@@ -25,14 +25,19 @@ test('the line meters read adapter counters through .NET, so the USB Wi-Fi stick
   for (const name of withAddress) assert.ok(list.some((item) => item.alias === name), `${name} is missing from the counters`);
 });
 
-test('the real meters helper reports a speed for the cable within a few seconds', { timeout: 20_000 }, async () => {
+test('the real meters helper reports a speed for a connected adapter within a few seconds', { timeout: 20_000 }, async () => {
+  // Adapter names differ between PCs ("Ethernet" here, something else on a CI
+  // machine), so use whichever one has an internet-style address.
+  const alias = Object.entries(networkInterfaces())
+    .find(([name, entries]) => name !== 'NetSwitch' && entries.some((entry) => entry.family === 'IPv4' && !entry.internal))?.[0];
+  assert.ok(alias, 'no connected adapter to measure');
   const monitor = new LineMonitor({ watchOutside: false, enginePath: '' });
   monitor.start();
   try {
     const until = Date.now() + 15_000;
-    while (Date.now() < until && !monitor.rate('Ethernet')) await delay(250);
-    const rate = monitor.rate('Ethernet');
-    assert.ok(rate && Number.isFinite(rate.down) && Number.isFinite(rate.up), 'no speed arrived');
+    while (Date.now() < until && !monitor.rate(alias)) await delay(250);
+    const rate = monitor.rate(alias);
+    assert.ok(rate && Number.isFinite(rate.down) && Number.isFinite(rate.up), `no speed arrived for ${alias}`);
     assert.equal(monitor.isFresh(), true);
   } finally {
     monitor.stop();
