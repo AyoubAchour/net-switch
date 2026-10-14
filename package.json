@@ -1,0 +1,22 @@
+{
+  "name": "net-switch",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Choose which internet connection each Windows app uses.",
+  "license": "MIT",
+  "author": "Ayoub Achour",
+  "homepage": "https://github.com/AyoubAchour/net-switch",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AyoubAchour/net-switch.git"
+  },
+  "bugs": "https://github.com/AyoubAchour/net-switch/issues",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1"
+  }
+}

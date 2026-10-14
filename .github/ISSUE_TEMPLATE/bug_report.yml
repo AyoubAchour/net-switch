@@ -1,0 +1,96 @@
+name: Bug report
+description: Something doesn't work the way the README or user guide says it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Network problems depend a lot on the setup, so the
+        details below really help. For a security problem, please use private reporting
+        instead (see SECURITY.md).
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        I moved Firefox to the Wi-Fi stick, but its downloads kept using the cable even after restarting the download.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Net Switch version
+      description: In Settings → Apps → Installed apps, or the release you downloaded.
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and language
+      description: Run `winver`. The display language matters for some Windows tools.
+      placeholder: "Windows 11 24H2 (26100.4061), English"
+    validations:
+      required: true
+
+  - type: textarea
+    id: connections
+    attributes:
+      label: Your two connections
+      description: What each line is, and how it reaches the internet.
+      placeholder: |
+        Cable: Ethernet to a fiber router
+        Second: TP-Link USB Wi-Fi adapter on a second router (4G)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: combining
+    attributes:
+      label: Was "Combine both lines" on?
+      options:
+        - "On"
+        - "Off"
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: other-software
+    attributes:
+      label: VPN, firewall or security software
+      description: Anything that also changes networking, such as a VPN client, a third-party firewall or antivirus.
+      placeholder: "None / Windows Defender only"
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        The relevant lines (around the time it happened) from:
+        - `%LOCALAPPDATA%\Net Switch\server.log`
+        - `%LOCALAPPDATA%\Net Switch\launch.log` (if Net Switch didn't open)
+        - `%ProgramData%\Net Switch\engine.log` (needs an administrator to open)
+
+        Look through them first: they can contain program paths, IP addresses and
+        network names. **Never paste `server.json` or `engine-config.json`**, they
+        contain secret keys.
+      render: text
+    validations:
+      required: false

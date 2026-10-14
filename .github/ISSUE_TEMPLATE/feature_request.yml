@@ -1,0 +1,19 @@
+name: Idea or request
+description: Something Net Switch could do better.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation and what gets in the way. This matters more than a proposed solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: Optional. How you imagine it working.
+    validations:
+      required: false

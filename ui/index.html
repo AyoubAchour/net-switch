@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <!-- Chrome paints its app-window title bar with this; without it the bar takes a low-contrast default. -->
+    <meta name="theme-color" content="#141619" />
+    <title>Net Switch</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"><i></i><i></i></span>
+        <h1>Net Switch</h1>
+        <p id="routing-status" class="status" aria-live="polite">Connecting…</p>
+      </div>
+      <button id="routing-toggle" class="button button-power" type="button" hidden>Turn off</button>
+    </header>
+
+    <section class="master" aria-label="Connections">
+      <div class="lines">
+        <div id="bus-main" class="bus" data-lane="main"></div>
+        <div id="bus-second" class="bus" data-lane="second"></div>
+      </div>
+      <div id="combine" class="feature" hidden></div>
+    </section>
+
+    <div id="notices" class="notices"></div>
+
+    <main class="channels">
+      <div id="list-message" class="list-message" hidden></div>
+      <div class="legends" aria-hidden="true" hidden>
+        <span class="legend col-app">App</span>
+        <span class="legend col-traffic">Traffic</span>
+        <span class="legend col-down">Down</span>
+        <span class="legend col-keys">Route</span>
+      </div>
+      <ul id="apps" class="strips" aria-label="Apps using the internet"></ul>
+      <div id="empty" class="empty" hidden></div>
+    </main>
+
+    <footer class="footer">
+      <p id="footer-note">Closing this window keeps routing on.</p>
+      <button id="quit" class="button button-quiet" type="button">Quit Net Switch</button>
+    </footer>
+  </body>
+</html>

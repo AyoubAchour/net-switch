@@ -1,0 +1,23 @@
+# Everything Net Switch writes while running: your settings, the Windows undo
+# record, the engine config, logs and the local session key. Created on first run.
+data/
+data-test/
+
+# sing-box is downloaded and checked against engine/SHA256SUMS.txt, not committed.
+engine/*.exe
+engine/*.dll
+
+# A bundled Node.js runtime, added by the release build.
+runtime/
+
+# Release build output.
+dist/
+
+node_modules/
+*.log
+*.pid
+
+# Local design and tooling files.
+design/
+.impeccable/
+PRODUCT.md

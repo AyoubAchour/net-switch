@@ -1,0 +1,1005 @@
+:root {
+  --bg: #0d0f12;
+  --panel: #14171c;
+  --panel-raised: #191d23;
+  --pressed: #262b33;
+  --rule: #242931;
+  --rule-strong: #343a44;
+  --cell-off: #242931;
+  --ink: #eceef1;
+  --ink-2: #a3a9b3;
+  --ink-3: #6b727d;
+  --cable: #f5b13d;
+  --second: #3cc8ea;
+  --ok: #3dd68c;
+  --warn: #f2b24d;
+  --alert: #f26d6d;
+  --focus: #f4f5f7;
+
+  --mono: 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
+  --size: 13px;
+  --size-small: 11px;
+  --gutter: 20px;
+  --row-columns: 24px minmax(0, 1fr) 110px 76px 204px;
+
+  /* Lucide icons (ISC licence), drawn through CSS masks: the page's security
+     policy allows data: images but not inline SVG styling. */
+  --icon-power: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2v10'/%3E%3Cpath d='M18.4 6.6a9 9 0 1 1-12.77.04'/%3E%3C/svg%3E");
+  --icon-cable: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m15 20 3-3h2a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2l3 3z'/%3E%3Cpath d='M6 8v1'/%3E%3Cpath d='M10 8v1'/%3E%3Cpath d='M14 8v1'/%3E%3Cpath d='M18 8v1'/%3E%3C/svg%3E");
+  --icon-wifi: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 20h.01'/%3E%3Cpath d='M2 8.82a15 15 0 0 1 20 0'/%3E%3Cpath d='M5 12.859a10 10 0 0 1 14 0'/%3E%3Cpath d='M8.5 16.429a5 5 0 0 1 7 0'/%3E%3C/svg%3E");
+  --icon-phone: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect width='14' height='20' x='5' y='2' rx='2' ry='2'/%3E%3Cpath d='M12 18h.01'/%3E%3C/svg%3E");
+  --icon-alert: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3'/%3E%3Cpath d='M12 9v4'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E");
+  --icon-setup: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 7h-9'/%3E%3Cpath d='M14 17H5'/%3E%3Ccircle cx='17' cy='17' r='3'/%3E%3Ccircle cx='7' cy='7' r='3'/%3E%3C/svg%3E");
+  --icon-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 16v-4'/%3E%3Cpath d='M12 8h.01'/%3E%3C/svg%3E");
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Component display rules must never override the hidden attribute. */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 var(--size) / 1.45 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--second) 35%, transparent);
+  color: var(--ink);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+h1,
+p {
+  margin: 0;
+}
+
+/* Legends: the small spaced capitals printed on the panel. */
+.legend {
+  font-size: var(--size-small);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* An icon drawn in the current text color through one of the masks above. */
+.line-icon::before,
+.notice-icon,
+.button-power::before {
+  content: '';
+  display: block;
+  background: currentColor;
+  mask: var(--icon) center / contain no-repeat;
+}
+
+/* ------------------------------------------------------------ buttons */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: inherit;
+  font-weight: 500;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  padding: 6px 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.button:hover {
+  border-color: var(--ink-3);
+  background: var(--panel-raised);
+}
+
+.button:disabled {
+  cursor: default;
+  color: var(--ink-3);
+  border-color: var(--rule);
+  background: transparent;
+}
+
+.button-quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-2);
+  font-weight: 400;
+  padding: 4px 8px;
+}
+
+.button-quiet:hover {
+  color: var(--ink);
+  border-color: transparent;
+  background: var(--panel-raised);
+}
+
+.button-power::before {
+  --icon: var(--icon-power);
+  width: 14px;
+  height: 14px;
+  color: var(--ink-2);
+}
+
+/* ------------------------------------------------------------ top bar */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px var(--gutter);
+  border-bottom: 1px solid var(--rule);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* The two-bar mark: the cable over the second connection. */
+.mark {
+  display: grid;
+  gap: 3px;
+  padding: 7px 6px;
+  border-radius: 7px;
+  background: var(--panel-raised);
+  border: 1px solid var(--rule);
+  flex-shrink: 0;
+}
+
+.mark i {
+  display: block;
+  width: 16px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--cable);
+}
+
+.mark i + i {
+  width: 11px;
+  background: var(--second);
+}
+
+h1 {
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The routing state as a pill whose color says how things are. */
+.status {
+  --tone: var(--ink-3);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 10px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--tone) 70%, var(--ink));
+  background: color-mix(in srgb, var(--tone) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tone) 22%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--tone);
+  flex-shrink: 0;
+}
+
+.status[data-tone='ok'] {
+  --tone: var(--ok);
+}
+
+.status[data-tone='warn'] {
+  --tone: var(--warn);
+}
+
+.status[data-tone='down'] {
+  --tone: var(--alert);
+}
+
+/* ------------------------------------------------------------ line cards */
+
+.master {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px var(--gutter) 12px;
+}
+
+.lines {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.bus {
+  --lane: var(--cable);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  transition: border-color 200ms ease;
+}
+
+.bus[data-lane='second'] {
+  --lane: var(--second);
+}
+
+.bus[data-down='warn'] {
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--rule));
+}
+
+.bus[data-down='down'] {
+  border-color: color-mix(in srgb, var(--alert) 30%, var(--rule));
+}
+
+.bus[data-down] .reading-down,
+.bus[data-down] .meter {
+  opacity: 0.45;
+}
+
+.bus-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.line-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  flex-shrink: 0;
+  color: var(--lane);
+  background: color-mix(in srgb, var(--lane) 13%, transparent);
+}
+
+.line-icon::before {
+  --icon: var(--icon-cable);
+  width: 15px;
+  height: 15px;
+}
+
+.line-icon[data-icon='wifi']::before {
+  --icon: var(--icon-wifi);
+}
+
+.line-icon[data-icon='phone']::before {
+  --icon: var(--icon-phone);
+}
+
+.bus-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.bus-name strong {
+  font-size: 14px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.bus-name span {
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.health {
+  --tone: var(--ok);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+  font: 12px var(--mono);
+  color: var(--ink-2);
+}
+
+.health .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tone);
+}
+
+.health[data-tone='warn'] {
+  --tone: var(--warn);
+  color: var(--warn);
+}
+
+.health[data-tone='down'] {
+  --tone: var(--alert);
+  color: var(--alert);
+}
+
+.bus-reading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.reading-down {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  transition: opacity 200ms ease;
+}
+
+.reading-value {
+  font: 500 30px / 1 var(--mono);
+  letter-spacing: -0.03em;
+}
+
+.reading-unit,
+.reading-up {
+  font: 12px var(--mono);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.bus-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 22px;
+  margin-top: -4px;
+}
+
+.bus-note {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.bus-foot .button-quiet {
+  font-size: 12px;
+  padding: 2px 8px;
+  margin-right: -8px;
+}
+
+.bus-setup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.candidate {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.candidate span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------ combining */
+
+/* Rows under the two line cards, such as combining both lines. Their two
+   cells are a short meter of which lines the feature is using right now. */
+.feature {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+}
+
+.feature-cells {
+  display: grid;
+  grid-template-columns: repeat(2, 6px);
+  gap: 2px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.feature-cells .cell {
+  border-radius: 2px;
+}
+
+.feature-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.feature-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.feature-text {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+/* An on/off switch: the knob slides, the track lights when on. */
+.switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 40px;
+  height: 22px;
+  padding: 0;
+  border-radius: 99px;
+  border: 1px solid var(--rule-strong);
+  background: var(--panel-raised);
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease;
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--ink-2);
+  transition:
+    transform 160ms cubic-bezier(0.3, 0.7, 0.4, 1),
+    background-color 160ms ease;
+}
+
+.switch[aria-checked='true'] {
+  background: var(--ok);
+  border-color: var(--ok);
+}
+
+.switch[aria-checked='true']::after {
+  transform: translateX(18px);
+  background: var(--bg);
+}
+
+.switch[aria-busy='true'] {
+  opacity: 0.6;
+}
+
+.switch:disabled {
+  cursor: default;
+}
+
+/* ------------------------------------------------------------ meters */
+
+.meter {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  gap: 2px;
+  transition: opacity 200ms ease;
+}
+
+.meter-master {
+  height: 14px;
+  gap: 3px;
+}
+
+.meter-row {
+  height: 8px;
+}
+
+.cell {
+  background: var(--cell-off);
+  border-radius: 1.5px;
+  /* Meter ballistics: cells light at once and fall back slowly. */
+  transition: background-color 700ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.cell[data-lit='main'] {
+  background: var(--cable);
+  transition-duration: 80ms;
+}
+
+.cell[data-lit='second'] {
+  background: var(--second);
+  transition-duration: 80ms;
+}
+
+/* ------------------------------------------------------------ notices */
+
+.notices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 var(--gutter) 12px;
+}
+
+.notices:empty {
+  display: none;
+}
+
+.notice {
+  --tone: var(--warn);
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--tone) 7%, var(--panel));
+  border: 1px solid color-mix(in srgb, var(--tone) 22%, var(--rule));
+}
+
+.notice-icon {
+  --icon: var(--icon-setup);
+  width: 15px;
+  height: 15px;
+  margin-top: 2px;
+  flex-shrink: 0;
+  color: var(--tone);
+}
+
+.notice-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.notice p {
+  color: var(--ink);
+}
+
+.notice-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.notice[data-kind='error'] {
+  --tone: var(--alert);
+}
+
+.notice[data-kind='error'] .notice-icon {
+  --icon: var(--icon-alert);
+}
+
+/* A settled fact, not something to act on: a quiet status line. */
+.notice[data-kind='status'] {
+  --tone: var(--ink-3);
+  align-items: center;
+  padding: 6px 12px;
+  background: transparent;
+  border-color: var(--rule);
+  font-size: 12px;
+}
+
+.notice[data-kind='status'] .notice-icon {
+  --icon: var(--icon-info);
+  margin-top: 0;
+}
+
+.notice[data-kind='status'] p {
+  color: var(--ink-2);
+}
+
+.notice[data-kind='status'] .button {
+  font-size: 12px;
+  padding: 2px 10px;
+}
+
+.notice details {
+  margin-top: 6px;
+  color: var(--ink-3);
+}
+
+.notice summary {
+  cursor: pointer;
+}
+
+.notice details pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: 11.5px / 1.5 var(--mono);
+}
+
+/* ------------------------------------------------------------ apps */
+
+.channels {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 var(--gutter) 12px;
+  scrollbar-color: var(--rule-strong) transparent;
+}
+
+.channels::-webkit-scrollbar {
+  width: 10px;
+}
+
+.channels::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border: 3px solid var(--bg);
+  border-radius: 6px;
+}
+
+.legends,
+.strip-main {
+  display: grid;
+  grid-template-columns: var(--row-columns);
+  align-items: center;
+  column-gap: 14px;
+}
+
+.legends {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 12px 8px;
+  background: var(--bg);
+}
+
+.col-app {
+  grid-column: 1 / 3;
+}
+
+.col-down,
+.col-keys {
+  text-align: right;
+}
+
+.strips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.strip {
+  padding: 8px 12px;
+  border-radius: 8px;
+  transition: background-color 120ms ease;
+}
+
+.strip:hover {
+  background: var(--panel);
+}
+
+/* A letter avatar in the app's own hue, or its real icon on a plate. */
+.app-icon {
+  --hue: 220;
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: hsl(var(--hue) 70% 68%);
+  background: hsl(var(--hue) 55% 55% / 0.16);
+}
+
+.app-icon.has-image {
+  background: var(--panel-raised);
+}
+
+.app-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+
+/* Apps with no traffic step back so the busy ones stand out. */
+.strip[data-idle] .app-name {
+  color: var(--ink-2);
+  font-weight: 400;
+}
+
+.strip[data-idle] .app-icon {
+  opacity: 0.6;
+}
+
+.rate {
+  text-align: right;
+  white-space: nowrap;
+  font: 12px var(--mono);
+}
+
+.rate[data-idle] {
+  color: var(--ink-3);
+}
+
+/* The line cards show upload; the rows keep to download. */
+.rate-up {
+  display: none;
+}
+
+/* The route: one segmented control, the chosen line on a raised plate with
+   a dot in its color. */
+.keys {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--panel-raised);
+  border: 1px solid var(--rule);
+}
+
+.key {
+  --lane: var(--cable);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.key[data-lane='second'] {
+  --lane: var(--second);
+}
+
+/* While combining, the cable key stands for both lines: its mark is a short
+   pill, half each color, wide enough that the halves don't blend. */
+.key[data-lane='both'] {
+  --lane: linear-gradient(90deg, var(--cable) 50%, var(--second) 50%);
+}
+
+.key[data-lane='both']::before {
+  width: 12px;
+  border-radius: 3px;
+}
+
+.key::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--lane);
+  display: none;
+}
+
+.key:hover:not(:disabled) {
+  color: var(--ink);
+}
+
+.key[aria-pressed='true'] {
+  background: var(--pressed);
+  color: var(--ink);
+  font-weight: 600;
+  cursor: default;
+}
+
+.key[aria-pressed='true']::before,
+.key[aria-busy='true']::before {
+  display: block;
+}
+
+.key[aria-busy='true'] {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--pressed) 60%, transparent);
+}
+
+.key:disabled:not([aria-pressed='true']) {
+  cursor: not-allowed;
+  color: var(--ink-3);
+}
+
+.key-placeholder {
+  grid-column: 1 / -1;
+  color: var(--ink-3);
+  text-align: center;
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.strip-note {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 6px 0 2px 38px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.strip-note .button {
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 2px 10px;
+}
+
+.note-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.strip-note[data-kind='confirm'] {
+  color: var(--ink);
+}
+
+.strip-note[data-kind='failed'] {
+  color: var(--alert);
+}
+
+.strip-note[data-kind='waiting'] {
+  color: var(--second);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 22px 12px;
+  color: var(--ink-2);
+}
+
+/* While routing is off the strips keep their choices but have nothing to measure. */
+.list-message {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px dashed var(--rule-strong);
+  color: var(--ink-2);
+}
+
+/* ------------------------------------------------------------ footer */
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px var(--gutter);
+  border-top: 1px solid var(--rule);
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.footer .button {
+  font-size: 12px;
+}
+
+/* Last known screen while Net Switch can't be reached. */
+body[data-stale] .master,
+body[data-stale] .channels {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------ closed */
+
+.closed {
+  margin: auto;
+  max-width: 420px;
+  padding: 32px var(--gutter);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.closed h1 {
+  font-size: 18px;
+}
+
+.closed p {
+  color: var(--ink-2);
+}
+
+/* ------------------------------------------------------------ narrow windows */
+
+@media (max-width: 640px) {
+  :root {
+    --row-columns: 24px minmax(0, 1fr) 70px 168px;
+  }
+
+  .lines {
+    grid-template-columns: 1fr;
+  }
+
+  .col-traffic,
+  .meter-row {
+    display: none;
+  }
+
+  .col-down {
+    grid-column: 3 / 4;
+  }
+
+  .col-keys {
+    grid-column: 4 / 5;
+  }
+
+  .feature {
+    flex-wrap: wrap;
+  }
+
+  .feature-body {
+    order: 1;
+    flex-basis: 100%;
+  }
+
+  .switch {
+    margin-left: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cell,
+  .switch,
+  .switch::after,
+  .key,
+  .strip,
+  .bus {
+    transition: none;
+  }
+}

@@ -1,0 +1,191 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test and build Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read bundled Node version
+        id: node
+        run: |
+          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+          "version=$($pins.node.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          package-manager-cache: false
+      - name: Check tag and changelog
+        id: metadata
+        run: node scripts/release-metadata.mjs
+      - name: Test app and C# tray
+        run: npm test
+      - name: Build with the pinned Inno Setup compiler
+        run: ./scripts/build-release.ps1
+      - name: Install, upgrade and uninstall the built installer
+        run: ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-${{ steps.metadata.outputs.version }}-x64.exe"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-installer
+          path: dist/NetSwitch-Setup-${{ steps.metadata.outputs.version }}-x64.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  source:
+    name: Bundle Go source and record native source provenance
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read immutable source pins
+        id: pins
+        shell: python
+        run: |
+          import json, os, re
+          with open('packaging/versions.json', encoding='utf-8') as f:
+              pin = json.load(f)['singBox']
+          source = pin['source']
+          assert re.fullmatch(r'\d+\.\d+\.\d+', pin['version'])
+          assert source['tag'] == 'v' + pin['version']
+          assert re.fullmatch(r'[0-9a-f]{40}', source['commit'])
+          assert re.fullmatch(r'\d+\.\d+\.\d+', source['goVersion'])
+          assert source['repository'] == 'https://github.com/SagerNet/sing-box.git'
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              for key, value in {
+                  'version': pin['version'], 'tag': source['tag'],
+                  'commit': source['commit'], 'go_version': source['goVersion'],
+                  'repository': source['repository']
+              }.items():
+                  print(f'{key}={value}', file=f)
+      - name: Clone the pinned release and verify its commit and Go version
+        shell: bash
+        env:
+          SOURCE_REPOSITORY: ${{ steps.pins.outputs.repository }}
+          SOURCE_TAG: ${{ steps.pins.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.pins.outputs.commit }}
+          SOURCE_VERSION: ${{ steps.pins.outputs.version }}
+          SOURCE_GO_VERSION: ${{ steps.pins.outputs.go_version }}
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/sing-box-$SOURCE_VERSION"
+          git clone --depth 1 --branch "$SOURCE_TAG" -- "$SOURCE_REPOSITORY" "$source_dir"
+          actual_commit=$(git -C "$source_dir" rev-parse HEAD)
+          if [[ "$actual_commit" != "$SOURCE_COMMIT" ]]; then
+            echo "Source tag $SOURCE_TAG moved: expected $SOURCE_COMMIT, got $actual_commit" >&2
+            exit 1
+          fi
+          actual_go=$(awk '$1 == "go" { print $2 }' "$source_dir/go.mod")
+          if [[ "$actual_go" != "$SOURCE_GO_VERSION" ]]; then
+            echo "Source requires Go $actual_go, but the manifest pins $SOURCE_GO_VERSION" >&2
+            exit 1
+          fi
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Exact go directive from the pinned tag's go.mod; checked above.
+          go-version: ${{ steps.pins.outputs.go_version }}
+          cache: false
+      - name: Vendor dependencies and archive source, licenses, and build recipes
+        shell: bash
+        env:
+          SOURCE_VERSION: ${{ steps.pins.outputs.version }}
+          # Do not silently download and use a different Go toolchain.
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/sing-box-$SOURCE_VERSION"
+          cd "$source_dir"
+          go mod vendor
+          go mod verify
+          test -s vendor/modules.txt
+          # Preserve upstream go.mod/go.sum and all tracked build instructions.
+          git diff --exit-code -- go.mod go.sum
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          tar --exclude='.git' -czf "$GITHUB_WORKSPACE/dist/sing-box-$SOURCE_VERSION-source-with-deps.tar.gz" \
+            -C "$RUNNER_TEMP" "sing-box-$SOURCE_VERSION"
+      - name: Verify native source pins and write the release source manifest
+        run: node scripts/write-source-manifest.mjs
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sing-box-source
+          path: |
+            dist/sing-box-${{ steps.pins.outputs.version }}-source-with-deps.tar.gz
+            dist/sources.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Checksum, attest, and publish
+    needs: [build, source]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: windows-installer
+          path: release-assets
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sing-box-source
+          path: release-assets
+      - name: Validate release inputs and generate checksums
+        shell: bash
+        env:
+          APP_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/release-metadata.mjs
+          engine_version=$(node -p 'JSON.parse(require("fs").readFileSync("packaging/versions.json", "utf8")).singBox.version')
+          cd release-assets
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 3
+          test -s "NetSwitch-Setup-$APP_VERSION-x64.exe"
+          test -s "sing-box-$engine_version-source-with-deps.tar.gz"
+          test -s sources.txt
+          sha256sum "NetSwitch-Setup-$APP_VERSION-x64.exe" \
+            "sing-box-$engine_version-source-with-deps.tar.gz" sources.txt > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+      - name: Attest all release assets, including the checksums file
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release-assets/*
+          create-storage-record: false
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
+            --verify-tag --title "Net Switch $GITHUB_REF_NAME" \
+            --notes-file dist/release-notes.md

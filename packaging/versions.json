@@ -1,0 +1,354 @@
+{
+  "node": {
+    "version": "24.21.0",
+    "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip",
+    "sha256": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
+    "checksumsUrl": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
+    "archiveRoot": "node-v24.21.0-win-x64"
+  },
+  "singBox": {
+    "version": "1.14.2",
+    "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-amd64.zip",
+    "sha256": "c2d8bfff918755808781dfdeeb8581b6c91eb3a243d9a7b55483cfc0c0684d32",
+    "archiveRoot": "sing-box-1.14.2-windows-amd64",
+    "files": {
+      "sing-box.exe": "7bbef1dea9189ee12799ae834ea4b4658355da25c47a21ad8804904c0ccd9410",
+      "libcronet.dll": "3217c6260fbca5f16072e0b79735742f40109a63bb0ff88fd6b96dd6b54a2928"
+    },
+    "source": {
+      "repository": "https://github.com/SagerNet/sing-box.git",
+      "tag": "v1.14.2",
+      "commit": "af6e64c3b69e6132ebaee0e1a3d24e93903f6709",
+      "goVersion": "1.25.5"
+    }
+  },
+  "licenses": {
+    "gpl3": {
+      "url": "https://www.gnu.org/licenses/gpl-3.0.txt",
+      "cacheName": "gpl-3.0.txt",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    },
+    "singBox": {
+      "url": "https://raw.githubusercontent.com/SagerNet/sing-box/v1.14.2/LICENSE",
+      "cacheName": "sing-box-1.14.2-LICENSE.txt",
+      "sha256": "650d5e3b99a446fb38e820fa87a49562e0c79eab868fff58618ac487a58e554c"
+    },
+    "node": {
+      "sha256": "ed34dd8e3f0a78dbaf00d0444ce8e285b015b765379c2e17880455f70370f8e9"
+    },
+    "cronetGo": {
+      "url": "https://raw.githubusercontent.com/SagerNet/cronet-go/0d28acc44093df24b2526dea3d6ffefd6b0a54f0/LICENSE",
+      "cacheName": "cronet-go-0d28acc44093-LICENSE.txt",
+      "sha256": "2f02b7486bcfa90d115c71a20437f3906b6fd5bef81c5dc0efd341399e89d0fd"
+    },
+    "cronetNative": [
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-LICENSE",
+        "installPath": "cronet-native/LICENSE",
+        "sha256": "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/AUTHORS",
+        "cacheName": "naiveproxy-72a06c9f-src_AUTHORS",
+        "installPath": "cronet-native/src/AUTHORS",
+        "sha256": "d06853635037b089346953004a718ec9cbfeeb0958b66a6248e519043cb95afe"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_LICENSE",
+        "installPath": "cronet-native/src/LICENSE",
+        "sha256": "368cca1106be99d39ecd32a38d8305585d802a475effb66380b91ffc9bcf709b"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/base/allocator/partition_allocator/src/partition_alloc/third_party/apple_apsl/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_base_allocator_partition_allocator_src_partition_alloc_third_party_apple_apsl_LICENSE",
+        "installPath": "cronet-native/src/base/allocator/partition_allocator/src/partition_alloc/third_party/apple_apsl/LICENSE",
+        "sha256": "b23e682fda7310afe43505ed6041919ccff8f9e0c6799ebd7542cbcef11102e3"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/base/third_party/cityhash/COPYING",
+        "cacheName": "naiveproxy-72a06c9f-src_base_third_party_cityhash_COPYING",
+        "installPath": "cronet-native/src/base/third_party/cityhash/COPYING",
+        "sha256": "3ed00dd93c75655599456c83cba2f69c6824fd53f24fc24206ba27b65057709d"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/base/third_party/cityhash_v103/COPYING",
+        "cacheName": "naiveproxy-72a06c9f-src_base_third_party_cityhash_v103_COPYING",
+        "installPath": "cronet-native/src/base/third_party/cityhash_v103/COPYING",
+        "sha256": "3ed00dd93c75655599456c83cba2f69c6824fd53f24fc24206ba27b65057709d"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/base/third_party/double_conversion/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_base_third_party_double_conversion_LICENSE",
+        "installPath": "cronet-native/src/base/third_party/double_conversion/LICENSE",
+        "sha256": "4af93c12062c58058378de2397dc1c92bbff9ddfb1d583a01c84127557ce97ca"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/base/third_party/icu/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_base_third_party_icu_LICENSE",
+        "installPath": "cronet-native/src/base/third_party/icu/LICENSE",
+        "sha256": "5d85142a5609ad177a2d7a2e7cae060b886b8b42f25c5b9803cf0cb5ee04ad2f"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/base/third_party/nspr/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_base_third_party_nspr_LICENSE",
+        "installPath": "cronet-native/src/base/third_party/nspr/LICENSE",
+        "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/base/third_party/superfasthash/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_base_third_party_superfasthash_LICENSE",
+        "installPath": "cronet-native/src/base/third_party/superfasthash/LICENSE",
+        "sha256": "90b2201c340cee36b40a443f949d9eb416f0a0d204c32d350aff87fedeb67ae8"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/base/third_party/symbolize/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_base_third_party_symbolize_LICENSE",
+        "installPath": "cronet-native/src/base/third_party/symbolize/LICENSE",
+        "sha256": "538edc6f52c563cf06eca1bac8dd785ff60ef5a371a950265700d5d40386db6e"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/base/third_party/xdg_user_dirs/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_base_third_party_xdg_user_dirs_LICENSE",
+        "installPath": "cronet-native/src/base/third_party/xdg_user_dirs/LICENSE",
+        "sha256": "18351de3d7e2dc469cc83e77d38a3e25d010251e34eb348bbd1a76275e313997"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/build/android/incremental_install/third_party/AndroidHiddenApiBypass/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_build_android_incremental_install_third_party_AndroidHiddenApiBypass_LICENSE",
+        "installPath": "cronet-native/src/build/android/incremental_install/third_party/AndroidHiddenApiBypass/LICENSE",
+        "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/net/third_party/mozilla_security_manager/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_net_third_party_mozilla_security_manager_LICENSE",
+        "installPath": "cronet-native/src/net/third_party/mozilla_security_manager/LICENSE",
+        "sha256": "bed70fc84f1bea2b4b144564b9a0f9a5a3bc7b0d78f6e62092aeb689cac56bdd"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/net/third_party/mozilla_win/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_net_third_party_mozilla_win_LICENSE",
+        "installPath": "cronet-native/src/net/third_party/mozilla_win/LICENSE",
+        "sha256": "6d29b685206b28617dd9ac13818ccc943e57df68aeea1db0f4a5539f4507a9aa"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/net/third_party/quiche/src/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_net_third_party_quiche_src_LICENSE",
+        "installPath": "cronet-native/src/net/third_party/quiche/src/LICENSE",
+        "sha256": "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/net/third_party/uri_template/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_net_third_party_uri_template_LICENSE",
+        "installPath": "cronet-native/src/net/third_party/uri_template/LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/abseil-cpp/AUTHORS",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_abseil-cpp_AUTHORS",
+        "installPath": "cronet-native/src/third_party/abseil-cpp/AUTHORS",
+        "sha256": "1fd39030c119b4c97014f59e0ad0ed65f23475bbdf55a52740f31eb82b34b4ee"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/abseil-cpp/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_abseil-cpp_LICENSE",
+        "installPath": "cronet-native/src/third_party/abseil-cpp/LICENSE",
+        "sha256": "c79a7fea0e3cac04cd43f20e7b648e5a0ff8fa5344e644b0ee09ca1162b62747"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/apple_apsl/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_apple_apsl_LICENSE",
+        "installPath": "cronet-native/src/third_party/apple_apsl/LICENSE",
+        "sha256": "b23e682fda7310afe43505ed6041919ccff8f9e0c6799ebd7542cbcef11102e3"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/boringssl/src/AUTHORS",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_boringssl_src_AUTHORS",
+        "installPath": "cronet-native/src/third_party/boringssl/src/AUTHORS",
+        "sha256": "6e5283f25977ae2fbbf5fd8a840b7184b2b48915279c10bf01107263d3f26936"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/boringssl/src/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_boringssl_src_LICENSE",
+        "installPath": "cronet-native/src/third_party/boringssl/src/LICENSE",
+        "sha256": "827c8d8fc207c2392794eef9e00fe246f9f61fdcc132556c275be3dd8c3cd97f"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/boringssl/src/third_party/benchmark/AUTHORS",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_boringssl_src_third_party_benchmark_AUTHORS",
+        "installPath": "cronet-native/src/third_party/boringssl/src/third_party/benchmark/AUTHORS",
+        "sha256": "7ba6f34ad92df42a79c85c117be3689fd58f1caca11f43aaab413d20df1f9f0e"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/boringssl/src/third_party/benchmark/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_boringssl_src_third_party_benchmark_LICENSE",
+        "installPath": "cronet-native/src/third_party/boringssl/src/third_party/benchmark/LICENSE",
+        "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/boringssl/src/third_party/fiat/AUTHORS",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_boringssl_src_third_party_fiat_AUTHORS",
+        "installPath": "cronet-native/src/third_party/boringssl/src/third_party/fiat/AUTHORS",
+        "sha256": "ad74c036a6afaedc418fed65f171c877c2f74a4c70938a03930aa11c98a20508"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/boringssl/src/third_party/fiat/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_boringssl_src_third_party_fiat_LICENSE",
+        "installPath": "cronet-native/src/third_party/boringssl/src/third_party/fiat/LICENSE",
+        "sha256": "9eacbcb81be660840c714a560a9d65ba07913db98dd4baf969f78dd499fdd60f"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/brotli/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_brotli_LICENSE",
+        "installPath": "cronet-native/src/third_party/brotli/LICENSE",
+        "sha256": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/cpu_features/src/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_cpu_features_src_LICENSE",
+        "installPath": "cronet-native/src/third_party/cpu_features/src/LICENSE",
+        "sha256": "af272c1b4dd08dd61d43e001d3134119d03ca7a2b057a64f7355fdf27fbea3dd"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/jni_zero/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_jni_zero_LICENSE",
+        "installPath": "cronet-native/src/third_party/jni_zero/LICENSE",
+        "sha256": "57faf03e216d5628169a779df31a842347e55c8e6567e1107b6cb8fb90175b59"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/libc++/src/CREDITS.TXT",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_libc++_src_CREDITS.TXT",
+        "installPath": "cronet-native/src/third_party/libc++/src/CREDITS.TXT",
+        "sha256": "054e099bf5954c8821b880f5751d2fbf221bf43cf7c57ac1c2c5ff6263d6d9c3"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/libc++/src/LICENSE.TXT",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_libc++_src_LICENSE.TXT",
+        "installPath": "cronet-native/src/third_party/libc++/src/LICENSE.TXT",
+        "sha256": "539dd7aed86e8a4f12cbdd0e6c50c189c7d74847e4fecc64ce2c6ee3a01da38b"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/libc++abi/src/CREDITS.TXT",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_libc++abi_src_CREDITS.TXT",
+        "installPath": "cronet-native/src/third_party/libc++abi/src/CREDITS.TXT",
+        "sha256": "a259fff28a51623f14917dd68f97f3af7804984087ddc1bfd8196d08ebb75b83"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/libc++abi/src/LICENSE.TXT",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_libc++abi_src_LICENSE.TXT",
+        "installPath": "cronet-native/src/third_party/libc++abi/src/LICENSE.TXT",
+        "sha256": "e2b35be49f7284a45b7baca8fc7b3ab7440e7902392b2528a457816b5bb2a15c"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/libunwind/src/LICENSE.TXT",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_libunwind_src_LICENSE.TXT",
+        "installPath": "cronet-native/src/third_party/libunwind/src/LICENSE.TXT",
+        "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/llvm-libc/src/LICENSE.TXT",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_llvm-libc_src_LICENSE.TXT",
+        "installPath": "cronet-native/src/third_party/llvm-libc/src/LICENSE.TXT",
+        "sha256": "ebcd9bbf783a73d05c53ba4d586b8d5813dcdf3bbec50265860ccc885e606f47"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/modp_b64/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_modp_b64_LICENSE",
+        "installPath": "cronet-native/src/third_party/modp_b64/LICENSE",
+        "sha256": "d47e8390fb0d7ad4a18f26aedd6283c7ab6b5b4fabab536ccb4db7f9f6d90c08"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/nasm/AUTHORS",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_nasm_AUTHORS",
+        "installPath": "cronet-native/src/third_party/nasm/AUTHORS",
+        "sha256": "8a7bd0cc6c517a220265548bf2ecf62fe89bf682b6a9938afb7521008679149e"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/nasm/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_nasm_LICENSE",
+        "installPath": "cronet-native/src/third_party/nasm/LICENSE",
+        "sha256": "7436a7c46b6e4d969b41e1ce387885ae4ced25710662189ff2983665253729ac"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/nasm/zlib/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_nasm_zlib_LICENSE",
+        "installPath": "cronet-native/src/third_party/nasm/zlib/LICENSE",
+        "sha256": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/protobuf/third_party/utf8_range/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_protobuf_third_party_utf8_range_LICENSE",
+        "installPath": "cronet-native/src/third_party/protobuf/third_party/utf8_range/LICENSE",
+        "sha256": "02de69b64fc36d9e938f418e52723e42f0b2b226d58a9cb3c8dcbdf7059f5074"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/simdutf/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_simdutf_LICENSE",
+        "installPath": "cronet-native/src/third_party/simdutf/LICENSE",
+        "sha256": "fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/zlib/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_zlib_LICENSE",
+        "installPath": "cronet-native/src/third_party/zlib/LICENSE",
+        "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/zstd/src/COPYING",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_zstd_src_COPYING",
+        "installPath": "cronet-native/src/third_party/zstd/src/COPYING",
+        "sha256": "f9c375a1be4a41f7b70301dd83c91cb89e41567478859b77eef375a52d782505"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/third_party/zstd/src/LICENSE",
+        "cacheName": "naiveproxy-72a06c9f-src_third_party_zstd_src_LICENSE",
+        "installPath": "cronet-native/src/third_party/zstd/src/LICENSE",
+        "sha256": "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/SagerNet/naiveproxy/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src/url/third_party/mozilla/LICENSE.txt",
+        "cacheName": "naiveproxy-72a06c9f-src_url_third_party_mozilla_LICENSE.txt",
+        "installPath": "cronet-native/src/url/third_party/mozilla/LICENSE.txt",
+        "sha256": "284545e873c704952e5b1b39d457dd83a3b115a51d9f1eb5175137bd69b8fa1b"
+      }
+    ],
+    "wintun": {
+      "archiveEntry": "wintun/LICENSE.txt",
+      "sha256": "183adac21e7d96c508c8fd34d394b7b6708bc81564ad1bad61ab66143a008cd2"
+    }
+  },
+  "innoSetup": {
+    "version": "7.1.0",
+    "url": "https://github.com/jrsoftware/issrc/releases/download/is-7_1_0/innosetup-7.1.0-x64.exe",
+    "sha256": "0362a383ed217d4c4239b5933866dd96d3eb2102737da92f80f6057a4b40df2f"
+  },
+  "nativeSources": {
+    "cronetGo": {
+      "repository": "https://github.com/SagerNet/cronet-go.git",
+      "version": "v0.0.0-20260912104727-0d28acc44093",
+      "commit": "0d28acc44093df24b2526dea3d6ffefd6b0a54f0",
+      "windowsModuleVersion": "v0.0.0-20260912104006-c10c03c318db",
+      "windowsModuleCommit": "c10c03c318db6d47bec8705c8290bad34bc32b64",
+      "buildCommit": "049f2909701ca088c9569f6b303bba5376a2b2ff"
+    },
+    "naiveproxy": {
+      "repository": "https://github.com/SagerNet/naiveproxy.git",
+      "commit": "72a06c9fca0e2d228588c7f3074bf7efff3ff686",
+      "chromiumVersion": "150.0.7871.63",
+      "noticesUrl": "https://github.com/SagerNet/naiveproxy/tree/72a06c9fca0e2d228588c7f3074bf7efff3ff686/src",
+      "noticesNote": "The installed cronet-native directory preserves the license, copyright, author and credit files collected from this pinned source tree. Upstream does not provide a single generated Windows Cronet credits file; this collection is not a verified inventory of the linked DLL dependencies."
+    },
+    "singTun": {
+      "repository": "https://github.com/SagerNet/sing-tun.git",
+      "version": "v0.9.6-0.20260924001923-ddaa4ca25e3b",
+      "commit": "ddaa4ca25e3bcb776d6ce81f4477b3becb5426de"
+    },
+    "wintun": {
+      "version": "0.14.1",
+      "url": "https://www.wintun.net/builds/wintun-0.14.1.zip",
+      "sha256": "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51",
+      "embeddedAmd64Sha256": "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
+    }
+  }
+}

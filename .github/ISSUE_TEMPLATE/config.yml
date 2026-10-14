@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security problem
+    url: https://github.com/AyoubAchour/net-switch/security/advisories/new
+    about: Please report security problems privately.
+  - name: User guide
+    url: https://github.com/AyoubAchour/net-switch/blob/main/docs/user-guide.md
+    about: How failover, combining and the tray work, and what to try when something goes wrong.

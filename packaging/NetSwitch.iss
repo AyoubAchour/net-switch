@@ -1,0 +1,120 @@
+#ifndef AppVersion
+  #error Pass /DAppVersion from package.json via scripts/build-release.ps1
+#endif
+#ifndef StageDir
+  #error Pass /DStageDir with the allowlisted staging directory
+#endif
+#ifndef OutputDir
+  #error Pass /DOutputDir with the release output directory
+#endif
+
+[Setup]
+AppId={{3ECce0AD-AE44-4768-8219-2C15C098976C}
+AppName=Net Switch
+AppVersion={#AppVersion}
+AppPublisher=Ayoub Achour
+DefaultDirName={autopf}\Net Switch
+DefaultGroupName=Net Switch
+DisableProgramGroupPage=yes
+UsePreviousAppDir=yes
+WizardStyle=modern
+PrivilegesRequired=admin
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+SetupIconFile={#StageDir}\assets\net-switch.ico
+UninstallDisplayIcon={app}\assets\net-switch.ico
+OutputDir={#OutputDir}
+OutputBaseFilename=NetSwitch-Setup-{#AppVersion}-x64
+Compression=lzma2
+SolidCompression=yes
+CloseApplications=no
+RestartApplications=no
+UninstallLogging=yes
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
+
+[Files]
+; StageDir is built exclusively from the allowlist, never from the working tree.
+Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{autoprograms}\Net Switch"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\launch.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\net-switch.ico"
+Name: "{autodesktop}\Net Switch"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\launch.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\net-switch.ico"; Tasks: desktopicon
+
+[Run]
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\launch.ps1"""; WorkingDir: "{app}"; Description: "Open Net Switch"; Flags: postinstall nowait skipifsilent runasoriginaluser
+
+[Code]
+var
+  DeleteMachineData: Boolean;
+
+function StopNetSwitch: Boolean;
+var
+  ExitCode: Integer;
+begin
+  Result := False;
+  ExitCode := -1;
+  if not FileExists(ExpandConstant('{app}\tools\stop.ps1')) then begin
+    Log('Cannot stop Net Switch: tools\stop.ps1 is missing.');
+    Exit;
+  end;
+  if Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+    ExpandConstant('-NoProfile -ExecutionPolicy Bypass -File "{app}\tools\stop.ps1" -AppDir "{app}"'),
+    ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+    Result := ExitCode = 0;
+  Log(Format('Net Switch shutdown result: %d', [ExitCode]));
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  { First install has no running copy. Upgrades must stop the existing copy. }
+  if FileExists(ExpandConstant('{app}\server.mjs')) or
+     FileExists(ExpandConstant('{app}\tools\stop.ps1')) then
+    if not StopNetSwitch then
+      Result := 'Net Switch could not be stopped. Quit Net Switch and retry. No files have been replaced.';
+end;
+
+function InitializeUninstall: Boolean;
+begin
+  { Abort before any deletion if the app cannot be stopped safely. }
+  Result := StopNetSwitch;
+  if not Result then
+    SuppressibleMsgBox('Net Switch could not be stopped. Quit Net Switch and retry uninstalling. No files have been removed.', mbError, MB_OK, IDOK);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ExitCode: Integer;
+begin
+  { The questions use SuppressibleMsgBox: a silent uninstall (/SILENT, as winget
+    runs it) takes the default answer instead of waiting for a click. }
+  if CurUninstallStep = usUninstall then begin
+    DeleteMachineData := False;
+    if SuppressibleMsgBox('Undo the Windows settings Net Switch changed (connection priority, keeping Wi-Fi on with the cable)?',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON1, IDYES) = IDYES then begin
+      ExitCode := -1;
+      if Exec(ExpandConstant('{app}\runtime\node.exe'),
+        ExpandConstant('"{app}\tools\restore-windows.mjs"'),
+        ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+        DeleteMachineData := ExitCode = 0;
+      Log(Format('Net Switch Windows restore result: %d', [ExitCode]));
+      if not DeleteMachineData then
+        SuppressibleMsgBox('Windows settings could not be fully restored. Your undo record is kept in ' +
+          ExpandConstant('{commonappdata}\Net Switch') +
+          '. Reinstall Net Switch to retry restoring them.', mbError, MB_OK, IDOK);
+    end else begin
+      DeleteMachineData := SuppressibleMsgBox('Delete the Windows undo record anyway? The current Windows settings will stay in place, and Net Switch will no longer be able to undo them.',
+        mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
+    end;
+  end;
+  if CurUninstallStep = usPostUninstall then begin
+    { Never delete the undo record after a failed restore. }
+    if DeleteMachineData and DirExists(ExpandConstant('{commonappdata}\Net Switch')) then
+      if not DelTree(ExpandConstant('{commonappdata}\Net Switch'), True, True, True) then
+        SuppressibleMsgBox('Some Net Switch machine data could not be deleted from ' + ExpandConstant('{commonappdata}\Net Switch') + '.', mbError, MB_OK, IDOK);
+    { User settings and logs are always retained. An elevated uninstaller may
+      belong to a different account from the person who used the app. }
+  end;
+end;
