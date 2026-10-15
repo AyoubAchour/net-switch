@@ -16,10 +16,26 @@ for (const commit of [cronetGo.windowsModuleCommit, cronetGo.buildCommit]) {
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('Invalid Cronet build commit');
 }
 
+// A connection that fails for a moment is retried, so a brief network hiccup
+// on the runner doesn't fail a release; so is a server error (5xx). An answer
+// like 404 is final.
 async function download(url) {
-  const response = await fetch(url, { signal: AbortSignal.timeout(60_000) });
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
+  const waits = [5, 15, 30];
+  for (let attempt = 0; ; attempt += 1) {
+    let failure;
+    try {
+      const response = await fetch(url, { signal: AbortSignal.timeout(60_000) });
+      if (response.ok) return Buffer.from(await response.arrayBuffer());
+      if (response.status < 500) throw new Error(`${url}: HTTP ${response.status}`);
+      failure = `HTTP ${response.status}`;
+    } catch (error) {
+      if (error.message.startsWith(`${url}: HTTP`)) throw error;
+      failure = error.message;
+    }
+    if (attempt >= waits.length) throw new Error(`${url}: download failed after ${attempt + 1} attempts: ${failure}`);
+    console.log(`Download failed (${failure}); retrying in ${waits[attempt]} s`);
+    await new Promise((resolve) => setTimeout(resolve, waits[attempt] * 1000));
+  }
 }
 const raw = (repo, commit, file) => `https://raw.githubusercontent.com/SagerNet/${repo}/${commit}/${file}`;
 const goMod = verifyOnly

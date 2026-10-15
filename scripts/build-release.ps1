@@ -56,7 +56,20 @@ function Get-Artifact($Pin) {
     # A partial download is never considered a reusable artifact.
     $partial = "$target.partial"
     if (Test-Path -LiteralPath $partial) { Assert-NoLink $partial }
-    Invoke-WebRequest -UseBasicParsing -Uri $uri -OutFile $partial
+    # Hosts like gnu.org sometimes refuse a connection for a moment (seen on a
+    # CI runner), so a failed download is retried. A file that downloads but
+    # doesn't match its pin is never retried: that stops the build below.
+    $waits = @(5, 15, 30)
+    for ($attempt = 0; ; $attempt++) {
+      try {
+        Invoke-WebRequest -UseBasicParsing -Uri $uri -OutFile $partial
+        break
+      } catch {
+        if ($attempt -ge $waits.Count) { throw "Download failed after $($attempt + 1) attempts: $uri`n$($_.Exception.Message)" }
+        Write-Host "Download failed ($($_.Exception.Message)); retrying in $($waits[$attempt]) s"
+        Start-Sleep -Seconds $waits[$attempt]
+      }
+    }
     Assert-Hash $partial $Pin.sha256
     Move-Item -LiteralPath $partial -Destination $target
   }
