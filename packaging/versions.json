@@ -24,8 +24,8 @@
   },
   "licenses": {
     "gpl3": {
-      "url": "https://www.gnu.org/licenses/gpl-3.0.txt",
-      "cacheName": "gpl-3.0.txt",
+      "file": "licenses/GPL-3.0.txt",
+      "copiedFrom": "https://www.gnu.org/licenses/gpl-3.0.txt",
       "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
     },
     "singBox": {

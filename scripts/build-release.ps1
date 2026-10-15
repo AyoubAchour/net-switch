@@ -56,9 +56,9 @@ function Get-Artifact($Pin) {
     # A partial download is never considered a reusable artifact.
     $partial = "$target.partial"
     if (Test-Path -LiteralPath $partial) { Assert-NoLink $partial }
-    # Hosts like gnu.org sometimes refuse a connection for a moment (seen on a
-    # CI runner), so a failed download is retried. A file that downloads but
-    # doesn't match its pin is never retried: that stops the build below.
+    # A host can refuse a connection for a moment, so a failed download is
+    # retried. A file that downloads but doesn't match its pin is never
+    # retried: that stops the build below.
     $waits = @(5, 15, 30)
     for ($attempt = 0; ; $attempt++) {
       try {
@@ -95,7 +95,10 @@ $rootFiles = @(
 $trees = @('lib', 'ui', 'tools', 'licenses', 'docs')
 $required = $rootFiles + $trees + @(
   'lib/tray.cs', 'ui/index.html', 'ui/app.js', 'ui/styles.css', 'ui/favicon.svg',
-  'tools/stop.ps1', 'tools/restore-windows.mjs', 'licenses/lucide-ISC.txt', 'docs/user-guide.md'
+  'tools/stop.ps1', 'tools/restore-windows.mjs', 'licenses/lucide-ISC.txt', 'docs/user-guide.md',
+  # Kept in the repository rather than downloaded: gnu.org refuses connections
+  # from GitHub's runners. Its hash is still checked against the pin below.
+  'licenses/GPL-3.0.txt'
 )
 $missing = @($required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $repoRoot $_)) })
 if ($missing.Count) { throw "Missing required packaging inputs: $($missing -join ', ')" }
@@ -139,7 +142,6 @@ foreach ($directory in @($repoRoot, $dist, $cache)) {
 }
 $nodeZip = Get-Artifact $pins.node
 $engineZip = Get-Artifact $pins.singBox
-$gplLicense = Get-Artifact $pins.licenses.gpl3
 $engineLicense = Get-Artifact $pins.licenses.singBox
 $cronetLicense = Get-Artifact $pins.licenses.cronetGo
 $wintunZip = Get-Artifact $pins.nativeSources.wintun
@@ -173,7 +175,6 @@ Copy-ArchiveFile $nodeZip "$($pins.node.archiveRoot)/node.exe" (Join-Path $stage
 Copy-ArchiveFile $nodeZip "$($pins.node.archiveRoot)/LICENSE" (Join-Path $stage 'runtime/LICENSE')
 Assert-Hash (Join-Path $stage 'runtime/LICENSE') $pins.licenses.node.sha256
 Copy-Item -LiteralPath (Join-Path $stage 'runtime/LICENSE') -Destination (Join-Path $stage 'licenses/node-LICENSE.txt')
-Copy-Item -LiteralPath $gplLicense -Destination (Join-Path $stage 'licenses/GPL-3.0.txt')
 Copy-Item -LiteralPath $engineLicense -Destination (Join-Path $stage 'licenses/sing-box-LICENSE.txt')
 Assert-Hash (Join-Path $stage 'licenses/node-LICENSE.txt') $pins.licenses.node.sha256
 Assert-Hash (Join-Path $stage 'licenses/GPL-3.0.txt') $pins.licenses.gpl3.sha256
