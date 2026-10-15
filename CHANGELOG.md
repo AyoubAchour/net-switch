@@ -4,7 +4,7 @@ All notable changes to Net Switch are listed here. Versions follow
 [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change behavior.
 
-## [0.1.0] - 2026-10-14
+## [0.1.0] - 2026-10-15
 
 First public release.
 
