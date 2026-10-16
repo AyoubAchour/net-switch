@@ -17,6 +17,8 @@ const els = {
   listMessage: document.getElementById('list-message'),
   legends: document.querySelector('.legends'),
   quit: document.getElementById('quit'),
+  statDownload: document.getElementById('stat-download'),
+  statUpload: document.getElementById('stat-upload'),
 };
 
 let state = null;
@@ -349,6 +351,15 @@ function renderTopbar() {
     toggle.textContent = routingWanted() ? 'Turn off' : 'Turn on';
     toggle.disabled = Boolean(busyAction);
   }
+}
+
+function renderStats() {
+  if (!els.statDownload || !els.statUpload || !state?.lanes) return;
+  const lanes = Object.values(state.lanes).filter(Boolean);
+  const download = lanes.reduce((total, lane) => total + (lane.rate?.down ?? 0), 0);
+  const upload = lanes.reduce((total, lane) => total + (lane.rate?.up ?? 0), 0);
+  els.statDownload.textContent = measuring() ? formatRate(download) : '—';
+  els.statUpload.textContent = measuring() ? formatRate(upload) : '—';
 }
 
 // ------------------------------------------------------------ master section
@@ -1011,6 +1022,7 @@ function renderEmpty(isEmpty) {
 
 function render() {
   renderTopbar();
+  renderStats();
   renderNotices();
   if (!state) return;
   renderMaster();

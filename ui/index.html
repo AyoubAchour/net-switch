@@ -4,48 +4,129 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
-    <!-- Chrome paints its app-window title bar with this; without it the bar takes a low-contrast default. -->
-    <meta name="theme-color" content="#141619" />
+    <meta name="theme-color" content="#0b1016" />
     <title>Net Switch</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/styles.css" />
     <script src="/app.js" defer></script>
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <span class="mark" aria-hidden="true"><i></i><i></i></span>
-        <h1>Net Switch</h1>
-        <p id="routing-status" class="status" aria-live="polite">Connecting…</p>
+    <div class="app-shell">
+      <aside class="rail" aria-label="Net Switch" title="Net Switch">
+        <div class="rail-brand">
+          <span class="mark" aria-hidden="true"><i></i><i></i></span>
+          <span class="rail-wordmark">NET<br />SWITCH</span>
+        </div>
+        <div class="rail-rule"></div>
+        <div class="rail-status" aria-hidden="true">
+          <span class="rail-status-dot"></span>
+          <span>LIVE</span>
+        </div>
+        <p class="rail-version">NETWORK<br />CONTROL</p>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <div class="topbar-title">
+            <p class="eyebrow">Network control center</p>
+            <h1>Routing workspace</h1>
+          </div>
+          <div class="topbar-actions">
+            <p id="routing-status" class="status" aria-live="polite">Connecting…</p>
+            <button id="routing-toggle" class="button button-power" type="button" hidden>Turn off</button>
+          </div>
+        </header>
+
+        <section class="master" aria-label="Connections">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">01 / Uplinks</p>
+              <h2>Connection health</h2>
+            </div>
+            <p class="section-caption">Live throughput · Last updated continuously</p>
+          </div>
+          <div class="lines">
+            <div id="bus-main" class="bus" data-lane="main"></div>
+            <div id="bus-second" class="bus" data-lane="second"></div>
+          </div>
+          <div id="combine" class="feature" hidden></div>
+        </section>
+
+        <section class="insights" aria-label="Network statistics">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">02 / Performance</p>
+              <h2>Network statistics</h2>
+            </div>
+            <p class="section-caption">Current session overview</p>
+          </div>
+          <div class="stats-panel">
+            <div class="stats-summary">
+              <article class="stat-card">
+                <div class="stat-label"><span class="stat-dot stat-dot-main"></span>Download</div>
+                <div class="stat-value" id="stat-download">Live</div>
+                <div class="stat-meta">Combined throughput <span>↓</span></div>
+              </article>
+              <article class="stat-card">
+                <div class="stat-label"><span class="stat-dot stat-dot-second"></span>Upload</div>
+                <div class="stat-value" id="stat-upload">Live</div>
+                <div class="stat-meta">Combined throughput <span>↑</span></div>
+              </article>
+              <article class="stat-card stat-card-status">
+                <div class="stat-label"><span class="stat-dot stat-dot-ok"></span>Routing</div>
+                <div class="stat-value">Active</div>
+                <div class="stat-meta">Monitoring all applications</div>
+              </article>
+            </div>
+            <div class="chart-area">
+              <div class="chart-heading">
+                <span>Live throughput</span>
+                <span class="stat-period">CURRENT SESSION</span>
+              </div>
+              <div class="chart-plot">
+                <span class="chart-grid chart-grid-one" aria-hidden="true"></span>
+                <span class="chart-grid chart-grid-two" aria-hidden="true"></span>
+                <svg class="curve curve-download" viewBox="0 0 440 76" preserveAspectRatio="none" aria-hidden="true">
+                  <path d="M0 64 C36 60 40 31 78 43 S118 66 153 36 S198 18 226 35 S270 54 300 27 S349 9 380 25 S416 38 440 8" />
+                </svg>
+                <svg class="curve curve-upload" viewBox="0 0 440 76" preserveAspectRatio="none" aria-hidden="true">
+                  <path d="M0 57 C38 53 52 68 85 47 S128 18 165 41 S210 57 245 46 S286 19 320 38 S365 58 392 43 S423 27 440 32" />
+                </svg>
+              </div>
+              <div class="chart-legend">
+                <span><i class="stat-dot stat-dot-main"></i>Download</span>
+                <span><i class="stat-dot stat-dot-second"></i>Upload</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div id="notices" class="notices"></div>
+
+        <main class="channels" aria-label="Application traffic allocation">
+          <div id="list-message" class="list-message" hidden></div>
+          <div class="section-heading apps-heading">
+            <div>
+              <p class="eyebrow">03 / Application routes</p>
+              <h2>Traffic allocation</h2>
+            </div>
+            <p class="section-caption">Assign each application to an uplink</p>
+          </div>
+          <div class="legends" aria-hidden="true" hidden>
+            <span class="legend col-app">Application</span>
+            <span class="legend col-traffic">Activity</span>
+            <span class="legend col-down">Download</span>
+            <span class="legend col-keys">Assigned uplink</span>
+          </div>
+          <ul id="apps" class="strips" aria-label="Apps using the internet"></ul>
+          <div id="empty" class="empty" hidden></div>
+        </main>
+
+        <footer class="footer">
+          <p id="footer-note">Closing this window keeps routing on.</p>
+          <button id="quit" class="button button-quiet" type="button">Quit Net Switch</button>
+        </footer>
       </div>
-      <button id="routing-toggle" class="button button-power" type="button" hidden>Turn off</button>
-    </header>
-
-    <section class="master" aria-label="Connections">
-      <div class="lines">
-        <div id="bus-main" class="bus" data-lane="main"></div>
-        <div id="bus-second" class="bus" data-lane="second"></div>
-      </div>
-      <div id="combine" class="feature" hidden></div>
-    </section>
-
-    <div id="notices" class="notices"></div>
-
-    <main class="channels">
-      <div id="list-message" class="list-message" hidden></div>
-      <div class="legends" aria-hidden="true" hidden>
-        <span class="legend col-app">App</span>
-        <span class="legend col-traffic">Traffic</span>
-        <span class="legend col-down">Down</span>
-        <span class="legend col-keys">Route</span>
-      </div>
-      <ul id="apps" class="strips" aria-label="Apps using the internet"></ul>
-      <div id="empty" class="empty" hidden></div>
-    </main>
-
-    <footer class="footer">
-      <p id="footer-note">Closing this window keeps routing on.</p>
-      <button id="quit" class="button button-quiet" type="button">Quit Net Switch</button>
-    </footer>
+    </div>
   </body>
 </html>
