@@ -82,6 +82,30 @@ test('pinned apps stay listed even when they are not running, in any letter case
   assert.equal(byKey.get(appKey(CHROME)).line, CABLE);
 });
 
+test('an old pin follows an update, merges both versions, and keeps the current program path', () => {
+  const oldPath = String.raw`C:\Users\Admin\AppData\Local\Discord\app-1.0.9164\Discord.exe`;
+  const newPath = oldPath.replace('9164', '9165');
+  const pins = { [oldPath]: STICK };
+  const tracker = new AppTracker();
+  assert.equal(tracker.snapshot(pins)[0].line, STICK, 'can pin before the app runs');
+  tracker.ingest([connection('old', oldPath)], 1000);
+  tracker.ingest([connection('new', newPath)], 2000);
+  const outside = new OutsideTracker();
+  outside.ingest([{ id: 'outside', path: oldPath, line: CABLE, down: 0, up: 0, beforeRouting: true }], 2000);
+  const rows = mergeRows(tracker.snapshot(pins), outside, pins);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].path, newPath);
+  assert.equal(rows[0].line, STICK);
+  assert.equal(rows[0].outside.connections, 1);
+  assert.deepEqual(tracker.connectionIdsOffLine(appKey(oldPath), STICK), ['new']);
+  const repinned = { [oldPath]: STICK, [newPath]: CABLE };
+  assert.equal(tracker.snapshot(repinned)[0].line, CABLE, 'last saved version wins');
+  assert.equal(mergeRows([], outside, repinned)[0].line, CABLE, 'outside-only rows use the same pin');
+  outside.ingest([{ id: 'outside-new', path: newPath, line: CABLE, down: 0, up: 0, beforeRouting: true }], 3000);
+  const neverRouted = new AppTracker();
+  assert.equal(mergeRows(neverRouted.snapshot(pins), outside, pins)[0].path, newPath, 'outside traffic replaces the stale pinned path');
+});
+
 test('a download that started before routing is measured, merged into its app row and counted on its line', () => {
   const outside = new OutsideTracker();
   const t0 = Date.parse('2026-10-07T01:10:00Z');

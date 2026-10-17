@@ -6,10 +6,11 @@ import { createServer as createTcpServer } from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { appKey, AppTracker, connectionLine, mergeRows, OutsideTracker, parseOutsideId } from './lib/apps.mjs';
+import { appKey, appPins, AppTracker, connectionLine, mergeRows, OutsideTracker, parseOutsideId } from './lib/apps.mjs';
 import { AppInfo } from './lib/appinfo.mjs';
 import { canAutostart, disableAutostart, enableAutostart, readAutostart } from './lib/autostart.mjs';
 import { Engine, probeUrls } from './lib/engine.mjs';
+import { InstalledApps } from './lib/installed-apps.mjs';
 import { LaneSwitch } from './lib/lane-switch.mjs';
 import {
   LEGACY_KEYS,
@@ -256,6 +257,7 @@ const engine = new Engine({
 const tracker = new AppTracker();
 const outside = new OutsideTracker();
 const appInfo = new AppInfo();
+const installedApps = new InstalledApps({ appInfo });
 const monitor = new LineMonitor({
   // Measuring connections that go around routing needs administrator rights.
   watchOutside: !testMode,
@@ -917,10 +919,8 @@ function setAppLine(processPath, lineId) {
 
 // The line an app is pinned to, if it is and that line exists.
 function pinnedLine(key) {
-  for (const [programPath, id] of Object.entries(settings.values.appLines)) {
-    if (appKey(programPath) === key && lineById(id)) return id;
-  }
-  return null;
+  const id = appPins(settings.values.appLines).get(key)?.lineId;
+  return id && lineById(id) ? id : null;
 }
 
 // Where a line's apps' new connections go now: the line itself, or the line
@@ -1495,6 +1495,7 @@ async function readJson(request) {
 const actions = {
   'GET /api/ping': async () => ({ ok: true }),
   'GET /api/state': async () => buildState(),
+  'GET /api/installed-apps': async () => installedApps.list(),
   'POST /api/routing': async ({ on }) => {
     await setRouting(Boolean(on));
     return buildState();

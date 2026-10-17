@@ -9,7 +9,7 @@ import {
   buildEngineConfig,
   buildRuleSets,
   Engine,
-  exactPathPattern,
+  appPathPattern,
   parseChecksums,
   PROBE_URLS,
   probeUrls,
@@ -20,7 +20,7 @@ import { assignPorts } from '../lib/lines.mjs';
 const LM = 'C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe';
 const DISCORD = 'C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0\\Discord.exe';
 const OTHER = 'C:\\Other\\app.exe';
-const LM_RULE = { process_path_regex: [exactPathPattern(LM)] };
+const LM_RULE = { process_path_regex: [appPathPattern(LM)] };
 const NEVER = { version: 3, rules: [{ process_path: ['C:\\NetSwitch\\no-app-selected.exe'] }] };
 
 const CABLE = { id: 'a1', alias: 'Ethernet' };
@@ -30,13 +30,13 @@ const LINES = [CABLE, STICK, PHONE];
 
 test('an app’s rule matches its exact path in any letter case, and nothing else', () => {
   // Go's regular expressions read (?i) and these escapes the same way JavaScript does with the i flag.
-  const pattern = new RegExp(exactPathPattern(LM).replace('(?i)', ''), 'i');
+  const pattern = new RegExp(appPathPattern(LM).replace('(?i)', ''), 'i');
   assert.ok(pattern.test(LM));
   assert.ok(pattern.test(LM.toLowerCase()));
   assert.ok(!pattern.test(`${LM}.bak`));
   assert.ok(!pattern.test(`D:${LM.slice(2)}`));
   assert.ok(!pattern.test(LM.replace('LM Studio.exe', 'LM StudioXexe')));
-  assert.equal(exactPathPattern('C:\\a (x86)\\b+c.exe'), '(?i)^C:\\\\a \\(x86\\)\\\\b\\+c\\.exe$');
+  assert.equal(appPathPattern('C:\\a (x86)\\b+c.exe'), '(?i)^C:\\\\a \\(x86\\)\\\\b\\+c\\.exe$');
 });
 
 test('every line gets a file of pinned apps; every line but the main one also gets a share file', () => {
@@ -49,6 +49,19 @@ test('every line gets a file of pinned apps; every line but the main one also ge
   assert.deepEqual(sets['share-b2'], NEVER, 'no share without combining');
   // A pin to a line that isn't there is left out.
   assert.deepEqual(buildRuleSets({ lines: [CABLE], appLines: { [LM]: 'zz' } })['apps-a1'], NEVER);
+});
+
+test('duplicate saved versions use the last pin in both routing rules and connection decisions', () => {
+  const updated = DISCORD.replace('app-1.0', 'app-1.0.9165');
+  const appLines = { [DISCORD]: 'a1', [updated]: 'b2' };
+  const sets = buildRuleSets({ lines: LINES, appLines });
+  assert.deepEqual(sets['apps-a1'], NEVER);
+  assert.deepEqual(sets['apps-b2'].rules, [{ process_path_regex: [appPathPattern(updated)] }]);
+  const engine = new Engine({ singBoxPath: 'unused.exe', dataDir: tmpdir(), mode: 'proxy' });
+  engine.lines = LINES;
+  engine.appLines = appLines;
+  assert.equal(engine.routesTo({ metadata: { processPath: DISCORD } }), 'b2');
+  assert.equal(engine.routesTo({ metadata: { processPath: updated } }), 'b2');
 });
 
 test('while combining, each line’s share file lists its share of ports 1024 to 65535', () => {
@@ -113,7 +126,7 @@ test('the engine’s own idea of where a connection goes matches the rule files 
     await engine.changeRules({ lines: LINES, appLines, combine: true, shares });
     const config = buildEngineConfig({ mode: 'tun', lines: LINES, apiPort: 1, apiSecret: 's', ruleDir: dataDir });
     const sets = buildRuleSets({ lines: LINES, appLines, combine: true, shares });
-    for (const processPath of [DISCORD, LM, OTHER]) {
+    for (const processPath of [DISCORD, DISCORD.replace('app-1.0', 'app-1.0.9165'), LM, OTHER]) {
       for (let port = 1000; port < 66000; port += 997) {
         const sourcePort = Math.min(port, 65535);
         const lane = routeOf(config, sets, { processPath, sourcePort });
