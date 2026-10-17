@@ -49,11 +49,19 @@ Write-Host "C# compiler $((Get-Item -LiteralPath $csc).VersionInfo.ProductVersio
 # Warnings fail the build, as they fail Add-Type. The sources are UTF-8 without
 # a byte order mark, which is said outright rather than left to this PC's code
 # page. No debug file is written, so no local path ends up in the program.
+# References are full paths into the framework folder: a bare name is looked
+# up in the current folder first, where a stray DLL could stand in for one.
+$framework = Split-Path $csc -Parent
+$references = @('System.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll', 'System.Net.Http.dll', 'System.Web.Extensions.dll') |
+  ForEach-Object {
+    $reference = Join-Path $framework $_
+    if (-not (Test-Path -LiteralPath $reference -PathType Leaf)) { throw "The .NET Framework assembly $reference is missing." }
+    "/reference:$reference"
+  }
 $arguments = @(
   '/nologo', '/noconfig', '/utf8output', '/codepage:65001', '/langversion:5',
-  '/target:winexe', '/platform:anycpu', '/optimize+', '/debug-', '/warn:4', '/warnaserror+',
-  '/reference:System.dll', '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll',
-  '/reference:System.Net.Http.dll', '/reference:System.Web.Extensions.dll',
+  '/target:winexe', '/platform:anycpu', '/optimize+', '/debug-', '/warn:4', '/warnaserror+'
+) + $references + @(
   "/win32icon:$icon", "/win32manifest:$manifest", "/out:$output"
 ) + $sources
 $messages = @(& $csc @arguments)
