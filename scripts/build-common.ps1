@@ -8,9 +8,9 @@ function Get-BuildCache([string] $Dist) {
 }
 
 function Get-NativeArchitecture {
-  # PROCESSOR_ARCHITEW6432 identifies the OS when this shell is emulated.
-  $native = $env:PROCESSOR_ARCHITEW6432
-  if (-not $native) { $native = $env:PROCESSOR_ARCHITECTURE }
+  # This system key is shared with emulated processes. Keep the source-engine
+  # downloader in agreement with lib/architecture.mjs, even in an x64 shell.
+  $native = Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name PROCESSOR_ARCHITECTURE
   switch ($native) {
     'AMD64' { return 'x64' }
     'ARM64' { return 'arm64' }

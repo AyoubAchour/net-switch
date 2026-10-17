@@ -13,7 +13,7 @@
 #if AppArch == "arm64"
   #define AllowedArch "arm64"
 #elif AppArch == "x64"
-  #define AllowedArch "x64os"
+  #define AllowedArch "x64compatible"
 #else
   #error AppArch must be x64 or arm64
 #endif

@@ -17,15 +17,6 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows') {
 }
 . (Join-Path $PSScriptRoot 'build-common.ps1')
 if ((Get-NativeArchitecture) -ne $Arch) { throw "Smoke test needs a native $Arch runner." }
-Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class SmokeProcessArchitecture {
-  [DllImport("kernel32.dll", SetLastError = true)]
-  [return: MarshalAs(UnmanagedType.Bool)]
-  public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
-}
-'@
 $installer = (Resolve-Path -LiteralPath $Installer).Path
 $app = Join-Path $env:ProgramFiles 'Net Switch'
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
@@ -221,21 +212,9 @@ function Start-InstalledApp {
     throw
   }
   Wait-HelperModes @('meters', 'outside', 'network', 'guard')
-  foreach ($running in Get-AppProcesses | Where-Object { $_.Name -ne 'powershell.exe' }) {
-    $processHandle = [Diagnostics.Process]::GetProcessById($running.ProcessId)
-    try {
-      [uint16]$processMachine = 0
-      [uint16]$nativeMachine = 0
-      if (-not [SmokeProcessArchitecture]::IsWow64Process2($processHandle.Handle, [ref]$processMachine, [ref]$nativeMachine)) {
-        throw "Could not read process architecture for $($running.Name)."
-      }
-      $expected = if ($Arch -eq 'arm64') { 0xaa64 } else { 0x8664 }
-      if ($processMachine -ne 0 -or $nativeMachine -ne $expected) {
-        throw "$($running.Name) is running under emulation instead of native $Arch."
-      }
-      Write-Host "$($running.Name) runs natively on $Arch"
-    } finally { $processHandle.Dispose() }
-  }
+  # Assert-Installed checks the PE headers of Node, helper and engine (and the
+  # tray's AnyCPU image). IsWow64Process2 cannot distinguish emulated x64 from
+  # native ARM64, so do not claim it proves these processes run natively.
   Wait-Until { $process.HasExited } 'The installed launcher did not finish opening the app window.'
   $process.WaitForExit()
   if ($process.ExitCode -ne 0) { throw "Installed launcher exited with code $($process.ExitCode)." }

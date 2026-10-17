@@ -91,3 +91,16 @@ jobs:
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-arm64.exe" -Arch arm64
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          architecture: x64
+          package-manager-cache: false
+      - name: Verify registry detection and updates under x64 emulation
+        env:
+          NETSWITCH_TEST_X64_ON_ARM64: '1'
+        run: |
+          node --test test/architecture.test.mjs test/updates.test.mjs test/engine.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          . ./scripts/build-common.ps1
+          if ((Get-NativeArchitecture) -ne 'arm64') { throw 'Source engine download would use the wrong architecture.' }

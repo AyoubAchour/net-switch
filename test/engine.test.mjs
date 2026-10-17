@@ -563,12 +563,18 @@ test('ARM64 uses its checkout checksums or the installed list, and only ARM64 ma
     const armSums = `${good}  sing-box.exe\n`;
     await writeFile(path.join(dir, 'SHA256SUMS-arm64.txt'), armSums);
     await writeFile(path.join(dir, 'SHA256SUMS.txt'), `${'a'.repeat(64)}  sing-box.exe\n${good}  libcronet.dll\n`);
-    const engine = new Engine({ singBoxPath: exe, dataDir: dir, mode: 'proxy' });
+    const engine = new Engine({ singBoxPath: exe, dataDir: dir, mode: 'proxy', architecture: () => 'arm64' });
+    // Source downloads match Windows, even when the current Node is x64.
+    await engine.verifyEngineFiles();
+    engine.verified.clear();
     await engine.verifyEngineFiles('arm64');
     engine.verified.clear();
-    await assert.rejects(engine.verifyEngineFiles('x64'), /doesn’t match/);
+    await assert.rejects(engine.verifyEngineFiles('x64'), /doesn’t match.*for x64/);
     await writeFile(path.join(dir, 'SHA256SUMS.txt'), armSums);
     await rm(path.join(dir, 'SHA256SUMS-arm64.txt'));
+    // Installed copies use the bundled runtime's architecture, so an x64 copy
+    // on ARM64 still requires Cronet until the native installer replaces it.
+    if (process.arch === 'x64') await assert.rejects(engine.verifyEngineFiles(), /no line for libcronet/);
     await engine.verifyEngineFiles('arm64');
     await assert.rejects(engine.verifyEngineFiles('x64'), /no line for libcronet/);
     await writeFile(path.join(dir, 'SHA256SUMS.txt'), `${armSums}${good}  libcronet.dll\n`);

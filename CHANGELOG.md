@@ -6,7 +6,7 @@ change behavior.
 
 ## [Unreleased]
 
-- Added a native Windows ARM64 installer alongside the x64 installer.
+- ARM64 PCs now get a native build; an x64 copy on an ARM64 PC moves to it with the next update.
 - The tray icon is now a small program of its own instead of a PowerShell
   script compiled at every start: it appears in under a second instead of
   about four, and uses about half the memory (around 45 MB instead of 97 MB).
