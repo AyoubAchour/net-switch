@@ -66,7 +66,7 @@ foreach ($directory in @($repoRoot, $dist, $cache)) {
 # The native helper that reads the line meters, built from helper\ with the
 # pinned Go (its own tests run first). It shares this download cache.
 & (Join-Path $PSScriptRoot 'build-helper.ps1') -Arch $Arch
-$helperExe = Join-Path $repoRoot 'helper\bin\netswitch-helper.exe'
+$helperExe = Get-HelperBinaryPath $repoRoot $Arch
 Assert-NoLink $helperExe
 # The tray icon as its own program, built with the C# compiler that comes with
 # Windows, so the installed tray needs no PowerShell running.

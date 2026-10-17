@@ -154,6 +154,8 @@ sing-box and helper binaries. `-SkipInstaller` only stages and verifies the
 payload, without running Inno Setup. The stages are `dist\stage-x64` and
 `dist\stage-arm64`; each binary's PE architecture is checked before packaging.
 The helper build defaults to the PC's architecture and also accepts `-Arch`.
+Cross-builds go in `helper\bin\<arch>\` so the native helper in your checkout
+still works; the installer always receives `helper\netswitch-helper.exe`.
 It runs Go tests only when the target matches the PC; CI runs tests and the
 installer smoke test on both x64 and `windows-11-arm` runners.
 The AnyCPU tray has no Prefer32Bit flag, so .NET Framework 4.8.1 runs it

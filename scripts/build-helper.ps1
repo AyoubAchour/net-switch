@@ -26,8 +26,8 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $dist = Join-Path $repoRoot 'dist'
 $cache = Get-BuildCache $dist
 $helperDir = Join-Path $repoRoot 'helper'
-$binDir = Join-Path $helperDir 'bin'
-$output = Join-Path $binDir 'netswitch-helper.exe'
+$output = Get-HelperBinaryPath $repoRoot $Arch
+$binDir = Split-Path $output -Parent
 $pins = Get-Content -LiteralPath (Join-Path $repoRoot 'packaging/versions.json') -Raw | ConvertFrom-Json
 $pin = $pins.go
 if ($pin.version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid Go version pin: $($pin.version)" }
@@ -38,7 +38,7 @@ foreach ($directory in @($repoRoot, $dist, $cache)) {
   else { New-Item -ItemType Directory -Path $directory | Out-Null }
 }
 Assert-NoLink $helperDir
-foreach ($path in @($binDir, $output)) {
+foreach ($path in @((Join-Path $helperDir 'bin'), $binDir, $output)) {
   if (Test-Path -LiteralPath $path) { Assert-NoLink $path }
 }
 

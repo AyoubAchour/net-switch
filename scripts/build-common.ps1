@@ -39,6 +39,12 @@ function Get-EngineChecksumFile([string] $RepoRoot, [string] $Arch) {
   return Join-Path $RepoRoot "engine/$name"
 }
 
+function Get-HelperBinaryPath([string] $RepoRoot, [string] $Arch) {
+  # A cross-build must not replace the helper used to run this checkout.
+  if ($Arch -eq (Get-NativeArchitecture)) { return Join-Path $RepoRoot 'helper/bin/netswitch-helper.exe' }
+  return Join-Path $RepoRoot "helper/bin/$Arch/netswitch-helper.exe"
+}
+
 function Assert-EnginePins($Pin, [string] $ChecksumFile, [string] $Arch) {
   Assert-NoLink $ChecksumFile
   $sums = @{}
