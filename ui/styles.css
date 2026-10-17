@@ -8,14 +8,26 @@
   --cell-off: #242931;
   --ink: #eceef1;
   --ink-2: #a3a9b3;
-  /* The faintest text still meets WCAG AA (4.5:1) on the background. */
-  --ink-3: #757c87;
+  /* The faintest text still meets WCAG AA (4.5:1) on the background, the
+     cards, and a card under the pointer (--panel-raised). */
+  --ink-3: #7e8590;
   --cable: #f5b13d;
   --second: #3cc8ea;
   --ok: #3dd68c;
   --warn: #f2b24d;
   --alert: #f26d6d;
   --focus: #f4f5f7;
+
+  /* One color per line, by position: the main line amber, the next cyan,
+     then hues kept clear of the status colors. All of them pass 4.5:1 as
+     text on the panels. */
+  --line-0: var(--cable);
+  --line-1: var(--second);
+  --line-2: #b394ff;
+  --line-3: #f584c8;
+  --line-4: #b9dc58;
+  --line-5: #7f99ff;
+  --lane: var(--line-0);
 
   --mono: 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace, monospace;
   --size: 13px;
@@ -29,6 +41,10 @@
   --icon-cable: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m15 20 3-3h2a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h2l3 3z'/%3E%3Cpath d='M6 8v1'/%3E%3Cpath d='M10 8v1'/%3E%3Cpath d='M14 8v1'/%3E%3Cpath d='M18 8v1'/%3E%3C/svg%3E");
   --icon-wifi: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 20h.01'/%3E%3Cpath d='M2 8.82a15 15 0 0 1 20 0'/%3E%3Cpath d='M5 12.859a10 10 0 0 1 14 0'/%3E%3Cpath d='M8.5 16.429a5 5 0 0 1 7 0'/%3E%3C/svg%3E");
   --icon-phone: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect width='14' height='20' x='5' y='2' rx='2' ry='2'/%3E%3Cpath d='M12 18h.01'/%3E%3C/svg%3E");
+  --icon-network: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='16' y='16' width='6' height='6' rx='1'/%3E%3Crect x='2' y='16' width='6' height='6' rx='1'/%3E%3Crect x='9' y='2' width='6' height='6' rx='1'/%3E%3Cpath d='M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3'/%3E%3Cpath d='M12 12V8'/%3E%3C/svg%3E");
+  --icon-plus: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14'/%3E%3Cpath d='M12 5v14'/%3E%3C/svg%3E");
+  --icon-close: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M18 6 6 18'/%3E%3Cpath d='m6 6 12 12'/%3E%3C/svg%3E");
+  --icon-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --icon-alert: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3'/%3E%3Cpath d='M12 9v4'/%3E%3Cpath d='M12 17h.01'/%3E%3C/svg%3E");
   --icon-setup: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 7h-9'/%3E%3Cpath d='M14 17H5'/%3E%3Ccircle cx='17' cy='17' r='3'/%3E%3Ccircle cx='7' cy='7' r='3'/%3E%3C/svg%3E");
   --icon-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 16v-4'/%3E%3Cpath d='M12 8h.01'/%3E%3C/svg%3E");
@@ -44,6 +60,31 @@
 /* Component display rules must never override the hidden attribute. */
 [hidden] {
   display: none !important;
+}
+
+/* A line's color, for its card, keys, meter cells and notes. */
+[data-color='0'] {
+  --lane: var(--line-0);
+}
+
+[data-color='1'] {
+  --lane: var(--line-1);
+}
+
+[data-color='2'] {
+  --lane: var(--line-2);
+}
+
+[data-color='3'] {
+  --lane: var(--line-3);
+}
+
+[data-color='4'] {
+  --lane: var(--line-4);
+}
+
+[data-color='5'] {
+  --lane: var(--line-5);
 }
 
 html,
@@ -73,6 +114,7 @@ body {
 }
 
 h1,
+h2,
 p {
   margin: 0;
 }
@@ -89,7 +131,10 @@ p {
 /* An icon drawn in the current text color through one of the masks above. */
 .line-icon::before,
 .notice-icon,
-.button-power::before {
+.button-power::before,
+.icon-button::before,
+.pick::after,
+.advanced summary::before {
   content: '';
   display: block;
   background: currentColor;
@@ -126,7 +171,10 @@ a.button {
   text-decoration: none;
 }
 
-.button:disabled {
+/* Unavailable for now (something is saving, or nothing to save): it keeps the
+   keyboard focus, so it is marked rather than disabled. */
+.button:disabled,
+.button[aria-disabled='true'] {
   cursor: default;
   color: var(--ink-3);
   border-color: var(--rule);
@@ -147,11 +195,68 @@ a.button {
   background: var(--panel-raised);
 }
 
+.button-quiet[aria-disabled='true']:hover {
+  color: var(--ink-3);
+  background: transparent;
+}
+
+/* Something that can't be taken back in one click, such as removing a line. */
+.button-danger:enabled:not([aria-disabled='true']) {
+  color: var(--alert);
+}
+
+.button-danger:not(.button-quiet):enabled:not([aria-disabled='true']) {
+  border-color: color-mix(in srgb, var(--alert) 45%, var(--rule-strong));
+  background: color-mix(in srgb, var(--alert) 9%, var(--panel));
+}
+
+.button-danger:not(.button-quiet):enabled:not([aria-disabled='true']):hover {
+  border-color: var(--alert);
+  background: color-mix(in srgb, var(--alert) 15%, var(--panel));
+}
+
+.button-quiet.button-danger:enabled:not([aria-disabled='true']):hover {
+  color: var(--alert);
+  background: color-mix(in srgb, var(--alert) 9%, transparent);
+}
+
 .button-power::before {
   --icon: var(--icon-power);
   width: 14px;
   height: 14px;
   color: var(--ink-2);
+}
+
+/* A square button with only an icon, such as a panel's close. */
+.icon-button {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.icon-button:hover {
+  color: var(--ink);
+  background: var(--panel-raised);
+}
+
+.icon-button::before {
+  width: 16px;
+  height: 16px;
+}
+
+.icon-close::before {
+  --icon: var(--icon-close);
 }
 
 /* ------------------------------------------------------------ top bar */
@@ -172,7 +277,7 @@ a.button {
   min-width: 0;
 }
 
-/* The two-bar mark: the cable over the second connection. */
+/* The two-bar mark: the main line over the next one. */
 .mark {
   display: grid;
   gap: 3px;
@@ -257,8 +362,19 @@ h1 {
   gap: 12px;
 }
 
+/* Five lines and more: the cards scroll inside their own area so the app list
+   keeps its room. Two rows show, and the top of the third says there is more. */
+.lines[data-rows='many'] {
+  max-height: 222px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--rule-strong) transparent;
+  /* Room for a focused card's outline at the edges. */
+  margin: -3px;
+  padding: 3px;
+}
+
 .bus {
-  --lane: var(--cable);
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -267,11 +383,18 @@ h1 {
   border-radius: 12px;
   background: var(--panel);
   border: 1px solid var(--rule);
-  transition: border-color 200ms ease;
+  transition:
+    border-color 200ms ease,
+    background-color 120ms ease;
 }
 
-.bus[data-lane='second'] {
-  --lane: var(--second);
+/* A line's card opens its settings when clicked anywhere. */
+.bus[data-id] {
+  cursor: pointer;
+}
+
+.bus[data-id]:hover {
+  background: var(--panel-raised);
 }
 
 .bus[data-down='warn'] {
@@ -285,6 +408,100 @@ h1 {
 .bus[data-down] .reading-down,
 .bus[data-down] .meter {
   opacity: 0.45;
+}
+
+/* Three lines and more: slim cards, the speed beside the name and the health
+   in the foot, so two rows still leave the app list its room. */
+.lines[data-density='compact'] .bus {
+  gap: 8px;
+  padding: 10px 14px 8px;
+}
+
+.lines[data-density='compact'] .line-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+.lines[data-density='compact'] .line-icon::before {
+  width: 13px;
+  height: 13px;
+}
+
+.lines[data-density='compact'] .bus-reading {
+  align-items: baseline;
+  gap: 10px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.lines[data-density='compact'] .reading-value {
+  font-size: 18px;
+}
+
+.lines[data-density='compact'] .meter-master {
+  height: 8px;
+  gap: 2px;
+}
+
+.lines[data-density='compact'] .bus-usage,
+.lines[data-density='compact'] .bus-foot {
+  margin-top: -2px;
+}
+
+.lines[data-density='compact'] .bus-foot {
+  justify-content: flex-start;
+}
+
+.lines[data-density='compact'] .bus-foot .health {
+  margin-left: 0;
+}
+
+.lines[data-density='compact'] .bus-foot .bus-note,
+.lines[data-density='compact'] .bus-foot .bus-usage {
+  flex: 1;
+  margin-top: 0;
+}
+
+.lines[data-density='compact'] .bus-foot .usage-bar {
+  flex-basis: 48px;
+}
+
+/* The add card's title and detail on one line, its adapters one line each,
+   beside slim cards or as the strip under two cards. */
+.lines[data-density='compact'] .add-name,
+.lines[data-density='compact'] .candidate-name,
+.bus-add[data-wide='true'] .add-name,
+.bus-add[data-wide='true'] .candidate-name {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.lines[data-density='compact'] .add-name span,
+.lines[data-density='compact'] .candidate-name span {
+  flex: 1;
+}
+
+.lines[data-density='compact'] .candidates {
+  gap: 6px;
+}
+
+.lines[data-density='compact'] .candidate .button,
+.bus-add[data-wide='true'] .candidate .button {
+  padding: 3px 12px;
+  font-size: 12px;
+}
+
+.bus-add[data-wide='true'] .line-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+.bus-add[data-wide='true'] .line-icon::before {
+  width: 13px;
+  height: 13px;
 }
 
 .bus-head {
@@ -319,6 +536,25 @@ h1 {
   --icon: var(--icon-phone);
 }
 
+.line-icon[data-icon='other']::before {
+  --icon: var(--icon-network);
+}
+
+.line-icon[data-icon='add']::before {
+  --icon: var(--icon-plus);
+}
+
+.line-icon-small {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+.line-icon-small::before {
+  width: 13px;
+  height: 13px;
+}
+
 .bus-name {
   display: flex;
   flex-direction: column;
@@ -327,17 +563,41 @@ h1 {
 }
 
 .bus-name strong {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
   font-size: 14px;
   font-weight: 600;
   white-space: nowrap;
 }
 
-.bus-name span {
+.bus-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bus-name span:not(.bus-label):not(.badge) {
   font-size: 12px;
   color: var(--ink-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Main and Metered: small capitals in a hairline box beside the name. */
+.badge {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-2);
 }
 
 .health {
@@ -394,6 +654,51 @@ h1 {
   white-space: nowrap;
 }
 
+/* Data used on a metered line, against its cap when it has one. */
+.bus-usage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin-top: -4px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.usage-bar {
+  flex: 0 0 64px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--cell-off);
+  overflow: hidden;
+}
+
+/* Scaled rather than sized, so the change animates without layout work; the
+   bar's own rounded clip shapes its ends. */
+.usage-bar i {
+  display: block;
+  height: 100%;
+  background: var(--lane);
+  transform: scaleX(var(--used, 0));
+  transform-origin: left center;
+  transition: transform 400ms ease;
+}
+
+.usage-bar[data-level='high'] i {
+  background: var(--warn);
+}
+
+.usage-bar[data-level='full'] i {
+  background: var(--alert);
+}
+
+.usage-text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .bus-foot {
   display: flex;
   align-items: center;
@@ -408,13 +713,32 @@ h1 {
   color: var(--ink-3);
 }
 
+.bus-foot .bus-note {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .bus-foot .button-quiet {
+  flex-shrink: 0;
   font-size: 12px;
   padding: 2px 8px;
   margin-right: -8px;
 }
 
-.bus-setup {
+/* Adapters that can become a line: a dashed slot beside or under the cards. */
+.bus-add {
+  border-style: dashed;
+  border-color: var(--rule-strong);
+  background: transparent;
+}
+
+.bus-add .line-icon {
+  --lane: var(--ink-2);
+}
+
+.candidates {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -423,34 +747,84 @@ h1 {
 .candidate {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
+  min-width: 0;
 }
 
-.candidate span {
+.candidate-name {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
   min-width: 0;
+  line-height: 1.3;
+}
+
+.candidate-name strong,
+.candidate-name span {
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.candidate-name strong {
+  font-weight: 600;
+}
+
+.candidate-name span {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+/* Under an even number of cards it is a slim strip across both columns. */
+.bus-add[data-wide='true'] {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 24px;
+  padding: 7px 14px;
+}
+
+.bus-add[data-wide='true'] .candidates {
+  flex: 1;
+  flex-direction: row;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px 24px;
+}
+
+.bus-add[data-wide='true'] .candidate {
+  flex: 0 1 auto;
+}
+
+.bus-add[data-wide='true'] > .bus-note {
+  flex: 1 1 260px;
 }
 
 /* ------------------------------------------------------------ combining */
 
-/* Rows under the two line cards, such as combining both lines. Their two
-   cells are a short meter of which lines the feature is using right now. */
+/* The row under the line cards. Its cells are a short meter of which lines
+   combining is using right now. */
 .feature {
+  --count: 2;
   display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 14px 18px;
+  flex-direction: column;
+  gap: 9px;
+  padding: 13px 18px;
   border-radius: 12px;
   background: var(--panel);
   border: 1px solid var(--rule);
 }
 
+.feature-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
 .feature-cells {
   display: grid;
-  grid-template-columns: repeat(2, 6px);
+  grid-template-columns: repeat(var(--count), 6px);
   gap: 2px;
   height: 20px;
   flex-shrink: 0;
@@ -476,6 +850,111 @@ h1 {
 .feature-text {
   font-size: 12px;
   color: var(--ink-2);
+}
+
+.mode-keys {
+  flex-shrink: 0;
+}
+
+.mode-keys .key {
+  padding: 4px 12px;
+}
+
+/* Each line's share of new connections on one line: its name, twenty cells
+   (one per 5%) and the number. They line up with the text above. */
+.shares {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px 24px;
+  margin-left: calc(var(--count) * 8px + 12px);
+}
+
+.share {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(56px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.share-name {
+  min-width: 0;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.share-value {
+  min-width: 3ch;
+  text-align: right;
+  font: 12px var(--mono);
+  color: var(--ink);
+}
+
+/* A line combining leaves alone: its name and why, no cells. */
+.share[data-off] {
+  grid-template-columns: minmax(0, max-content) auto;
+  justify-content: start;
+}
+
+.share[data-off] .share-name,
+.share[data-off] .share-value {
+  font-family: inherit;
+  color: var(--ink-3);
+}
+
+.share-track {
+  position: relative;
+}
+
+.meter-share {
+  height: 8px;
+}
+
+/* In Manual the cells are the slider's track; only its handle is drawn. */
+.share-range {
+  position: absolute;
+  inset: -6px 0;
+  width: 100%;
+  height: calc(100% + 12px);
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+  border-radius: 4px;
+}
+
+.share-range::-webkit-slider-runnable-track {
+  height: 100%;
+  background: transparent;
+}
+
+.share-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 6px;
+  height: 20px;
+  border-radius: 3px;
+  background: var(--ink);
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+.share-range::-moz-range-track {
+  background: transparent;
+}
+
+.share-range::-moz-range-thumb {
+  width: 6px;
+  height: 20px;
+  border: 0;
+  border-radius: 3px;
+  background: var(--ink);
+  box-shadow: 0 0 0 2px var(--panel);
+}
+
+.share-range:hover::-webkit-slider-thumb {
+  background: #fff;
 }
 
 /* An on/off switch: the knob slides, the track lights when on. */
@@ -522,8 +1001,13 @@ h1 {
   opacity: 0.6;
 }
 
-.switch:disabled {
+.switch:disabled,
+.switch[aria-disabled='true'] {
   cursor: default;
+}
+
+.switch:disabled:not([aria-busy='true']) {
+  opacity: 0.45;
 }
 
 /* ------------------------------------------------------------ meters */
@@ -552,14 +1036,33 @@ h1 {
   transition: background-color 700ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.cell[data-lit='main'] {
-  background: var(--cable);
+/* A lit cell takes the color of the line it counts. */
+.cell[data-lit] {
   transition-duration: 80ms;
 }
 
-.cell[data-lit='second'] {
-  background: var(--second);
-  transition-duration: 80ms;
+.cell[data-lit='0'] {
+  background: var(--line-0);
+}
+
+.cell[data-lit='1'] {
+  background: var(--line-1);
+}
+
+.cell[data-lit='2'] {
+  background: var(--line-2);
+}
+
+.cell[data-lit='3'] {
+  background: var(--line-3);
+}
+
+.cell[data-lit='4'] {
+  background: var(--line-4);
+}
+
+.cell[data-lit='5'] {
+  background: var(--line-5);
 }
 
 /* ------------------------------------------------------------ notices */
@@ -676,14 +1179,18 @@ h1 {
   min-height: 0;
   overflow-y: auto;
   padding: 0 var(--gutter) 12px;
+  /* A row reached with the keyboard stops below the sticky legends, not under them. */
+  scroll-padding-top: 40px;
   scrollbar-color: var(--rule-strong) transparent;
 }
 
-.channels::-webkit-scrollbar {
+.channels::-webkit-scrollbar,
+.lines::-webkit-scrollbar {
   width: 10px;
 }
 
-.channels::-webkit-scrollbar-thumb {
+.channels::-webkit-scrollbar-thumb,
+.lines::-webkit-scrollbar-thumb {
   background: var(--rule-strong);
   border: 3px solid var(--bg);
   border-radius: 6px;
@@ -697,9 +1204,17 @@ h1 {
   column-gap: 14px;
 }
 
-/* While combining, a third key (Cable) needs room; the traffic meter gives a little. */
+/* The route column widens with the number of keys; the traffic meter gives a little. */
+.channels[data-keys='1'] {
+  --row-columns: 24px minmax(0, 1fr) 110px 76px 128px;
+}
+
 .channels[data-keys='3'] {
   --row-columns: 24px minmax(0, 1fr) 96px 76px 280px;
+}
+
+.channels[data-keys='4'] {
+  --row-columns: 24px minmax(0, 1fr) 84px 76px 348px;
 }
 
 .legends {
@@ -786,12 +1301,17 @@ h1 {
   display: none;
 }
 
+.route {
+  min-width: 0;
+}
+
 /* The route: one segmented control, the chosen line on a raised plate with
    a dot in its color. */
 .keys {
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: 1fr;
+  /* Equal keys however long a line's name is; the name is cut short instead. */
+  grid-auto-columns: minmax(0, 1fr);
   gap: 2px;
   padding: 3px;
   border-radius: 8px;
@@ -800,7 +1320,6 @@ h1 {
 }
 
 .key {
-  --lane: var(--cable);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -822,19 +1341,10 @@ h1 {
     color 120ms ease;
 }
 
-.key[data-lane='second'] {
-  --lane: var(--second);
-}
-
-/* While combining, the cable key stands for both lines: its mark is a short
-   pill, half each color, wide enough that the halves don't blend. */
-.key[data-lane='both'] {
-  --lane: linear-gradient(90deg, var(--cable) 50%, var(--second) 50%);
-}
-
-.key[data-lane='both']::before {
-  width: 12px;
-  border-radius: 3px;
+.key-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .key::before {
@@ -847,7 +1357,14 @@ h1 {
   display: none;
 }
 
-.key:hover:not(:disabled) {
+/* Shared: its mark is a short pill with a stripe per sharing line. */
+[data-look='shared'].key::before,
+[data-look='shared'].pick::before {
+  width: var(--pill, 12px);
+  border-radius: 3px;
+}
+
+.key:hover:not(:disabled):not([aria-disabled='true']) {
   color: var(--ink);
 }
 
@@ -873,12 +1390,90 @@ h1 {
   color: var(--ink-3);
 }
 
+.key[aria-disabled='true']:not([aria-pressed='true']):not([aria-busy='true']) {
+  cursor: default;
+  color: var(--ink-3);
+}
+
+/* Choices that aren't lines, such as Auto and Manual: no colored dot. */
+.keys-plain .key[aria-pressed]::before {
+  display: none;
+}
+
 .key-placeholder {
   grid-column: 1 / -1;
   color: var(--ink-3);
   text-align: center;
   font-size: 12px;
   padding: 4px 0;
+}
+
+/* More lines than keys fit: a list on the same plate, with the chosen line's mark. */
+.pick {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: 8px;
+  background: var(--panel-raised);
+  border: 1px solid var(--rule);
+  transition: border-color 120ms ease;
+}
+
+.pick:hover {
+  border-color: var(--rule-strong);
+}
+
+.pick::before {
+  content: '';
+  position: absolute;
+  left: 12px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--lane);
+  pointer-events: none;
+}
+
+.pick::after {
+  --icon: var(--icon-chevron);
+  position: absolute;
+  right: 10px;
+  width: 14px;
+  height: 14px;
+  color: var(--ink-2);
+  pointer-events: none;
+}
+
+.pick select {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 7px 30px 7px 26px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  appearance: none;
+  text-overflow: ellipsis;
+}
+
+[data-look='shared'].pick select {
+  padding-left: calc(var(--pill, 12px) + 20px);
+}
+
+.pick select[aria-disabled='true'] {
+  cursor: default;
+  color: var(--ink-2);
+}
+
+.pick option {
+  font-weight: 400;
+  color: var(--ink);
+  background: var(--panel-raised);
 }
 
 .strip-note {
@@ -910,8 +1505,9 @@ h1 {
   color: var(--alert);
 }
 
+/* Its line is away: the note is in the color of the line standing in. */
 .strip-note[data-kind='waiting'] {
-  color: var(--second);
+  color: var(--lane);
 }
 
 .empty {
@@ -966,6 +1562,274 @@ body[data-stale] .channels {
   pointer-events: none;
 }
 
+/* ------------------------------------------------------------ side panel */
+
+/* Settings slide in from the right over a dimmed window, and leave the app
+   list where it was. */
+.drawer {
+  position: fixed;
+  inset: 0 0 0 auto;
+  width: min(380px, 100vw);
+  max-width: 100vw;
+  height: 100%;
+  max-height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--rule-strong);
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: -12px 0 32px rgb(0 0 0 / 0.45);
+}
+
+.drawer[open] {
+  transition:
+    transform 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 220ms ease;
+}
+
+@starting-style {
+  .drawer[open] {
+    transform: translateX(28px);
+    opacity: 0;
+  }
+}
+
+.drawer::backdrop {
+  background: rgb(5 6 8 / 0.6);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 14px 14px 18px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.panel-title {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.panel-title h2 {
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel-title p {
+  font-size: 12px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 18px 18px;
+  scrollbar-color: var(--rule-strong) transparent;
+}
+
+.panel-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.panel-section:last-child {
+  border-bottom: 0;
+}
+
+.panel-error {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--alert) 30%, var(--rule));
+  background: color-mix(in srgb, var(--alert) 7%, var(--panel));
+  color: var(--ink);
+  font-size: 12px;
+}
+
+/* An on/off setting: name and what it does on the left, the switch on the right. */
+.setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.setting-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.setting-name,
+.field-label {
+  font-weight: 600;
+}
+
+label.setting-name {
+  cursor: pointer;
+}
+
+.setting-help,
+.field-help {
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  font: inherit;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--rule-strong);
+  border-radius: 8px;
+  padding: 6px 10px;
+  transition: border-color 120ms ease;
+}
+
+.input:hover {
+  border-color: var(--ink-3);
+}
+
+.input:focus-visible {
+  outline-offset: 1px;
+}
+
+.input[aria-invalid='true'] {
+  border-color: var(--alert);
+}
+
+/* What is wrong with a field, right under it. */
+.field-error {
+  font-size: 12px;
+  color: var(--alert);
+}
+
+.input-mono {
+  font: 12px var(--mono);
+  padding: 8px 10px;
+}
+
+/* A number with its unit printed inside the field. */
+.input-unit {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 0 0 92px;
+}
+
+.input-unit .input {
+  padding-right: 32px;
+  font-family: var(--mono);
+  font-size: 12px;
+  -moz-appearance: textfield;
+}
+
+.input-unit .input::-webkit-inner-spin-button,
+.input-unit .input::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.input-unit span {
+  position: absolute;
+  right: 10px;
+  font-size: 12px;
+  color: var(--ink-3);
+  pointer-events: none;
+}
+
+.cap-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cap-form .keys {
+  flex-shrink: 0;
+}
+
+.confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Advanced settings stay folded until asked for. */
+.advanced summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  font-weight: 600;
+  color: var(--ink-2);
+  cursor: pointer;
+  list-style: none;
+  border-radius: 4px;
+}
+
+.advanced summary::-webkit-details-marker {
+  display: none;
+}
+
+.advanced summary:hover {
+  color: var(--ink);
+}
+
+.advanced summary::before {
+  --icon: var(--icon-chevron);
+  width: 14px;
+  height: 14px;
+  transform: rotate(-90deg);
+  transition: transform 150ms ease;
+}
+
+.advanced[open] summary::before {
+  transform: none;
+}
+
+.details-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+}
+
 /* ------------------------------------------------------------ closed */
 
 .closed {
@@ -992,6 +1856,10 @@ body[data-stale] .channels {
     --row-columns: 24px minmax(0, 1fr) 70px 168px;
   }
 
+  .channels[data-keys='1'] {
+    --row-columns: 24px minmax(0, 1fr) 70px 112px;
+  }
+
   .channels[data-keys='3'] {
     --row-columns: 24px minmax(0, 1fr) 70px 240px;
   }
@@ -999,6 +1867,7 @@ body[data-stale] .channels {
   .lines {
     grid-template-columns: 1fr;
   }
+
 
   .col-traffic,
   .meter-row {
@@ -1013,17 +1882,28 @@ body[data-stale] .channels {
     grid-column: 4 / 5;
   }
 
-  .feature {
+  /* The title stays beside the controls; only the explanation wraps under them. */
+  .feature-row {
     flex-wrap: wrap;
+    row-gap: 6px;
   }
 
   .feature-body {
+    display: contents;
+  }
+
+  .feature-name {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .feature-text {
     order: 1;
     flex-basis: 100%;
   }
 
-  .switch {
-    margin-left: auto;
+  .shares {
+    margin-left: 0;
   }
 }
 
@@ -1033,7 +1913,10 @@ body[data-stale] .channels {
   .switch::after,
   .key,
   .strip,
-  .bus {
+  .bus,
+  .drawer[open],
+  .usage-bar i,
+  .advanced summary::before {
     transition: none;
   }
 }
