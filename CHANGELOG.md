@@ -24,6 +24,9 @@ change behavior.
   for the apps you choose, and give it a daily or monthly cap (from the day
   your plan renews). Once the cap is reached, its apps use your other lines
   until it starts over.
+- **Add an app** chooses a line for an app from the Start menu before it has
+  ever run, and an app's line now stays when it updates itself into a new
+  version folder (Discord, Slack, JetBrains IDEs, Store apps).
 - **Start with Windows**, in the window's new **Settings**, starts Net Switch
   when you sign in, and stops the administrator prompt each time it starts.
   **Check for updates** moved there too, along with the test sites for the

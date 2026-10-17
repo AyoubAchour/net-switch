@@ -1409,7 +1409,7 @@ function buildState() {
     // whether checking is on, for the switch in the window.
     update: updateOffer(),
     updateChecks: !testMode && settings.values.checkForUpdates,
-    features: { reconnect: true, combine: true, lines: true },
+    features: { reconnect: true, combine: true, lines: true, installedApps: true },
     // From the engine's rules rather than the saved choice, so the window
     // shows what routing really does even if saving the choice failed.
     combine: { on: engine.combine, active: combineActive(), mode: settings.values.combineMode },

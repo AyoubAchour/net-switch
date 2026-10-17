@@ -1725,7 +1725,8 @@ function buildAppsPanel() {
                     render();
                   },
                 },
-                appIcon({ name: app.name, key: app.key, hasIcon: Boolean(app.key && app.hasIcon) }),
+                // The icon endpoint takes the program path as its key too.
+                appIcon({ name: app.name, key: app.key ?? app.path, hasIcon: Boolean(app.hasIcon) }),
                 h('span', { class: 'app-choice-label', text: app.name }),
                 current ? h('span', { class: 'app-choice-line', text: `On the ${current.label}` }) : null,
               ),

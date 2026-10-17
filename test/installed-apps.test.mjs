@@ -33,10 +33,10 @@ test('Start menu apps are sorted, deduplicated by identity, and limited to exist
       assert.match(script, /CreateShortcut/);
       return shortcuts;
     },
-    readDirectory: async (folder) => {
-      assert.equal(folder, DISCORD);
-      return [dir('app-1.0.9'), dir('app-1.0.10'), dir('app-1.0.11'), dir('app-9.0.0', false), dir('app-2.0-beta')];
-    },
+    readDirectory: async (folder) =>
+      folder === DISCORD
+        ? [dir('app-1.0.9'), dir('app-1.0.10'), dir('app-1.0.11'), dir('app-9.0.0', false), dir('app-2.0-beta')]
+        : [],
     fileStat: async (file) => {
       if (file.includes('Missing') || file.includes('app-1.0.11')) throw missing();
       return { isFile: () => !file.includes('NotAFile') };
@@ -47,6 +47,18 @@ test('Start menu apps are sorted, deduplicated by identity, and limited to exist
     { name: 'Discord', path: `${DISCORD}\\app-1.0.10\\Discord.exe` },
     { name: 'Zebra', path: String.raw`C:\Zebra\zebra.exe` },
   ]);
+});
+
+test('a Squirrel launcher stub resolves to the program in its newest version folder', async () => {
+  // Discord's Start menu shortcut can name Discord\Discord.exe, a small
+  // launcher; the program that connects is Discord\app-<version>\Discord.exe.
+  const apps = new InstalledApps({
+    readDirectory: async (folder) => (folder === DISCORD ? [dir('app-1.0.9261'), dir('app-1.0.9262'), dir('packages')] : []),
+    fileStat: async () => ({ isFile: () => true }),
+  });
+  assert.equal(await apps.target({ path: `${DISCORD}\\Discord.exe` }), `${DISCORD}\\app-1.0.9262\\Discord.exe`);
+  // A program without version folders beside it stays as it is.
+  assert.equal(await apps.target({ path: String.raw`C:\Zebra\zebra.exe` }), String.raw`C:\Zebra\zebra.exe`);
 });
 
 test('Squirrel accepts unquoted targets and skips missing folders and unsafe target paths', async () => {
