@@ -11,6 +11,7 @@ situation, for when you want to know why an app ended up on a line.
 - [The tray icon](#the-tray-icon)
 - [Windows settings Net Switch can change](#windows-settings-net-switch-can-change)
 - [Where Net Switch keeps its files](#where-net-switch-keeps-its-files)
+- [Updates](#updates)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 
@@ -201,6 +202,25 @@ only once the Windows changes are undone, or if you tell it to drop the undo
 record; if undoing fails, the record stays so a reinstall can try again. Your
 settings and logs in `%LOCALAPPDATA%\Net Switch` always stay, so a reinstall
 picks up where you left off. Delete that folder if you don't want them.
+
+## Updates
+
+A minute after it starts, and then twice a day, Net Switch asks GitHub whether
+a newer version is out. If one is, the window shows a notice with three
+buttons:
+
+- **Download** downloads the new installer in your browser. Run it: it closes
+  Net Switch, updates it and keeps your settings. Open Net Switch again
+  afterwards.
+- **What's new** opens the release notes.
+- **Not now** hides that version. You'll hear about the next one.
+
+The tray icon's right-click menu offers the same download.
+
+Net Switch never downloads or installs anything by itself: its server runs as
+administrator, and installing should always be your decision. To stop the
+checks, press **Check for updates** at the bottom of the window; it shows
+whether they're on or off.
 
 ## Limitations
 

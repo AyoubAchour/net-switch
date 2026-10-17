@@ -73,6 +73,20 @@ namespace NetSwitch
             { "error", "Net Switch: routing stopped" },
         };
 
+        const string InstallerPrefix = "https://github.com/AyoubAchour/net-switch/releases/download/";
+
+        // A newer release the server offers, as { version, installer link }, or
+        // null. Only a link to this project's own releases is ever opened.
+        public static string[] UpdateOffer(IDictionary<string, object> state)
+        {
+            IDictionary<string, object> update = Child(state, "update");
+            string version = Text(update, "version");
+            string installer = Text(update, "installer");
+            if (string.IsNullOrEmpty(version) || string.IsNullOrEmpty(installer)) return null;
+            if (!installer.StartsWith(InstallerPrefix, StringComparison.Ordinal)) return null;
+            return new string[] { version, installer };
+        }
+
         public static TrayView FromState(IDictionary<string, object> state)
         {
             IDictionary<string, object> routing = Child(state, "routing");
@@ -1451,6 +1465,7 @@ namespace NetSwitch
         const int MenuOpen = 1;
         const int MenuQuit = 2;
         const int MenuRemove = 3;
+        const int MenuUpdate = 4;
 
         sealed class Server
         {
@@ -1496,6 +1511,8 @@ namespace NetSwitch
         string actionError;
         bool actionSending;
         int actionVersion;
+        // A newer release from the last reading: { version, installer link }, or null.
+        string[] update;
 
         Tray(string root, string dataDir, string logFile, bool canLaunch)
         {
@@ -1632,6 +1649,7 @@ namespace NetSwitch
                 if (state != null)
                 {
                     reachable = true;
+                    update = TrayModel.UpdateOffer(state);
                     Render(TrayModel.FromState(state));
                     flyout.SetView(FlyoutModel.FromState(state));
                     // An older in-flight poll must not clear feedback for a new action.
@@ -2010,6 +2028,8 @@ namespace NetSwitch
             {
                 Native.AppendMenu(menu, quitting ? Native.MF_GRAYED : Native.MF_STRING, (IntPtr)MenuOpen, "Open Net Switch");
                 Native.SetMenuDefaultItem(menu, MenuOpen, 0);
+                if (update != null && reachable && !quitting)
+                    Native.AppendMenu(menu, Native.MF_STRING, (IntPtr)MenuUpdate, "Download Net Switch " + update[0]);
                 Native.AppendMenu(menu, Native.MF_SEPARATOR, IntPtr.Zero, null);
                 if (quitting) Native.AppendMenu(menu, Native.MF_GRAYED, (IntPtr)MenuQuit, "Quitting\u2026");
                 else if (Answering()) Native.AppendMenu(menu, Native.MF_STRING, (IntPtr)MenuQuit, "Quit Net Switch");
@@ -2042,6 +2062,28 @@ namespace NetSwitch
             if (id == MenuOpen) Open();
             else if (id == MenuQuit) Quit();
             else if (id == MenuRemove) Exit();
+            else if (id == MenuUpdate) DownloadUpdate();
+        }
+
+        // The installer downloads in the person's own browser, as from the
+        // releases page; running it updates this copy.
+        void DownloadUpdate()
+        {
+            string[] offer = update;
+            if (offer == null) return;
+            try
+            {
+                ProcessStartInfo start = new ProcessStartInfo(offer[1]);
+                start.UseShellExecute = true;
+                Process started = Process.Start(start);
+                if (started != null) started.Dispose();
+                Log("opened the download of Net Switch " + offer[0]);
+            }
+            catch (Exception error)
+            {
+                Log("could not open the update download: " + error.Message);
+                icon.Balloon("The download didn’t open", "Get Net Switch " + offer[0] + " from its GitHub releases page.");
+            }
         }
 
         // Net Switch answers once routing has stopped, then removes its server

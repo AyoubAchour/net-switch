@@ -93,6 +93,18 @@ the cable is plugged in. It saves how things were before changing them, and
 The [user guide](docs/user-guide.md) explains failover, combining and the tray
 in more detail.
 
+## Updating
+
+When a newer version is out, Net Switch says so in its window (and in the tray
+icon's right-click menu). Press **Download**, then run the installer: it closes
+Net Switch, updates it in place and keeps your settings. You can also just
+download the latest installer from the
+[releases page](https://github.com/AyoubAchour/net-switch/releases/latest) and
+run it over your current copy.
+
+Net Switch asks GitHub about new versions twice a day; turn that off with
+**Check for updates** at the bottom of the window.
+
 ## Uninstalling
 
 Use **Settings → Apps → Installed apps → Net Switch → Uninstall**. It asks

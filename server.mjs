@@ -31,6 +31,7 @@ import {
 } from './lib/network.mjs';
 import { runFile, runPowerShell, SYSTEM32 } from './lib/ps.mjs';
 import { Settings } from './lib/settings.mjs';
+import { UpdateChecker } from './lib/updates.mjs';
 import { openUndoRecord, undoWindowsChanges } from './lib/windows-undo.mjs';
 
 const mode = process.argv.includes('--dev-proxy') ? 'proxy' : 'tun';
@@ -38,6 +39,8 @@ const mode = process.argv.includes('--dev-proxy') ? 'proxy' : 'tun';
 const testMode = mode === 'proxy';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
+// The installer ships package.json, so this is the version the person runs.
+const APP_VERSION = JSON.parse(await readFile(path.join(ROOT, 'package.json'), 'utf8')).version;
 
 // The value after a command-line flag, or null.
 function argument(flag) {
@@ -201,6 +204,20 @@ const windowsUndo = openUndoRecord(MACHINE_DIR, {
 await windowsUndo.load();
 if (windowsUndo.recovery) log(`the Windows undo record was damaged: ${windowsUndo.recovery.reason}`);
 await moveUndoOutOfSettings();
+
+// Looks for a newer release, unless the person turned that off. Test mode
+// never checks: it runs beside a real copy, which already does.
+const updates = new UpdateChecker({
+  currentVersion: APP_VERSION,
+  enabled: () => !testMode && settings.values.checkForUpdates,
+  log: (line) => log(line),
+});
+
+// The newer release to offer, unless the person said "not now" to that one.
+function updateOffer() {
+  const offer = updates.offer;
+  return offer && offer.version !== settings.values.skippedUpdate ? offer : null;
+}
 
 const engine = new Engine({
   singBoxPath: path.join(ROOT, 'engine', 'sing-box.exe'),
@@ -959,6 +976,11 @@ function buildState() {
   return {
     mode,
     elevated,
+    version: APP_VERSION,
+    // A newer release to offer ({ version, page, installer }) or null, and
+    // whether checking is on, for the switch in the window.
+    update: updateOffer(),
+    updateChecks: !testMode && settings.values.checkForUpdates,
     features: { reconnect: true, combine: true, cableOnly: true },
     // From the engine's rules rather than the saved choice, so the window
     // shows what routing really does even if saving the choice failed.
@@ -1079,6 +1101,19 @@ const actions = {
     return buildState();
   },
   'POST /api/reconnect': async ({ key }) => ({ ...(await reconnectApp(key)), state: buildState() }),
+  // "Not now" for one release: it isn't offered again, a later one is.
+  'POST /api/update/dismiss': async ({ version }) => {
+    if (typeof version !== 'string' || !version) throw clientError('Choose which update to skip, then try again.');
+    await settings.update({ skippedUpdate: version });
+    return buildState();
+  },
+  'POST /api/update/checks': async ({ on }) => {
+    if (typeof on !== 'boolean') throw clientError('Choose whether to check for updates, then try again.');
+    await settings.update({ checkForUpdates: on });
+    if (on) await updates.check();
+    else updates.offer = null;
+    return buildState();
+  },
   'POST /api/combine': async ({ on }) => {
     await setCombine(on);
     return buildState();
@@ -1205,6 +1240,7 @@ await log(`started on port ${port} (mode ${mode}, elevated ${elevated})`);
 console.log(`Net Switch is running at http://127.0.0.1:${port}/#token=${token}`);
 
 monitor.start();
+updates.start();
 every(nextScanDelay, refreshAdapters);
 every(1000, pollConnections);
 every(1000, superviseRouting);

@@ -19,6 +19,7 @@ $results = foreach ($case in $json.DeserializeObject($env:NETSWITCH_CASES)) {
   switch ($case['kind']) {
     'flyout' { [NetSwitch.FlyoutModel]::FromState($case['state']) }
     'flyoutRate' { @{ lit = [NetSwitch.FlyoutModel]::Lit([double]$case['value']) } }
+    'updateOffer' { @{ offer = [NetSwitch.TrayModel]::UpdateOffer($case['state']) } }
     'rate' { @{ text = [NetSwitch.TrayModel]::Rate([double]$case['value']); lit = [NetSwitch.TrayModel]::Lit([double]$case['value']) } }
     default {
       $view = switch ($case['kind']) {
@@ -81,6 +82,12 @@ const CASES = {
   flyoutLong: flyout({ lanes: { main: cable, second: { ...wifi, kind: 'ethernet', label: 'Second ethernet adapter' } } }),
   flyoutOld: flyout({ routing: { status: 'on' }, lanes: { main: lane('Cable', true, null), second: lane('Wi-Fi stick', true, null) } }),
   flyoutUnavailable: { kind: 'flyout', state: null },
+  updateOffered: {
+    kind: 'updateOffer',
+    state: { update: { version: '0.3.0', installer: 'https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/NetSwitch-Setup-0.3.0-x64.exe' } },
+  },
+  updateElsewhere: { kind: 'updateOffer', state: { update: { version: '0.3.0', installer: 'https://example.com/setup.exe' } } },
+  updateNone: { kind: 'updateOffer', state: { update: null } },
   flyoutRateZero: { kind: 'flyoutRate', value: 0 },
   flyoutRate1k: { kind: 'flyoutRate', value: 1024 },
   flyoutRate1m: { kind: 'flyoutRate', value: 1024 * 1024 },
@@ -241,6 +248,15 @@ test('while combining, the flyout offers Cable between the two and shows which a
   assert.equal(results.flyoutKeptNoCombine.CableOption, null);
   assert.equal(results.flyoutKeptNoCombine.Apps[0].Choice, 'cable');
   assert.equal(results.flyoutCombine.CableOption, null);
+});
+
+test('the tray offers an update only with a link to this project’s releases', () => {
+  assert.deepEqual(results.updateOffered.offer, [
+    '0.3.0',
+    'https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/NetSwitch-Setup-0.3.0-x64.exe',
+  ]);
+  assert.equal(results.updateElsewhere.offer, null);
+  assert.equal(results.updateNone.offer, null);
 });
 
 test('flyout health describes healthy lines, stopped routing, and actual fallback', () => {
