@@ -282,9 +282,11 @@ test('a connection that already ended counts as closed, one the engine refuses c
 
 test('closing stops when the time budget is used up, and the rest count as not closed', async () => {
   const stuck = Array.from({ length: 5 }, (_, index) => via(`s${index}`, 'cable', 'second-lane'));
-  const { engine, stop } = await fakeEngineApi(stuck, { delayMs: 80 });
+  // Wide margins: with an 80 ms close and a 100 ms budget, a busy machine could
+  // spend the whole budget listing the connections, and then close none.
+  const { engine, stop } = await fakeEngineApi(stuck, { delayMs: 300 });
   try {
-    const result = await engine.releaseFallbackConnections({ budgetMs: 100 });
+    const result = await engine.releaseFallbackConnections({ budgetMs: 450 });
     assert.equal(result.found, 5);
     assert.equal(result.closed + result.failed, 5);
     assert.ok(result.closed >= 1 && result.failed >= 1, JSON.stringify(result));
