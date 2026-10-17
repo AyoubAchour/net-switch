@@ -1,6 +1,6 @@
 {
   "name": "net-switch",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Choose which internet connection each Windows app uses.",
   "license": "MIT",
@@ -19,6 +19,8 @@
     "test": "node --test test/*.test.mjs",
     "build:helper": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-helper.ps1",
     "build:tray": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-tray.ps1",
+    "fetch:engine": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-engine.ps1",
+    "test:routing": "node scripts/e2e-routing.mjs",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1"
   }
 }

@@ -127,8 +127,8 @@ test('lane health keeps checking Node addresses and route.exe when the helper di
   const update = (defaultRoutes) => monitor.handleLine(JSON.stringify({ ...sample, defaultRoutes }));
   let now = 0;
   let interfaces = { Cable: [{ family: 'IPv4', internal: false, address: '192.168.1.2' }] };
-  const lane = new LaneSwitch({ engine: { status: 'off' }, getAlias: () => 'Cable', now: () => now,
-    usableAddresses: (alias) => usableAddresses(alias, () => interfaces), readDefaultRoutes: () => monitor.readDefaultRoutes(),
+  const lane = new LaneSwitch({ engine: { status: 'off' }, lineId: 'a1', getLines: () => [{ id: 'a1', alias: 'Cable', label: 'Cable' }],
+    now: () => now, usableAddresses: (alias) => usableAddresses(alias, () => interfaces), readDefaultRoutes: () => monitor.readDefaultRoutes(),
   });
   const sampleLane = async () => { lane.sample(); await lane.routeReading; now += 5000; };
   update([route]);

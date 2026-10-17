@@ -2,7 +2,7 @@
 
 Choose which internet connection each Windows app uses.
 
-![The Net Switch window: two line cards with live speeds, the combine switch, and a list of apps with their line](docs/images/window.png)
+![The Net Switch window: a card per line with live speeds, the combine card with each line's share, and a list of apps with their line](docs/images/window.png)
 
 I have two internet connections at home: a cable that is slow but steady, and a
 USB Wi-Fi stick on a second router. Windows kept sending everything through the
@@ -10,27 +10,37 @@ cable. When something big was downloading, everything else crawled while the
 second line sat there doing nothing.
 
 Net Switch lists the apps using your internet, sorted by speed, and lets you
-send each one to the cable or to the second connection. The second connection
-can be a USB Wi-Fi adapter or a phone with USB tethering.
+send each one to the line you choose. A line is any connection Windows has: a
+cable, built-in Wi-Fi, a USB Wi-Fi adapter, or a phone with USB tethering. Use
+two, or as many as you have.
 
 ## What it does
 
 - **Pick a line per app.** Put the game download on one line and keep your
-  browser and calls on the other.
-- **Combine both lines.** New connections from the apps you haven't moved are
-  spread across both lines. Downloads that open several connections at once
-  (Steam, browsers, speed tests, download managers) can use both lines. Apps
-  that should stay on one line, like calls or a picky website, can be kept on
-  the cable.
+  browser and calls on another. You can choose a line for an app before it has
+  even started, and the choice stays when the app updates itself.
+- **Combine your lines.** New connections from the apps you haven't placed are
+  spread across your lines. Downloads that open several connections at once
+  (Steam, browsers, speed tests, download managers) can use all of them. **Auto**
+  gives each line a share that follows its measured speed; **Manual** lets you
+  set the split yourself. Apps that should stay on one line, like calls or a
+  picky website, can be kept there.
 - **Fail over.** If a line drops, or stays connected but stops reaching the
-  internet, its apps move to the other line while that one works, and come back
-  when it returns.
+  internet, its apps move to the next line that works, in the order you set.
+  When it comes back, new connections go back to it, and nothing that is
+  working gets cut off.
+- **Phone data under control.** Mark a line as metered to count what it uses,
+  keep it for the apps you choose only, and give it a daily or monthly cap.
+  Once the cap is reached, its apps use your other lines until the cap resets.
+- **Start with Windows.** Turn it on once and Net Switch starts when you sign
+  in, without asking for administrator permission each time.
 - **Live traffic meters.** Line speeds come from Windows, per-app speeds from
   the routing engine, so you can see a switch worked instead of guessing.
-- **Tray controls.** The tray icon shows both lines at a glance, and a click
-  opens a small panel for the common switches.
+- **Tray controls.** The tray icon shows your lines at a glance, tells you when
+  one goes down or comes back, and a click opens a small panel for the common
+  switches.
 
-<img src="docs/images/tray.png" alt="The tray panel: routing and combining toggles, both lines' speeds, and the busiest apps" width="372">
+<img src="docs/images/tray.png" alt="The tray panel: routing and combining toggles, each line's speed, and the busiest apps" width="372">
 
 ## Download
 
@@ -55,21 +65,23 @@ gh attestation verify NetSwitch-Setup-<version>-arm64.exe -R AyoubAchour/net-swi
 
 ## Before you install
 
-- **It asks for administrator permission each time it starts.** It needs that
-  to route traffic through its own virtual network adapter and to see which app
-  owns each connection. The window and tray icon run as you.
+- **It needs administrator permission.** It routes traffic through its own
+  virtual network adapter and sees which app owns each connection. Windows asks
+  each time Net Switch starts, unless you turn on **Start with Windows** in its
+  settings. The window and tray icon run as you.
 - **One connection still uses one line.** Combining spreads *connections* across
   your lines; it doesn't split a single connection. A big file downloaded over
   one connection gets one line's speed. That would need a bonding server on the
   internet (like Speedify or OpenMPTCProuter), which Net Switch doesn't use.
-- **While combining, websites can see two different addresses.** Most don't
-  care. If one keeps signing you out, set that browser to **Cable** so it stays
-  on one line.
-- **Routing is IPv4 only** while it's on.
-- **Watch your data plan on a phone.** If the cable drops, everything moves to
-  the second connection. And while routing is on with two lines, Net Switch
-  tests each line's internet every 30 seconds (more often after a failed test),
-  which comes to roughly 17 MB a day per healthy line.
+- **While combining, websites can see different addresses.** Most don't care. If
+  one keeps signing you out, put that browser on one line.
+- **IPv6 is routed only while every line has it.** Otherwise Net Switch keeps
+  apps on IPv4, so a line without IPv6 can still stand in for one with it.
+- **Watch your data plan on a phone.** If your other lines drop, their apps
+  move to the phone unless you keep it for chosen apps or give it a cap. While
+  routing is on with two lines or more, Net Switch checks each line's internet
+  with a tiny connection every 15 seconds (about 2 MB a day per line), and a
+  bigger test only when a check fails.
 - **It's young.** It's been used daily on Windows 11 with an Ethernet cable and
   a USB Wi-Fi adapter. Other setups (Windows 10, VPN software, phone
   tethering, non-English Windows) should work but haven't been tested much.
@@ -78,45 +90,49 @@ gh attestation verify NetSwitch-Setup-<version>-arm64.exe -R AyoubAchour/net-swi
 ## First run
 
 1. Open **Net Switch** from the Start menu and accept the administrator prompt.
-2. When your second connection shows up, press **Use as second connection**.
-3. In the app list, press the second connection's button on an app (it's named
-   after the connection, like **Wi-Fi stick** or **Phone**) to move it there.
-   New connections move at once. A download that's already running keeps its
-   line until you pause and resume it.
-4. Turn on **Combine both lines** if you want the apps you haven't moved to use
-   both lines. Each app then offers **Both lines**, **Cable** and the second
-   connection, so you can keep some apps on the cable.
+   The connection Windows uses for the internet becomes your main line.
+2. Your other connections show up as **Add a line**. Add the ones you want.
+3. In the app list, pick a line for an app to send it there. New connections
+   move at once. A download that's already running keeps its line until you
+   pause and resume it.
+4. Turn on **Combine** if you want the apps you haven't placed to use all your
+   lines. Each app then offers **Shared** and every line, so you can keep some
+   apps on one.
+
+Click a line to rename it, make it the main line, mark it as metered, keep it
+for chosen apps, give it a data cap, or remove it.
 
 Closing the window keeps routing on, and the tray icon brings it back. **Quit
 Net Switch** turns routing off, and every app goes back to Windows' normal
 connection.
 
 Net Switch may offer two Windows changes, each with its own button: keeping the
-cable as the default when Net Switch is off, and keeping Wi-Fi connected while
-the cable is plugged in. It saves how things were before changing them, and
+main line as the default when Net Switch is off, and keeping Wi-Fi connected
+while a cable is plugged in. It saves how things were before changing them, and
 **Undo** puts them back.
 
-The [user guide](docs/user-guide.md) explains failover, combining and the tray
-in more detail.
+The [user guide](docs/user-guide.md) explains failover, combining, data caps and
+the tray in more detail.
 
 ## Updating
 
 When a newer version is out, Net Switch says so in its window (and in the tray
 icon's right-click menu). Press **Download**, then run the installer: it closes
-Net Switch, updates it in place and keeps your settings. You can also just
-download the latest installer from the
+Net Switch, updates it in place and keeps your settings, including your lines
+from older versions. You can also just download the latest installer from the
 [releases page](https://github.com/AyoubAchour/net-switch/releases/latest) and
 run it over your current copy.
 
 Net Switch asks GitHub about new versions twice a day; turn that off with
-**Check for updates** at the bottom of the window.
+**Check for updates** in its settings.
 
 ## Uninstalling
 
 Use **Settings → Apps → Installed apps → Net Switch → Uninstall**. It asks
-whether to undo the Windows settings Net Switch changed (yes is the default).
-Your Net Switch settings stay in `%LOCALAPPDATA%\Net Switch`; delete that folder
-if you don't plan to reinstall.
+whether to undo the Windows settings Net Switch changed (yes is the default),
+and it removes the tasks that start Net Switch with Windows. Your Net Switch
+settings stay in `%LOCALAPPDATA%\Net Switch`; delete that folder if you don't
+plan to reinstall.
 
 ## How it works
 
@@ -124,7 +140,7 @@ Net Switch runs [sing-box](https://github.com/SagerNet/sing-box) as a local
 routing engine behind a virtual network adapter. sing-box sees which program
 opened each new connection, and Net Switch tells it which line to send that
 program's connections through. A small Node.js server keeps the rules up to
-date, watches both lines, and serves the window as a page on `127.0.0.1`.
+date, watches every line, and serves the window as a page on `127.0.0.1`.
 
 Your traffic goes straight out through your own connections; nothing is relayed
 through a server of mine, and there's no telemetry. [SECURITY.md](SECURITY.md)

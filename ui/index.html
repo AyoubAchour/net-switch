@@ -21,11 +21,8 @@
       <button id="routing-toggle" class="button button-power" type="button" hidden>Turn off</button>
     </header>
 
-    <section class="master" aria-label="Connections">
-      <div class="lines">
-        <div id="bus-main" class="bus" data-lane="main"></div>
-        <div id="bus-second" class="bus" data-lane="second"></div>
-      </div>
+    <section class="master" aria-label="Lines">
+      <div id="lines" class="lines"></div>
       <div id="combine" class="feature" hidden></div>
     </section>
 
@@ -46,9 +43,13 @@
     <footer class="footer">
       <p id="footer-note">Closing this window keeps routing on.</p>
       <div class="footer-actions">
-        <button id="update-checks" class="button button-quiet" type="button" hidden></button>
+        <button id="add-app" class="button button-quiet" type="button" aria-haspopup="dialog" hidden>Add an app</button>
+        <button id="open-settings" class="button button-quiet" type="button" aria-haspopup="dialog" hidden>Settings</button>
         <button id="quit" class="button button-quiet" type="button">Quit Net Switch</button>
       </div>
     </footer>
+
+    <!-- A line's settings, or Net Switch's own, slide in here on demand. -->
+    <dialog id="panel" class="drawer" aria-labelledby="panel-title"></dialog>
   </body>
 </html>

@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { describeFailure, findAdapter, hasDefaultRouteVia, parseDefaultRoutes, parseRouteTable } from '../lib/network.mjs';
+import { describeFailure, findAdapter, hasDefaultRouteVia, hasGlobalIPv6, parseDefaultRoutes, parseRouteTable } from '../lib/network.mjs';
+
+test('only a global IPv6 address counts as IPv6 on a line', () => {
+  const v6 = (address) => ({ family: 'IPv6', internal: false, address });
+  const interfaces = {
+    Ethernet: [{ family: 'IPv4', internal: false, address: '192.168.1.11' }, v6('fe80::1c2b:3a4d:5e6f:7081')],
+    'Wi-Fi': [v6('fe80::1'), v6('2a01:e0a:1f2:3c40::5')],
+    Phone: [v6('fd00::12'), v6('3fff::1')],
+  };
+  assert.equal(hasGlobalIPv6('Ethernet', interfaces), false, 'link-local only');
+  assert.equal(hasGlobalIPv6('Wi-Fi', interfaces), true);
+  assert.equal(hasGlobalIPv6('Phone', interfaces), true);
+  assert.equal(hasGlobalIPv6('Phone', { Phone: [v6('fd00::12')] }), false, 'private only');
+  assert.equal(hasGlobalIPv6('Gone', interfaces), false);
+});
 
 test('adapter identity takes precedence over an old alias, ignoring GUID case and braces', () => {
   const adapters = [

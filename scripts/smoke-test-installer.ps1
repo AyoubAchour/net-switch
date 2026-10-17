@@ -50,7 +50,7 @@ function Assert-Installed {
   $expected = @(
     'launch.ps1', 'tray.ps1', 'server.mjs', 'package.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
     'lib\engine.mjs', 'lib\tray.cs', 'ui\index.html', 'assets\net-switch.ico',
-    'tools\stop.ps1', 'tools\restore-windows.mjs',
+    'tools\stop.ps1', 'tools\restore-windows.mjs', 'tools\remove-autostart.mjs',
     'runtime\node.exe', 'runtime\LICENSE',
     'engine\sing-box.exe', 'engine\SHA256SUMS.txt', 'engine\LICENSE',
     'helper\netswitch-helper.exe', 'tray\NetSwitchTray.exe',
@@ -220,8 +220,31 @@ function Start-InstalledApp {
   if (-not (Test-Path -LiteralPath $machineData)) { throw 'Installed server did not create its ProgramData directory.' }
   if (@(Get-AppProcesses | Where-Object { $_.ExecutablePath -eq $trayProgram }).Count -ne 1) { throw 'The installed tray program did not keep running after the launcher finished.' }
   if (@(Get-AppProcesses | Where-Object { $_.Name -eq 'powershell.exe' }).Count) { throw 'The installed copy ran tray.ps1 instead of tray\NetSwitchTray.exe.' }
-  Write-Host 'Installed shortcut started its own server and tray program; authenticated ping succeeded'
+  Wait-Routing $script:runningServer
+  Write-Host 'Installed shortcut started its own server and tray program; authenticated ping succeeded; routing is on'
   return $script:runningServer
+}
+
+# A server that answers is not enough: the routing engine must really be on.
+function Wait-Routing($Server) {
+  $script:lastRouting = $null
+  try {
+    Wait-Until {
+      try {
+        $state = Invoke-RestMethod -Uri "http://127.0.0.1:$($Server.port)/api/state" -Headers @{ 'X-Token' = $Server.token } -TimeoutSec 5
+        $script:lastRouting = $state.routing
+        return $state.routing.status -eq 'on'
+      } catch { return $false }
+    } 'Routing did not turn on.' 90
+  } catch {
+    throw "Routing did not turn on in the installed copy: $($script:lastRouting | ConvertTo-Json -Compress)"
+  }
+}
+
+$schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
+function Test-StartupTask([string] $Name) {
+  $query = Start-Process -FilePath $schtasks -ArgumentList '/Query', '/TN', "`"\Net Switch\$Name`"" -WindowStyle Hidden -Wait -PassThru
+  return $query.ExitCode -eq 0
 }
 
 function Stop-InstalledApp($Server) {
@@ -262,9 +285,42 @@ $server = Start-InstalledApp
 Invoke-Setup 'reinstall'
 Assert-Installed
 Wait-Until { @(Get-AppProcesses).Count -eq 0 } 'Reinstall failed to stop the installed processes.'
-# A successful restart also proves the reinstalled payload is usable. Leave it
-# running to exercise InitializeUninstall's stop path as well.
+# A successful restart also proves the reinstalled payload is usable.
 $server = Start-InstalledApp
+
+# Starting with Windows: two scheduled tasks. Then what sign-in runs must start
+# the server through the task, which asks for no permission.
+$state = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$($server.port)/api/settings" -Headers @{ 'X-Token' = $server.token } -ContentType 'application/json' -Body '{"autostart":true}' -TimeoutSec 60
+if ($state.settings.autostart -ne $true) { throw 'Turning on starting with Windows did not stick.' }
+foreach ($name in 'Server', 'Sign-in') {
+  if (-not (Test-StartupTask $name)) { throw "Startup task missing: $name" }
+}
+Stop-InstalledApp $server
+$signIn = Start-Process -FilePath $windowsPowerShell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$(Join-Path $app 'launch.ps1')`"", '-Background' -WindowStyle Hidden -PassThru
+$launchers.Add($signIn)
+$script:runningServer = $null
+Wait-Until {
+  try {
+    $saved = Get-Content -LiteralPath $serverFile -Raw | ConvertFrom-Json
+    $ping = Invoke-RestMethod -Uri "http://127.0.0.1:$($saved.port)/api/ping" -Headers @{ 'X-Token' = $saved.token } -TimeoutSec 2
+    if ($ping.ok -eq $true) { $script:runningServer = $saved; return $true }
+  } catch {}
+  return $false
+} 'The sign-in start did not bring up the server within 120 seconds.' 120
+$server = $script:runningServer
+$serverProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($server.pid)"
+$parent = Get-CimInstance Win32_Process -Filter "ProcessId = $($serverProcess.ParentProcessId)"
+$parentName = if ($parent) { $parent.Name } else { 'gone' }
+# The Task Scheduler service starts it; a permission prompt would make the launcher its parent.
+if ($parentName -ne 'svchost.exe') { throw "The sign-in start did not use the startup task (the server's parent is $parentName)." }
+Wait-Until { $signIn.HasExited } 'The sign-in start did not finish.' 120
+if ($signIn.ExitCode -ne 0) { throw "The sign-in start exited with code $($signIn.ExitCode)." }
+Wait-Until { @(Get-AppProcesses | Where-Object { $_.ExecutablePath -eq $trayProgram }).Count -eq 1 } 'The sign-in start did not start the tray program.'
+Wait-Routing $server
+Write-Host 'Starting with Windows works: the sign-in start ran the server through its task, with routing on'
+
+# Left running, and starting with Windows left on, to exercise
+# InitializeUninstall's stop path and the removal of the startup tasks.
 $userMarker = Join-Path $userData 'installer-smoke-retain.txt'
 [IO.File]::WriteAllText($userMarker, 'User data must survive uninstall.')
 
@@ -278,6 +334,9 @@ foreach ($link in @($shortcut, $desktopShortcut)) {
   if (Test-Path -LiteralPath $link) { throw "Uninstall left a shortcut behind: $link" }
 }
 if (@(Get-AppProcesses).Count) { throw 'Uninstall left an app process behind.' }
+foreach ($name in 'Server', 'Sign-in') {
+  if (Test-StartupTask $name) { throw "Uninstall left a startup task behind: $name" }
+}
 if (-not (Test-Path -LiteralPath $userMarker)) { throw 'Uninstall deleted user data.' }
 $uninstallText = Get-Content -LiteralPath $uninstallLog -Raw
 if ($uninstallText -match 'Net Switch Windows restore result: 0') {

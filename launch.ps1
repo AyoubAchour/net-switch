@@ -1,6 +1,9 @@
 # Opens Net Switch. Starts its background server first if it isn't running
 # (Windows asks for administrator permission), then the tray icon and the window.
 # This script itself runs as the normal user; only the server is elevated.
+# -Background: at sign-in, when Net Switch starts with Windows. The server and
+# the tray icon start, and no window opens.
+param([switch] $Background)
 
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -102,26 +105,48 @@ if (-not $server) {
     Show-Message "Net Switch needs Node.js 22 or newer, and this PC has $(if ($version) { $version } else { 'an unknown version' }) at $node."
     exit 1
   }
+  # When Net Switch starts with Windows, an installed copy has a scheduled task
+  # that starts the server as administrator without asking (lib/autostart.mjs).
+  # schtasks answers with its exit code, which reads the same in any language.
+  # It runs through Start-Process: with errors set to stop, Windows PowerShell
+  # throws on the first line a program writes to its error output.
+  $startedByTask = $false
+  if ($installed) {
+    $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
+    $run = Start-Process -FilePath $schtasks -ArgumentList '/Run', '/TN', '"\Net Switch\Server"' -WindowStyle Hidden -Wait -PassThru
+    $startedByTask = $run.ExitCode -eq 0
+    if (-not $startedByTask -and $Background) {
+      # Starting with Windows was turned off by hand, or the task is damaged:
+      # never ask for permission at sign-in.
+      Write-LaunchLog "the startup task couldn't start the server (schtasks exit code $($run.ExitCode))"
+      exit 1
+    }
+  } elseif ($Background) {
+    exit 0
+  }
   # Paths are quoted by hand: Start-Process joins the list with plain spaces.
   $arguments = @(
     "`"$(Join-Path $root 'server.mjs')`"",
     '--user-data', "`"$userDir`"",
     '--machine-data', "`"$machineDir`""
   )
-  try {
-    Start-Process -FilePath $node -ArgumentList $arguments -WorkingDirectory $root -Verb RunAs -WindowStyle Hidden
-  } catch {
-    # 1223: the administrator prompt was declined. Nothing to open, nothing to report.
-    if ((Get-NativeError $_.Exception) -eq 1223) { exit 0 }
-    Write-LaunchLog "the server could not be started: $($_.Exception.Message)"
-    Show-Message "Net Switch couldn't start its background service: $($_.Exception.Message)"
-    exit 1
+  if (-not $startedByTask) {
+    try {
+      Start-Process -FilePath $node -ArgumentList $arguments -WorkingDirectory $root -Verb RunAs -WindowStyle Hidden
+    } catch {
+      # 1223: the administrator prompt was declined. Nothing to open, nothing to report.
+      if ((Get-NativeError $_.Exception) -eq 1223) { exit 0 }
+      Write-LaunchLog "the server could not be started: $($_.Exception.Message)"
+      Show-Message "Net Switch couldn't start its background service: $($_.Exception.Message)"
+      exit 1
+    }
   }
-  $deadline = (Get-Date).AddSeconds(30)
+  # Longer at sign-in, while Windows is still busy starting everything else.
+  $deadline = (Get-Date).AddSeconds($(if ($Background) { 120 } else { 30 }))
   while (-not ($server = Get-RunningServer)) {
     if ((Get-Date) -gt $deadline) {
-      Write-LaunchLog 'the server did not answer within 30 seconds'
-      Show-Message "Net Switch didn't start. The details are in server.log in $userDir"
+      Write-LaunchLog 'the server did not answer in time'
+      if (-not $Background) { Show-Message "Net Switch didn't start. The details are in server.log in $userDir" }
       exit 1
     }
     Start-Sleep -Milliseconds 300
@@ -168,6 +193,8 @@ try {
   # Net Switch works without its tray icon: say why in the log, and open the window anyway.
   Write-LaunchLog "the tray icon could not be started: $($_.Exception.Message)"
 }
+
+if ($Background) { exit 0 }
 
 $url = "http://127.0.0.1:$($server.port)/#token=$($server.token)"
 $browser = Find-Browser

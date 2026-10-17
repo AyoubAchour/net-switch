@@ -4,7 +4,8 @@
 // in Windows PowerShell 5.1. Both compilers know only C# 5, so the code stays
 // at version 5.
 // Once a second it reads the same /api/state the window reads: the icon shows
-// both lines' load, the tooltip their speeds, and its menu opens or quits Net Switch.
+// the lines' load, the tooltip their speeds, the flyout the lines and the
+// busiest apps, and a notification says when a line goes down or comes back.
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -28,13 +29,18 @@ namespace NetSwitch
 {
     // ------------------------------------------------------------ what the tray shows
 
-    public enum LineState { NotSetUp, NotConnected, NoSpeed, Measured }
-
-    // One line, the cable or the second connection, as the tray shows it.
+    // One line, as the icon and its tooltip show it.
     public sealed class LineView
     {
         public string Label;
-        public LineState State;
+        // Its place in the palette: the main line 0, then by priority.
+        public int Color;
+        // Connected, with no problem: its row of the icon is lit.
+        public bool Working;
+        // The window's health word for a line with a problem ("No internet"), else null.
+        public string Problem;
+        // Windows gave a speed reading.
+        public bool Measured;
         public double Down;
         public double Up;
     }
@@ -47,8 +53,8 @@ namespace NetSwitch
         public string Hint;
         // Routing is on, so the icon keeps the lines' colors.
         public bool Routing;
-        public LineView Cable;
-        public LineView Second;
+        // In priority order: the first is the main line.
+        public List<LineView> Lines = new List<LineView>();
     }
 
     // How one row of the icon looks.
@@ -64,14 +70,21 @@ namespace NetSwitch
         public const int Cells = 5;
         // NOTIFYICONDATA.szTip holds 128 characters, the last one the terminating null.
         public const int MaxTip = 127;
+        // The icon has a row for each of the first three lines. With one line the
+        // second row stays faint, so the icon keeps its shape.
+        public const int MaxRows = 3;
+        // Line colors by position, as in the window (ui/styles.css --line-0 to
+        // --line-5); a seventh line starts over.
+        public const int PaletteSize = 6;
         const int MaxLabel = 18;
+        const int MaxBriefLabel = 14;
 
         // The window's top bar says the same (ui/app.js renderTopbar).
         static readonly Dictionary<string, string> Statuses = new Dictionary<string, string>
         {
             { "on", "Net Switch: routing is on" },
-            { "starting", "Net Switch: starting routing\u2026" },
-            { "stopping", "Net Switch: turning off routing\u2026" },
+            { "starting", "Net Switch: starting routing…" },
+            { "stopping", "Net Switch: turning off routing…" },
             { "off", "Net Switch: routing is off" },
             { "error", "Net Switch: routing stopped" },
         };
@@ -93,8 +106,6 @@ namespace NetSwitch
         public static TrayView FromState(IDictionary<string, object> state)
         {
             IDictionary<string, object> routing = Child(state, "routing");
-            IDictionary<string, object> lanes = Child(state, "lanes");
-            IDictionary<string, object> second = Child(lanes, "second");
             string status = Text(routing, "status") ?? "";
             string headline;
             if (!Statuses.TryGetValue(status, out headline)) headline = "Net Switch";
@@ -103,10 +114,8 @@ namespace NetSwitch
             TrayView view = new TrayView();
             view.Status = headline;
             view.Routing = status == "on";
-            view.Cable = Line(Child(lanes, "main"), "Cable");
-            view.Second = second == null
-                ? new LineView { Label = "Second connection", State = LineState.NotSetUp }
-                : Line(second, "Second connection");
+            List<IDictionary<string, object>> lines = Lines(state);
+            for (int i = 0; i < lines.Count; i++) view.Lines.Add(Line(lines[i], i, view.Routing));
             return view;
         }
 
@@ -120,60 +129,104 @@ namespace NetSwitch
         {
             return new TrayView
             {
-                Status = processRunning ? "Net Switch isn\u2019t responding" : "Net Switch isn\u2019t running",
+                Status = processRunning ? "Net Switch isn’t responding" : "Net Switch isn’t running",
                 Hint = "Click for Open Net Switch.",
             };
         }
 
         public static TrayView Quitting()
         {
-            return new TrayView { Status = "Net Switch is quitting\u2026" };
+            return new TrayView { Status = "Net Switch is quitting…" };
         }
 
-        static LineView Line(IDictionary<string, object> lane, string fallbackLabel)
+        static LineView Line(IDictionary<string, object> line, int index, bool routingOn)
         {
-            LineView line = new LineView();
-            line.Label = Text(lane, "label") ?? fallbackLabel;
-            IDictionary<string, object> rate = Child(lane, "rate");
-            if (!Flag(lane, "connected"))
-            {
-                line.State = LineState.NotConnected;
-            }
-            else if (rate == null)
-            {
-                // Unknown, which is not the same as zero.
-                line.State = LineState.NoSpeed;
-            }
-            else
-            {
-                line.State = LineState.Measured;
-                line.Down = Number(rate, "down");
-                line.Up = Number(rate, "up");
-            }
-            return line;
+            LineView view = new LineView();
+            view.Label = LineLabel(line, index);
+            view.Color = index % PaletteSize;
+            view.Working = Flag(line, "connected") && string.IsNullOrEmpty(Text(line, "problem"));
+            string tone;
+            string health = Health(line, routingOn, out tone);
+            view.Problem = tone == "ok" ? null : health;
+            IDictionary<string, object> rate = Child(line, "rate");
+            // Unknown, which is not the same as zero.
+            view.Measured = rate != null;
+            view.Down = Number(rate, "down");
+            view.Up = Number(rate, "up");
+            return view;
         }
 
+        // The window's health words for a line (ui/app.js lineHealth), and their
+        // tone: "ok", "warn" or "down". The ping is the last internet test's round
+        // trip, which only runs while routing is on.
+        public static string Health(IDictionary<string, object> line, bool routingOn, out string tone)
+        {
+            string problem = Text(line, "problem");
+            tone = "warn";
+            // Connected again, and trusted once an internet test passes.
+            if (problem == "checking") return "Checking…";
+            if (problem == "no internet") return "No internet";
+            tone = "down";
+            if (!string.IsNullOrEmpty(problem)) return problem == "no address" ? "No address" : "No route";
+            if (!Flag(line, "connected")) return "Not connected";
+            tone = "warn";
+            if (Flag(line, "exhausted")) return "Cap reached";
+            tone = "ok";
+            object ping;
+            if (routingOn && line.TryGetValue("ping", out ping) && IsNumber(ping))
+            {
+                return Number(line, "ping").ToString("0", CultureInfo.InvariantCulture) + " ms";
+            }
+            return "Online";
+        }
+
+        // A short line per line. When they don't all fit in what Windows shows,
+        // each gives only its download; the ones that still don't fit are
+        // counted on the last line instead.
         public static string Tooltip(TrayView view)
+        {
+            bool complete;
+            string tip = Tooltip(view, false, out complete);
+            if (!complete) tip = Tooltip(view, true, out complete);
+            return tip.Length <= MaxTip ? tip : tip.Substring(0, MaxTip - 1) + "…";
+        }
+
+        static string Tooltip(TrayView view, bool brief, out bool complete)
         {
             List<string> lines = new List<string>();
             lines.Add(view.Status);
             if (view.Hint != null) lines.Add(view.Hint);
-            if (view.Cable != null) lines.Add(LineText(view.Cable));
-            if (view.Second != null) lines.Add(LineText(view.Second));
-            string text = string.Join("\n", lines);
-            return text.Length <= MaxTip ? text : text.Substring(0, MaxTip - 1) + "\u2026";
+            int length = string.Join("\n", lines).Length;
+            int count = view.Lines.Count;
+            complete = true;
+            for (int i = 0; i < count; i++)
+            {
+                string text = LineText(view.Lines[i], brief);
+                int rest = count - i - 1;
+                int needed = 1 + text.Length + (rest > 0 ? 1 + More(rest).Length : 0);
+                if (length + needed > MaxTip)
+                {
+                    lines.Add(More(count - i));
+                    complete = false;
+                    break;
+                }
+                lines.Add(text);
+                length += 1 + text.Length;
+            }
+            return string.Join("\n", lines);
         }
 
-        public static string LineText(LineView line)
+        public static string More(int count)
         {
-            string label = Shorten(line.Label, MaxLabel);
-            switch (line.State)
-            {
-                case LineState.NotSetUp: return label + ": not set up";
-                case LineState.NotConnected: return label + ": not connected";
-                case LineState.NoSpeed: return label + ": speed not available";
-                default: return label + ": \u2193 " + Rate(line.Down) + "  \u2191 " + Rate(line.Up);
-            }
+            return "+" + count.ToString(CultureInfo.InvariantCulture) + (count == 1 ? " more line" : " more lines");
+        }
+
+        public static string LineText(LineView line, bool brief)
+        {
+            string label = Shorten(line.Label, brief ? MaxBriefLabel : MaxLabel);
+            if (line.Problem != null) return label + ": " + Lower(line.Problem);
+            if (!line.Measured) return label + (brief ? ": no speed" : ": speed not available");
+            return label + ": ↓ " + Rate(line.Down) + (brief ? "" : "  ↑ " + Rate(line.Up));
         }
 
         // Same wording as the window (ui/app.js formatRate).
@@ -202,23 +255,65 @@ namespace NetSwitch
         public static IconRow Row(LineView line)
         {
             IconRow row = new IconRow();
-            row.Available = line != null && (line.State == LineState.Measured || line.State == LineState.NoSpeed);
-            row.Lit = line != null && line.State == LineState.Measured ? Lit(line.Down + line.Up) : 0;
+            row.Available = line != null && line.Working;
+            row.Lit = row.Available && line.Measured ? Lit(line.Down + line.Up) : 0;
             return row;
+        }
+
+        public static IconRow[] Rows(TrayView view)
+        {
+            IconRow[] rows = new IconRow[Math.Max(2, Math.Min(MaxRows, view.Lines.Count))];
+            for (int i = 0; i < rows.Length; i++) rows[i] = Row(i < view.Lines.Count ? view.Lines[i] : null);
+            return rows;
         }
 
         // The icon is redrawn only when this changes, not on every reading.
         public static string IconSignature(TrayView view)
         {
-            IconRow cable = Row(view.Cable);
-            IconRow second = Row(view.Second);
-            return (view.Routing ? "on" : "off") + "|" + cable.Available + cable.Lit + "|" + second.Available + second.Lit;
+            StringBuilder signature = new StringBuilder(view.Routing ? "on" : "off");
+            foreach (IconRow row in Rows(view)) signature.Append("|").Append(row.Available).Append(row.Lit);
+            return signature.ToString();
         }
 
-        static string Shorten(string text, int max)
+        // The line's name, or its adapter's while it has none.
+        public static string LineLabel(IDictionary<string, object> line, int index)
+        {
+            string label = (Text(line, "label") ?? "").Trim();
+            if (label.Length == 0) label = (Text(line, "alias") ?? "").Trim();
+            return label.Length > 0 ? label : "Line " + (index + 1).ToString(CultureInfo.InvariantCulture);
+        }
+
+        // "Fibre from…", not "Fibre from …".
+        public static string Shorten(string text, int max)
         {
             text = (text ?? "").Trim();
-            return text.Length <= max ? text : text.Substring(0, max - 1) + "\u2026";
+            return text.Length <= max ? text : text.Substring(0, max - 1).TrimEnd() + "…";
+        }
+
+        // "No internet" in the middle of a sentence: "no internet".
+        public static string Lower(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            return char.ToLowerInvariant(text[0]) + text.Substring(1);
+        }
+
+        internal static List<IDictionary<string, object>> Lines(IDictionary<string, object> state)
+        {
+            return Items(state, "lines");
+        }
+
+        internal static List<IDictionary<string, object>> Items(IDictionary<string, object> parent, string key)
+        {
+            List<IDictionary<string, object>> items = new List<IDictionary<string, object>>();
+            object raw;
+            IEnumerable list = parent != null && parent.TryGetValue(key, out raw) && !(raw is string) ? raw as IEnumerable : null;
+            if (list == null) return items;
+            foreach (object item in list)
+            {
+                IDictionary<string, object> entry = item as IDictionary<string, object>;
+                if (entry != null) items.Add(entry);
+            }
+            return items;
         }
 
         internal static IDictionary<string, object> Child(IDictionary<string, object> parent, string key)
@@ -239,6 +334,11 @@ namespace NetSwitch
             return parent != null && parent.TryGetValue(key, out value) && value is bool && (bool)value;
         }
 
+        internal static bool IsNumber(object value)
+        {
+            return value is int || value is long || value is double || value is decimal || value is float;
+        }
+
         internal static double Number(IDictionary<string, object> parent, string key)
         {
             object value;
@@ -257,29 +357,54 @@ namespace NetSwitch
 
     public sealed class FlyoutLine
     {
+        public string Id;
         public string Name;
-        public string Title;
-        public string Detail;
-        public string Speed;
-        public string Problem;
+        public int Color;
+        // Marked Main: the first line, when there are others.
+        public bool Main;
+        public bool Metered;
+        // The window's health words and their tone ("ok", "warn" or "down").
+        public string Health;
+        public string Tone;
         public bool Healthy;
-        public bool Carrying;
+        // Beside the name: the adapter (and network) or the data used, then the
+        // health of a line that works.
+        public string Detail;
+        // Where its apps went while it can't take them; shown in its meter's place.
+        public string Note;
+        // The line its apps use instead, while they use another.
+        public string StandIn;
+        public string Speed;
         public double Down;
         public int Lit;
+        // Everything about it, for the tooltip over its row.
+        public string Tip;
+    }
+
+    // One line an app can be put on, or Shared while combining.
+    public sealed class FlyoutOption
+    {
+        // The line's id, or null for Shared.
+        public string Value;
+        // What choosing it sends to /api/app-line: null is the default.
+        public string Send;
+        public string Label;
+        public string Name;
+        // The line's palette color; -1 for Shared.
+        public int Color;
+        public bool Shared;
     }
 
     public sealed class FlyoutApp
     {
         public string Name;
         public string Path;
-        public string Lane;
-        // "second", "cable" (kept on the cable while combining) or "main".
+        // The option shown as chosen: a line's id, or null for Shared.
         public string Choice;
         public string Speed;
         public string Initial;
         public int ColorIndex;
         public bool CanMove;
-        public bool CanSecond;
         public double Score;
         public bool HasTraffic;
     }
@@ -294,22 +419,33 @@ namespace NetSwitch
         public bool RoutingWanted;
         public bool CombineOn;
         public bool CanCombine;
-        public string MainOption;
-        // Shown between the two while combining, when the server can keep an
-        // app on the cable; null otherwise.
-        public string CableOption;
-        public string SecondOption;
+        public string CombineName;
+        public string CombineDetail;
         public string Health;
         public string HealthTone;
-        public FlyoutLine Main;
-        public FlyoutLine Second;
+        // The first lines in priority order; MoreLines counts the others.
+        public List<FlyoutLine> Lines = new List<FlyoutLine>();
+        public int MoreLines;
+        // The palette colors of the lines that take part in sharing, for the Shared mark.
+        public List<int> SharingColors = new List<int>();
+        public List<FlyoutOption> Options = new List<FlyoutOption>();
+        // Few enough options for a compact control in each app's row; with more,
+        // the row has a Change link that opens the window.
+        public bool CompactChoice;
         public List<FlyoutApp> Apps = new List<FlyoutApp>();
     }
 
-    // No window or network work here: older servers and missing measurements
+    // No window or network work here: missing measurements and older servers
     // take the same path in the flyout and in its tests.
     public static class FlyoutModel
     {
+        public const int MaxLines = 3;
+        public const int MaxOptions = 3;
+        // The flyout shortens further, with "…", when the options don't fit.
+        const int MaxOptionLabel = 12;
+        const double MB = 1024.0 * 1024;
+        const double GB = 1024.0 * MB;
+
         public static FlyoutView Unavailable(string message)
         {
             return new FlyoutView { Message = message, Status = "Not connected", Tone = "dim" };
@@ -317,57 +453,95 @@ namespace NetSwitch
 
         public static FlyoutView FromState(IDictionary<string, object> state)
         {
-            if (state == null) return Unavailable("Net Switch isn\u2019t responding.");
+            if (state == null) return Unavailable("Net Switch isn’t responding.");
             IDictionary<string, object> routing = TrayModel.Child(state, "routing");
-            IDictionary<string, object> lanes = TrayModel.Child(state, "lanes");
-            IDictionary<string, object> second = TrayModel.Child(lanes, "second");
             string status = TrayModel.Text(routing, "status") ?? "off";
+            bool routingOn = status == "on";
+            List<IDictionary<string, object>> lines = TrayModel.Lines(state);
             FlyoutView view = new FlyoutView();
             view.Available = true;
-            view.RoutingWanted = OptionalFlag(routing, "wanted", status == "on");
-            view.CanCombine = second != null;
-            view.CombineOn = second != null && TrayModel.Flag(TrayModel.Child(state, "combine"), "on");
-            view.MainOption = view.CombineOn ? "Both" : "Cable";
-            view.CableOption = view.CombineOn && TrayModel.Flag(TrayModel.Child(state, "features"), "cableOnly") ? "Cable" : null;
-            view.SecondOption = ShortOption(second);
-            view.Main = Line(TrayModel.Child(lanes, "main"), "Cable");
-            view.Second = second == null ? null : Line(second, TrayModel.Text(second, "label") ?? "Second connection");
-            view.TotalDown = view.Main.Down + (view.Second == null ? 0 : view.Second.Down);
+            view.RoutingWanted = OptionalFlag(routing, "wanted", routingOn);
+
+            Dictionary<string, string> names = new Dictionary<string, string>();
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string id = TrayModel.Text(lines[i], "id");
+                if (id != null && !names.ContainsKey(id)) names[id] = TrayModel.LineLabel(lines[i], i);
+            }
+            List<FlyoutLine> all = new List<FlyoutLine>();
+            for (int i = 0; i < lines.Count; i++) all.Add(Line(lines[i], i, lines.Count, routingOn, names));
+            foreach (FlyoutLine line in all) view.TotalDown += line.Down;
+            view.Lines = all.GetRange(0, Math.Min(MaxLines, all.Count));
+            view.MoreLines = all.Count - view.Lines.Count;
+
+            // The person chose to combine, and there are lines to combine (ui/app.js combining).
+            IDictionary<string, object> combine = TrayModel.Child(state, "combine");
+            bool combining = TrayModel.Flag(combine, "on") && lines.Count > 1;
+            bool active = combining && TrayModel.Flag(combine, "active");
+            for (int i = 0; i < lines.Count; i++)
+            {
+                // Lines kept for chosen apps, or over their cap, don't share.
+                if (!TrayModel.Flag(lines[i], "strict") && !TrayModel.Flag(lines[i], "exhausted")) view.SharingColors.Add(i % TrayModel.PaletteSize);
+            }
+            view.CombineOn = combining;
+            view.CanCombine = combining || view.SharingColors.Count >= 2;
+            view.CombineName = lines.Count == 2 ? "Both lines" : "Combine lines";
+            if (combining) view.CombineDetail = !routingOn ? "On" : active ? "Combining" : "Paused";
+            else if (view.CanCombine) view.CombineDetail = "Off";
+            else view.CombineDetail = lines.Count < 2 ? "Add a second line" : "Needs two lines";
+
             string headline = "Routing off";
             if (status == "on") headline = "Routing on";
-            else if (status == "starting") headline = "Starting routing\u2026";
-            else if (status == "stopping") headline = "Turning routing off\u2026";
+            else if (status == "starting") headline = "Starting routing…";
+            else if (status == "stopping") headline = "Turning routing off…";
             else if (status == "error") headline = "Routing stopped";
-            view.Status = headline + " \u00b7 " + TrayModel.Rate(view.TotalDown);
+            view.Status = headline + " · " + TrayModel.Rate(view.TotalDown);
             view.Tone = status == "on" ? "ok" : status == "error" ? "error" : "dim";
-            Health(view, status);
+            Health(view, status, all);
+            // Like the window's top bar: routing is on, but not every line works.
+            if (status == "on" && view.HealthTone != "ok") view.Tone = view.HealthTone;
 
-            object raw;
-            IEnumerable apps = state.TryGetValue("apps", out raw) ? raw as IEnumerable : null;
-            if (apps != null)
+            // The window's choices (ui/app.js lineOptions): Shared while combining,
+            // then every line. Without combining the main line is the default, so
+            // choosing it clears the app's choice.
+            string mainId = lines.Count > 0 ? TrayModel.Text(lines[0], "id") : null;
+            if (combining) view.Options.Add(new FlyoutOption { Label = "Shared", Name = "Shared", Color = -1, Shared = true });
+            for (int i = 0; i < lines.Count; i++)
             {
-                foreach (object item in apps)
+                string id = TrayModel.Text(lines[i], "id");
+                if (id == null) continue;
+                string name = TrayModel.LineLabel(lines[i], i);
+                view.Options.Add(new FlyoutOption
                 {
-                    IDictionary<string, object> app = item as IDictionary<string, object>;
-                    if (app == null) continue;
-                    IDictionary<string, object> rate = TrayModel.Child(app, "rate");
-                    FlyoutApp row = new FlyoutApp();
-                    row.Name = TrayModel.Text(app, "name") ?? "App";
-                    if (string.IsNullOrWhiteSpace(row.Name)) row.Name = "App";
-                    row.Path = TrayModel.Text(app, "path") ?? "";
-                    row.Lane = TrayModel.Text(app, "lane") == "second" ? "second" : "main";
-                    row.Choice = row.Lane == "second" ? "second" : TrayModel.Flag(app, "cableOnly") ? "cable" : "main";
-                    row.Speed = TrayModel.Rate(TrayModel.Number(rate, "down"));
-                    row.Score = TrayModel.Number(app, "sortScore");
-                    row.HasTraffic = TrayModel.Number(rate, "down") + TrayModel.Number(rate, "up") > 0;
-                    row.CanMove = OptionalFlag(app, "switchable", true) && row.Path.Length > 0;
-                    row.CanSecond = row.CanMove && second != null;
-                    row.Initial = StringInfo.GetNextTextElement(row.Name.Trim()).ToUpperInvariant();
-                    uint hash = 0;
-                    foreach (char letter in row.Name) hash = unchecked(hash * 31 + letter);
-                    row.ColorIndex = (int)(hash % 6);
-                    view.Apps.Add(row);
-                }
+                    Value = id,
+                    Send = !combining && id == mainId ? null : id,
+                    Label = TrayModel.Shorten(name, MaxOptionLabel),
+                    Name = name,
+                    Color = i % TrayModel.PaletteSize,
+                });
+            }
+            view.CompactChoice = view.Options.Count <= MaxOptions;
+
+            foreach (IDictionary<string, object> app in TrayModel.Items(state, "apps"))
+            {
+                IDictionary<string, object> rate = TrayModel.Child(app, "rate");
+                FlyoutApp row = new FlyoutApp();
+                row.Name = TrayModel.Text(app, "name") ?? "App";
+                if (string.IsNullOrWhiteSpace(row.Name)) row.Name = "App";
+                row.Path = TrayModel.Text(app, "path") ?? "";
+                string pinned = TrayModel.Text(app, "line");
+                if (pinned != null && !names.ContainsKey(pinned)) pinned = null;
+                // Without combining, an app with no choice of its own shows the main line chosen.
+                row.Choice = combining ? pinned : pinned ?? mainId;
+                row.Speed = TrayModel.Rate(TrayModel.Number(rate, "down"));
+                row.Score = TrayModel.Number(app, "sortScore");
+                row.HasTraffic = TrayModel.Number(rate, "down") + TrayModel.Number(rate, "up") > 0;
+                row.CanMove = OptionalFlag(app, "switchable", true) && row.Path.Length > 0;
+                row.Initial = StringInfo.GetNextTextElement(row.Name.Trim()).ToUpperInvariant();
+                uint hash = 0;
+                foreach (char letter in row.Name) hash = unchecked(hash * 31 + letter);
+                row.ColorIndex = (int)(hash % 6);
+                view.Apps.Add(row);
             }
             // Keep idle apps useful when nothing is transferring, but do not let
             // their historical score displace an app that is busy now.
@@ -390,35 +564,73 @@ namespace NetSwitch
             return value != null && value.TryGetValue(key, out raw) && raw is bool ? (bool)raw : fallback;
         }
 
-        static string ShortOption(IDictionary<string, object> second)
+        static FlyoutLine Line(IDictionary<string, object> line, int index, int count, bool routingOn, Dictionary<string, string> names)
         {
-            string kind = (TrayModel.Text(second, "kind") ?? "").ToLowerInvariant();
-            string label = TrayModel.Text(second, "label") ?? "Wi-Fi";
-            if (kind == "wifi" || label.IndexOf("wi-fi", StringComparison.OrdinalIgnoreCase) >= 0) return "Wi-Fi";
-            if (kind == "phone" || kind == "tether" || label.IndexOf("phone", StringComparison.OrdinalIgnoreCase) >= 0) return "Phone";
-            return label.Length <= 8 ? label : label.Substring(0, 7) + "\u2026";
+            FlyoutLine row = new FlyoutLine();
+            row.Id = TrayModel.Text(line, "id") ?? "";
+            row.Name = TrayModel.LineLabel(line, index);
+            row.Color = index % TrayModel.PaletteSize;
+            // "Main" only means something next to other lines.
+            row.Main = index == 0 && count > 1;
+            row.Metered = TrayModel.Flag(line, "metered");
+            string tone;
+            row.Health = TrayModel.Health(line, routingOn, out tone);
+            row.Tone = tone;
+            row.Healthy = tone == "ok";
+            IDictionary<string, object> rate = TrayModel.Child(line, "rate");
+            row.Down = TrayModel.Number(rate, "down");
+            row.Speed = rate == null ? "Not measured" : TrayModel.Rate(row.Down);
+            row.Lit = row.Healthy ? Lit(row.Down) : 0;
+
+            string where = Join(TrayModel.Text(line, "alias"), TrayModel.Text(line, "ssid"));
+            IDictionary<string, object> cap = TrayModel.Child(line, "cap");
+            double used = TrayModel.Number(TrayModel.Child(line, "usage"), "bytes");
+            // The window's words (ui/app.js usageText); the row leaves out the
+            // period, which its tooltip says.
+            string usage = null;
+            string period = null;
+            if (cap != null)
+            {
+                usage = Data(used) + " of " + Data(TrayModel.Number(cap, "bytes"));
+                period = TrayModel.Text(cap, "period") == "day" ? " today" : " this month";
+            }
+            else if (row.Metered)
+            {
+                usage = Data(used) + " used";
+            }
+            row.Detail = Join(usage ?? where, row.Healthy ? row.Health : null);
+
+            // Its own apps use another line while it is down or out of data
+            // (ui/app.js lineFoot), which only happens while routing is on.
+            string target = TrayModel.Text(line, "target");
+            if (routingOn && target != null && target != row.Id && names.ContainsKey(target))
+            {
+                row.StandIn = names[target];
+                row.Note = "Its apps use the " + row.StandIn + (TrayModel.Flag(line, "exhausted") ? " until the cap resets" : " until it’s back");
+            }
+            row.Tip = Join(Join(row.Name, where), Join(usage == null ? null : usage + period, row.Health)) + (row.Note != null ? "\n" + row.Note : "");
+            return row;
         }
 
-        static FlyoutLine Line(IDictionary<string, object> lane, string name)
+        // "a · b", leaving out the empty ones.
+        static string Join(string first, string second)
         {
-            FlyoutLine line = new FlyoutLine();
-            line.Name = name;
-            line.Title = name;
-            object ping;
-            if (lane != null && lane.TryGetValue("ping", out ping) && ping != null && !(ping is string) && !(ping is bool))
-                line.Title += " \u00b7 " + TrayModel.Number(lane, "ping").ToString("0", CultureInfo.InvariantCulture) + " ms";
-            string alias = TrayModel.Text(lane, "alias") ?? "";
-            string ssid = TrayModel.Text(lane, "ssid") ?? "";
-            line.Detail = alias + (ssid.Length > 0 ? (alias.Length > 0 ? " \u00b7 " : "") + ssid : "");
-            line.Problem = TrayModel.Text(lane, "problem");
-            if (string.IsNullOrEmpty(line.Problem) && !TrayModel.Flag(lane, "connected")) line.Problem = "not connected";
-            line.Healthy = string.IsNullOrEmpty(line.Problem);
-            line.Carrying = OptionalFlag(lane, "carryingApps", line.Healthy);
-            IDictionary<string, object> rate = TrayModel.Child(lane, "rate");
-            line.Down = TrayModel.Number(rate, "down");
-            line.Speed = !line.Healthy ? line.Problem : rate == null ? "Not measured" : TrayModel.Rate(line.Down);
-            line.Lit = line.Healthy ? Lit(line.Down) : 0;
-            return line;
+            if (string.IsNullOrEmpty(first)) return second ?? "";
+            if (string.IsNullOrEmpty(second)) return first;
+            return first + " · " + second;
+        }
+
+        // Data amounts as the window writes them (ui/app.js formatData): MB under
+        // a gigabyte, then GB with one decimal ("10 GB", not "10.0 GB").
+        public static string Data(double bytes)
+        {
+            if (!(bytes >= MB)) return bytes > 0 ? "<1 MB" : "0 MB";
+            if (bytes < GB) return Math.Round(bytes / MB, MidpointRounding.AwayFromZero).ToString(CultureInfo.InvariantCulture) + " MB";
+            double gigabytes = bytes / GB;
+            string number = gigabytes >= 100
+                ? Math.Round(gigabytes, MidpointRounding.AwayFromZero).ToString(CultureInfo.InvariantCulture)
+                : Math.Round(gigabytes, 1, MidpointRounding.AwayFromZero).ToString("0.#", CultureInfo.InvariantCulture);
+            return number + " GB";
         }
 
         public static int Lit(double down)
@@ -428,34 +640,200 @@ namespace NetSwitch
             return Math.Max(1, Math.Min(24, (int)Math.Round(level * 24, MidpointRounding.AwayFromZero)));
         }
 
-        static void Health(FlyoutView view, string status)
+        // The footer: what is wrong, if anything, across all the lines.
+        static void Health(FlyoutView view, string status, List<FlyoutLine> lines)
         {
             view.HealthTone = "dim";
             if (status != "on")
             {
-                view.Health = status == "starting" ? "Routing is starting\u2026" : status == "stopping" ? "Routing is turning off\u2026" :
-                    status == "error" ? "Routing stopped \u00b7 apps use Windows' connection" : "Routing is off \u00b7 apps use Windows' connection";
+                view.Health = status == "starting" ? "Routing is starting…" : status == "stopping" ? "Routing is turning off…" :
+                    status == "error" ? "Routing stopped · apps use Windows' connection" : "Routing is off · apps use Windows' connection";
                 if (status == "error") view.HealthTone = "error";
                 return;
             }
-            FlyoutLine main = view.Main;
-            FlyoutLine second = view.Second;
-            view.HealthTone = "warning";
-            if (!main.Healthy && second != null && !second.Healthy)
-                view.Health = "Cable: " + main.Problem + " \u00b7 " + second.Name + ": " + second.Problem;
-            else if (!main.Healthy)
-                view.Health = "Cable: " + main.Problem + (second != null && second.Carrying && !main.Carrying ? " \u00b7 apps use the " + second.Name : "");
-            else if (second != null && !second.Healthy)
-                view.Health = second.Name + ": " + second.Problem + (main.Carrying && !second.Carrying ? " \u00b7 its apps use the cable" : "");
-            else if (!main.Carrying && second != null && second.Carrying)
-                view.Health = "Cable is recovering \u00b7 apps use the " + second.Name;
-            else if (second != null && !second.Carrying && main.Carrying)
-                view.Health = second.Name + " is recovering \u00b7 its apps use the cable";
-            else
+            List<FlyoutLine> problems = lines.FindAll(delegate (FlyoutLine line) { return !line.Healthy; });
+            int working = lines.Count - problems.Count;
+            if (lines.Count == 0)
+            {
+                view.HealthTone = "warning";
+                view.Health = "No line is set up";
+                return;
+            }
+            if (problems.Count == 0)
             {
                 view.HealthTone = "ok";
-                view.Health = second == null ? "Cable reaches the internet" : "Both lines reach the internet";
+                view.Health = lines.Count == 1 ? lines[0].Name + " reaches the internet"
+                    : lines.Count == 2 ? "Both lines reach the internet"
+                    : "All " + lines.Count.ToString(CultureInfo.InvariantCulture) + " lines reach the internet";
+                return;
             }
+            view.HealthTone = working == 0 ? "error" : "warning";
+            if (problems.Count == 1)
+            {
+                FlyoutLine line = problems[0];
+                string moved = line.StandIn == null ? "" : (lines.IndexOf(line) == 0 ? " · apps use the " : " · its apps use the ") + line.StandIn;
+                // "checking", without the "…" it has on its own.
+                view.Health = line.Name + ": " + TrayModel.Lower(line.Health).TrimEnd('…') + moved;
+                return;
+            }
+            FlyoutLine first = lines.Find(delegate (FlyoutLine line) { return line.Healthy; });
+            view.Health = working == 0 ? "No line reaches the internet"
+                : working == 1 ? "Only the " + first.Name + " reaches the internet"
+                : working.ToString(CultureInfo.InvariantCulture) + " of " + lines.Count.ToString(CultureInfo.InvariantCulture) + " lines reach the internet";
+        }
+    }
+
+    // ------------------------------------------------------------ notifications
+
+    // One line event from the server: a line went down, came back, used up its
+    // data cap, or can be used again.
+    public sealed class LineEvent
+    {
+        public string Id;
+        public string Kind;
+        public string LineId;
+        public string Text;
+    }
+
+    public sealed class Notice
+    {
+        public string EventId;
+        public string LineId;
+        public string Title;
+        public string Text;
+        public bool Warning;
+    }
+
+    // Which line events become notifications, and when. Each event is shown at
+    // most once. Those already there on the tray's first reading happened before
+    // it started, so they are only marked seen. A line notifies at most once per
+    // PerLineSeconds: while it flaps, only its newest event waits, and shows once
+    // the time is up. Notifications also keep GapSeconds apart, so each one is on
+    // screen long enough to read before the next replaces it.
+    public sealed class EventNotifier
+    {
+        public const int PerLineSeconds = 30;
+        public const int GapSeconds = 4;
+        // Event ids, as keys: HashSet is in System.Core, which the tray doesn't reference.
+        readonly Dictionary<string, bool> seen = new Dictionary<string, bool>();
+        // The newest event waiting to be shown, by line id; order keeps the lines oldest first.
+        readonly Dictionary<string, LineEvent> waiting = new Dictionary<string, LineEvent>();
+        readonly List<string> order = new List<string>();
+        readonly Dictionary<string, DateTime> shownAt = new Dictionary<string, DateTime>();
+        DateTime lastShown = DateTime.MinValue;
+        bool primed;
+
+        // The state's events, oldest first; null from a server that has none.
+        public static List<LineEvent> FromState(IDictionary<string, object> state)
+        {
+            object raw;
+            if (state == null || !state.TryGetValue("events", out raw) || !(raw is IEnumerable) || raw is string) return null;
+            List<LineEvent> events = new List<LineEvent>();
+            foreach (IDictionary<string, object> item in TrayModel.Items(state, "events"))
+            {
+                events.Add(new LineEvent
+                {
+                    Id = TrayModel.Text(item, "id"),
+                    Kind = TrayModel.Text(item, "kind"),
+                    LineId = TrayModel.Text(item, "lineId"),
+                    Text = TrayModel.Text(item, "text"),
+                });
+            }
+            return events;
+        }
+
+        public void Read(List<LineEvent> events, bool enabled)
+        {
+            if (!enabled)
+            {
+                waiting.Clear();
+                order.Clear();
+            }
+            if (events == null)
+            {
+                primed = true;
+                return;
+            }
+            Dictionary<string, bool> current = new Dictionary<string, bool>();
+            foreach (LineEvent item in events)
+            {
+                if (string.IsNullOrEmpty(item.Id)) continue;
+                current[item.Id] = true;
+                if (seen.ContainsKey(item.Id)) continue;
+                seen[item.Id] = true;
+                if (!primed || !enabled || string.IsNullOrEmpty(item.Text)) continue;
+                string line = item.LineId ?? "";
+                if (!waiting.ContainsKey(line)) order.Add(line);
+                waiting[line] = item;
+            }
+            // The server keeps the last 20 events; one that has left the list never comes back.
+            List<string> gone = new List<string>();
+            foreach (string id in seen.Keys) if (!current.ContainsKey(id)) gone.Add(id);
+            foreach (string id in gone) seen.Remove(id);
+            primed = true;
+        }
+
+        // The notification to show now, or null.
+        public Notice Next(DateTime now)
+        {
+            if ((now - lastShown).TotalSeconds < GapSeconds) return null;
+            for (int i = 0; i < order.Count; i++)
+            {
+                string line = order[i];
+                DateTime last;
+                if (shownAt.TryGetValue(line, out last) && (now - last).TotalSeconds < PerLineSeconds) continue;
+                LineEvent item = waiting[line];
+                waiting.Remove(line);
+                order.RemoveAt(i);
+                shownAt[line] = now;
+                lastShown = now;
+                return new Notice
+                {
+                    EventId = item.Id,
+                    LineId = item.LineId,
+                    Title = Title(item.Kind),
+                    Text = item.Text,
+                    Warning = item.Kind == "down" || item.Kind == "exhausted",
+                };
+            }
+            return null;
+        }
+
+        static string Title(string kind)
+        {
+            if (kind == "down") return "Line down";
+            if (kind == "up") return "Line back";
+            if (kind == "exhausted") return "Data cap reached";
+            if (kind == "cap-reset") return "Data cap reset";
+            return "Net Switch";
+        }
+    }
+
+    // What the tray remembers between runs, in tray-settings.json in the data folder.
+    public sealed class TraySettings
+    {
+        public bool LineNotifications = true;
+
+        // A missing or damaged file means the defaults.
+        public static TraySettings Load(string file)
+        {
+            TraySettings settings = new TraySettings();
+            try
+            {
+                IDictionary<string, object> saved = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(file)) as IDictionary<string, object>;
+                object value;
+                if (saved != null && saved.TryGetValue("lineNotifications", out value) && value is bool) settings.LineNotifications = (bool)value;
+            }
+            catch (Exception)
+            {
+            }
+            return settings;
+        }
+
+        public void Save(string file)
+        {
+            Dictionary<string, object> values = new Dictionary<string, object> { { "lineNotifications", LineNotifications } };
+            File.WriteAllText(file, new JavaScriptSerializer().Serialize(values) + Environment.NewLine);
         }
     }
 
@@ -465,18 +843,24 @@ namespace NetSwitch
     {
         // The window's colors (ui/favicon.svg).
         static readonly Color Panel = Color.FromArgb(0x14, 0x16, 0x19);
-        static readonly Color Amber = Color.FromArgb(0xf0, 0xb2, 0x3e);
-        static readonly Color Cyan = Color.FromArgb(0x4c, 0xc3, 0xe8);
         static readonly Color Gray = Color.FromArgb(0xa8, 0xad, 0xb3);
+        // A row's color by the line's position: the favicon's amber and cyan,
+        // then the window's other line colors (ui/styles.css --line-2 to --line-5).
+        static readonly Color[] Lines =
+        {
+            Color.FromArgb(0xf0, 0xb2, 0x3e), Color.FromArgb(0x4c, 0xc3, 0xe8), Color.FromArgb(0xb3, 0x94, 0xff),
+            Color.FromArgb(0xf5, 0x84, 0xc8), Color.FromArgb(0xb9, 0xdc, 0x58), Color.FromArgb(0x7f, 0x99, 0xff),
+        };
 
-        // Two rows of cells on the dark panel, like the favicon's two bars: the
-        // cable on top in amber, the second connection below in cyan. While
-        // routing isn't on the colors give way to gray; a line that isn't there
-        // stays faint. Every pixel is either fully drawn or fully clear, so the
-        // icon stays crisp at its real size.
+        // A row of cells per line on the dark panel, like the favicon's bars: the
+        // main line on top in amber, the next in cyan, a third below in violet.
+        // While routing isn't on the colors give way to gray; a line that isn't
+        // there or doesn't work stays faint. Every pixel is either fully drawn or
+        // fully clear, so the icon stays crisp at its real size.
         public static Bitmap Paint(TrayView view, int size)
         {
             Bitmap bitmap = new Bitmap(size, size, PixelFormat.Format32bppArgb);
+            IconRow[] rows = TrayModel.Rows(view);
             using (Graphics g = Graphics.FromImage(bitmap))
             {
                 using (SolidBrush panel = new SolidBrush(Panel))
@@ -485,11 +869,15 @@ namespace NetSwitch
                 }
                 int cell = Math.Max(2, size / 8);
                 int gap = Math.Max(1, size / 16);
-                int height = Math.Max(3, size / 4);
+                // Two rows as the favicon draws them; three thinner ones, closer together.
+                int height = rows.Length == 2 ? Math.Max(3, size / 4) : Math.Max(2, size * 3 / 16);
+                int rowGap = rows.Length == 2 ? 2 * gap : gap;
                 int left = (size - (TrayModel.Cells * cell + (TrayModel.Cells - 1) * gap)) / 2;
-                int top = (size - (2 * height + 2 * gap)) / 2;
-                DrawRow(g, TrayModel.Row(view.Cable), view.Routing ? Amber : Gray, left, top, cell, gap, height);
-                DrawRow(g, TrayModel.Row(view.Second), view.Routing ? Cyan : Gray, left, top + height + 2 * gap, cell, gap, height);
+                int top = (size - (rows.Length * height + (rows.Length - 1) * rowGap)) / 2;
+                for (int i = 0; i < rows.Length; i++)
+                {
+                    DrawRow(g, rows[i], view.Routing ? Lines[i % Lines.Length] : Gray, left, top + i * (height + rowGap), cell, gap, height);
+                }
             }
             RoundCorners(bitmap, Math.Max(2, size / 8));
             return bitmap;
@@ -547,15 +935,26 @@ namespace NetSwitch
         const int TileWidth = (Inner - 8) / 2;
         const int TileHeight = 82;
         const int LinesTop = TilesTop + TileHeight + Gap;
-        // A line's name row, the gap under it, and its meter.
-        const int LineHeight = 16 + 7 + 6;
+        // Between two line rows, and the "+N more" link under them.
+        const int LineGap = 10;
+        const int MoreHeight = 16;
         const int AppsHeadHeight = 18;
         const int RowHeight = 39;
         const int RowGap = 2;
         const int UnavailableHeight = 84;
+        // An app's name keeps at least this much room beside its speed; with
+        // less, the speed goes under the name.
+        const int MinNameRoom = 96;
+        // The widest an app's line control gets, with two options and with three.
+        const int MaxControl2 = 196;
+        const int MaxControl3 = 216;
+        // The chosen line's caption beside Change.
+        const int MaxChosen = 110;
         static readonly Color Background = Color.FromArgb(32, 32, 32);
         static readonly Color Card = Color.FromArgb(43, 43, 43);
         static readonly Color Stroke = Color.FromArgb(58, 58, 58);
+        // The hairline box around Main and Metered.
+        static readonly Color Hairline = Color.FromArgb(74, 74, 74);
         // The design's #FFFFFF1A edge, over the background.
         static readonly Color Edge = Color.FromArgb(54, 54, 54);
         static readonly Color FooterFill = Color.FromArgb(26, 26, 26);
@@ -571,16 +970,20 @@ namespace NetSwitch
         static readonly Color Ink = Color.FromArgb(0, 42, 61);
         static readonly Color InkSoft = Color.FromArgb(0, 64, 92);
         static readonly Color AvatarInk = Color.FromArgb(17, 17, 17);
-        static readonly Color Amber = Color.FromArgb(245, 177, 61);
-        static readonly Color Cyan = Color.FromArgb(60, 200, 234);
         static readonly Color Green = Color.FromArgb(108, 203, 95);
         static readonly Color Warning = Color.FromArgb(242, 178, 77);
         static readonly Color Red = Color.FromArgb(242, 109, 109);
+        // The lines' colors by position, as in the window (ui/styles.css --line-0 to --line-5).
+        static readonly Color[] Palette =
+        {
+            Color.FromArgb(245, 177, 61), Color.FromArgb(60, 200, 234), Color.FromArgb(179, 148, 255),
+            Color.FromArgb(245, 132, 200), Color.FromArgb(185, 220, 88), Color.FromArgb(127, 153, 255),
+        };
         // Solid tiles under a dark letter; the first three are the design's.
         static readonly Color[] Avatars =
         {
             Color.FromArgb(61, 220, 132), Color.FromArgb(154, 164, 178), Color.FromArgb(255, 113, 57),
-            Accent, Amber, Color.FromArgb(199, 161, 245),
+            Accent, Palette[0], Color.FromArgb(199, 161, 245),
         };
 
         sealed class Hit
@@ -591,7 +994,7 @@ namespace NetSwitch
         }
 
         readonly List<Hit> hits = new List<Hit>();
-        // Tooltips over things that can't be pressed, such as an app that can't move.
+        // Tooltips over things that can't be pressed, such as a line's row or an app that can't move.
         readonly List<Hit> notes = new List<Hit>();
         readonly ToolTip tips = new ToolTip();
         // Segoe UI Variable has no Medium, so the design's 500 weight uses Regular.
@@ -601,10 +1004,11 @@ namespace NetSwitch
         readonly Font body = MakeFont("Segoe UI Variable Text", "Segoe UI", 12, FontStyle.Regular);
         readonly Font smallStrong = MakeFont("Segoe UI Variable Text Semibold", "Segoe UI Semibold", 11, FontStyle.Regular);
         readonly Font small = MakeFont("Segoe UI Variable Text", "Segoe UI", 11, FontStyle.Regular);
+        readonly Font badge = MakeFont("Segoe UI Variable Text Semibold", "Segoe UI Semibold", 9, FontStyle.Regular);
         readonly Font letter = MakeFont("Segoe UI Variable Text", "Segoe UI", 11, FontStyle.Bold);
         readonly Font mono = MakeFont("Cascadia Mono", "Consolas", 12, FontStyle.Regular);
         readonly Font monoSmall = MakeFont("Cascadia Mono", "Consolas", 11, FontStyle.Regular);
-        FlyoutView view = FlyoutModel.Unavailable("Connecting to Net Switch\u2026");
+        FlyoutView view = FlyoutModel.Unavailable("Connecting to Net Switch…");
         float scale = 1;
         // Windows draws the rounded edge itself on Windows 11; older Windows gets a painted one.
         bool windowEdge;
@@ -645,6 +1049,28 @@ namespace NetSwitch
             catch (ArgumentException) { return new Font(fallback, size, style, GraphicsUnit.Pixel); }
         }
 
+        // The flyout drawn into a picture at a display scale, as it looks on
+        // screen, for the tests and dev/render-tray.mjs. Windows 11 rounds the
+        // real flyout's corners itself; the picture has the square, painted edge
+        // older Windows gets.
+        public static Bitmap Snapshot(FlyoutView view, float scale)
+        {
+            using (FlyoutForm form = new FlyoutForm())
+            {
+                form.view = view;
+                form.scale = scale;
+                int width = (int)Math.Round(WidthDip * scale);
+                int height = (int)Math.Round((form.ContentBottom() + form.FooterHeight()) * scale);
+                Bitmap bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(bitmap))
+                {
+                    g.Clear(Background);
+                    form.Draw(g, height / scale);
+                }
+                return bitmap;
+            }
+        }
+
         public void SetView(FlyoutView next)
         {
             view = next;
@@ -677,10 +1103,20 @@ namespace NetSwitch
             Activate();
         }
 
+        // A line's row: its name, then its meter, or where its apps went in the meter's place.
+        static int LineRowHeight(FlyoutLine line)
+        {
+            return 23 + (line.Note != null ? 14 : 6);
+        }
+
         // The body is a vertical stack: header, toggles, lines card, apps head, app rows.
         int LinesHeight()
         {
-            return 12 + LineHeight + (view.Second == null ? 0 : 10 + LineHeight) + 12;
+            int height = 12;
+            if (view.Lines.Count == 0) height += 16;
+            for (int i = 0; i < view.Lines.Count; i++) height += (i > 0 ? LineGap : 0) + LineRowHeight(view.Lines[i]);
+            if (view.MoreLines > 0) height += LineGap + MoreHeight;
+            return height + 12;
         }
 
         int AppsTop()
@@ -770,13 +1206,18 @@ namespace NetSwitch
 
         static Color Tone(string tone)
         {
-            return tone == "ok" ? Green : tone == "error" ? Red : tone == "warning" ? Warning : Dim;
+            return tone == "ok" ? Green : tone == "error" || tone == "down" ? Red : tone == "warning" || tone == "warn" ? Warning : Dim;
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            Graphics g = e.Graphics;
+            Draw(e.Graphics, ClientSize.Height / scale);
+        }
+
+        // height: the flyout's height in logical pixels.
+        void Draw(Graphics g, float height)
+        {
             g.ScaleTransform(scale, scale);
             g.SmoothingMode = SmoothingMode.AntiAlias;
             // Whole logical pixels land on whole device pixels, so fills stay crisp.
@@ -803,18 +1244,25 @@ namespace NetSwitch
             else
             {
                 Tile(g, Pad, "routing", "Routing", view.RoutingWanted ? "On" : "Off", view.RoutingWanted, true);
-                Tile(g, Pad + TileWidth + 8, "combine", "Both lines", view.CanCombine ? view.CombineOn ? "Combining" : "Off" : "Set up a second connection", view.CombineOn, view.CanCombine);
+                Tile(g, Pad + TileWidth + 8, "combine", view.CombineName, view.CombineDetail, view.CombineOn, view.CanCombine);
                 Round(g, new RectangleF(Pad, LinesTop, Inner, LinesHeight()), 8, Card, Color.Transparent);
-                Line(g, view.Main, LinesTop + 12, Amber);
-                if (view.Second != null) Line(g, view.Second, LinesTop + 12 + LineHeight + 10, Cyan);
+                int y = LinesTop + 12;
+                if (view.Lines.Count == 0) Caption(g, "No line is set up yet", body, Dim, Pad + 12, y + 8, Inner - 24, StringAlignment.Near);
+                foreach (FlyoutLine line in view.Lines)
+                {
+                    Line(g, line, y);
+                    y += LineRowHeight(line) + LineGap;
+                }
+                if (view.MoreLines > 0) MoreLink(g, y);
                 AppsHead(g, AppsTop());
                 int top = RowsTop();
                 if (view.Apps.Count == 0) Caption(g, "No apps using the connection yet", body, Dim, Pad + 2, top + RowHeight / 2f, Inner - 4, StringAlignment.Near);
-                for (int i = 0; i < view.Apps.Count; i++) AppRow(g, view.Apps[i], top + i * (RowHeight + RowGap));
+                AppLayout layout = LayOutApps(g);
+                for (int i = 0; i < view.Apps.Count; i++) AppRow(g, view.Apps[i], top + i * (RowHeight + RowGap), layout);
             }
-            Footer(g, ContentBottom());
+            Footer(g, ContentBottom(), height);
             if (!windowEdge)
-                using (Pen edge = new Pen(Edge, 1)) g.DrawRectangle(edge, 0.5f, 0.5f, WidthDip - 1, ClientSize.Height / scale - 1);
+                using (Pen edge = new Pen(Edge, 1)) g.DrawRectangle(edge, 0.5f, 0.5f, WidthDip - 1, height - 1);
         }
 
         // A square toggle: glyph, then its name and state under it.
@@ -827,34 +1275,71 @@ namespace NetSwitch
             Caption(g, detail, small, on ? InkSoft : Dim, x + 12, TilesTop + 63.5f, TileWidth - 24, StringAlignment.Near);
         }
 
-        // One line in the lines card: swatch, name and details, speed on the right, meter under them.
-        void Line(Graphics g, FlyoutLine line, float y, Color color)
+        // One line in the lines card: its color, name and marks, what it is and
+        // how it is doing beside them, and its speed on the right (or its health,
+        // while it has a problem). Under them its meter, or where its apps went
+        // while it can't take them.
+        void Line(Graphics g, FlyoutLine line, float y)
         {
+            Color color = Palette[line.Color % Palette.Length];
             float middle = y + 8;
             float right = WidthDip - Pad - 12;
             float left = Pad + 12;
             Round(g, new RectangleF(left, middle - 4, 8, 8), 2, line.Healthy ? color : Dim, Color.Transparent);
-            Font speedFont = line.Healthy ? mono : small;
+            string reading = line.Healthy ? line.Speed : line.Health;
+            Font readingFont = line.Healthy && line.Speed != "Not measured" ? mono : small;
             // Measured widths place things; the boxes drawn into stay roomy,
             // because GDI+ trims against a wider estimate than the letters' own.
-            float speedWidth = Math.Min(140, Measure(g, line.Speed, speedFont));
-            Caption(g, line.Speed, speedFont, line.Healthy ? Color.White : Warning, right - 140, middle, 140, StringAlignment.Far);
+            float readingWidth = Math.Min(140, Measure(g, reading, readingFont));
+            Caption(g, reading, readingFont, line.Healthy ? Color.White : Tone(line.Tone), right - 140, middle, 140, StringAlignment.Far);
             float nameLeft = left + 16;
-            float room = right - speedWidth - 12 - nameLeft;
-            float nameWidth = Math.Min(room, Measure(g, line.Name, strong));
-            Caption(g, line.Name, strong, line.Healthy ? Color.White : Dim, nameLeft, middle, room, StringAlignment.Near);
-            // The model's title is the name with the ping after it; the ping
-            // joins the adapter details in the quieter text.
-            string ping = line.Title != null && line.Title.Length > line.Name.Length + 3 ? line.Title.Substring(line.Name.Length + 3) : "";
-            string detail = line.Detail ?? "";
-            if (ping.Length > 0) detail = detail.Length > 0 ? detail + " \u00b7 " + ping : ping;
-            float detailLeft = nameLeft + nameWidth + 8;
-            if (detail.Length > 0 && room - nameWidth - 8 > 12)
-                Caption(g, detail, small, Dim, detailLeft, middle, room - nameWidth - 8, StringAlignment.Near);
-            float cell = (Inner - 24 - 23 * 2) / 24f;
-            Color off = line.Healthy ? Unlit : UnlitDown;
-            for (int i = 0; i < 24; i++)
-                Round(g, new RectangleF(left + i * (cell + 2), y + 23, cell, 6), 1, i < line.Lit ? color : off, Color.Transparent);
+            float room = right - readingWidth - 12 - nameLeft;
+
+            List<string> marks = new List<string>();
+            if (line.Main) marks.Add("MAIN");
+            if (line.Metered) marks.Add("METERED");
+            float marksWidth = 0;
+            foreach (string mark in marks) marksWidth += 6 + Measure(g, mark, badge) + 10;
+            float nameRoom = Math.Max(40, room - marksWidth);
+            float nameWidth = Math.Min(nameRoom, Measure(g, line.Name, strong));
+            Caption(g, line.Name, strong, line.Healthy ? Color.White : Secondary, nameLeft, middle, nameRoom, StringAlignment.Near);
+            float x = nameLeft + nameWidth;
+            foreach (string mark in marks)
+            {
+                RectangleF box = new RectangleF(x + 6, middle - 7, Measure(g, mark, badge) + 10, 14);
+                if (box.Right > nameLeft + room) break;
+                Round(g, box, 4, Color.Transparent, Hairline);
+                Caption(g, mark, badge, Secondary, box.X, middle, box.Width, StringAlignment.Center);
+                x = box.Right;
+            }
+            float detailLeft = x + 8;
+            float detailRoom = nameLeft + room - detailLeft;
+            if (!string.IsNullOrEmpty(line.Detail) && detailRoom > 24)
+                Caption(g, line.Detail, small, Dim, detailLeft, middle, detailRoom, StringAlignment.Near);
+
+            if (line.Note != null)
+            {
+                Caption(g, line.Note, small, Secondary, left, y + 30, right - left, StringAlignment.Near);
+            }
+            else
+            {
+                float cell = (Inner - 24 - 23 * 2) / 24f;
+                Color off = line.Healthy ? Unlit : UnlitDown;
+                for (int i = 0; i < 24; i++)
+                    Round(g, new RectangleF(left + i * (cell + 2), y + 23, cell, 6), 1, i < line.Lit ? color : off, Color.Transparent);
+            }
+            notes.Add(new Hit { Bounds = new RectangleF(Pad, y - 5, Inner, LineRowHeight(line) + 10), Tip = line.Tip });
+        }
+
+        // Under the first lines, for the others: the window shows them all.
+        void MoreLink(Graphics g, float y)
+        {
+            string text = TrayModel.More(view.MoreLines);
+            float left = Pad + 12;
+            float middle = y + MoreHeight / 2f;
+            float width = Measure(g, text, small);
+            Button(g, new RectangleF(left - 6, middle - 11, width + 12, 22), new FlyoutAction { Key = "more" }, "See every line in Net Switch", !quitting, Card, false, 6);
+            Caption(g, text, small, quitting ? Faint : Accent, left, middle, width + 20, StringAlignment.Near);
         }
 
         void AppsHead(Graphics g, float y)
@@ -867,7 +1352,91 @@ namespace NetSwitch
             Caption(g, "See all", body, quitting ? Faint : Accent, right - 100, middle, 100, StringAlignment.Far);
         }
 
-        void AppRow(Graphics g, FlyoutApp app, float y)
+        // The app rows' columns, the same for every row so they line up.
+        sealed class AppLayout
+        {
+            // Each option's width in the compact control.
+            public float[] Widths;
+            // Where the control on the right starts.
+            public float ControlLeft;
+            // The name above its speed, when beside it would leave the name too little room.
+            public bool Stacked;
+        }
+
+        // The colored mark of an option: a dot for a line, a striped pill for Shared.
+        float MarkWidth(FlyoutOption option)
+        {
+            return option.Shared ? Math.Max(12, view.SharingColors.Count * 5) : 6;
+        }
+
+        AppLayout LayOutApps(Graphics g)
+        {
+            AppLayout layout = new AppLayout();
+            float right = WidthDip - Pad - 8;
+            layout.ControlLeft = right;
+            if (view.Options.Count >= 2)
+            {
+                if (view.CompactChoice)
+                {
+                    // Each option as wide as its caption in the bold face with the
+                    // mark beside it, so the control doesn't move when the choice
+                    // changes. Past the control's widest, which leaves the app's
+                    // name its room, the widest options give way first; a caption
+                    // that doesn't fit is shortened with "…".
+                    int count = view.Options.Count;
+                    float[] natural = new float[count];
+                    for (int i = 0; i < count; i++) natural[i] = Measure(g, view.Options[i].Label, smallStrong) + MarkWidth(view.Options[i]) + 5 + 14;
+                    float cap = WidestFitting(natural, (count == 2 ? MaxControl2 : MaxControl3) - 4 - 2 * (count - 1));
+                    layout.Widths = new float[count];
+                    float total = 4;
+                    for (int i = 0; i < count; i++)
+                    {
+                        layout.Widths[i] = Math.Min(cap, natural[i]);
+                        total += layout.Widths[i] + (i > 0 ? 2 : 0);
+                    }
+                    layout.ControlLeft = right - total;
+                }
+                else
+                {
+                    layout.ControlLeft = right - ChangeWidth(g) - 8 - ChosenWidth(g);
+                }
+            }
+            float nameLeft = Pad + 8 + 22 + 10;
+            float speedWidth = Measure(g, "999 KB/s", monoSmall);
+            layout.Stacked = layout.ControlLeft - 10 - speedWidth - 10 - nameLeft < MinNameRoom;
+            return layout;
+        }
+
+        // The largest width each option may take so that, with the narrower ones
+        // at their own width, they all add up to no more than room.
+        static float WidestFitting(float[] widths, float room)
+        {
+            float[] sorted = (float[])widths.Clone();
+            Array.Sort(sorted);
+            float used = 0;
+            for (int i = 0; i < sorted.Length; i++)
+            {
+                float even = (room - used) / (sorted.Length - i);
+                if (sorted[i] > even) return even;
+                used += sorted[i];
+            }
+            return float.MaxValue;
+        }
+
+        float ChangeWidth(Graphics g)
+        {
+            return Measure(g, "Change", body) + 12;
+        }
+
+        // The chosen line's pill beside Change, wide enough for any line's short name.
+        float ChosenWidth(Graphics g)
+        {
+            float widest = 0;
+            foreach (FlyoutOption option in view.Options) widest = Math.Max(widest, Measure(g, option.Label, small) + MarkWidth(option) + 5);
+            return Math.Min(MaxChosen, widest + 16);
+        }
+
+        void AppRow(Graphics g, FlyoutApp app, float y, AppLayout layout)
         {
             float middle = y + RowHeight / 2f;
             Round(g, new RectangleF(Pad, y, Inner, RowHeight), 6, Card, Color.Transparent);
@@ -876,50 +1445,114 @@ namespace NetSwitch
             Round(g, avatar, 5, Avatars[app.ColorIndex], Color.Transparent);
             Caption(g, app.Initial, letter, AvatarInk, avatar.X, middle, avatar.Width, StringAlignment.Center);
 
-            // The segmented control, sized by its captions; all are measured in
-            // the bold face so the control doesn't move when the choice changes.
-            float mainWidth = Measure(g, view.MainOption, smallStrong) + 16;
-            float cableWidth = view.CableOption == null ? 0 : Measure(g, view.CableOption, smallStrong) + 16;
-            float secondWidth = Measure(g, view.SecondOption, smallStrong) + 16;
-            float options = mainWidth + secondWidth + 2 + (view.CableOption == null ? 0 : cableWidth + 2);
-            float segmentRight = WidthDip - Pad - 8;
-            RectangleF segment = new RectangleF(segmentRight - (options + 4), middle - 11.5f, options + 4, 23);
-            Round(g, segment, 6, SegmentFill, Color.Transparent);
-            float x = segment.X + 2;
-            AppOption(g, app, "main", view.MainOption, new RectangleF(x, segment.Y + 2, mainWidth, 19), app.CanMove);
-            x += mainWidth + 2;
-            if (view.CableOption != null)
+            float control = layout.ControlLeft;
+            if (view.Options.Count >= 2 && view.CompactChoice)
             {
-                AppOption(g, app, "cable", view.CableOption, new RectangleF(x, segment.Y + 2, cableWidth, 19), app.CanMove);
-                x += cableWidth + 2;
+                RectangleF segment = new RectangleF(control, middle - 11.5f, WidthDip - Pad - 8 - control, 23);
+                Round(g, segment, 6, SegmentFill, Color.Transparent);
+                float x = segment.X + 2;
+                for (int i = 0; i < view.Options.Count; i++)
+                {
+                    AppOption(g, app, view.Options[i], new RectangleF(x, segment.Y + 2, layout.Widths[i], 19));
+                    x += layout.Widths[i] + 2;
+                }
+                if (!app.CanMove) notes.Add(new Hit { Bounds = segment, Tip = app.Name + " can’t be moved" });
             }
-            AppOption(g, app, "second", view.SecondOption, new RectangleF(x, segment.Y + 2, secondWidth, 19), app.CanSecond);
-            if (!app.CanMove) notes.Add(new Hit { Bounds = segment, Tip = app.Name + " can\u2019t be moved" });
+            else if (view.Options.Count >= 2)
+            {
+                // More lines than fit: what is chosen, and Change, which opens the window.
+                FlyoutOption chosen = view.Options.Find(delegate (FlyoutOption option) { return option.Value == app.Choice; }) ?? view.Options[0];
+                float changeWidth = ChangeWidth(g);
+                RectangleF pill = new RectangleF(control, middle - 11.5f, ChosenWidth(g), 23);
+                Round(g, pill, 6, SegmentFill, Color.Transparent);
+                MarkedCaption(g, chosen, chosen.Label, small, app.CanMove ? Secondary : Dim, pill);
+                notes.Add(new Hit { Bounds = pill, Tip = app.Name + ": " + chosen.Name });
+                float changeLeft = WidthDip - Pad - 8 - changeWidth;
+                if (app.CanMove)
+                {
+                    Button(g, new RectangleF(changeLeft, middle - 11, changeWidth, 22), new FlyoutAction { Key = "change:" + app.Path },
+                        "Choose the line for " + app.Name + " in Net Switch", !quitting, Card, false, 6);
+                    Caption(g, "Change", body, quitting ? Faint : Accent, changeLeft, middle, changeWidth, StringAlignment.Center);
+                }
+                else
+                {
+                    notes.Add(new Hit { Bounds = new RectangleF(changeLeft, middle - 11, changeWidth, 22), Tip = app.Name + " can’t be moved" });
+                }
+            }
 
-            float speedRight = segment.X - 10;
-            float speedWidth = Measure(g, app.Speed, monoSmall);
-            Caption(g, app.Speed, monoSmall, Dim, speedRight - 100, middle, 100, StringAlignment.Far);
             float nameLeft = left + 22 + 10;
-            Caption(g, app.Name, body, Color.White, nameLeft, middle, speedRight - speedWidth - 10 - nameLeft, StringAlignment.Near);
+            if (layout.Stacked)
+            {
+                float nameRoom = control - 10 - nameLeft;
+                Caption(g, app.Name, body, Color.White, nameLeft, middle - 7, nameRoom, StringAlignment.Near);
+                Caption(g, app.Speed, monoSmall, Dim, nameLeft, middle + 7.5f, nameRoom, StringAlignment.Near);
+            }
+            else
+            {
+                float speedRight = control - 10;
+                float speedWidth = Measure(g, app.Speed, monoSmall);
+                Caption(g, app.Speed, monoSmall, Dim, speedRight - 100, middle, 100, StringAlignment.Far);
+                Caption(g, app.Name, body, Color.White, nameLeft, middle, speedRight - speedWidth - 10 - nameLeft, StringAlignment.Near);
+            }
         }
 
-        // lane is the choice the option makes. Without the Cable option, the
-        // Cable caption stands for both "main" and "cable", which mean the same
-        // line then; pressing it sends the app's own choice, so a kept app stays kept.
-        void AppOption(Graphics g, FlyoutApp app, string lane, string caption, RectangleF bounds, bool enabled)
+        void Mark(Graphics g, FlyoutOption option, float x, float middle)
         {
-            bool selected = app.Choice == lane || (lane == "main" && app.Choice == "cable" && view.CableOption == null);
-            string send = selected ? app.Choice : lane;
-            FlyoutAction action = new FlyoutAction { Key = "app:" + app.Path + ":" + lane, Endpoint = "/api/app-lane",
-                Body = new Dictionary<string, object> { { "path", app.Path }, { "lane", send } } };
-            Button(g, bounds, action, "Move " + app.Name + " to " + caption, enabled && !quitting && pending == null, selected ? SelectedFill : SegmentFill, false, 4);
-            Color color = selected ? enabled ? Color.White : Dim : enabled ? Dim : Faint;
-            Caption(g, caption, selected ? smallStrong : small, color, bounds.X, bounds.Y + bounds.Height / 2, bounds.Width, StringAlignment.Center);
+            if (!option.Shared)
+            {
+                using (SolidBrush dot = new SolidBrush(Palette[option.Color % Palette.Length])) g.FillEllipse(dot, x, middle - 3, 6, 6);
+                return;
+            }
+            // A stripe per line that shares, like the window's Shared mark.
+            RectangleF pill = new RectangleF(x, middle - 3, MarkWidth(option), 6);
+            List<int> colors = view.SharingColors.Count > 0 ? view.SharingColors : new List<int> { 0 };
+            GraphicsState state = g.Save();
+            using (GraphicsPath path = RoundPath(pill, 3)) g.SetClip(path);
+            float step = pill.Width / colors.Count;
+            for (int i = 0; i < colors.Count; i++)
+                using (SolidBrush stripe = new SolidBrush(Palette[colors[i] % Palette.Length])) g.FillRectangle(stripe, pill.X + i * step, pill.Y, step + 0.5f, pill.Height);
+            g.Restore(state);
         }
 
-        void Footer(Graphics g, int y)
+        // One option of an app's compact control. The chosen one shows its line's
+        // mark, as the window's keys do; pressing it changes nothing.
+        void AppOption(Graphics g, FlyoutApp app, FlyoutOption option, RectangleF bounds)
         {
-            float height = ClientSize.Height / scale - y;
+            bool selected = app.Choice == option.Value;
+            bool enabled = !selected && app.CanMove && !quitting && pending == null;
+            FlyoutAction action = new FlyoutAction
+            {
+                Key = "app:" + app.Path + ":" + (option.Value ?? ""),
+                Endpoint = "/api/app-line",
+                Body = new Dictionary<string, object> { { "path", app.Path }, { "line", option.Send } },
+            };
+            string hint = option.Shared ? "Share " + app.Name + "’s new connections between the lines" : "Put " + app.Name + " on the " + option.Name;
+            Button(g, bounds, action, hint, enabled, selected ? SelectedFill : SegmentFill, false, 4);
+            Font font = selected ? smallStrong : small;
+            Color color = selected ? app.CanMove ? Color.White : Dim : enabled ? Dim : Faint;
+            if (selected) MarkedCaption(g, option, option.Label, font, color, bounds);
+            else Caption(g, option.Label, font, color, bounds.X + 7, bounds.Y + bounds.Height / 2, bounds.Width - 14, StringAlignment.Center);
+        }
+
+        // An option's mark and caption, centered together in bounds; a caption
+        // too long for what is left beside the mark is shortened with "…".
+        void MarkedCaption(Graphics g, FlyoutOption option, string text, Font font, Color color, RectangleF bounds)
+        {
+            float markWidth = MarkWidth(option);
+            float room = bounds.Width - 14 - markWidth - 5;
+            float textWidth = Measure(g, text, font);
+            bool fits = textWidth <= room;
+            float shown = fits ? textWidth : room;
+            float middle = bounds.Y + bounds.Height / 2;
+            float start = bounds.X + (bounds.Width - (markWidth + 5 + shown)) / 2;
+            Mark(g, option, start, middle);
+            // A roomy box when it fits, because GDI+ trims against a wider estimate than the letters' own.
+            Caption(g, text, font, color, start + markWidth + 5, middle, fits ? textWidth + 12 : room, StringAlignment.Near);
+        }
+
+        void Footer(Graphics g, int y, float flyoutHeight)
+        {
+            float height = flyoutHeight - y;
             using (SolidBrush brush = new SolidBrush(FooterFill)) g.FillRectangle(brush, 0, y, WidthDip, height);
             using (Pen pen = new Pen(Stroke)) g.DrawLine(pen, 0, y + 0.5f, WidthDip, y + 0.5f);
             // While quitting, the health reading no longer applies.
@@ -1160,7 +1793,7 @@ namespace NetSwitch
             if (disposing)
             {
                 tips.Dispose(); title.Dispose(); label.Dispose(); strong.Dispose(); body.Dispose();
-                smallStrong.Dispose(); small.Dispose(); letter.Dispose(); mono.Dispose(); monoSmall.Dispose();
+                smallStrong.Dispose(); small.Dispose(); badge.Dispose(); letter.Dispose(); mono.Dispose(); monoSmall.Dispose();
             }
             base.Dispose(disposing);
         }
@@ -1175,6 +1808,7 @@ namespace NetSwitch
         public const int WM_COMMAND = 0x0111;
         public const int NIN_SELECT = 0x0400;
         public const int NIN_KEYSELECT = 0x0401;
+        public const int NIN_BALLOONUSERCLICK = 0x0405;
         public const int NIM_ADD = 0;
         public const int NIM_MODIFY = 1;
         public const int NIM_DELETE = 2;
@@ -1185,10 +1819,12 @@ namespace NetSwitch
         public const int NIF_TIP = 0x04;
         public const int NIF_INFO = 0x10;
         public const int NIF_SHOWTIP = 0x80;
+        public const int NIIF_INFO = 0x01;
         public const int NIIF_WARNING = 0x02;
         public const int NOTIFYICON_VERSION_4 = 4;
         public const int MF_STRING = 0x0000;
         public const int MF_GRAYED = 0x0001;
+        public const int MF_CHECKED = 0x0008;
         public const int MF_SEPARATOR = 0x0800;
         public const int TPM_LEFTALIGN = 0x0000;
         public const int TPM_RIGHTBUTTON = 0x0002;
@@ -1294,6 +1930,7 @@ namespace NetSwitch
         public Action Selected;
         public Action<int, int> MenuRequested;
         public Action TaskbarRestarted;
+        public Action BalloonClicked;
         public Action<int> Command;
 
         public TrayWindow(string caption)
@@ -1322,6 +1959,10 @@ namespace NetSwitch
                 else if (notification == Native.WM_CONTEXTMENU)
                 {
                     if (MenuRequested != null) MenuRequested((short)(anchor & 0xFFFF), (short)((anchor >> 16) & 0xFFFF));
+                }
+                else if (notification == Native.NIN_BALLOONUSERCLICK)
+                {
+                    if (BalloonClicked != null) BalloonClicked();
                 }
                 return;
             }
@@ -1400,12 +2041,18 @@ namespace NetSwitch
 
         public void Balloon(string title, string text)
         {
-            if (!added) return;
+            Balloon(title, text, true);
+        }
+
+        // A notification from the icon; Windows 10 and 11 show it as a toast. False when it couldn't be shown.
+        public bool Balloon(string title, string text, bool warning)
+        {
+            if (!added) return false;
             Native.NOTIFYICONDATA data = Data(Native.NIF_INFO);
             data.szInfoTitle = title;
             data.szInfo = text;
-            data.dwInfoFlags = Native.NIIF_WARNING;
-            Native.Shell_NotifyIcon(Native.NIM_MODIFY, ref data);
+            data.dwInfoFlags = warning ? Native.NIIF_WARNING : Native.NIIF_INFO;
+            return Native.Shell_NotifyIcon(Native.NIM_MODIFY, ref data);
         }
 
         public void Remove()
@@ -1470,6 +2117,7 @@ namespace NetSwitch
         const int MenuQuit = 2;
         const int MenuRemove = 3;
         const int MenuUpdate = 4;
+        const int MenuNotifications = 5;
 
         sealed class Server
         {
@@ -1484,6 +2132,7 @@ namespace NetSwitch
 
         readonly string root;
         readonly string serverFile;
+        readonly string settingsFile;
         readonly string logFile;
         // Whether this icon watches the folder launch.ps1 uses, so running the
         // launcher starts the Net Switch it watches. False for test mode.
@@ -1496,6 +2145,8 @@ namespace NetSwitch
         readonly FlyoutForm flyout;
         readonly JavaScriptSerializer json = new JavaScriptSerializer();
         readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+        readonly EventNotifier notifier = new EventNotifier();
+        readonly TraySettings settings;
         readonly int iconSize;
 
         // What data/server.json said last.
@@ -1524,6 +2175,8 @@ namespace NetSwitch
             this.logFile = logFile;
             this.canLaunch = canLaunch;
             serverFile = Path.Combine(dataDir, "server.json");
+            settingsFile = Path.Combine(dataDir, "tray-settings.json");
+            settings = TraySettings.Load(settingsFile);
             window = new TrayWindow("Net Switch tray (" + Path.GetFileName(dataDir) + ")");
             icon = new TrayIcon(window);
             HttpClientHandler handler = new HttpClientHandler();
@@ -1546,6 +2199,8 @@ namespace NetSwitch
             window.Selected = delegate { Guard(ToggleFlyout); };
             window.MenuRequested = delegate (int x, int y) { Guard(delegate { ShowMenu(x, y); }); };
             window.TaskbarRestarted = delegate { Guard(icon.Restore); };
+            // A click on a notification opens Net Switch, where the lines are.
+            window.BalloonClicked = delegate { Guard(OpenFromClick); };
             window.Command = delegate (int id) { Guard(delegate { OnCommand(id); }); };
         }
 
@@ -1618,7 +2273,7 @@ namespace NetSwitch
                 FileState file = ReadServerFile(out current);
                 if (file == FileState.Missing)
                 {
-                    flyout.SetView(FlyoutModel.Unavailable("Net Switch isn\u2019t running."));
+                    flyout.SetView(FlyoutModel.Unavailable("Net Switch isn’t running."));
                     // Net Switch deletes the file when it quits. It must be gone on two
                     // readings in a row, so a restart that rewrites it isn't taken for a quit.
                     missing += 1;
@@ -1646,9 +2301,9 @@ namespace NetSwitch
                     if ((DateTime.UtcNow - quitStarted).TotalMilliseconds <= QuitDeadlineMs) return;
                     quitting = false;
                     Log("Net Switch didn't quit within " + (QuitDeadlineMs / 1000) + " seconds");
-                    actionError = "Net Switch didn\u2019t quit. Open it and try again.";
+                    actionError = "Net Switch didn’t quit. Open it and try again.";
                     flyout.Feedback(pendingAction, actionError, false);
-                    icon.Balloon("Net Switch didn\u2019t quit", "Open Net Switch and press Quit Net Switch there.");
+                    icon.Balloon("Net Switch didn’t quit", "Open Net Switch and press Quit Net Switch there.");
                 }
                 if (state != null)
                 {
@@ -1659,9 +2314,11 @@ namespace NetSwitch
                     // An older in-flight poll must not clear feedback for a new action.
                     if (canFinishAction && !actionSending && pollVersion == actionVersion) pendingAction = null;
                     flyout.Feedback(pendingAction, actionError, quitting);
+                    notifier.Read(EventNotifier.FromState(state), settings.LineNotifications);
+                    Notify(notifier.Next(DateTime.UtcNow));
                     return;
                 }
-                flyout.SetView(FlyoutModel.Unavailable("Net Switch isn\u2019t responding. Open it to reconnect."));
+                flyout.SetView(FlyoutModel.Unavailable("Net Switch isn’t responding. Open it to reconnect."));
                 // A process that is gone can't answer again, so the tray says so at
                 // once; one that is still there may only be busy for a moment.
                 bool running = ProcessIsRunning(server);
@@ -1679,12 +2336,20 @@ namespace NetSwitch
             catch (Exception error)
             {
                 Log("reading failed: " + error.Message);
-                flyout.SetView(FlyoutModel.Unavailable("Couldn\u2019t read Net Switch. Open it to reconnect."));
+                flyout.SetView(FlyoutModel.Unavailable("Couldn’t read Net Switch. Open it to reconnect."));
             }
             finally
             {
                 polling = false;
             }
+        }
+
+        // A line event as a notification. The log keeps it too, so a missed one can be found.
+        void Notify(Notice notice)
+        {
+            if (notice == null) return;
+            bool shown = icon.Balloon(notice.Title, notice.Text, notice.Warning);
+            Log((shown ? "notified: " : "could not notify: ") + notice.Text);
         }
 
         FileState ReadServerFile(out Server read)
@@ -1826,7 +2491,9 @@ namespace NetSwitch
 
         void FlyoutRequested(FlyoutAction action)
         {
-            if (action.Key == "open" || action.Key == "all")
+            // The window has what the flyout leaves out: every line, every app,
+            // and the choice of line when there are too many for the flyout.
+            if (action.Key == "open" || action.Key == "all" || action.Key == "more" || action.Key.StartsWith("change:", StringComparison.Ordinal))
             {
                 flyout.Hide();
                 OpenFromClick();
@@ -1854,7 +2521,7 @@ namespace NetSwitch
             }
             catch (Exception error)
             {
-                failure = "Couldn\u2019t reach Net Switch. Open it to reconnect.";
+                failure = "Couldn’t reach Net Switch. Open it to reconnect.";
                 Log("flyout " + action.Endpoint + " failed: " + error.Message);
             }
             finally
@@ -1898,7 +2565,7 @@ namespace NetSwitch
                     }
                     catch (ArgumentException) { }
                     catch (InvalidOperationException) { }
-                    return "Couldn\u2019t apply that change (HTTP " + ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture) + ").";
+                    return "Couldn’t apply that change (HTTP " + ((int)response.StatusCode).ToString(CultureInfo.InvariantCulture) + ").";
                 }
             }
         }
@@ -2018,7 +2685,7 @@ namespace NetSwitch
             catch (Exception error)
             {
                 Log("could not open Net Switch: " + error.Message);
-                icon.Balloon("Net Switch didn\u2019t open", "Open it from the Net Switch shortcut on the desktop.");
+                icon.Balloon("Net Switch didn’t open", "Open it from the Net Switch shortcut on the desktop.");
             }
         }
 
@@ -2035,7 +2702,9 @@ namespace NetSwitch
                 if (update != null && reachable && !quitting)
                     Native.AppendMenu(menu, Native.MF_STRING, (IntPtr)MenuUpdate, "Download Net Switch " + update[0]);
                 Native.AppendMenu(menu, Native.MF_SEPARATOR, IntPtr.Zero, null);
-                if (quitting) Native.AppendMenu(menu, Native.MF_GRAYED, (IntPtr)MenuQuit, "Quitting\u2026");
+                Native.AppendMenu(menu, settings.LineNotifications ? Native.MF_CHECKED : Native.MF_STRING, (IntPtr)MenuNotifications, "Show line notifications");
+                Native.AppendMenu(menu, Native.MF_SEPARATOR, IntPtr.Zero, null);
+                if (quitting) Native.AppendMenu(menu, Native.MF_GRAYED, (IntPtr)MenuQuit, "Quitting…");
                 else if (Answering()) Native.AppendMenu(menu, Native.MF_STRING, (IntPtr)MenuQuit, "Quit Net Switch");
                 // Nothing left to quit: the icon itself can go.
                 else Native.AppendMenu(menu, Native.MF_STRING, (IntPtr)MenuRemove, "Remove this icon");
@@ -2067,6 +2736,22 @@ namespace NetSwitch
             else if (id == MenuQuit) Quit();
             else if (id == MenuRemove) Exit();
             else if (id == MenuUpdate) DownloadUpdate();
+            else if (id == MenuNotifications) ToggleNotifications();
+        }
+
+        // Kept in tray-settings.json, so the choice holds after a restart.
+        void ToggleNotifications()
+        {
+            settings.LineNotifications = !settings.LineNotifications;
+            Log(settings.LineNotifications ? "line notifications turned on" : "line notifications turned off");
+            try
+            {
+                settings.Save(settingsFile);
+            }
+            catch (Exception error)
+            {
+                Log("could not save the tray settings: " + error.Message);
+            }
         }
 
         // The installer downloads in the person's own browser, as from the
@@ -2116,10 +2801,10 @@ namespace NetSwitch
             if (accepted != false || exiting) return;
             quitting = false;
             Log("quit was not accepted");
-            actionError = "Net Switch didn\u2019t quit. Open it and try again.";
+            actionError = "Net Switch didn’t quit. Open it and try again.";
             flyout.Feedback(null, actionError, false);
             Render(before);
-            icon.Balloon("Net Switch didn\u2019t quit", "Open Net Switch and press Quit Net Switch there.");
+            icon.Balloon("Net Switch didn’t quit", "Open Net Switch and press Quit Net Switch there.");
         }
 
         // True when Net Switch quit, false when it refused or isn't there, null

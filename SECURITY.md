@@ -29,8 +29,8 @@ Only the latest release gets security fixes.
   byte counters and the list of TCP connections, turns on Windows' byte counts
   for connections that go around routing, and reports them to the server. It
   also watches for adapter, address and route changes and reads the Wi-Fi
-  policy. Its `probe` mode can open a TCP connection to a given IPv4 address
-  through a given adapter; failover doesn't use it yet.
+  policy. Its `probe` mode opens a TCP connection to a test address through
+  one adapter, for the line checks described below.
 - **The window and the tray icon** run as you, not as administrator. The tray
   icon is Net Switch's own small program (`tray\NetSwitchTray.exe`, built from
   `lib\tray.cs` in this repository with the C# compiler that comes with
@@ -38,6 +38,15 @@ Only the latest release gets security fixes.
   opens the window in your browser (or runs `launch.ps1` when Net Switch isn't
   running), and its update offer opens only installer links from this
   project's GitHub releases.
+
+- **Start with Windows**, when you turn it on, creates two scheduled tasks in a
+  `Net Switch` folder of the Task Scheduler. **Server** starts the server as
+  administrator without a permission prompt; it has no trigger of its own, and
+  `launch.ps1` runs it when Net Switch opens. **Sign-in** runs `launch.ps1` as
+  you when you sign in. Only an installed copy in Program Files can create
+  them, since the server task runs that copy's files as administrator and only
+  administrators can change them there. Turning it off, or uninstalling,
+  deletes both tasks.
 
 The window and tray talk to the server with a random key made at each start.
 It is saved in `%LOCALAPPDATA%\Net Switch\server.json`, readable by your
@@ -49,10 +58,12 @@ single-user PC; it doesn't try to protect one Windows user from another.
 
 Only when you press the buttons that offer them:
 
-- the priority (interface metric) of your second connection, so Windows keeps
-  using the cable when Net Switch is off;
-- the `fMinimizeConnections` policy, so Windows keeps Wi-Fi connected while the
+- the priority (interface metric) of your other lines, so Windows keeps using
+  the main line when Net Switch is off;
+- the `fMinimizeConnections` policy, so Windows keeps Wi-Fi connected while a
   cable is plugged in.
+
+**Start with Windows** adds the two scheduled tasks described above.
 
 Before changing either one, it saves how it was in
 `%ProgramData%\Net Switch\windows-undo.json`. At each start the server makes
@@ -74,13 +85,16 @@ says which Net Switch version is asking, and GitHub sees your public address,
 as with any request. It only reads the answer: Net Switch never downloads or
 runs anything by itself. A newer release is offered in the window, and the
 installer downloads in your browser like any other file. Turn this off with
-**Check for updates** at the bottom of the window.
+**Check for updates** in the window's settings.
 
-**Connectivity checks** through each line while routing is on with two
-lines: every 30 seconds while the line is healthy, more often after a failure.
-Each is an HTTPS request to `1.1.1.1` (Cloudflare), or to `8.8.8.8` (Google)
-if that fails (both at once after a failed check). They carry nothing about
-you, though like any request they show those companies your public addresses.
+**Connectivity checks** through each line while routing is on with two lines
+or more. Every 15 seconds the helper opens a TCP connection to `1.1.1.1`
+(Cloudflare) or `8.8.8.8` (Google) from that line and closes it without
+sending anything. When that fails, an HTTPS request to the same addresses
+confirms it, every 5 seconds until the line passes (both at once while in
+doubt). They carry nothing about you, though like any request they show those
+companies your public addresses. You can change the addresses in the window's
+settings; a line that has reached its data cap isn't checked.
 
 ## Bug reports and logs
 

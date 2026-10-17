@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { LineHealth, MIN_POLL_GAP_MS, ROUTE_CONFIRM_MS, ROUTE_STALE_MS } from '../lib/line-health.mjs';
+import { LineHealth, MIN_POLL_GAP_MS, PASS_WAIT_MS, ROUTE_STALE_MS } from '../lib/line-health.mjs';
 
 // A clock that moves one second per poll, like the server's poll loop.
 function clock(start = 1_000_000) {
@@ -169,46 +169,84 @@ test('route misses from before an address outage do not add up with one new miss
   assert.equal(health.check(true, time.tick()), false);
 });
 
-test('the line is shaky after a missed poll, and after a route reading without a default route', () => {
+// A line that was down for lack of an address, polled once more with it back.
+function returning({ tested }) {
   const health = new LineHealth();
   const time = clock();
-  health.check(true, time.now);
-  assert.equal(health.shaky(time.now), false);
-  health.check(false, time.tick());
-  assert.equal(health.shaky(time.now), true);
-  health.check(true, time.tick());
-  health.noteRoute(true, time.tick());
-  assert.equal(health.shaky(time.now), false);
-  // One reading without a route is not yet a drop, but it is not steady either.
-  health.noteRoute(false, time.tick());
-  assert.equal(health.up, true);
-  assert.equal(health.shaky(time.now), true);
-  health.noteRoute(true, time.tick());
-  assert.equal(health.shaky(time.now), false);
+  health.check(true, time.now, { tested });
+  health.check(false, time.tick(), { tested });
+  health.check(false, time.tick(), { tested });
+  assert.equal(health.up, false);
+  const back = time.tick();
+  const up = health.check(true, back, { tested });
+  return { health, time, back, up };
+}
+
+test('while lines are tested, a line whose address returns stays down until a test passes', () => {
+  const { health, time, back, up } = returning({ tested: true });
+  assert.equal(up, false);
+  assert.equal(health.reason, 'checking');
+  assert.equal(health.inDoubt(), true);
+  assert.equal(health.check(true, time.tick(), { tested: true }), false);
+  health.noteProbe(true, back + 500);
+  assert.equal(health.check(true, time.tick(), { tested: true }), true);
+  assert.equal(health.reason, null);
+  assert.equal(health.inDoubt(), false);
 });
 
-test('just after the address returns the line is not steady until a route reading confirms it, or ten seconds pass', () => {
+test('without tests, a line is back at the first poll with an address', () => {
+  const { health, up } = returning({ tested: false });
+  assert.equal(up, true);
+  assert.equal(health.reason, null);
+});
+
+test('a returning line whose tests fail stays down, and three failures make it offline', () => {
+  const { health, time, back } = returning({ tested: true });
+  for (let i = 1; i <= 3; i += 1) health.noteProbe(false, back + i * 5000);
+  assert.equal(health.offline, true);
+  // Long after the wait for a first pass, failures still keep it down.
+  assert.equal(health.check(true, time.tick(PASS_WAIT_MS * 2), { tested: true }), false);
+  assert.equal(health.reason, 'no internet');
+});
+
+test('a returning line is trusted on its address once no test could say anything for a while', () => {
+  const { health, back } = returning({ tested: true });
+  // Every test came back "couldn't be run".
+  health.noteProbe(null, back + 5000);
+  assert.equal(health.check(true, back + PASS_WAIT_MS - 1000, { tested: true }), false);
+  assert.equal(health.check(true, back + PASS_WAIT_MS, { tested: true }), true);
+});
+
+test('one failed test, then tests that can’t run, doesn’t leave a returning line checking forever', () => {
+  const { health, back } = returning({ tested: true });
+  health.noteProbe(false, back + 5000);
+  assert.equal(health.check(true, back + 5000 + PASS_WAIT_MS - 1000, { tested: true }), false);
+  assert.equal(health.reason, 'checking');
+  // Thirty seconds after the last test that answered, it goes on without one.
+  assert.equal(health.check(true, back + 5000 + PASS_WAIT_MS, { tested: true }), true);
+});
+
+test('a routing restart keeps a returning line waiting for its first passing test', () => {
+  const { health, time, back } = returning({ tested: true });
+  health.restartKeeping({ offline: health.offline, awaitingPass: health.awaitingPass }, back + 1000);
+  assert.equal(health.check(true, time.tick(2000), { tested: true }), false);
+  assert.equal(health.reason, 'checking');
+  health.noteProbe(true, time.tick());
+  assert.equal(health.check(true, time.tick(), { tested: true }), true);
+});
+
+test('a single poll without an address is a glitch and asks for no test afterwards', () => {
   const health = new LineHealth();
   const time = clock();
-  health.check(true, time.now);
-  health.check(false, time.tick());
-  health.check(false, time.tick());
-  const back = time.tick();
-  health.check(true, back);
-  assert.equal(health.shaky(back), true);
-  assert.equal(health.shaky(time.tick(5000)), true);
-  // No reading ever arrives (the reads keep failing): it goes on without one.
-  assert.equal(health.shaky(back + ROUTE_CONFIRM_MS + 1), false);
+  health.check(true, time.now, { tested: true });
+  health.check(false, time.tick(), { tested: true });
+  assert.equal(health.check(true, time.tick(), { tested: true }), true);
+  assert.equal(health.awaitingPass, false);
+});
 
-  const confirmed = new LineHealth();
-  const t = clock();
-  confirmed.check(true, t.now);
-  confirmed.check(false, t.tick());
-  confirmed.check(false, t.tick());
-  const returned = t.tick();
-  confirmed.check(true, returned);
-  confirmed.noteRoute(true, returned + 500);
-  assert.equal(confirmed.shaky(returned + 600), false);
+test('the first poll after a reset never waits for a test', () => {
+  const health = new LineHealth();
+  assert.equal(health.check(true, 0, { tested: true }), true);
 });
 
 test('a route read that started before the address came back is ignored, whenever it ends', () => {

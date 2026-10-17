@@ -6,7 +6,43 @@ change behavior.
 
 ## [Unreleased]
 
-- ARM64 PCs now get a native build; an x64 copy on an ARM64 PC moves to it with the next update.
+## [0.3.0] - 2026-10-17
+
+To update, use the update offer in Net Switch or download the installer below
+and run it: `x64` for Intel and AMD PCs, `arm64` for ARM64 PCs on Windows 11.
+It updates Net Switch in place and keeps your settings.
+
+- **Any number of lines, and any adapter as the main one.** A line can be a
+  cable, built-in Wi-Fi, a USB Wi-Fi adapter or a tethered phone, and the
+  main line no longer has to be a cable. Add, rename, reorder and remove lines
+  in the window. Your cable and second connection from 0.2.0 become your first
+  two lines, and every app keeps its line.
+- **Combining by speed or by hand.** **Auto** gives each line a share of new
+  connections that follows its measured speed; **Manual** lets you set the
+  split with sliders.
+- **Gentle failback.** When a line comes back, new connections go back to it,
+  and nothing that is working gets cut off. Connections that moved while it was
+  down stay until they end, and **Reconnect** moves an app's back at once. A
+  line whose address comes back now has to pass an internet test before it's
+  trusted again, and a line that is busy uploading no longer counts as dead
+  when it misses a test.
+- **Phone data control.** Mark a line as metered to count what it uses, keep it
+  for the apps you choose, and give it a daily or monthly cap (from the day
+  your plan renews). Once the cap is reached, its apps use your other lines
+  until it starts over.
+- **Add an app** chooses a line for an app from the Start menu before it has
+  ever run, and an app's line now stays when it updates itself into a new
+  version folder (Discord, Slack, JetBrains IDEs, Store apps).
+- **Start with Windows**, in the window's new **Settings**, starts Net Switch
+  when you sign in, and stops the administrator prompt each time it starts.
+  **Check for updates** moved there too, along with the test sites for the
+  line checks.
+- IPv6 is now routed while every line has it; otherwise apps keep using IPv4
+  as before.
+- Line checks are lighter: a tiny connection every 15 seconds, and a full
+  HTTPS test only when that fails.
+- ARM64 PCs (Windows 11) now get a native build. An x64 copy running on an
+  ARM64 PC is offered it at its next update.
 - The tray icon is now a small program of its own instead of a PowerShell
   script compiled at every start: it appears in under a second instead of
   about four, and uses about half the memory (around 45 MB instead of 97 MB).
@@ -16,6 +52,14 @@ change behavior.
   every few seconds, through its native helper. That took its steady
   background CPU use from about 0.4 of a core to almost nothing, and the
   scans that sometimes hung for 20 seconds are gone.
+- The tray shows any number of lines: a row of the icon for each of the first
+  three, and in its panel each line's speed, health, Main and Metered marks,
+  and where a down line's apps went. Apps get a line choice right in the
+  panel when there are up to three choices, and a **Change** link otherwise.
+- Line notifications: Windows tells you when a line goes down, comes back,
+  uses up its data cap or can be used again. A flapping line notifies at most
+  every 30 seconds. Turn them off with **Show line notifications** in the
+  tray icon's right-click menu.
 
 ## [0.2.0] - 2026-10-17
 
@@ -65,6 +109,7 @@ First public release.
 - Windows installer that bundles Node.js and sing-box, and offers to undo
   Net Switch's Windows setting changes when you uninstall.
 
-[Unreleased]: https://github.com/AyoubAchour/net-switch/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AyoubAchour/net-switch/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.3.0
 [0.2.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.2.0
 [0.1.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.1.0
