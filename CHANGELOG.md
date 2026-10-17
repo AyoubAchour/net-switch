@@ -6,6 +6,12 @@ change behavior.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
+To update, use the update offer in Net Switch or download the installer below
+and run it: `x64` for Intel and AMD PCs, `arm64` for ARM64 PCs on Windows 11.
+It updates Net Switch in place and keeps your settings.
+
 - **Any number of lines, and any adapter as the main one.** A line can be a
   cable, built-in Wi-Fi, a USB Wi-Fi adapter or a tethered phone, and the
   main line no longer has to be a cable. Add, rename, reorder and remove lines
@@ -103,6 +109,7 @@ First public release.
 - Windows installer that bundles Node.js and sing-box, and offers to undo
   Net Switch's Windows setting changes when you uninstall.
 
-[Unreleased]: https://github.com/AyoubAchour/net-switch/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/AyoubAchour/net-switch/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.3.0
 [0.2.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.2.0
 [0.1.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.1.0
