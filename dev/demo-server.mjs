@@ -20,6 +20,8 @@
 //
 // POST /api/demo with the same options as JSON ({ "lines": 5, "overCap": true,
 // "update": true }) starts over without restarting the server.
+// POST /api/demo/line { "index": 2, "down": true } takes a line down or brings
+// it back without starting over (1 is the main line), with its event for the tray.
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
@@ -502,6 +504,15 @@ const actions = {
   'POST /api/quit': async () => ({ ok: true }),
   'POST /api/demo': async (options) => {
     reset(options);
+    return state();
+  },
+  'POST /api/demo/line': async ({ index, down }) => {
+    const line = lines[Number(index) - 1];
+    if (!line) throw clientError('There’s no line with that number.');
+    if (line.down !== Boolean(down)) {
+      line.down = Boolean(down);
+      addEvent(line.down ? 'down' : 'up', line, line.down ? `${line.label} is down: it doesn’t reach the internet.` : `${line.label} is back.`);
+    }
     return state();
   },
 };
