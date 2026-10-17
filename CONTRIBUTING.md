@@ -72,6 +72,10 @@ Git. There are no npm dependencies to install.
 - **Demo window.** `node dev/demo-server.mjs` serves the real window with
   made-up apps and traffic at `http://127.0.0.1:47841/#token=demo`. No
   administrator rights, no second connection. Good for UI work and screenshots.
+- **Tray pictures.** `node dev/render-tray.mjs` draws the tray's panel and icon
+  for each made-up state in `test\tray-states.mjs` (one line, four lines, a
+  line down, a capped line, combining, long names...) into `dist\tray-flyout`,
+  and prints each tooltip. Look at them after changing `lib\tray.cs`.
 - **Test mode.** `node server.mjs --dev-proxy` runs the real server and engine,
   but only routes traffic you send through its local proxy (the window's status
   shows the port). It keeps its files in `data-test\` and uses other ports, so it can
@@ -88,7 +92,8 @@ npm test
 The tray tests compile `lib\tray.cs` with Windows PowerShell 5.1, and the
 tray program is built with the C# compiler that comes with Windows, so that
 code (and `lib\tray-main.cs`) must stay C# 5: no string interpolation, no `?.`,
-no expression-bodied members.
+no expression-bodied members. It references only what `tray.ps1` gives
+`Add-Type`, plus `System.dll`: no `System.Core`, so no `HashSet` or LINQ.
 
 When the tray program is built, `npm test` also starts it for a few seconds on
 a temporary folder, so an icon may appear briefly. When the native helper is

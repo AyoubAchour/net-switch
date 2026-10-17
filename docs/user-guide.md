@@ -203,23 +203,30 @@ Three settings on a line help with a phone's data plan:
 
 ## The tray icon
 
-The icon shows a row of cells per line, in that line's color. More lit cells
-mean more traffic on that line. The cells turn gray while routing is off.
+The icon shows a row of cells for each of your first three lines, in the
+lines' colors: the main line on top (amber), the next one below (cyan), then a
+third (violet). More lit cells mean more traffic on that line. A line that is
+down stays faint, and all the cells turn gray while routing is off.
 
-- **Point at it** to see each line's speed.
+- **Point at it** to see each line's speed, or what is wrong with it.
 - **Click it** for a small panel:
-  - **Routing** and **Combine** toggles;
-  - your lines and their speeds;
-  - the busiest apps, with their line;
+  - **Routing** and combining toggles (**Both lines**, or **Combine lines**
+    with more than two);
+  - your first three lines, each with its speed and health, and where its
+    apps went while it is down; with more lines, **+N more** opens the window;
+  - the three busiest apps. With up to three choices, pick an app's line right
+    there; with more, **Change** opens the window;
   - a health line, and **Quit**.
 
   Click again, press Esc or click elsewhere to close it. The square button at
   the top and **See all** open the full window.
-- **Right-click it** for **Open Net Switch**, the notifications switch, and
+- **Right-click it** for **Open Net Switch**, **Show line notifications** and
   **Quit Net Switch**.
 
-The icon also tells you when a line goes down, comes back, or reaches its cap.
-Turn that off in its right-click menu.
+When a line goes down, comes back, uses up its data cap or can be used again,
+Windows shows a notification. Clicking it opens Net Switch. A line that keeps
+dropping and coming back notifies at most every 30 seconds, with its latest
+news. To stop them, untick **Show line notifications**.
 
 If the icon first appears under the ^ arrow, drag it onto the taskbar once.
 
@@ -245,7 +252,7 @@ An installed copy uses three places:
 | Folder | What's in it |
 | --- | --- |
 | `C:\Program Files\Net Switch` | The program, with its own Node.js and sing-box |
-| `%LOCALAPPDATA%\Net Switch` | Your settings (`settings.json` and a backup), the data each line used (`usage.json`), `server.log`, `tray.log`, `launch.log` |
+| `%LOCALAPPDATA%\Net Switch` | Your settings (`settings.json` and a backup, and the tray's `tray-settings.json`), the data each line used (`usage.json`), `server.log`, `tray.log`, `launch.log` |
 | `%ProgramData%\Net Switch` | The Windows undo record and the engine's files and log (administrators only) |
 
 Settings from older versions, with a cable and a second connection, become two
