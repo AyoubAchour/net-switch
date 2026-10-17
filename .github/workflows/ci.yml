@@ -30,6 +30,11 @@ jobs:
           package-manager-cache: false
       - name: Build and test the native helper with the pinned Go
         run: ./scripts/build-helper.ps1
+      - name: Diagnose runner adapter visibility
+        run: |
+          Get-NetAdapter -IncludeHidden | Format-List Name,InterfaceGuid,Status,Virtual,Hidden,ConnectorPresent,DriverDescription
+          Get-NetIPInterface -AddressFamily IPv4 | Format-Table InterfaceAlias,InterfaceIndex,InterfaceMetric
+          ./helper/bin/netswitch-helper.exe network --once
       - name: Build the tray program with the C# compiler that comes with Windows
         run: ./scripts/build-tray.ps1
       - name: Test app, tray program and C# tray with Windows PowerShell 5.1
