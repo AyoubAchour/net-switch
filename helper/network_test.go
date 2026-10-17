@@ -138,7 +138,7 @@ func TestNetworkCoalescesBurstsAndStillRefreshesWhenQuiet(t *testing.T) {
 	}
 }
 
-func TestVanishedAdapterDoesNotDiscardSnapshot(t *testing.T) {
+func TestMissingIPInterfaceDoesNotDiscardSnapshot(t *testing.T) {
 	for _, gone := range []error{windows.ERROR_NOT_FOUND, windows.ERROR_FILE_NOT_FOUND} {
 		rows := []windows.MibIfRow2{{InterfaceIndex: 1, Type: 6}, {InterfaceIndex: 2, Type: 6}}
 		addresses := map[uint32][]string{1: {"192.168.1.2"}, 2: {"192.168.2.2"}}
@@ -150,8 +150,12 @@ func TestVanishedAdapterDoesNotDiscardSnapshot(t *testing.T) {
 			row.Metric = 25
 			return nil
 		})
-		if err != nil || len(line.Adapters) != 1 || line.Adapters[0].Index != 2 || len(line.DefaultRoutes) != 1 || line.DefaultRoutes[0].InterfaceAddress != "192.168.2.2" {
-			t.Fatalf("vanished (%v): %+v, %v", gone, line, err)
+		wantAdapters := 1
+		if errors.Is(gone, windows.ERROR_NOT_FOUND) {
+			wantAdapters = 2 // Missing IPv4 does not mean the device is gone.
+		}
+		if err != nil || len(line.Adapters) != wantAdapters || line.Adapters[len(line.Adapters)-1].Index != 2 || len(line.DefaultRoutes) != 1 || line.DefaultRoutes[0].InterfaceAddress != "192.168.2.2" {
+			t.Fatalf("missing IP interface (%v): %+v, %v", gone, line, err)
 		}
 	}
 	_, err := assembleNetwork(networkLine{}, []windows.MibIfRow2{{Type: 6}}, nil, nil, nil, nil, func(*windows.MibIpInterfaceRow) error {
@@ -159,6 +163,31 @@ func TestVanishedAdapterDoesNotDiscardSnapshot(t *testing.T) {
 	})
 	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("unexpected errors must still reject the partial scan: %v", err)
+	}
+}
+
+func TestVisibleAdapterWithoutIPv4(t *testing.T) {
+	// Runner evidence: the Mellanox VF has flags 0x05 and is Up, visible,
+	// and present, but GetIpInterfaceEntry(AF_INET) returns ERROR_NOT_FOUND.
+	row := windows.MibIfRow2{InterfaceIndex: 3, Type: 6, OperStatus: 1, InterfaceAndOperStatusFlags: 0x05}
+	copy(row.Alias[:], windows.StringToUTF16("Ethernet 4"))
+	copy(row.Description[:], windows.StringToUTF16("Mellanox ConnectX-4 Lx Virtual Ethernet Adapter"))
+	row.InterfaceGuid, _ = windows.GUIDFromString("{FDA85F00-AD70-425D-8F0C-D4E774F25F27}")
+	line, err := assembleNetwork(networkLine{}, []windows.MibIfRow2{row}, nil, nil, nil, nil, func(ipif *windows.MibIpInterfaceRow) error {
+		if ipif.Family != windows.AF_INET || ipif.InterfaceIndex != 3 {
+			t.Fatalf("unexpected IPv4 lookup: %+v", ipif)
+		}
+		return windows.ERROR_NOT_FOUND
+	})
+	if err != nil || len(line.Adapters) != 1 {
+		t.Fatalf("visible adapter without IPv4 was lost: %+v, %v", line, err)
+	}
+	adapter := line.Adapters[0]
+	if adapter.Alias != "Ethernet 4" || adapter.GUID != row.InterfaceGuid.String() || adapter.Status != "Up" || adapter.Virtual {
+		t.Fatalf("device identity changed: %+v", adapter)
+	}
+	if adapter.Gateway != nil || adapter.RouteMetric != nil || adapter.Metric != nil || adapter.AutomaticMetric != nil || adapter.IPv4 != nil || adapter.IPv4s == nil || len(adapter.IPv4s) != 0 || len(line.DefaultRoutes) != 0 {
+		t.Fatalf("adapter without IPv4 must have null IPv4 fields and an empty address list: %+v", line)
 	}
 }
 
