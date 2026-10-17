@@ -30,10 +30,7 @@ Only the latest release gets security fixes.
   for connections that go around routing, and reports them to the server. It
   also watches for adapter, address and route changes and reads the Wi-Fi
   policy. Its `probe` mode opens a TCP connection to a test address through
-  one adapter, for the line checks described below. Its `guard` mode
-  stops the routing engine if the server ends: it holds handles to both and
-  checks the engine's full path and start time, so a reused process id can't
-  point it at another program.
+  one adapter, for the line checks described below.
 - **The window and the tray icon** run as you, not as administrator. The tray
   icon is Net Switch's own small program (`tray\NetSwitchTray.exe`, built from
   `lib\tray.cs` in this repository with the C# compiler that comes with

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,6 +42,7 @@ type defaultRoute struct {
 }
 
 type networkLine struct {
+	ReadAt        int64            `json:"readAt"`
 	Adapters      []networkAdapter `json:"adapters"`
 	DefaultRoutes []defaultRoute   `json:"defaultRoutes"`
 	Policy        any              `json:"policy"`
@@ -113,9 +115,32 @@ func readPolicy() (any, error) {
 		return nil, err
 	}
 	defer key.Close()
+	return policyValue(key)
+}
+
+type policyKey interface {
+	GetIntegerValue(string) (uint64, uint32, error)
+	GetStringValue(string) (string, uint32, error)
+}
+
+func policyValue(key policyKey) (any, error) {
 	value, _, err := key.GetIntegerValue("fMinimizeConnections")
 	if errors.Is(err, registry.ErrNotExist) {
 		return "absent", nil
+	}
+	if errors.Is(err, registry.ErrUnexpectedType) {
+		text, kind, err := key.GetStringValue("fMinimizeConnections")
+		if err != nil {
+			return nil, err
+		}
+		if kind != registry.SZ {
+			return nil, registry.ErrUnexpectedType
+		}
+		number, err := strconv.ParseInt(strings.TrimSpace(text), 10, 32)
+		if err != nil {
+			return nil, err
+		}
+		return int32(number), nil
 	}
 	if err != nil {
 		return nil, err
@@ -123,12 +148,65 @@ func readPolicy() (any, error) {
 	return int32(value), nil
 }
 
-// The IP interface table includes hidden WAN miniports and Wi-Fi Direct
-// devices. NCF_HIDDEN is stored by each network driver's INF; checking it
-// keeps the same visible-device list as Get-NetAdapter without using WMI.
+const networkDeviceClass = "{4d36e972-e325-11ce-bfc1-08002be10318}"
+
+// GetIfTable2 also retains interfaces for removed PnP devices (for example
+// old Hyper-V NICs in an Azure VM image). Get-NetAdapter omits those even
+// with -IncludeHidden. Check PnP presence, not OperStatus: a present but
+// disabled adapter can report Not Present too and must remain in the list.
+// https://learn.microsoft.com/windows-hardware/drivers/install/determining-whether-a-device-is-plugged-in
+func phantomAdapterDrivers() (map[string]bool, error) {
+	guid, err := windows.GUIDFromString(networkDeviceClass)
+	if err != nil {
+		return nil, err
+	}
+	devices, err := windows.SetupDiGetClassDevsEx(&guid, "", 0, 0, 0, "")
+	if err != nil {
+		return nil, err
+	}
+	defer windows.SetupDiDestroyDeviceInfoList(devices)
+	phantoms := map[string]bool{}
+	for i := 0; ; i++ {
+		device, err := windows.SetupDiEnumDeviceInfo(devices, i)
+		if errors.Is(err, windows.ERROR_NO_MORE_ITEMS) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		var status, problem uint32
+		err = windows.CM_Get_DevNode_Status(&status, &problem, device.DevInst, 0)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, windows.CR_NO_SUCH_DEVINST) {
+			return nil, fmt.Errorf("read PnP device status: %w", err)
+		}
+		driver, err := windows.SetupDiGetDeviceRegistryProperty(devices, device, windows.SPDRP_DRIVER)
+		if errors.Is(err, windows.ERROR_INVALID_DATA) {
+			continue // An unconfigured device has no driver/interface to exclude.
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read phantom adapter driver: %w", err)
+		}
+		name, ok := driver.(string)
+		if !ok {
+			return nil, fmt.Errorf("unexpected adapter driver property type %T", driver)
+		}
+		phantoms[strings.ToLower(name)] = true
+	}
+	return phantoms, nil
+}
+
+// Exclude NCF_HIDDEN devices and phantom PnP devices. Do not require every
+// interface to have a PnP device: Hyper-V virtual ports can lack one.
 func hiddenAdapters() (map[string]bool, error) {
+	phantoms, err := phantomAdapterDrivers()
+	if err != nil {
+		return nil, err
+	}
 	result := map[string]bool{}
-	class, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}`, registry.ENUMERATE_SUB_KEYS)
+	class, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Control\Class\`+networkDeviceClass, registry.ENUMERATE_SUB_KEYS)
 	if err != nil {
 		return nil, err
 	}
@@ -146,13 +224,14 @@ func hiddenAdapters() (map[string]bool, error) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			fmt.Fprintf(os.Stderr, "can't read adapter class subkey %s: %v\n", name, err)
+			continue
 		}
 		guid, _, guidErr := key.GetStringValue("NetCfgInstanceId")
 		flags, _, flagsErr := key.GetIntegerValue("Characteristics")
 		key.Close()
-		if guidErr == nil && flagsErr == nil {
-			result[strings.ToLower(guid)] = flags&8 != 0
+		if guidErr == nil {
+			result[strings.ToLower(guid)] = (flagsErr == nil && flags&8 != 0) || phantoms[networkDeviceClass+`\`+name]
 		}
 	}
 	return result, nil
@@ -163,13 +242,14 @@ func routeIPv4(address *windows.RawSockaddrInet) string {
 }
 
 func readNetwork() (networkLine, error) {
-	line := networkLine{Adapters: []networkAdapter{}, DefaultRoutes: []defaultRoute{}}
+	line := networkLine{ReadAt: time.Now().UnixMilli(), Adapters: []networkAdapter{}, DefaultRoutes: []defaultRoute{}}
 	var err error
 	line.Policy, err = readPolicy()
 	if err != nil {
-		return line, fmt.Errorf("read Wi-Fi policy: %w", err)
+		line.Policy = "unknown"
+		fmt.Fprintf(os.Stderr, "read Wi-Fi policy: %v\n", err)
 	}
-	first, err := adapterAddresses()
+	first, err := adapterAddresses(true)
 	if err != nil {
 		return line, err
 	}
@@ -204,15 +284,19 @@ func readNetwork() (networkLine, error) {
 		return line, fmt.Errorf("read interfaces: %w", err)
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(table))
-	for _, entry := range unsafe.Slice(&table.Table[0], table.NumEntries) {
+	return assembleNetwork(line, unsafe.Slice(&table.Table[0], table.NumEntries), addresses, defaults, ssids, hidden, windows.GetIpInterfaceEntry)
+}
+
+func vanishedAdapter(err error) bool {
+	return errors.Is(err, windows.ERROR_NOT_FOUND) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND)
+}
+
+func assembleNetwork(line networkLine, rows []windows.MibIfRow2, addresses map[uint32][]string, defaults []windows.MibIpForwardRow2, ssids map[string]string, hidden map[string]bool, readIP func(*windows.MibIpInterfaceRow) error) (networkLine, error) {
+	for _, row := range rows {
 		// Get-NetAdapter lists network devices, not loopback, IP tunnels or
 		// filter/endpoint interfaces stacked on top of those devices.
-		if entry.Type == 24 || entry.Type == 131 || entry.InterfaceAndOperStatusFlags&0x82 != 0 || hidden[strings.ToLower(entry.InterfaceGuid.String())] {
+		if row.Type == 24 || row.Type == 131 || row.InterfaceAndOperStatusFlags&0x82 != 0 || hidden[strings.ToLower(row.InterfaceGuid.String())] {
 			continue
-		}
-		row := windows.MibIfRow2{InterfaceIndex: entry.InterfaceIndex}
-		if err := windows.GetIfEntry2Ex(windows.MibIfEntryNormal, &row); err != nil {
-			return line, fmt.Errorf("read adapter %d: %w", entry.InterfaceIndex, err)
 		}
 		own := addresses[row.InterfaceIndex]
 		if own == nil {
@@ -234,10 +318,12 @@ func readNetwork() (networkLine, error) {
 			adapter.IPv4 = &own[0]
 		}
 		ipif := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceIndex: row.InterfaceIndex}
-		if err := windows.GetIpInterfaceEntry(&ipif); err == nil {
+		if err := readIP(&ipif); err == nil {
 			automatic := ipif.UseAutomaticMetric != 0
 			adapter.Metric, adapter.AutomaticMetric = &ipif.Metric, &automatic
-		} else if !errors.Is(err, windows.ERROR_NOT_FOUND) {
+		} else if vanishedAdapter(err) {
+			continue
+		} else {
 			return line, fmt.Errorf("read IPv4 interface %d: %w", row.InterfaceIndex, err)
 		}
 		if ssid, ok := ssids[strings.ToLower(adapter.GUID)]; ok {
@@ -263,8 +349,11 @@ func readNetwork() (networkLine, error) {
 			continue
 		}
 		ipif := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceIndex: route.InterfaceIndex}
-		if err := windows.GetIpInterfaceEntry(&ipif); err != nil {
-			return line, err
+		if err := readIP(&ipif); err != nil {
+			if vanishedAdapter(err) {
+				continue
+			}
+			return line, fmt.Errorf("read route interface %d: %w", route.InterfaceIndex, err)
 		}
 		gateway := routeIPv4(&route.NextHop)
 		if gateway == "0.0.0.0" {
@@ -293,7 +382,7 @@ func network(once bool) error {
 			windows.NotifyIpInterfaceChange, windows.NotifyUnicastIpAddressChange, windows.NotifyRouteChange2,
 		} {
 			var handle windows.Handle
-			if err := register(windows.AF_UNSPEC, callback, nil, false, &handle); err != nil {
+			if err := register(windows.AF_INET, callback, nil, false, &handle); err != nil {
 				return fmt.Errorf("subscribe to network changes: %w", err)
 			}
 			defer windows.CancelMibChangeNotify2(handle)
@@ -302,35 +391,56 @@ func network(once bool) error {
 	emit := func() error {
 		line, err := readNetwork()
 		if err != nil {
-			return err
+			return &networkReadError{err}
 		}
 		return writeLine(line)
 	}
 	if once {
 		return emit()
 	}
-	return streamNetwork(changed, emit, 30*time.Second, 300*time.Millisecond)
+	return streamNetwork(changed, emit, 10*time.Second, 300*time.Millisecond)
 }
 
+type networkReadError struct{ error }
+
 func streamNetwork(changed <-chan struct{}, emit func() error, refresh, coalesce time.Duration) error {
-	if err := emit(); err != nil {
-		return err
-	}
 	ticker := time.NewTicker(refresh)
 	defer ticker.Stop()
 	var burst <-chan time.Time
 	var timer *time.Timer
+	var retry <-chan time.Time
+	var retryTimer *time.Timer
+	backoff := 500 * time.Millisecond
+	read := func() error {
+		err := emit()
+		var failed *networkReadError
+		if errors.As(err, &failed) {
+			fmt.Fprintf(os.Stderr, "network read failed; retrying: %v\n", err)
+			retryTimer = time.NewTimer(backoff)
+			retry = retryTimer.C
+			backoff = min(2*time.Second, backoff*2)
+			return nil
+		}
+		backoff = 500 * time.Millisecond
+		return err
+	}
 	defer func() {
 		if timer != nil {
 			timer.Stop()
 		}
+		if retryTimer != nil {
+			retryTimer.Stop()
+		}
 	}()
+	if err := read(); err != nil {
+		return err
+	}
 	for {
 		select {
 		case <-changed:
 			// A fixed window coalesces a burst without starving updates when
 			// Windows keeps sending notifications for a busy interface.
-			if burst == nil {
+			if burst == nil && retry == nil {
 				timer = time.NewTimer(coalesce)
 				burst = timer.C
 			}
@@ -338,10 +448,15 @@ func streamNetwork(changed <-chan struct{}, emit func() error, refresh, coalesce
 		case <-burst:
 			burst = nil
 		case <-ticker.C:
+		case <-retry:
+			retry = nil
 		}
-		if err := emit(); err != nil {
-			// Never send a partial snapshot as if adapters disappeared. Exiting
-			// lets the server apply its existing helper restart backoff.
+		if retry != nil {
+			continue
+		}
+		if err := read(); err != nil {
+			// Only output failures end the stream. Read failures never publish
+			// partial data and retry without waiting for a process restart.
 			return err
 		}
 	}

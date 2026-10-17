@@ -44,8 +44,6 @@ change behavior.
   every few seconds, through its native helper. That took its steady
   background CPU use from about 0.4 of a core to almost nothing, and the
   scans that sometimes hung for 20 seconds are gone.
-- If Net Switch's server is ended by force, the routing engine now stops with
-  it instead of routing on unmanaged until the next start.
 - The tray shows any number of lines: a row of the icon for each of the first
   three, and in its panel each line's speed, health, Main and Metered marks,
   and where a down line's apps went. Apps get a line choice right in the

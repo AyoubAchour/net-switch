@@ -117,6 +117,24 @@ function Remember-BrowserProcesses {
   } while ($added)
 }
 
+function Wait-HelperModes([string[]] $Modes) {
+  try {
+    Wait-Until {
+      $helpers = @(Get-AppProcesses | Where-Object { $_.Name -eq 'netswitch-helper.exe' })
+      foreach ($mode in $Modes) {
+        # Match the first argument, not an arbitrary occurrence in a path or flag.
+        $pattern = '^(?:"[^"]+"|\S+)\s+' + [regex]::Escape($mode) + '(?:\s|$)'
+        if (@($helpers | Where-Object { $_.CommandLine -match $pattern }).Count -ne 1) { return $false }
+      }
+      return $true
+    } ("Expected one installed helper for each mode: " + ($Modes -join ', '))
+  } catch {
+    Get-AppProcesses | Where-Object { $_.Name -eq 'netswitch-helper.exe' } |
+      Select-Object ProcessId, CommandLine | Format-List | Out-Host
+    throw
+  }
+}
+
 function Wait-Until([scriptblock] $Condition, [string] $Failure, [int] $Seconds = 60) {
   $deadline = (Get-Date).AddSeconds($Seconds)
   do {
@@ -159,8 +177,20 @@ function Start-InstalledApp {
   # An installed copy runs its tray icon as tray\NetSwitchTray.exe, never as
   # tray.ps1 in PowerShell. Stop-InstalledApp then checks it notices the quit and ends.
   Wait-Until { @(Get-AppProcesses | Where-Object { $_.ExecutablePath -eq $trayProgram }).Count -gt 0 } 'Installed shortcut did not start tray\NetSwitchTray.exe.'
-  # The meters and the connections around routing, read by the installed native helper.
-  Wait-Until { @(Get-AppProcesses | Where-Object { $_.Name -eq 'netswitch-helper.exe' }).Count -eq 2 } 'Installed server did not start its two line meter helpers.'
+  Wait-HelperModes @('meters', 'outside', 'network')
+  # Routing starts automatically. Require the real engine before
+  # exercising quit, upgrade and uninstall, so each shutdown path covers all modes.
+  $script:routingState = $null
+  try {
+    Wait-Until {
+      $state = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:runningServer.port)/api/state" -Headers @{ 'X-Token' = $script:runningServer.token } -TimeoutSec 5
+      $script:routingState = $state.routing
+      return $state.routing.status -eq 'on'
+    } 'Installed routing engine did not turn on.'
+  } catch {
+    Write-Host ($script:routingState | ConvertTo-Json -Compress)
+    throw
+  }
   Wait-Until { $process.HasExited } 'The installed launcher did not finish opening the app window.'
   $process.WaitForExit()
   if ($process.ExitCode -ne 0) { throw "Installed launcher exited with code $($process.ExitCode)." }
@@ -225,7 +255,7 @@ if ($LASTEXITCODE -ne 0) { throw 'restore-windows.mjs failed with nothing to und
 $server = Start-InstalledApp
 Stop-InstalledApp $server
 
-# Leave it running so PrepareToInstall must stop the server, tray and engine.
+# Leave routing and all four helper modes running for PrepareToInstall to stop.
 $server = Start-InstalledApp
 Invoke-Setup 'reinstall'
 Assert-Installed

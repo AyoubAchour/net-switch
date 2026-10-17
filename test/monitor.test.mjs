@@ -20,6 +20,21 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const HELPER = path.join(ROOT, 'helper', 'bin', 'netswitch-helper.exe');
 const needsHelper = { skip: existsSync(HELPER) ? false : 'helper\\bin\\netswitch-helper.exe is not built; run npm run build:helper' };
 
+test('helper stderr logs each distinct message at most once a minute across restarts', (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  const logged = [];
+  const monitor = new LineMonitor({ log: (line) => logged.push(line) });
+  for (let i = 0; i < 100; i++) monitor.logSometimes('meters helper: access denied');
+  monitor.logSometimes('outside helper: access denied');
+  assert.equal(logged.length, 2);
+  t.mock.timers.tick(59_999);
+  monitor.logSometimes('meters helper: access denied');
+  assert.equal(logged.length, 2);
+  t.mock.timers.tick(1);
+  monitor.logSometimes('meters helper: access denied');
+  assert.equal(logged.length, 3);
+});
+
 test('the line meters read adapter counters through .NET, so the USB Wi-Fi stick is listed', async () => {
   // The same Windows PowerShell 5.1 the monitor runs in.
   const list = await runPowerShellJson(`${ADAPTER_STATS}\nConvertTo-Json -InputObject @($adapters) -Compress`);

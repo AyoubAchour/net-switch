@@ -29,7 +29,7 @@ import {
 } from './lib/lines.mjs';
 import { createLog } from './lib/logfile.mjs';
 import { findHelper, LineMonitor } from './lib/monitor.mjs';
-import { NetworkMonitor, quickProbe, readNetworkOnce } from './lib/helper.mjs';
+import { NetworkMonitor, NetworkUpdates, quickProbe, readNetworkOnce, readPolicyOnce } from './lib/helper.mjs';
 import {
   allowSimultaneousConnections,
   applyCableAsMain,
@@ -40,6 +40,7 @@ import {
   findAdapter,
   hasGlobalIPv6,
   isElevated,
+  MissingAdapter,
   prepareAdapters,
   readDefaultRoutes,
   readMetrics,
@@ -100,10 +101,6 @@ const STEADY_RUN_MS = 120_000;
 // The administrator check is tried again this often while it says no: on a
 // slow start Windows may not have answered it in time.
 const ELEVATION_RECHECK_MS = 30_000;
-// A chosen adapter missing from this many good scans in a row, for at least
-// this long, counts as gone.
-const ADAPTER_GONE_SCANS = 2;
-const ADAPTER_GONE_MS = 20_000;
 // More lines than this would make combining's shares too thin to matter.
 const MAX_LINES = 8;
 // Auto combining rewrites the shares at most this often, and only when one
@@ -260,7 +257,6 @@ const engine = new Engine({
   singBoxPath: path.join(ENGINE_DIR, 'sing-box.exe'),
   dataDir: MACHINE_DIR,
   mode,
-  helperPath,
 });
 const tracker = new AppTracker();
 const outside = new OutsideTracker();
@@ -298,9 +294,9 @@ let scanFailures = 0;
 let laneQueue = Promise.resolve();
 let startQueue = Promise.resolve();
 let setupQueue = Promise.resolve();
-// Good scans in a row without each line's adapter, and since when, by line id.
-const adapterMissing = new Map();
-const adapterMissingSince = new Map();
+// Whether each line's adapter has been missing long enough to count as gone,
+// by line id (see MissingAdapter).
+const missingAdapters = new Map();
 // Line events for the window and the tray's notifications, newest last.
 const events = [];
 // Lines out of data for this period, as of the last poll.
@@ -331,9 +327,11 @@ const retry = { attempts: 0, at: 0 };
 // busy sending a big file is as slow to answer a test as one downloading.
 const CARRYING_MIN_BYTES_PER_SECOND = 16 * 1024;
 
-// The helper's latest reading when it runs, Windows' own readers otherwise. A
-// failed reading says nothing about a line's health.
-const readAddresses = networkMonitor ? (alias) => networkMonitor.usableAddresses(alias) : usableAddresses;
+// Addresses always come from Node, in this process: they can't fail or go
+// stale. Default routes come from the helper's latest reading, or from
+// route.exe when there is no fresh one. A failed reading says nothing about a
+// line's health.
+const readAddresses = usableAddresses;
 const readRoutes = networkMonitor ? () => networkMonitor.readDefaultRoutes() : readDefaultRoutes;
 
 // The quick line check: a TCP connection to a test address from the line's
@@ -581,10 +579,13 @@ async function migrateLines() {
 // network, link details), and to notice when a chosen adapter is renamed or
 // replaced. Line health is decided separately; a failed reading never moves
 // anyone to the other line.
-async function refreshAdapters(snapshot = null) {
+function refreshAdapters() {
+  return networkMonitor ? networkUpdates.refresh() : applyAdapters();
+}
+
+async function applyAdapters(snapshot = null) {
   try {
     if (networkMonitor) {
-      snapshot ??= await readNetworkOnce(helperPath);
       adapters = prepareAdapters(snapshot.adapters);
       minimizePolicy = snapshot.policy === 'absent' ? null : snapshot.policy;
     } else {
@@ -614,15 +615,14 @@ async function refreshAdapters(snapshot = null) {
 
 // Stream snapshots are applied in order, including the missing-adapter count
 // and GUID following. A failed read never counts as an adapter disappearing.
-let networkUpdates = Promise.resolve();
+const networkUpdates = new NetworkUpdates(applyAdapters, () => readNetworkOnce(helperPath), log);
 networkMonitor?.on('network', (snapshot) => {
-  networkUpdates = networkUpdates.then(() => refreshAdapters(snapshot)).catch((error) => log(`network update failed: ${error.message}`));
+  networkUpdates.refresh(snapshot);
 });
 
 async function readCurrentPolicy() {
   if (!networkMonitor) return readMinimizeConnectionsPolicy();
-  const { policy } = await readNetworkOnce(helperPath);
-  return policy === 'absent' ? null : policy;
+  return readPolicyOnce(helperPath);
 }
 
 function nextScanDelay() {
@@ -653,13 +653,12 @@ async function followAdapters() {
   // record stays with the old name.
   const renamed = [];
   let changed = false;
-  const now = Date.now();
   const next = lines.map((line, index) => {
     const found = findAdapter(adapters, { alias: line.alias, guid: line.guid });
-    const missing = found ? 0 : (adapterMissing.get(line.id) ?? 0) + 1;
-    adapterMissing.set(line.id, missing);
-    if (found) adapterMissingSince.delete(line.id);
-    else if (!adapterMissingSince.has(line.id)) adapterMissingSince.set(line.id, now);
+    if (!missingAdapters.has(line.id)) missingAdapters.set(line.id, new MissingAdapter());
+    // Readings can come in bursts (one unplug sends several), so an adapter
+    // counts as gone only after two readings 20 seconds apart.
+    const gone = missingAdapters.get(line.id).update(line.guid || line.alias, !found);
     if (found) {
       if (found.alias !== line.alias) {
         notes.push(`${line.label}'s adapter was renamed from ${line.alias} to ${found.alias}`);
@@ -669,9 +668,6 @@ async function followAdapters() {
       changed = true;
       return { ...line, alias: found.alias, guid: found.guid || null };
     }
-    // Readings can come in bursts (one unplug sends several), so both the
-    // count and the time matter.
-    const gone = missing >= ADAPTER_GONE_SCANS && now - adapterMissingSince.get(line.id) >= ADAPTER_GONE_MS;
     if (index !== 0 || line.kind !== 'wired' || !gone) return line;
     const taken = new Set(lines.map((item) => item.alias));
     const replacement = pickFirstAdapter(adapters.filter((item) => item.kind === 'wired' && !taken.has(item.alias)));
@@ -1219,8 +1215,7 @@ function removeLine(id) {
     if (lines.length === 1) throw clientError('Net Switch needs at least one line.');
     const appLines = Object.fromEntries(Object.entries(settings.values.appLines).filter(([, lineId]) => lineId !== id));
     await applyLines(withMainOpen(lines.filter((item) => item.id !== id)), appLines);
-    adapterMissing.delete(id);
-    adapterMissingSince.delete(id);
+    missingAdapters.delete(id);
     log(`removed ${line.label} (${line.alias})`);
     if (engine.status !== 'off') await restartEngine();
   });
@@ -1783,7 +1778,7 @@ await checkElevation();
 if (networkMonitor) {
   networkMonitor.start();
   await networkMonitor.ready().catch((error) => log(`waiting for network helper: ${error.message}`));
-  await networkUpdates;
+  await networkUpdates.pending;
 } else {
   await refreshAdapters();
 }

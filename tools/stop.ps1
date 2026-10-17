@@ -1,4 +1,4 @@
-# Stops a running Net Switch: its server, its routing engine, its line meter
+# Stops a running Net Switch: its server, its routing engine, all its native
 # helpers and its tray icon. The installer runs this (as administrator) before
 # upgrading or uninstalling.
 #
@@ -6,8 +6,9 @@
 #
 # Only these processes of this copy are stopped, matched exactly:
 # - its routing engine: <AppDir>\engine\sing-box.exe;
-# - its line meter helpers: <AppDir>\helper\netswitch-helper.exe (they end with
-#   the server anyway, but the installer can't replace the file while they run);
+# - every mode of <AppDir>\helper\netswitch-helper.exe: meters, outside,
+#   network, probes and policy reads. Match the
+#   image path regardless of arguments: the installer must replace this file;
 # - its server: <AppDir>\runtime\node.exe running <AppDir>\server.mjs;
 # - its tray icon: <AppDir>\tray\NetSwitchTray.exe, or powershell.exe running
 #   -File "<AppDir>\tray.ps1" (how older copies, and copies without that
@@ -60,5 +61,8 @@ do {
 
 $left = Get-OwnProcesses
 if ($left.Count -eq 0) { exit 0 }
-Write-Output ("Still running: " + (($left | ForEach-Object { "$($_.Name) ($($_.ProcessId))" }) -join ', '))
+Write-Output ("Still running: " + (($left | ForEach-Object {
+  $detail = if (Test-Same $_.ExecutablePath $helper) { " $($_.CommandLine)" } else { '' }
+  "$($_.Name) ($($_.ProcessId))$detail"
+}) -join ', '))
 exit 1
