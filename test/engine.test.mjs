@@ -282,9 +282,11 @@ test('a connection that already ended counts as closed, one the engine refuses c
 
 test('closing stops when the time budget is used up, and the rest count as not closed', async () => {
   const stuck = Array.from({ length: 5 }, (_, index) => via(`s${index}`, 'cable', 'second-lane'));
-  const { engine, stop } = await fakeEngineApi(stuck, { delayMs: 80 });
+  // Wide margins: with an 80 ms close and a 100 ms budget, a busy machine could
+  // spend the whole budget listing the connections, and then close none.
+  const { engine, stop } = await fakeEngineApi(stuck, { delayMs: 300 });
   try {
-    const result = await engine.releaseFallbackConnections({ budgetMs: 100 });
+    const result = await engine.releaseFallbackConnections({ budgetMs: 450 });
     assert.equal(result.found, 5);
     assert.equal(result.closed + result.failed, 5);
     assert.ok(result.closed >= 1 && result.failed >= 1, JSON.stringify(result));
@@ -368,6 +370,60 @@ test('when lines come back while combining, an app kept on the cable gets back a
     // Second connection back: only the sharing app's connection returns to it.
     assert.deepEqual(await api.engine.releaseFallbackConnections(), { found: 1, closed: 1, failed: 0, interrupted: false });
     assert.deepEqual(api.deleted, ['other-share-on-cable']);
+  } finally {
+    api.stop();
+  }
+});
+
+// A stand-in for the engine's delay test: answers per test address.
+async function fakeDelayApi(answers) {
+  const asked = [];
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1');
+    const target = url.searchParams.get('url');
+    asked.push(target);
+    const answer = answers[target] ?? 504;
+    if (answer === 200) response.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ delay: 40 }));
+    else response.writeHead(answer).end();
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const engine = new Engine({ singBoxPath: 'sing-box.exe', dataDir: tmpdir(), mode: 'proxy' });
+  engine.apiPort = server.address().port;
+  engine.apiSecret = 'secret';
+  return { engine, asked, stop: () => server.close() };
+}
+
+test('an internet test asks the second site only when the first fails, or both at once while in doubt', async () => {
+  const [first, second] = ['https://1.1.1.1/cdn-cgi/trace', 'https://8.8.8.8/'];
+  let api = await fakeDelayApi({ [first]: 200 });
+  try {
+    assert.equal(await api.engine.probe('second'), 40);
+    assert.deepEqual(api.asked, [first]);
+  } finally {
+    api.stop();
+  }
+  api = await fakeDelayApi({ [first]: 504, [second]: 200 });
+  try {
+    assert.equal(await api.engine.probe('second'), 40);
+    assert.deepEqual(api.asked, [first, second]);
+    api.asked.length = 0;
+    assert.equal(await api.engine.probe('second', { both: true }), 40);
+    assert.deepEqual(api.asked.sort(), [first, second].sort());
+  } finally {
+    api.stop();
+  }
+  // Both fail: a failed test. One failed and the engine didn't answer the other: nothing learned.
+  api = await fakeDelayApi({ [first]: 503, [second]: 504 });
+  try {
+    assert.equal(await api.engine.probe('second', { both: true }), false);
+    assert.equal(await api.engine.probe('second'), false);
+  } finally {
+    api.stop();
+  }
+  api = await fakeDelayApi({ [first]: 504, [second]: 500 });
+  try {
+    assert.equal(await api.engine.probe('second', { both: true }), null);
+    assert.equal(await api.engine.probe('second'), null);
   } finally {
     api.stop();
   }

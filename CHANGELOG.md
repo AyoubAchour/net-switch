@@ -10,6 +10,12 @@ change behavior.
   **Both lines**, **Cable** and the second connection. Useful for calls, games
   and websites that sign you out when your address changes. If the cable drops,
   those apps still move to the second connection until it's back.
+- Fewer false failovers. A line that was busy with a download could miss its
+  internet test and get marked as down for a few seconds, which moved apps and
+  then cut their new connections. Now a failed test doesn't count while
+  internet traffic is still arriving through that line, the test waits up to
+  10 seconds instead of 5, and after a failed test both test sites are asked
+  at once.
 
 ## [0.1.0] - 2026-10-15
 
