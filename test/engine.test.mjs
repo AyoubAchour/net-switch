@@ -488,6 +488,7 @@ test('the checksum list is read line by line, and anything else in it is skipped
   ]);
 });
 
+
 test('an engine file that doesn’t match its checksum is never run, and one that does is hashed only once', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'net-switch-engine-'));
   try {

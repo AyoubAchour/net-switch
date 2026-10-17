@@ -2,7 +2,8 @@
 # native program that reads the line meters and the connections that go around
 # routing. It uses the Go toolchain pinned in packaging\versions.json, which is
 # downloaded once into dist\cache and checked against its hash every time.
-# Nothing is installed on the PC and nothing is written to the user profile.
+# NETSWITCH_CACHE can override dist\cache. Nothing is installed on the PC;
+# downloads and Go's working files stay in the chosen cache.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-helper.ps1
 #
@@ -20,7 +21,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $dist = Join-Path $repoRoot 'dist'
-$cache = Join-Path $dist 'cache'
+$cache = Get-BuildCache $dist
 $helperDir = Join-Path $repoRoot 'helper'
 $binDir = Join-Path $helperDir 'bin'
 $output = Join-Path $binDir 'netswitch-helper.exe'
@@ -76,7 +77,7 @@ $goEnv = [ordered]@{
   GOFLAGS = '-mod=readonly'
   GOPROXY = 'https://proxy.golang.org,direct'
   GOSUMDB = 'sum.golang.org'
-  # Everything Go writes stays in dist\cache. Go also keeps settings and usage
+  # Everything Go writes stays in the cache. Go also keeps settings and usage
   # counters under %APPDATA%\go, so APPDATA points into the cache as well.
   GOENV = 'off'
   GOPATH = Join-Path $goHome 'gopath'

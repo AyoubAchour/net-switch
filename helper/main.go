@@ -1,19 +1,22 @@
-// Command netswitch-helper reads, once a second, what Net Switch's server needs
-// from Windows and prints each reading as one line of JSON. It has two modes:
+// Command netswitch-helper reads what Net Switch's server needs from Windows
+// and prints each reading as one line of JSON. Its modes are:
 //
 //   - meters: bytes per network adapter, so the line meters show the real load.
 //   - outside: TCP connections that go around the routing engine, for example
 //     a download that was already running when routing started.
+//   - network: adapters, default routes and policy on Windows change notifications.
+//   - probe: concurrent TCP tests bound to one interface.
+//   - policy: read only the Wi-Fi policy, for setup and Undo.
 //
 // Usage:
 //
 //	netswitch-helper.exe meters  [--parent PID] [--once]
 //	netswitch-helper.exe outside [--parent PID] [--engine PATH] [--once]
 //
-// It replaces two long-running PowerShell processes that printed the same
+// It replaces long-running PowerShell processes that printed the same
 // lines and used about a hundred megabytes each. The server still runs each
 // mode as its own process, so one Windows call that gets stuck can't blind the
-// other. Both end by themselves when the server (--parent) exits, and when
+// other. The reading modes end when the server (--parent) exits, and when
 // their standard input closes. Only readings go to standard output; anything
 // else goes to standard error.
 package main
@@ -32,15 +35,21 @@ import (
 )
 
 type options struct {
-	mode   string
-	parent uint32
-	engine string
-	once   bool
+	mode    string
+	parent  uint32
+	engine  string
+	once    bool
+	index   uint
+	targets string
+	timeout int
 }
 
 const usage = `usage:
   netswitch-helper.exe meters  [--parent PID] [--once]
-  netswitch-helper.exe outside [--parent PID] [--engine PATH] [--once]`
+  netswitch-helper.exe outside [--parent PID] [--engine PATH] [--once]
+  netswitch-helper.exe network [--parent PID] [--once]
+  netswitch-helper.exe probe --interface-index N --targets IP:PORT,IP:PORT [--timeout-ms 2000]
+  netswitch-helper.exe policy`
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -55,6 +64,21 @@ func run(args []string) int {
 
 	var sample func() any
 	switch opts.mode {
+	case "policy":
+		policy, err := readPolicy()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		if err := writeLine(map[string]any{"policy": policy}); err != nil {
+			return 1
+		}
+		return 0
+	case "probe":
+		if err := writeLine(probe(opts)); err != nil {
+			return 1
+		}
+		return 0
 	case "meters":
 		sample = func() any { return readMeters() }
 	case "outside":
@@ -74,6 +98,13 @@ func run(args []string) int {
 		}
 		go exitAtEndOfInput()
 	}
+	if opts.mode == "network" {
+		if err := network(opts.once); err != nil {
+			fmt.Fprintf(os.Stderr, "network: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
@@ -92,10 +123,10 @@ func run(args []string) int {
 
 func parseArgs(args []string) (options, error) {
 	if len(args) == 0 {
-		return options{}, errors.New("choose a mode: meters or outside")
+		return options{}, errors.New("choose a mode: meters, outside, network, probe or policy")
 	}
 	opts := options{mode: args[0]}
-	if opts.mode != "meters" && opts.mode != "outside" {
+	if opts.mode != "meters" && opts.mode != "outside" && opts.mode != "network" && opts.mode != "probe" && opts.mode != "policy" {
 		return options{}, fmt.Errorf("unknown mode %q", opts.mode)
 	}
 	flags := flag.NewFlagSet(opts.mode, flag.ContinueOnError)
@@ -104,6 +135,11 @@ func parseArgs(args []string) (options, error) {
 	flags.BoolVar(&opts.once, "once", false, "")
 	if opts.mode == "outside" {
 		flags.StringVar(&opts.engine, "engine", "", "")
+	}
+	if opts.mode == "probe" {
+		flags.UintVar(&opts.index, "interface-index", 0, "")
+		flags.StringVar(&opts.targets, "targets", "", "")
+		flags.IntVar(&opts.timeout, "timeout-ms", 2000, "")
 	}
 	if err := flags.Parse(args[1:]); err != nil {
 		return options{}, err
@@ -115,6 +151,14 @@ func parseArgs(args []string) (options, error) {
 		return options{}, fmt.Errorf("--parent %d is not a process id", *parent)
 	}
 	opts.parent = uint32(*parent)
+	if opts.mode == "probe" {
+		if opts.index == 0 || opts.index > math.MaxUint32 || opts.timeout <= 0 || opts.timeout > 60_000 {
+			return options{}, errors.New("probe needs a valid interface index and timeout (1..60000 ms)")
+		}
+		if _, err := probeTargets(opts.targets); err != nil {
+			return options{}, err
+		}
+	}
 	return opts, nil
 }
 

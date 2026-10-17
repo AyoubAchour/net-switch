@@ -23,12 +23,14 @@ Only the latest release gets security fixes.
   Net Switch checks its files against the hashes in `engine/SHA256SUMS.txt`.
   That catches a damaged or swapped file; it is an integrity check, not a
   security boundary, since both live in the same folder.
-- **The line meter helper** (`helper\netswitch-helper.exe`, Net Switch's own
+- **The native helper** (`helper\netswitch-helper.exe`, Net Switch's own
   small program, built from the `helper` folder of this repository) is also
   started by the server and runs as administrator. It reads each adapter's
   byte counters and the list of TCP connections, turns on Windows' byte counts
   for connections that go around routing, and reports them to the server. It
-  makes no network requests.
+  also watches for adapter, address and route changes and reads the Wi-Fi
+  policy. Its `probe` mode can open a TCP connection to a given IPv4 address
+  through a given adapter; failover doesn't use it yet.
 - **The window and the tray icon** run as you, not as administrator. The tray
   icon is Net Switch's own small program (`tray\NetSwitchTray.exe`, built from
   `lib\tray.cs` in this repository with the C# compiler that comes with
