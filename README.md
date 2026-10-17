@@ -1,4 +1,4 @@
-# Net Switch
+# Net Switch: per-app internet for Windows
 
 Choose which internet connection each Windows app uses.
 
