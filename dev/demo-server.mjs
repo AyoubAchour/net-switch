@@ -28,6 +28,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const UI_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'ui');
+// The version this checkout would ship, so screenshots show the right one.
+const VERSION = JSON.parse(await readFile(path.join(UI_DIR, '..', 'package.json'), 'utf8')).version;
 const FILES = {
   '/': ['index.html', 'text/html; charset=utf-8'],
   '/app.js': ['app.js', 'text/javascript; charset=utf-8'],
@@ -322,7 +324,7 @@ function state() {
   return {
     mode: 'tun',
     elevated: true,
-    version: '0.2.0',
+    version: VERSION,
     update: offerUpdate && settings.checkForUpdates ? DEMO_UPDATE : null,
     features: { reconnect: true, combine: true, lines: true, installedApps: true },
     combine: { on: combine.on, active: combineActive(), mode: combine.mode },
