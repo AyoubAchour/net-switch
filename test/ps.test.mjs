@@ -20,6 +20,8 @@ test('a timeout also stops the child PowerShell started', windows, async (t) => 
   let childPid;
   t.after(() => killTree(childPid));
   const start = Date.now();
+  // Leave room for PowerShell startup when tests run at low priority. The
+  // child must exist before this case can test descendant cleanup.
   await assert.rejects(runPowerShell(String.raw`
 $info = New-Object System.Diagnostics.ProcessStartInfo
 $info.FileName = "$env:SystemRoot\System32\ping.exe"
@@ -30,14 +32,14 @@ $child = [System.Diagnostics.Process]::Start($info)
 [Console]::WriteLine("CHILD=$($child.Id)")
 [Console]::Out.Flush()
 Start-Sleep 30
-`, { timeoutMs: 3000 }), (error) => {
+`, { timeoutMs: 10_000 }), (error) => {
     const match = error.stdout.match(/CHILD=(\d+)/);
     assert.ok(match, `the child was started before the timeout: ${error.stderr}`);
     childPid = Number(match[1]);
     assert.equal(error.killed, true);
     return true;
   });
-  assert.ok(Date.now() - start < 12_000);
+  assert.ok(Date.now() - start < 20_000);
   assert.throws(() => process.kill(childPid, 0), { code: 'ESRCH' });
 });
 
