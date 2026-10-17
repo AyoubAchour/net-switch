@@ -30,7 +30,9 @@ jobs:
           package-manager-cache: false
       - name: Build and test the native helper with the pinned Go
         run: ./scripts/build-helper.ps1
-      - name: Test app and compile C# tray with Windows PowerShell 5.1
+      - name: Build the tray program with the C# compiler that comes with Windows
+        run: ./scripts/build-tray.ps1
+      - name: Test app, tray program and C# tray with Windows PowerShell 5.1
         run: npm test
       - name: Verify pinned downloads and stage the installer payload
         run: ./scripts/build-release.ps1 -SkipInstaller

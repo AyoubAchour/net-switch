@@ -4,6 +4,14 @@ All notable changes to Net Switch are listed here. Versions follow
 [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change behavior.
 
+## [Unreleased]
+
+- The tray icon is now a small program of its own instead of a PowerShell
+  script compiled at every start: it appears in under a second instead of
+  about four, and uses about half the memory (around 45 MB instead of 97 MB).
+  Windows sees it as a new icon, so if it shows up under the ^ arrow after
+  updating, drag it back onto the taskbar.
+
 ## [0.2.0] - 2026-10-17
 
 To update from 0.1.0, download the installer below and run it: it updates
@@ -52,5 +60,6 @@ First public release.
 - Windows installer that bundles Node.js and sing-box, and offers to undo
   Net Switch's Windows setting changes when you uninstall.
 
+[Unreleased]: https://github.com/AyoubAchour/net-switch/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.2.0
 [0.1.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.1.0

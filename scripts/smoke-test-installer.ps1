@@ -48,7 +48,7 @@ function Assert-Installed {
     'tools\stop.ps1', 'tools\restore-windows.mjs',
     'runtime\node.exe', 'runtime\LICENSE',
     'engine\sing-box.exe', 'engine\libcronet.dll', 'engine\SHA256SUMS.txt', 'engine\LICENSE',
-    'helper\netswitch-helper.exe',
+    'helper\netswitch-helper.exe', 'tray\NetSwitchTray.exe',
     'licenses\GPL-3.0.txt', 'licenses\sing-box-LICENSE.txt', 'licenses\node-LICENSE.txt', 'licenses\lucide-ISC.txt',
     'licenses\cronet-go-LICENSE.txt', 'licenses\cronet-native\LICENSE', 'licenses\cronet-native\src\LICENSE',
     'licenses\wintun-LICENSE.txt', 'licenses\go-LICENSE.txt',
@@ -57,7 +57,7 @@ function Assert-Installed {
   foreach ($file in $expected) {
     if (-not (Test-Path -LiteralPath (Join-Path $app $file))) { throw "Missing from the installed copy: $file" }
   }
-  foreach ($unwanted in 'data', 'data-test', 'design', 'dev', 'test', '.git', 'helper\bin', 'helper\go.mod') {
+  foreach ($unwanted in 'data', 'data-test', 'design', 'dev', 'test', '.git', 'helper\bin', 'helper\go.mod', 'tray\bin') {
     if (Test-Path -LiteralPath (Join-Path $app $unwanted)) { throw "Should not be installed: $unwanted" }
   }
   foreach ($link in @($shortcut, $desktopShortcut)) {
@@ -84,10 +84,11 @@ function Get-AppProcesses {
   $helper = Join-Path $app 'helper\netswitch-helper.exe'
   $server = Join-Path $app 'server.mjs'
   $trayArgument = '-File "' + (Join-Path $app 'tray.ps1') + '"'
-  Get-CimInstance Win32_Process -Filter "Name = 'node.exe' OR Name = 'sing-box.exe' OR Name = 'netswitch-helper.exe' OR Name = 'powershell.exe'" |
+  Get-CimInstance Win32_Process -Filter "Name = 'node.exe' OR Name = 'sing-box.exe' OR Name = 'netswitch-helper.exe' OR Name = 'NetSwitchTray.exe' OR Name = 'powershell.exe'" |
     Where-Object {
       $_.ExecutablePath -eq $engine -or
       $_.ExecutablePath -eq $helper -or
+      $_.ExecutablePath -eq $trayProgram -or
       ($_.ExecutablePath -eq $node -and $_.CommandLine -and $_.CommandLine.IndexOf($server, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or
       ($_.Name -eq 'powershell.exe' -and $_.CommandLine -and $_.CommandLine.IndexOf($trayArgument, [StringComparison]::OrdinalIgnoreCase) -ge 0)
     }
@@ -155,14 +156,18 @@ function Start-InstalledApp {
       return $true
     } catch { return $false }
   } 'Installed shortcut did not create an authenticated, reachable server within 60 seconds.'
-  Wait-Until { @(Get-AppProcesses | Where-Object { $_.Name -eq 'powershell.exe' }).Count -gt 0 } 'Installed shortcut did not start tray.ps1.'
+  # An installed copy runs its tray icon as tray\NetSwitchTray.exe, never as
+  # tray.ps1 in PowerShell. Stop-InstalledApp then checks it notices the quit and ends.
+  Wait-Until { @(Get-AppProcesses | Where-Object { $_.ExecutablePath -eq $trayProgram }).Count -gt 0 } 'Installed shortcut did not start tray\NetSwitchTray.exe.'
   # The meters and the connections around routing, read by the installed native helper.
   Wait-Until { @(Get-AppProcesses | Where-Object { $_.Name -eq 'netswitch-helper.exe' }).Count -eq 2 } 'Installed server did not start its two line meter helpers.'
   Wait-Until { $process.HasExited } 'The installed launcher did not finish opening the app window.'
   $process.WaitForExit()
   if ($process.ExitCode -ne 0) { throw "Installed launcher exited with code $($process.ExitCode)." }
   if (-not (Test-Path -LiteralPath $machineData)) { throw 'Installed server did not create its ProgramData directory.' }
-  Write-Host 'Installed shortcut started its own server and tray; authenticated ping succeeded'
+  if (@(Get-AppProcesses | Where-Object { $_.ExecutablePath -eq $trayProgram }).Count -ne 1) { throw 'The installed tray program did not keep running after the launcher finished.' }
+  if (@(Get-AppProcesses | Where-Object { $_.Name -eq 'powershell.exe' }).Count) { throw 'The installed copy ran tray.ps1 instead of tray\NetSwitchTray.exe.' }
+  Write-Host 'Installed shortcut started its own server and tray program; authenticated ping succeeded'
   return $script:runningServer
 }
 
@@ -173,6 +178,7 @@ function Stop-InstalledApp($Server) {
 }
 
 $node = Join-Path $app 'runtime\node.exe'
+$trayProgram = Join-Path $app 'tray\NetSwitchTray.exe'
 
 try {
 Invoke-Setup 'install'

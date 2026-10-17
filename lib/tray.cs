@@ -1,5 +1,8 @@
-// Net Switch's tray icon. tray.ps1 compiles this file with Add-Type in Windows
-// PowerShell 5.1, so the C# stays at version 5, and runs it as the normal user.
+// Net Switch's tray icon, run as the normal user. scripts\build-tray.ps1 builds
+// it, with lib\tray-main.cs, into NetSwitchTray.exe using the C# compiler that
+// comes with Windows; without that program, tray.ps1 compiles it with Add-Type
+// in Windows PowerShell 5.1. Both compilers know only C# 5, so the code stays
+// at version 5.
 // Once a second it reads the same /api/state the window reads: the icon shows
 // both lines' load, the tooltip their speeds, and its menu opens or quits Net Switch.
 using System;
@@ -1341,7 +1344,8 @@ namespace NetSwitch
     // The icon in the taskbar corner.
     sealed class TrayIcon
     {
-        // Its own entry in the taskbar's icon settings, apart from other PowerShell icons.
+        // Windows keeps an icon's taskbar settings by program and this number;
+        // under tray.ps1, the number keeps it apart from other PowerShell icons.
         const int IconId = 0x4E53;
         readonly TrayWindow window;
         IntPtr picture = IntPtr.Zero;
@@ -1545,7 +1549,7 @@ namespace NetSwitch
             window.Command = delegate (int id) { Guard(delegate { OnCommand(id); }); };
         }
 
-        // Called by tray.ps1; returns once the icon is gone.
+        // Called by NetSwitchTray.exe (lib\tray-main.cs) or tray.ps1; returns once the icon is gone.
         public static void Run(string root, string dataDir, string logFile)
         {
             Run(root, dataDir, logFile, true);

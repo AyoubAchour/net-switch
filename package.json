@@ -18,6 +18,7 @@
     "start": "node server.mjs",
     "test": "node --test test/*.test.mjs",
     "build:helper": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-helper.ps1",
+    "build:tray": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-tray.ps1",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1"
   }
 }

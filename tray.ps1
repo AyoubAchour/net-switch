@@ -2,6 +2,9 @@
 # a quick flyout on click, and a menu to open or quit Net Switch. launch.ps1 starts it as the normal user,
 # never as administrator, so opening the window works the way the shortcut does.
 # One copy runs per data folder; another copy exits at once.
+# launch.ps1 starts the tray as its own program, NetSwitchTray.exe, when that is
+# built (lib\tray-main.cs does what this script does, without PowerShell); this
+# script is the fallback, and compiles lib\tray.cs at each start. Keep the two in step.
 param(
   # The folder holding server.json, where tray.log is written: what launch.ps1
   # passes. A relative path is taken from this folder, so `-DataDir data-test`

@@ -128,14 +128,42 @@ if (-not $server) {
   }
 }
 
+# The tray icon is a small program of its own: tray\NetSwitchTray.exe in an
+# installed copy, tray\bin\NetSwitchTray.exe in a source checkout that has run
+# npm run build:tray. Without it, tray.ps1 compiles the same code at each start
+# and PowerShell stays running to host it, which uses more memory.
+$trayProgram = if ($installed) { Join-Path $root 'tray\NetSwitchTray.exe' } else { Join-Path $root 'tray\bin\NetSwitchTray.exe' }
+
+# A source checkout uses its build only while it is newer than the tray's code,
+# so a change to lib\tray.cs is never hidden behind an old build.
+function Test-TrayProgram {
+  if (-not (Test-Path -LiteralPath $trayProgram -PathType Leaf)) { return $false }
+  if ($installed) { return $true }
+  $built = (Get-Item -LiteralPath $trayProgram).LastWriteTimeUtc
+  foreach ($source in 'lib\tray.cs', 'lib\tray-main.cs', 'lib\tray.manifest') {
+    $file = Get-Item -LiteralPath (Join-Path $root $source) -ErrorAction SilentlyContinue
+    if ($file -and $file.LastWriteTimeUtc -gt $built) {
+      Write-LaunchLog "tray\bin\NetSwitchTray.exe is older than $source, so tray.ps1 runs the tray icon; rebuild it with: npm run build:tray"
+      return $false
+    }
+  }
+  return $true
+}
+
 # The tray icon runs as the normal user and stays after the window closes.
 # When one is already running, this new copy exits at once.
 try {
-  $trayArguments = @(
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
-    '-File', "`"$(Join-Path $root 'tray.ps1')`"", '-DataDir', "`"$userDir`""
-  )
-  Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $trayArguments -WorkingDirectory $root -WindowStyle Hidden
+  if (Test-TrayProgram) {
+    # Not started hidden: it has no console window to hide, and Windows would
+    # apply a hidden start to the first window it shows, the flyout.
+    Start-Process -FilePath $trayProgram -ArgumentList '-DataDir', "`"$userDir`"" -WorkingDirectory $root
+  } else {
+    $trayArguments = @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+      '-File', "`"$(Join-Path $root 'tray.ps1')`"", '-DataDir', "`"$userDir`""
+    )
+    Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -ArgumentList $trayArguments -WorkingDirectory $root -WindowStyle Hidden
+  }
 } catch {
   # Net Switch works without its tray icon: say why in the log, and open the window anyway.
   Write-LaunchLog "the tray icon could not be started: $($_.Exception.Message)"
