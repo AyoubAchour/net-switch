@@ -107,6 +107,20 @@ export const STATES = {
   oneLine: state({ lines: [cable], apps: [app('Steam', 2600 * KB), app('Firefox', 640 * KB), app('Discord', 14 * KB)] }),
   twoLines: state({ lines: [cable, wifi], apps: busy.slice(0, 3) }),
   fourLines: state({ lines: [cable, wifi, phone, wifi2], apps: busy }),
+  // Three lines without combining: each app gets a key per line. Also the
+  // README's picture of the tray.
+  threeLines: state({
+    lines: [
+      { ...cable, rate: { down: 1.1 * MB, up: 44 * KB } },
+      { ...wifi, rate: { down: 2.3 * MB, up: 93 * KB } },
+      phone,
+    ],
+    apps: [
+      app('Steam', 2600 * KB, 2600 * KB, { line: wifi.id }),
+      app('Firefox', 640 * KB),
+      app('Spotify', 160 * KB, 160 * KB, { line: phone.id }),
+    ],
+  }),
   lineDown: state({
     lines: [cable, down(wifi, 'no internet', cable.id)],
     apps: busy.slice(0, 3),
