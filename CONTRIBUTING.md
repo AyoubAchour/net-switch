@@ -5,15 +5,16 @@ your setup are just as useful as code.
 
 ## Running from source
 
-You need Windows 10 or 11 (x64), [Node.js](https://nodejs.org) 22 or newer, and
-Git. There are no npm dependencies to install.
+You need Windows 10 or 11 (x64), or Windows 11 ARM64 with .NET Framework 4.8.1,
+[Node.js](https://nodejs.org) 22 or newer for your PC's architecture, and Git.
+There are no npm dependencies to install.
 
 1. Clone the repository.
-2. Download sing-box 1.14.2 for Windows from its
-   [release page](https://github.com/SagerNet/sing-box/releases/tag/v1.14.2)
-   (`sing-box-1.14.2-windows-amd64.zip`). Put `sing-box.exe` and
-   `libcronet.dll` in `engine\`. Net Switch refuses to start the engine unless
-   both match `engine\SHA256SUMS.txt`.
+2. Run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-engine.ps1`.
+   It downloads the pinned sing-box archive for the PC's architecture and checks
+   the archive and extracted files. A source checkout uses `engine\SHA256SUMS.txt`
+   on x64 and `engine\SHA256SUMS-arm64.txt` on ARM64. An installer stages its
+   architecture's list as `engine\SHA256SUMS.txt`.
 3. Optional: build the small native helper that watches network changes,
    reads line speeds and watches connections that go around routing:
 
@@ -141,13 +142,27 @@ in the pull request:
 
 ```powershell
 npm run build
+# Or cross-build the ARM64 installer with the same pinned x64 Go toolchain:
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1 -Arch arm64
 ```
 
 This downloads the pinned Node.js, sing-box, Go and
 [Inno Setup](https://jrsoftware.org/isinfo.php) files listed in
 `packaging\versions.json`, checks their hashes, builds the native helper and
-the tray program, and builds `dist\NetSwitch-Setup-<version>-x64.exe`. In
-`dist\STAGE-SHA256SUMS.txt`, the tray program's hash changes with every
+the tray program, and builds `dist\NetSwitch-Setup-<version>-<arch>.exe`.
+`-Arch x64` is the release build default; `-Arch arm64` selects ARM64 Node,
+sing-box and helper binaries. `-SkipInstaller` only stages and verifies the
+payload, without running Inno Setup. The stages are `dist\stage-x64` and
+`dist\stage-arm64`; each binary's PE architecture is checked before packaging.
+The helper build defaults to the PC's architecture and also accepts `-Arch`.
+Cross-builds go in `helper\bin\<arch>\` so the native helper in your checkout
+still works; the installer always receives `helper\netswitch-helper.exe`.
+It runs Go tests only when the target matches the PC; CI runs tests and the
+installer smoke test on both x64 and `windows-11-arm` runners.
+The AnyCPU tray has no Prefer32Bit flag, so .NET Framework 4.8.1 runs it
+natively on ARM64. Never run the installer smoke test on a PC you use.
+
+In `dist\STAGE-SHA256SUMS-<arch>.txt`, the tray program's hash changes with every
 build, because the compiler Windows ships stamps each build with its own time
 and ID. Pushing a `v*` tag builds and publishes a release on GitHub; the tag
 must match `package.json` and have a section in `CHANGELOG.md`.

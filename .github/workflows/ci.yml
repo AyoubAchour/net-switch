@@ -54,3 +54,53 @@ jobs:
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-x64.exe"
+
+  arm64:
+    name: Windows ARM64 / tests and installer
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          architecture: arm64
+          package-manager-cache: false
+      - name: Confirm native Node and build and test the helper
+        run: |
+          node -e "if (process.arch !== 'arm64') process.exit(1)"
+          ./scripts/build-helper.ps1 -Arch arm64
+      - name: Build the AnyCPU tray
+        run: ./scripts/build-tray.ps1
+      - name: Test app, native helper and tray on ARM64
+        run: npm test
+      - name: Verify source provenance for both engine architectures
+        if: ${{ !cancelled() }}
+        run: node scripts/write-source-manifest.mjs --verify-only
+      - name: Build the ARM64 installer and verify its payload
+        if: ${{ !cancelled() }}
+        id: arm64-build
+        run: ./scripts/build-release.ps1 -Arch arm64
+      - name: Install, upgrade and uninstall it
+        if: ${{ !cancelled() && steps.arm64-build.outcome == 'success' }}
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-arm64.exe" -Arch arm64
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          architecture: x64
+          package-manager-cache: false
+      - name: Verify registry detection and updates under x64 emulation
+        env:
+          NETSWITCH_TEST_X64_ON_ARM64: '1'
+        run: |
+          node --test test/architecture.test.mjs test/updates.test.mjs test/engine.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          . ./scripts/build-common.ps1
+          if ((Get-NativeArchitecture) -ne 'arm64') { throw 'Source engine download would use the wrong architecture.' }

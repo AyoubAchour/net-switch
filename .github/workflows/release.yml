@@ -13,8 +13,16 @@ concurrency:
 
 jobs:
   build:
-    name: Test and build Windows installer
-    runs-on: windows-latest
+    name: Test and build Windows ${{ matrix.arch }} installer
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
     timeout-minutes: 30
     outputs:
       version: ${{ steps.metadata.outputs.version }}
@@ -33,24 +41,25 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ steps.node.outputs.version }}
+          architecture: ${{ matrix.arch }}
           package-manager-cache: false
       - name: Check tag and changelog
         id: metadata
         run: node scripts/release-metadata.mjs
       - name: Build and test the native helper with the pinned Go
-        run: ./scripts/build-helper.ps1
+        run: ./scripts/build-helper.ps1 -Arch ${{ matrix.arch }}
       - name: Build the tray program with the C# compiler that comes with Windows
         run: ./scripts/build-tray.ps1
       - name: Test app, native helper, tray program and C# tray
         run: npm test
       - name: Build with the pinned Inno Setup compiler
-        run: ./scripts/build-release.ps1
+        run: ./scripts/build-release.ps1 -Arch ${{ matrix.arch }}
       - name: Install, upgrade and uninstall the built installer
-        run: ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-${{ steps.metadata.outputs.version }}-x64.exe"
+        run: ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-${{ steps.metadata.outputs.version }}-${{ matrix.arch }}.exe" -Arch ${{ matrix.arch }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: windows-installer
-          path: dist/NetSwitch-Setup-${{ steps.metadata.outputs.version }}-x64.exe
+          name: windows-installer-${{ matrix.arch }}
+          path: dist/NetSwitch-Setup-${{ steps.metadata.outputs.version }}-${{ matrix.arch }}.exe
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
@@ -156,7 +165,8 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: windows-installer
+          pattern: windows-installer-*
+          merge-multiple: true
           path: release-assets
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -171,11 +181,13 @@ jobs:
           node scripts/release-metadata.mjs
           engine_version=$(node -p 'JSON.parse(require("fs").readFileSync("packaging/versions.json", "utf8")).singBox.version')
           cd release-assets
-          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 4
           test -s "NetSwitch-Setup-$APP_VERSION-x64.exe"
+          test -s "NetSwitch-Setup-$APP_VERSION-arm64.exe"
           test -s "sing-box-$engine_version-source-with-deps.tar.gz"
           test -s sources.txt
           sha256sum "NetSwitch-Setup-$APP_VERSION-x64.exe" \
+            "NetSwitch-Setup-$APP_VERSION-arm64.exe" \
             "sing-box-$engine_version-source-with-deps.tar.gz" sources.txt > SHA256SUMS.txt
           sha256sum --check SHA256SUMS.txt
       - name: Attest all release assets, including the checksums file
