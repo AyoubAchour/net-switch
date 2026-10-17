@@ -269,6 +269,9 @@ function lineFoot(line, compact = false) {
   const other = standIn(line);
   if (other && compact) return `Its apps use the ${other.label}`;
   if (other && line.exhausted) return `Its apps use the ${other.label} until the cap resets`;
+  // Out of data with no other line to take its apps.
+  if (line.exhausted && line.blocked) return 'Its apps are paused until the cap resets';
+  if (line.exhausted && line.main) return 'Still in use: no other line can take over';
   if (other) return `Its apps use the ${other.label} until it’s back`;
   if (Number.isFinite(line.connections)) return `Carrying ${connectionCount(line.connections)}`;
   return '';

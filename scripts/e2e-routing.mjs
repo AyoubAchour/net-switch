@@ -97,29 +97,50 @@ async function routingOn() {
 
 // One HTTPS request through the test-mode proxy, left open so the server's
 // next poll sees it. Resolves once the answer has arrived.
+// One deadline covers the proxy, TLS and the answer; any other answer, or the
+// connection closing first, fails the request instead of hanging the test.
+const REQUEST_TIMEOUT_MS = 20_000;
 function connectThroughProxy(proxyPort) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const sockets = [];
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const socket of sockets) socket.destroy();
+      reject(error);
+    };
+    const timer = setTimeout(() => fail(new Error('the request through the proxy took too long')), REQUEST_TIMEOUT_MS);
     const tunnel = request({ host: '127.0.0.1', port: proxyPort, method: 'CONNECT', path: `${TARGET.host}:${TARGET.port}` });
-    tunnel.setTimeout(20_000, () => tunnel.destroy(new Error('the proxy did not answer')));
-    tunnel.on('error', reject);
+    tunnel.on('error', fail);
     tunnel.on('connect', (response, socket) => {
+      sockets.push(socket);
       if (response.statusCode !== 200) {
-        socket.destroy();
-        reject(new Error(`the proxy answered ${response.statusCode}`));
+        fail(new Error(`the proxy answered ${response.statusCode}`));
         return;
       }
       const secure = tlsConnect({ socket, servername: 'one.one.one.one' }, () => {
         secure.write(`GET ${TARGET.path} HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: keep-alive\r\n\r\n`);
       });
+      sockets.push(secure);
       let text = '';
       secure.on('data', (chunk) => {
+        if (settled) return;
         text += chunk;
-        if (text.includes('\r\n\r\n') && /^HTTP\/1\.1 200/.test(text)) {
-          open.push(secure);
-          resolve(secure);
+        if (!text.includes('\r\n\r\n')) return;
+        const status = /^HTTP\/1\.[01] (\d{3})/.exec(text)?.[1];
+        if (status !== '200') {
+          fail(new Error(`the site answered ${status ?? 'something unreadable'}`));
+          return;
         }
+        settled = true;
+        clearTimeout(timer);
+        open.push(secure);
+        resolve(secure);
       });
-      secure.on('error', reject);
+      secure.on('end', () => fail(new Error('the site closed the connection before answering')));
+      secure.on('error', fail);
     });
     tunnel.end();
   });

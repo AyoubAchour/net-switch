@@ -217,6 +217,24 @@ test('a returning line is trusted on its address once no test could say anything
   assert.equal(health.check(true, back + PASS_WAIT_MS, { tested: true }), true);
 });
 
+test('one failed test, then tests that can’t run, doesn’t leave a returning line checking forever', () => {
+  const { health, back } = returning({ tested: true });
+  health.noteProbe(false, back + 5000);
+  assert.equal(health.check(true, back + 5000 + PASS_WAIT_MS - 1000, { tested: true }), false);
+  assert.equal(health.reason, 'checking');
+  // Thirty seconds after the last test that answered, it goes on without one.
+  assert.equal(health.check(true, back + 5000 + PASS_WAIT_MS, { tested: true }), true);
+});
+
+test('a routing restart keeps a returning line waiting for its first passing test', () => {
+  const { health, time, back } = returning({ tested: true });
+  health.restartKeeping({ offline: health.offline, awaitingPass: health.awaitingPass }, back + 1000);
+  assert.equal(health.check(true, time.tick(2000), { tested: true }), false);
+  assert.equal(health.reason, 'checking');
+  health.noteProbe(true, time.tick());
+  assert.equal(health.check(true, time.tick(), { tested: true }), true);
+});
+
 test('a single poll without an address is a glitch and asks for no test afterwards', () => {
   const health = new LineHealth();
   const time = clock();

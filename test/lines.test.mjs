@@ -12,6 +12,7 @@ import {
   newLine,
   normalizeLines,
   pickFirstAdapter,
+  placeWaitingApps,
   sharesFromWeights,
   sharingLines,
   uniqueLabel,
@@ -81,6 +82,16 @@ test('0.2.0 settings become two lines, with every app choice kept', () => {
   }
   assert.equal(Object.hasOwn(changes, 'combine'), false);
 
+  // A second connection that had been removed: its apps wait for the next line.
+  const removed = migrateSettings({ mainAlias: 'Ethernet', secondAlias: null, secondApps: ['C:\\Games\\steam.exe'] });
+  assert.equal(removed.lines.length, 1);
+  assert.deepEqual(removed.waitingApps, ['C:\\Games\\steam.exe']);
+  assert.equal(migrateSettings({ mainAlias: 'Ethernet', secondAlias: 'Wi-Fi', secondApps: ['a.exe'] }).waitingApps, undefined);
+  assert.deepEqual(placeWaitingApps(['C:\\Games\\steam.exe', 'C:\\Kept.exe'], { 'c:\\kept.exe': 'a1' }, 'b2'), {
+    'c:\\kept.exe': 'a1',
+    'C:\\Games\\steam.exe': 'b2',
+  });
+  assert.equal(placeWaitingApps(undefined, {}, 'b2'), null);
   // A phone as the second connection counts as metered.
   assert.equal(migrateSettings({ mainAlias: 'Ethernet', secondAlias: 'Ethernet 3', secondKind: 'phone' }).lines[1].metered, true);
   // Only a cable: one line.
@@ -99,6 +110,8 @@ test('lines from the settings file are repaired or dropped, and the main line is
     { id: '../../evil', alias: 'Wi-Fi' },
     { id: 'b2', alias: '' },
     { id: 'c3', alias: 'Ethernet 3', kind: 'phone', metered: true, strict: true, weight: -2, cap: { bytes: 5e9, period: 'day' } },
+    // A number id would give the same tags and file names as its text.
+    { id: 12, alias: 'Number' },
     'Wi-Fi',
   ]);
   assert.deepEqual(lines, [
@@ -150,9 +163,11 @@ test('a line’s apps use it while it is up, else the first other line that is u
   assert.equal(laneTarget(LINES, 'zz', up('a1')), null);
 });
 
-test('every open line takes part in combining; the main line always does', () => {
+test('every open line takes part in combining, the main line too until it is out of data', () => {
   assert.deepEqual(sharingLines(LINES).map((line) => line.id), ['a1', 'b2', 'd4']);
-  assert.deepEqual(sharingLines(LINES, new Set(['a1', 'b2'])).map((line) => line.id), ['a1', 'd4']);
+  // Out of data, the main line leaves sharing rather than handing its share on.
+  assert.deepEqual(sharingLines(LINES, new Set(['a1', 'b2'])).map((line) => line.id), ['d4']);
+  assert.deepEqual(sharingLines([{ id: 'a1', strict: true }, ...LINES.slice(1)]).map((line) => line.id), ['a1', 'b2', 'd4']);
   assert.equal(isOpenLine(LINES[2]), false);
 });
 

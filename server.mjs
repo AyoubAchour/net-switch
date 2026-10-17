@@ -20,6 +20,7 @@ import {
   newLine,
   normalizeLines,
   pickFirstAdapter,
+  placeWaitingApps,
   SHARE_STEP,
   sharesFromWeights,
   sharingLines,
@@ -754,6 +755,7 @@ function noteUsage() {
     if (next.has(line.id) && !exhaustedIds.has(line.id)) {
       noteEvent('exhausted', line.id, `${line.label} has used its data cap. Its apps use other lines until the cap resets.`);
       log(`${line.label} reached its data cap`);
+      closeWhenMoved.add(line.id);
     } else if (!next.has(line.id) && exhaustedIds.has(line.id)) {
       noteEvent('cap-reset', line.id, `${line.label} can be used again: its data cap has reset.`);
       log(`${line.label}'s data cap reset`);
@@ -799,6 +801,65 @@ async function followShares() {
   log(`combining shares: ${Object.entries(next).map(([id, share]) => `${lineById(id)?.label ?? id} ${Math.round(share * 100)}%`).join(', ')}`);
 }
 
+// Lines out of data whose apps have no other line to use now: their pinned
+// apps' new connections are refused until the cap resets. The main line is
+// never refused this way, as that would cut the whole internet; it keeps
+// working past its cap until another line can take over.
+function blockedLines() {
+  if (!routingThroughLanes()) return [];
+  return settings.values.lines
+    .slice(1)
+    .filter((line) => exhaustedIds.has(line.id) && laneTargetNow(line.id) === line.id)
+    .map((line) => line.id);
+}
+
+let blockedPending = false;
+function followBlockedSoon() {
+  const next = blockedLines();
+  if (blockedPending || JSON.stringify(next) === JSON.stringify(engine.blocked)) return;
+  blockedPending = true;
+  inLaneQueue(async () => {
+    const now = blockedLines();
+    if (JSON.stringify(now) === JSON.stringify(engine.blocked)) return;
+    await engine.changeRules({ blocked: now });
+    for (const id of now) log(`${lineById(id)?.label ?? id} is out of data and no other line can take its apps: their new connections are refused until the cap resets`);
+  })
+    .catch((error) => log(`could not refuse the apps of a line out of data: ${error.message}`))
+    .finally(() => {
+      blockedPending = false;
+    });
+}
+
+// A line that just ran out of data: its routed connections are closed, so a
+// long download doesn't keep spending it. Its apps reconnect through the line
+// standing in for it, or are refused. Done after the lanes have moved.
+const closeWhenMoved = new Set();
+function closeExhaustedConnections() {
+  for (const id of [...closeWhenMoved]) {
+    if (!routingThroughLanes()) {
+      closeWhenMoved.delete(id);
+      continue;
+    }
+    const moved = laneTargetNow(id) !== id;
+    if (!moved && !engine.blocked.includes(id)) {
+      // The main line with no other line up: it keeps working, so nothing is closed.
+      if (settings.values.lines[0]?.id === id) closeWhenMoved.delete(id);
+      continue;
+    }
+    closeWhenMoved.delete(id);
+    engine
+      .connections()
+      .then(async (connections) => {
+        let closed = 0;
+        for (const connection of connections.filter((item) => connectionLine(item) === id)) {
+          await engine.closeConnection(connection.id).then(() => (closed += 1)).catch(() => {});
+        }
+        if (closed) log(`${lineById(id)?.label ?? id} is out of data: closed ${closed} connection${closed === 1 ? '' : 's'} still using it`);
+      })
+      .catch((error) => log(`could not close the connections of a line out of data: ${error.message}`));
+  }
+}
+
 // From the poll, without waiting: a line change may be holding the queue.
 let sharesPending = false;
 function followSharesSoon() {
@@ -823,6 +884,8 @@ async function pollConnections() {
   // their new connections go back as soon as it returns.
   await tickLanes();
   followSharesSoon();
+  followBlockedSoon();
+  closeExhaustedConnections();
   try {
     const connections = await engine.connections();
     monitorFailures = 0;
@@ -1139,7 +1202,10 @@ function addLine(alias) {
     if (!adapter || taken) throw clientError('That connection isn’t available. Check that it’s connected, then try again.');
     if (lines.length >= MAX_LINES) throw clientError(`Net Switch can use up to ${MAX_LINES} lines.`);
     const line = newLine(adapter, lines);
-    await applyLines([...lines, line]);
+    // Apps from a 0.2.0 second connection that had been removed come back.
+    const placed = lines.length > 0 ? placeWaitingApps(settings.values.waitingApps, settings.values.appLines, line.id) : null;
+    await applyLines([...lines, line], placed ?? settings.values.appLines);
+    if (placed) await settings.update({ waitingApps: undefined });
     log(`added ${line.label} (${line.alias})`);
     if (engine.status !== 'off') await restartEngine();
   });
@@ -1435,6 +1501,8 @@ function lineState(line, index) {
     cap: line.cap,
     usage: usage.used(line.id),
     exhausted: exhaustedIds.has(line.id),
+    // Out of data with no line to stand in: its apps' new connections are refused.
+    blocked: engine.blocked.includes(line.id),
     weight: line.weight,
     // Its part of new connections while combining, from the rule files.
     share: engine.combine ? (engine.shares[line.id] ?? 0) : null,

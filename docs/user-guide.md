@@ -197,9 +197,12 @@ Three settings on a line help with a phone's data plan:
   carries every app without a line of its own.
 - **Data cap** sets an amount per day or per month. A day starts at midnight; a
   month starts on the day you choose. Once the cap is reached, the line is left
-  alone until the next period: its apps use your other lines, and its checks
-  stop so they use no more of it. The count includes everything on that
-  adapter, not only Net Switch's traffic.
+  alone until the next period: connections still using it are closed, its apps
+  use your other lines, and its checks stop so they use no more of it. If no
+  other line can take its apps, their new connections are refused until the
+  cap resets. The main line is the exception: with no other line up it keeps
+  working, since refusing it would cut your whole internet. The count includes
+  everything on that adapter, not only Net Switch's traffic.
 
 ## The tray icon
 

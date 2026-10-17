@@ -41,16 +41,29 @@ test('an app’s rule matches its exact path in any letter case, and nothing els
   assert.equal(appPathPattern('C:\\a (x86)\\b+c.exe'), '(?i)^C:\\\\a \\(x86\\)\\\\b\\+c\\.exe$');
 });
 
-test('every line gets a file of pinned apps; every line but the main one also gets a share file', () => {
-  assert.deepEqual(ruleSetTags(LINES), ['apps-a1', 'apps-b2', 'share-b2', 'apps-c3', 'share-c3']);
+test('every line gets a file of pinned apps; every line but the main one also gets a share file and a cut file', () => {
+  assert.deepEqual(ruleSetTags(LINES), ['apps-a1', 'apps-b2', 'share-b2', 'cut-b2', 'apps-c3', 'share-c3', 'cut-c3']);
   const sets = buildRuleSets({ lines: LINES, appLines: { [LM]: 'b2' } });
   assert.deepEqual(Object.keys(sets), ruleSetTags(LINES));
   assert.deepEqual(sets['apps-b2'], { version: 3, rules: [LM_RULE] });
   // Files are never empty: sing-box refuses a rule set without rules.
   assert.deepEqual(sets['apps-a1'], NEVER);
   assert.deepEqual(sets['share-b2'], NEVER, 'no share without combining');
+  assert.deepEqual(sets['cut-b2'], NEVER, 'nothing refused while the line has data');
   // A pin to a line that isn't there is left out.
   assert.deepEqual(buildRuleSets({ lines: [CABLE], appLines: { [LM]: 'zz' } })['apps-a1'], NEVER);
+});
+
+test('a line out of data with nowhere to send its apps refuses their new connections', () => {
+  const sets = buildRuleSets({ lines: LINES, appLines: { [LM]: 'b2' }, blocked: ['b2'] });
+  assert.deepEqual(sets['cut-b2'], { version: 3, rules: [LM_RULE] });
+  assert.deepEqual(sets['cut-c3'], NEVER);
+  const config = buildEngineConfig({ mode: 'tun', lines: LINES, apiPort: 1, apiSecret: 's', ruleDir: 'C:\\data' });
+  // Refusals come before any app's route, so a refused app can't slip through.
+  const cut = config.route.rules.findIndex((rule) => rule.rule_set === 'cut-b2');
+  const apps = config.route.rules.findIndex((rule) => rule.rule_set === 'apps-b2');
+  assert.ok(cut >= 0 && cut < apps);
+  assert.equal(config.route.rules[cut].action, 'reject');
 });
 
 test('duplicate saved versions use the last pin in both routing rules and connection decisions', () => {
@@ -164,7 +177,7 @@ test('the engine writes every rule file, keeps the other choices across a change
     await engine.setLines([CABLE, STICK]);
     await engine.removeStaleRuleFiles();
     const names = (await readdir(dataDir)).filter((name) => name.endsWith('.json')).sort();
-    assert.deepEqual(names, ['apps-a1.json', 'apps-b2.json', 'share-b2.json']);
+    assert.deepEqual(names, ['apps-a1.json', 'apps-b2.json', 'cut-b2.json', 'share-b2.json']);
   } finally {
     await rm(dataDir, { recursive: true, force: true });
   }
@@ -192,6 +205,25 @@ test('a change whose rule file could not be written never slips into the next ch
   }
 });
 
+test('when a later rule file can’t be written, the ones already written are put back', async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'net-switch-test-'));
+  try {
+    const engine = new Engine({ singBoxPath: 'sing-box.exe', dataDir, mode: 'proxy' });
+    await engine.setLines([CABLE, STICK]);
+    await engine.setAppLines({ [LM]: 'b2' });
+    // Moving LM Studio to the main line writes apps-a1 first, then apps-b2.
+    const later = path.join(dataDir, 'apps-b2.json');
+    await rm(later);
+    await mkdir(later);
+    await assert.rejects(engine.setAppLines({ [LM]: 'a1' }));
+    // apps-a1 is as before the change, so the engine doesn't send LM Studio to the main line.
+    assert.deepEqual(JSON.parse(await readFile(path.join(dataDir, 'apps-a1.json'), 'utf8')), NEVER);
+    assert.deepEqual(engine.appLines, { [LM]: 'b2' });
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('with two lines or more, each line gets a selector that starts on itself, and everything else goes through the main line’s', () => {
   const config = buildEngineConfig({ mode: 'tun', lines: LINES, apiPort: 1, apiSecret: 's', ruleDir: 'C:\\data' });
   const byTag = new Map(config.outbounds.map((item) => [item.tag, item]));
@@ -203,7 +235,7 @@ test('with two lines or more, each line gets a selector that starts on itself, a
   // IPv6 is refused first, then pinned apps on every line, then the shares.
   assert.deepEqual(
     config.route.rules.map((rule) => rule.rule_set ?? rule.action),
-    ['reject', 'apps-a1', 'apps-b2', 'apps-c3', 'share-b2', 'share-c3'],
+    ['reject', 'cut-b2', 'cut-c3', 'apps-a1', 'apps-b2', 'apps-c3', 'share-b2', 'share-c3'],
   );
   assert.deepEqual(
     config.route.rule_set.map((set) => set.path),
@@ -214,7 +246,7 @@ test('with two lines or more, each line gets a selector that starts on itself, a
 
   // With IPv6 on every line, it is routed instead of refused.
   const withIpv6 = buildEngineConfig({ mode: 'tun', lines: LINES, apiPort: 1, apiSecret: 's', ruleDir: 'C:\\data', ipv6: true });
-  assert.equal(withIpv6.route.rules.some((rule) => rule.action === 'reject'), false);
+  assert.equal(withIpv6.route.rules.some((rule) => rule.ip_version === 6), false);
 
   const alone = buildEngineConfig({ mode: 'proxy', lines: [CABLE], apiPort: 1, apiSecret: 's', ruleDir: 'C:\\data' });
   assert.equal(alone.route.final, 'line-a1');
