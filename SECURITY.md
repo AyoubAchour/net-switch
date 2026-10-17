@@ -51,13 +51,22 @@ delete that folder by hand if you want them gone.
 
 ## What it sends over the network
 
-No telemetry, and no update check. The only requests Net Switch makes on its
-own are connectivity checks through each line while routing is on with two
+No telemetry. Net Switch makes two kinds of requests on its own.
+
+**Update checks.** A minute after it starts, then twice a day, it asks GitHub's
+API for this project's latest release
+(`api.github.com/repos/AyoubAchour/net-switch/releases/latest`). The request
+says which Net Switch version is asking, and GitHub sees your public address,
+as with any request. It only reads the answer: Net Switch never downloads or
+runs anything by itself. A newer release is offered in the window, and the
+installer downloads in your browser like any other file. Turn this off with
+**Check for updates** at the bottom of the window.
+
+**Connectivity checks** through each line while routing is on with two
 lines: every 30 seconds while the line is healthy, more often after a failure.
 Each is an HTTPS request to `1.1.1.1` (Cloudflare), or to `8.8.8.8` (Google)
 if that fails (both at once after a failed check). They carry nothing about
-you, though like any request they show
-those companies your public addresses.
+you, though like any request they show those companies your public addresses.
 
 ## Bug reports and logs
 

@@ -17,6 +17,8 @@ const els = {
   listMessage: document.getElementById('list-message'),
   legends: document.querySelector('.legends'),
   channels: document.querySelector('.channels'),
+  footerNote: document.getElementById('footer-note'),
+  updateChecks: document.getElementById('update-checks'),
   quit: document.getElementById('quit'),
 };
 
@@ -355,6 +357,7 @@ function renderTopbar() {
 
   // Quit needs a working connection to the server; without one it would only pretend.
   els.quit.hidden = stale || !token;
+  renderFooter(stale);
 
   const toggle = els.toggle;
   toggle.hidden = !state || stale;
@@ -369,6 +372,24 @@ function renderTopbar() {
     toggle.textContent = routingWanted() ? 'Turn off' : 'Turn on';
     toggle.disabled = Boolean(busyAction);
   }
+}
+
+// The version, and the switch for looking for updates. An older Net Switch
+// sends neither, and test mode never checks, so the switch is hidden then.
+function renderFooter(stale) {
+  const version = state?.version;
+  const note = `${version ? `Net Switch ${version}. ` : ''}Closing this window keeps routing on.`;
+  if (els.footerNote.textContent !== note) els.footerNote.textContent = note;
+  const offered = !stale && state && typeof state.updateChecks === 'boolean' && state.mode !== 'proxy';
+  els.updateChecks.hidden = !offered;
+  if (!offered) return;
+  const busy = busyAction === 'update-checks';
+  els.updateChecks.textContent = busy ? 'Changing…' : `Check for updates: ${state.updateChecks ? 'on' : 'off'}`;
+  els.updateChecks.title = state.updateChecks
+    ? 'Net Switch asks GitHub twice a day whether a newer version is out. Press to stop.'
+    : 'Press to let Net Switch ask GitHub twice a day whether a newer version is out.';
+  els.updateChecks.setAttribute('aria-pressed', String(state.updateChecks));
+  els.updateChecks.disabled = Boolean(busyAction);
 }
 
 // ------------------------------------------------------------ master section
@@ -601,9 +622,9 @@ function notice(kind, text, actions = [], details = null) {
   );
 }
 
-function actionButton(label, busyLabel, name, task) {
+function actionButton(label, busyLabel, name, task, { quiet = false } = {}) {
   return h('button', {
-    class: 'button',
+    class: quiet ? 'button button-quiet' : 'button',
     type: 'button',
     text: busyAction === name ? busyLabel : label,
     disabled: Boolean(busyAction),
@@ -624,6 +645,22 @@ function renderNotices() {
   }
   if (state && !unreachable && !outdated) {
     const { routing, setup } = state;
+    // A newer release. The download is an ordinary one in the browser; the
+    // installer then updates this copy and keeps the settings.
+    const update = state.update;
+    if (update) {
+      list.push(
+        notice(
+          'update',
+          `Net Switch ${update.version} is out (you have ${state.version}). Download it and run the installer: it updates this copy and keeps your settings.`,
+          [
+            h('a', { class: 'button', href: update.installer, target: '_blank', rel: 'noopener noreferrer', text: 'Download' }),
+            h('a', { class: 'button button-quiet', href: update.page, target: '_blank', rel: 'noopener noreferrer', text: 'What’s new' }),
+            actionButton('Not now', 'Hiding…', 'update-dismiss', () => api('/api/update/dismiss', { version: update.version }), { quiet: true }),
+          ],
+        ),
+      );
+    }
     if (routing.status === 'error' && routing.error) {
       const [first, ...rest] = routing.error.split('\n');
       const canRetry = state.elevated || state.mode === 'proxy';
@@ -1073,6 +1110,9 @@ async function poll() {
 
 els.toggle.addEventListener('click', toggleRouting);
 els.quit.addEventListener('click', quit);
+els.updateChecks.addEventListener('click', () => {
+  if (state) run('update-checks', () => api('/api/update/checks', { on: !state.updateChecks }));
+});
 window.addEventListener('hashchange', () => {
   const next = readToken();
   if (!next || next === token) return;

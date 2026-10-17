@@ -16,6 +16,13 @@ change behavior.
   internet traffic is still arriving through that line, the test waits up to
   10 seconds instead of 5, and after a failed test both test sites are asked
   at once.
+- Update notice: Net Switch checks GitHub twice a day for a newer release and
+  offers it in the window and the tray menu. The installer downloads in your
+  browser and updates Net Switch in place; nothing is installed by itself.
+  Turn the checks off with **Check for updates** at the bottom of the window.
+- The window shows which version you're running.
+- The faintest text is a little brighter, so it's readable for everyone
+  (WCAG AA contrast).
 
 ## [0.1.0] - 2026-10-15
 

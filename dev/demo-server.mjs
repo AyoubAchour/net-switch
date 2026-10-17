@@ -33,6 +33,14 @@ const apps = [
   { name: 'Windows services', kb: 1, lane: 'main', service: true },
 ];
 let combine = true;
+// node dev/demo-server.mjs --update also shows a newer release on offer.
+let offerUpdate = process.argv.includes('--update');
+let updateChecks = true;
+const DEMO_UPDATE = {
+  version: '9.9.9',
+  page: 'https://github.com/AyoubAchour/net-switch/releases/latest',
+  installer: 'https://github.com/AyoubAchour/net-switch/releases/latest',
+};
 
 // A steady wobble, so the meters move like real traffic.
 function wobble(base, seed) {
@@ -66,6 +74,9 @@ function state() {
   return {
     mode: 'tun',
     elevated: true,
+    version: '0.2.0',
+    update: offerUpdate && updateChecks ? DEMO_UPDATE : null,
+    updateChecks,
     features: { reconnect: true, combine: true, cableOnly: true },
     combine: { on: combine, active: combine },
     routing: { status: 'on', wanted: true, error: null, measuring: true, proxyPort: null, retryAt: null },
@@ -103,6 +114,14 @@ const actions = {
   },
   'POST /api/combine': async ({ on }) => {
     combine = Boolean(on);
+    return state();
+  },
+  'POST /api/update/dismiss': async () => {
+    offerUpdate = false;
+    return state();
+  },
+  'POST /api/update/checks': async ({ on }) => {
+    updateChecks = Boolean(on);
     return state();
   },
 };
