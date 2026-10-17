@@ -197,6 +197,10 @@ test('with two lines or more, each line gets a selector that starts on itself, a
   // The engine's lines come to Net Switch, which keeps the log to a set size.
   assert.equal(config.log.output, undefined);
 
+  // With IPv6 on every line, it is routed instead of refused.
+  const withIpv6 = buildEngineConfig({ mode: 'tun', lines: LINES, apiPort: 1, apiSecret: 's', ruleDir: 'C:\\data', ipv6: true });
+  assert.equal(withIpv6.route.rules.some((rule) => rule.action === 'reject'), false);
+
   const alone = buildEngineConfig({ mode: 'proxy', lines: [CABLE], apiPort: 1, apiSecret: 's', ruleDir: 'C:\\data' });
   assert.equal(alone.route.final, 'line-a1');
   assert.deepEqual(alone.outbounds.map((item) => item.tag), ['line-a1']);

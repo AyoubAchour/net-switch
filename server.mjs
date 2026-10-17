@@ -35,6 +35,7 @@ import {
   detectAdapters,
   effectiveMetric,
   findAdapter,
+  hasGlobalIPv6,
   isElevated,
   readDefaultRoutes,
   readMetrics,
@@ -292,6 +293,9 @@ const events = [];
 let exhaustedIds = new Set();
 // When Auto combining last rewrote the shares.
 let sharesWrittenAt = 0;
+// Since when whether to route IPv6 has differed from what routing started with.
+let ipv6ChangedSince = null;
+const IPV6_SETTLE_MS = 30_000;
 
 const usage = new Usage();
 try {
@@ -522,11 +526,13 @@ async function migrateLines() {
     Object.entries(settings.values.appLines).filter(([programPath, id]) => programPath && typeof id === 'string' && ids.has(id)),
   );
   const combineMode = ['auto', 'manual'].includes(settings.values.combineMode) ? settings.values.combineMode : 'auto';
+  const ipv6 = ['auto', 'off'].includes(settings.values.ipv6) ? settings.values.ipv6 : 'auto';
   const changed =
     JSON.stringify(lines) !== JSON.stringify(settings.values.lines) ||
     JSON.stringify(appLines) !== JSON.stringify(settings.values.appLines) ||
-    combineMode !== settings.values.combineMode;
-  if (changed) await settings.update({ lines, appLines, combineMode });
+    combineMode !== settings.values.combineMode ||
+    ipv6 !== settings.values.ipv6;
+  if (changed) await settings.update({ lines, appLines, combineMode, ipv6 });
 }
 
 // ---------------------------------------------------------------- polling
@@ -634,12 +640,36 @@ async function followAdapters() {
 function rebindIfNeeded() {
   const bound = (lines) => JSON.stringify(lines.map(({ id, alias }) => [id, alias]));
   const differs = () => engine.startedWith && bound(engine.startedWith.lines) !== bound(settings.values.lines);
-  if (!differs()) return null;
+  if (differs()) {
+    return inLaneQueue(async () => {
+      if (!wantRouting || quitting || engine.status !== 'on' || !differs()) return;
+      log(`routing restarts to use ${settings.values.lines.map((line) => line.alias).join(', ')}`);
+      await restartEngine();
+    });
+  }
+  // IPv6 came or went on a line. A restart is a short break for every app, so
+  // only a change that lasts counts: an address can drop for a moment.
+  const ipv6 = ipv6Wanted();
+  if (!engine.startedWith || ipv6 === engine.startedWith.ipv6) {
+    ipv6ChangedSince = null;
+    return null;
+  }
+  ipv6ChangedSince ??= Date.now();
+  if (Date.now() - ipv6ChangedSince < IPV6_SETTLE_MS) return null;
+  ipv6ChangedSince = null;
   return inLaneQueue(async () => {
-    if (!wantRouting || quitting || engine.status !== 'on' || !differs()) return;
-    log(`routing restarts to use ${settings.values.lines.map((line) => line.alias).join(', ')}`);
+    if (!wantRouting || quitting || engine.status !== 'on' || ipv6Wanted() === engine.startedWith?.ipv6) return;
+    log(ipv6 ? 'every line has IPv6 now: routing restarts to carry it too' : 'a line lost IPv6: routing restarts to keep apps on IPv4');
     await restartEngine();
   });
+}
+
+// IPv6 is routed only while every line has a global IPv6 address, and the
+// person didn't turn it off. Test mode routes through a local proxy, where it
+// makes no difference.
+function ipv6Wanted() {
+  const lines = settings.values.lines;
+  return settings.values.ipv6 !== 'off' && lines.length > 0 && lines.every((line) => hasGlobalIPv6(line.alias));
 }
 
 // In priority order, so the main line's apps are placed first.
@@ -794,7 +824,7 @@ function startEngine() {
       await tickLanes();
       return;
     }
-    await engine.start({ lines: settings.values.lines });
+    await engine.start({ lines: settings.values.lines, ipv6: ipv6Wanted() });
     await tickLanes();
   };
   const result = startQueue.then(run, run);
@@ -1391,6 +1421,8 @@ function buildState() {
       error: engine.error,
       measuring,
       proxyPort: engine.proxyPort,
+      // Whether IPv6 is routed too (every line has it), or refused so apps use IPv4.
+      ipv6: routingOn ? Boolean(engine.startedWith?.ipv6) : null,
       // When routing that should be on is started again by itself.
       retryAt: wantRouting && engine.status === 'error' && (mode !== 'tun' || elevated) ? retry.at : null,
     },
