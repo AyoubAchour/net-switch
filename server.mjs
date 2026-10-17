@@ -12,7 +12,7 @@ import { Engine } from './lib/engine.mjs';
 import { LaneSwitch } from './lib/lane-switch.mjs';
 import { createLog } from './lib/logfile.mjs';
 import { findHelper, LineMonitor } from './lib/monitor.mjs';
-import { NetworkMonitor, readNetworkOnce } from './lib/helper.mjs';
+import { NetworkMonitor, NetworkUpdates, readNetworkOnce, readPolicyOnce } from './lib/helper.mjs';
 import {
   allowSimultaneousConnections,
   applyCableAsMain,
@@ -23,6 +23,7 @@ import {
   findAdapter,
   isElevated,
   laneLabel,
+  MissingAdapter,
   pickMainAlias,
   prepareAdapters,
   readDefaultRoutes,
@@ -81,8 +82,6 @@ const STEADY_RUN_MS = 120_000;
 // The administrator check is tried again this often while it says no: on a
 // slow start Windows may not have answered it in time.
 const ELEVATION_RECHECK_MS = 30_000;
-// A chosen adapter missing from this many good scans in a row counts as gone.
-const ADAPTER_GONE_SCANS = 2;
 // The adapter list is read this often. When Windows doesn't answer, each try
 // that is given up on can leave a stuck request inside Windows, so the wait
 // grows with every failure instead of piling them up.
@@ -227,7 +226,6 @@ const engine = new Engine({
   singBoxPath: path.join(ROOT, 'engine', 'sing-box.exe'),
   dataDir: MACHINE_DIR,
   mode,
-  helperPath,
 });
 const tracker = new AppTracker();
 const outside = new OutsideTracker();
@@ -264,8 +262,7 @@ let scanFailures = 0;
 let laneQueue = Promise.resolve();
 let startQueue = Promise.resolve();
 let setupQueue = Promise.resolve();
-// Good scans in a row without each chosen adapter.
-const adapterMissing = { main: 0, second: 0 };
+const missingMain = new MissingAdapter();
 
 // Routing should be on unless the person turned it off. While it should be on
 // and isn't, it is started again, waiting longer after each failure.
@@ -277,7 +274,7 @@ const retry = { attempts: 0, at: 0 };
 // the cable is down. A failed network reading says nothing about line health.
 const laneOptions = {
   engine,
-  usableAddresses: networkMonitor ? (alias) => networkMonitor.usableAddresses(alias) : usableAddresses,
+  usableAddresses,
   readDefaultRoutes: networkMonitor ? () => networkMonitor.readDefaultRoutes() : readDefaultRoutes,
   probe: (outbound, options) => engine.probe(outbound, options),
   runExclusive: (task) => inLaneQueue(task),
@@ -433,10 +430,13 @@ async function moveUndoOutOfSettings() {
 // network, link details), and to notice when a chosen adapter is renamed or
 // replaced. Line health is decided separately; a failed reading never moves
 // anyone to the other line.
-async function refreshAdapters(snapshot = null) {
+function refreshAdapters() {
+  return networkMonitor ? networkUpdates.refresh() : applyAdapters();
+}
+
+async function applyAdapters(snapshot = null) {
   try {
     if (networkMonitor) {
-      snapshot ??= await readNetworkOnce(helperPath);
       adapters = prepareAdapters(snapshot.adapters);
       minimizePolicy = snapshot.policy === 'absent' ? null : snapshot.policy;
     } else {
@@ -466,15 +466,14 @@ async function refreshAdapters(snapshot = null) {
 
 // Stream snapshots are applied in order, including the missing-adapter count
 // and GUID following. A failed read never counts as an adapter disappearing.
-let networkUpdates = Promise.resolve();
+const networkUpdates = new NetworkUpdates(applyAdapters, () => readNetworkOnce(helperPath), log);
 networkMonitor?.on('network', (snapshot) => {
-  networkUpdates = networkUpdates.then(() => refreshAdapters(snapshot)).catch((error) => log(`network update failed: ${error.message}`));
+  networkUpdates.refresh(snapshot);
 });
 
 async function readCurrentPolicy() {
   if (!networkMonitor) return readMinimizeConnectionsPolicy();
-  const { policy } = await readNetworkOnce(helperPath);
-  return policy === 'absent' ? null : policy;
+  return readPolicyOnce(helperPath);
 }
 
 function nextScanDelay() {
@@ -497,7 +496,7 @@ async function followAdapters() {
   const renamed = [];
 
   const main = mainAlias ? findAdapter(adapters, { alias: mainAlias, guid: mainGuid }) : null;
-  adapterMissing.main = mainAlias && !main ? adapterMissing.main + 1 : 0;
+  const mainGone = missingMain.update(mainGuid || mainAlias, Boolean(mainAlias && !main));
   if (!mainAlias) {
     const picked = adapters.find((item) => item.alias === pickMainAlias(adapters));
     if (picked) Object.assign(changes, { mainAlias: picked.alias, mainGuid: picked.guid || null });
@@ -509,7 +508,7 @@ async function followAdapters() {
     if (main.alias !== mainAlias || (main.guid && main.guid !== mainGuid)) {
       Object.assign(changes, { mainAlias: main.alias, mainGuid: main.guid || null });
     }
-  } else if (adapterMissing.main >= ADAPTER_GONE_SCANS) {
+  } else if (mainGone) {
     const replacement = adapters.find(
       (item) => item.alias === pickMainAlias(adapters.filter((other) => other.alias !== secondAlias)),
     );
@@ -1270,7 +1269,7 @@ await checkElevation();
 if (networkMonitor) {
   networkMonitor.start();
   await networkMonitor.ready().catch((error) => log(`waiting for network helper: ${error.message}`));
-  await networkUpdates;
+  await networkUpdates.pending;
 } else {
   await refreshAdapters();
 }

@@ -7,7 +7,7 @@
 # Only these processes of this copy are stopped, matched exactly:
 # - its routing engine: <AppDir>\engine\sing-box.exe;
 # - every mode of <AppDir>\helper\netswitch-helper.exe: meters, outside,
-#   network, probes and the guard (which can outlive the server). Match the
+#   network, probes and policy reads. Match the
 #   image path regardless of arguments: the installer must replace this file;
 # - its server: <AppDir>\runtime\node.exe running <AppDir>\server.mjs;
 # - its tray icon: <AppDir>\tray\NetSwitchTray.exe, or powershell.exe running

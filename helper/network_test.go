@@ -9,6 +9,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 func TestNetworkWindowsLayouts(t *testing.T) {
@@ -55,14 +56,13 @@ func TestNewArguments(t *testing.T) {
 	for _, args := range [][]string{
 		{"network", "--once"}, {"network", "--parent", "123"},
 		{"probe", "--interface-index", "3", "--targets", "1.1.1.1:443,8.8.8.8:443"},
-		{"guard", "--parent", "123", "--child", "456", "--child-path", `C:\engine.exe`},
+		{"policy"},
 	} {
 		if _, err := parseArgs(args); err != nil {
 			t.Errorf("%v: %v", args, err)
 		}
 	}
 	for _, args := range [][]string{
-		{"guard"}, {"guard", "--parent", "1", "--child", "1", "--child-path", "x"},
 		{"probe", "--interface-index", "0", "--targets", "1.1.1.1:443"},
 		{"probe", "--interface-index", "1", "--targets", "example.com:443"},
 		{"probe", "--interface-index", "1", "--targets", "[::1]:443"},
@@ -105,24 +105,6 @@ func TestFirstSuccessfulProbeCancelsTheOther(t *testing.T) {
 	}
 }
 
-func TestGuardIdentity(t *testing.T) {
-	for _, c := range []struct {
-		actual, expected string
-		parent, child    uint64
-		want             bool
-	}{
-		{`C:\engine.exe`, `c:\ENGINE.exe`, 10, 11, true},
-		{`C:\other.exe`, `c:\engine.exe`, 10, 11, false},
-		{`C:\engine.exe`, `c:\engine.exe`, 10, 9, false},
-		{`C:\engine.exe`, `c:\engine.exe`, 10, 10, false},
-		{"", "", 10, 11, false},
-	} {
-		if got := guardMatches(c.actual, c.expected, c.parent, c.child); got != c.want {
-			t.Errorf("%+v: %v", c, got)
-		}
-	}
-}
-
 func TestNetworkCoalescesBurstsAndStillRefreshesWhenQuiet(t *testing.T) {
 	changed := make(chan struct{}, 100)
 	emitted := make(chan time.Time, 10)
@@ -153,5 +135,84 @@ func TestNetworkCoalescesBurstsAndStillRefreshesWhenQuiet(t *testing.T) {
 	}
 	if err := <-done; !errors.Is(err, stop) {
 		t.Fatalf("write failure wasn't propagated: %v", err)
+	}
+}
+
+func TestVanishedAdapterDoesNotDiscardSnapshot(t *testing.T) {
+	for _, gone := range []error{windows.ERROR_NOT_FOUND, windows.ERROR_FILE_NOT_FOUND} {
+		rows := []windows.MibIfRow2{{InterfaceIndex: 1, Type: 6}, {InterfaceIndex: 2, Type: 6}}
+		addresses := map[uint32][]string{1: {"192.168.1.2"}, 2: {"192.168.2.2"}}
+		routes := []windows.MibIpForwardRow2{{InterfaceIndex: 1}, {InterfaceIndex: 2}}
+		line, err := assembleNetwork(networkLine{}, rows, addresses, routes, nil, nil, func(row *windows.MibIpInterfaceRow) error {
+			if row.InterfaceIndex == 1 {
+				return gone
+			}
+			row.Metric = 25
+			return nil
+		})
+		if err != nil || len(line.Adapters) != 1 || line.Adapters[0].Index != 2 || len(line.DefaultRoutes) != 1 || line.DefaultRoutes[0].InterfaceAddress != "192.168.2.2" {
+			t.Fatalf("vanished (%v): %+v, %v", gone, line, err)
+		}
+	}
+	_, err := assembleNetwork(networkLine{}, []windows.MibIfRow2{{Type: 6}}, nil, nil, nil, nil, func(*windows.MibIpInterfaceRow) error {
+		return windows.ERROR_ACCESS_DENIED
+	})
+	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("unexpected errors must still reject the partial scan: %v", err)
+	}
+}
+
+func TestNetworkAddressErrorsAreNotEmptySnapshots(t *testing.T) {
+	for _, failure := range []error{windows.ERROR_NO_DATA, windows.ERROR_INVALID_PARAMETER} {
+		query := func(uint32, uint32, uintptr, *windows.IpAdapterAddresses, *uint32) error { return failure }
+		if _, err := queryAdapterAddresses(true, query); !errors.Is(err, failure) {
+			t.Fatalf("network mode hid %v: %v", failure, err)
+		}
+		if first, err := queryAdapterAddresses(false, query); first != nil || err != nil {
+			t.Fatalf("meters compatibility changed: %v, %v", first, err)
+		}
+	}
+}
+
+type stringPolicy struct {
+	value string
+	kind  uint32
+}
+
+func (key stringPolicy) GetIntegerValue(string) (uint64, uint32, error) {
+	return 0, key.kind, registry.ErrUnexpectedType
+}
+
+func (key stringPolicy) GetStringValue(string) (string, uint32, error) {
+	return key.value, key.kind, nil
+}
+
+func TestPolicyAcceptsNumericREGSZ(t *testing.T) {
+	for _, value := range []string{"3", " 3 ", "+3"} {
+		got, err := policyValue(stringPolicy{value, registry.SZ})
+		if err != nil || got != int32(3) {
+			t.Fatalf("REG_SZ %q: %v, %v", value, got, err)
+		}
+	}
+	for _, key := range []stringPolicy{{"invalid", registry.SZ}, {"3oops", registry.SZ}, {"2147483648", registry.SZ}, {"3", registry.EXPAND_SZ}} {
+		if _, err := policyValue(key); err == nil {
+			t.Fatalf("invalid policy accepted: %+v", key)
+		}
+	}
+}
+
+func TestNetworkRetriesReadFailureWithoutExiting(t *testing.T) {
+	stop := errors.New("output closed")
+	calls := 0
+	started := time.Now()
+	err := streamNetwork(make(chan struct{}), func() error {
+		calls++
+		if calls < 3 {
+			return &networkReadError{windows.ERROR_ACCESS_DENIED}
+		}
+		return stop
+	}, time.Hour, time.Millisecond)
+	if !errors.Is(err, stop) || calls != 3 || time.Since(started) < 1500*time.Millisecond {
+		t.Fatalf("calls=%d elapsed=%s err=%v", calls, time.Since(started), err)
 	}
 }

@@ -178,7 +178,7 @@ function Start-InstalledApp {
   # tray.ps1 in PowerShell. Stop-InstalledApp then checks it notices the quit and ends.
   Wait-Until { @(Get-AppProcesses | Where-Object { $_.ExecutablePath -eq $trayProgram }).Count -gt 0 } 'Installed shortcut did not start tray\NetSwitchTray.exe.'
   Wait-HelperModes @('meters', 'outside', 'network')
-  # Routing starts automatically. Require the real engine and its guard before
+  # Routing starts automatically. Require the real engine before
   # exercising quit, upgrade and uninstall, so each shutdown path covers all modes.
   $script:routingState = $null
   try {
@@ -191,7 +191,6 @@ function Start-InstalledApp {
     Write-Host ($script:routingState | ConvertTo-Json -Compress)
     throw
   }
-  Wait-HelperModes @('meters', 'outside', 'network', 'guard')
   Wait-Until { $process.HasExited } 'The installed launcher did not finish opening the app window.'
   $process.WaitForExit()
   if ($process.ExitCode -ne 0) { throw "Installed launcher exited with code $($process.ExitCode)." }

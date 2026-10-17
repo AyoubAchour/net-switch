@@ -1,11 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { EventEmitter } from 'node:events';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import {
   buildEngineConfig,
@@ -490,43 +488,6 @@ test('the checksum list is read line by line, and anything else in it is skipped
   ]);
 });
 
-test('engine arms the guard for its exact child and stops it after the child exits', async () => {
-  const imagePath = path.resolve('resolved-engine/sing-box.exe');
-  const guard = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), kills: 0 });
-  guard.kill = () => { guard.kills++; guard.emit('exit', 1); };
-  const engine = new Engine({ singBoxPath: path.resolve('engine/sing-box.exe'), dataDir: '.', mode: 'proxy', helperPath: 'helper.exe',
-    spawnGuard: (file, args, options) => {
-      assert.equal(file, 'helper.exe');
-      assert.deepEqual(args, ['guard', '--parent', String(process.pid), '--child', '987', '--child-path', imagePath]);
-      assert.equal(options.windowsHide, true);
-      return guard;
-    },
-  });
-  engine.log = { append() {} };
-  const child = { pid: 987 };
-  engine.child = child;
-  const armed = engine.startGuard(child, imagePath);
-  assert.equal(engine.guard, guard);
-  guard.stdout.write('{"ready":true}\n');
-  await armed;
-  engine.stopGuard();
-  assert.equal(guard.kills, 1);
-  assert.equal(engine.guard, null);
-});
-
-test('engine reports guard startup failure instead of claiming protection is armed', async () => {
-  const guard = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), kill() {} });
-  const engine = new Engine({ singBoxPath: 'engine.exe', dataDir: '.', mode: 'proxy', helperPath: 'helper.exe', spawnGuard: () => guard });
-  engine.log = { append() {} };
-  const armed = engine.startGuard({ pid: 987 });
-  guard.stderr.write('access denied');
-  guard.emit('exit', 1);
-  await assert.rejects(armed, /guard could not start.*access denied/);
-  engine.stopGuard();
-  const fallback = new Engine({ singBoxPath: 'engine.exe', dataDir: '.', mode: 'proxy' });
-  await fallback.startGuard({ pid: 987 });
-  assert.equal(fallback.guard, null);
-});
 
 test('an engine file that doesn’t match its checksum is never run, and one that does is hashed only once', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'net-switch-engine-'));

@@ -1,22 +1,17 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { EventEmitter, once } from 'node:events';
+import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
-import { realpath } from 'node:fs/promises';
-import path from 'node:path';
-import { createInterface } from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { NetworkMonitor, parseNetworkSnapshot, quickProbe } from '../lib/helper.mjs';
+import { NetworkMonitor, NetworkUpdates, parseNetworkSnapshot, quickProbe, readPolicyOnce } from '../lib/helper.mjs';
 import { LaneSwitch } from '../lib/lane-switch.mjs';
-import { ADAPTERS_SCRIPT, readDefaultRoutes, readMinimizeConnectionsPolicy } from '../lib/network.mjs';
+import { ADAPTERS_SCRIPT, MissingAdapter, readDefaultRoutes, readMinimizeConnectionsPolicy, usableAddresses } from '../lib/network.mjs';
 import { runFile, runPowerShellJson } from '../lib/ps.mjs';
 
 const helper = fileURLToPath(new URL('../helper/bin/netswitch-helper.exe', import.meta.url));
-const nodeImage = await realpath(process.execPath);
 const needsHelper = { skip: existsSync(helper) ? false : 'native helper is not built', timeout: 45_000 };
-const sample = { adapters: [{ alias: 'Cable', index: 3, status: 'Up', ipv4s: ['192.168.1.2'] }], defaultRoutes: [], policy: 'absent' };
+const sample = { readAt: 1000, adapters: [{ alias: 'Cable', index: 3, status: 'Up', ipv4s: ['192.168.1.2'] }], defaultRoutes: [], policy: 'absent' };
 
 test('native adapters match the PowerShell scan field by field', needsHelper, async (t) => {
   const native = JSON.parse(await runFile(helper, ['network', '--once']));
@@ -82,9 +77,7 @@ test('network snapshots reject partial reads and keep freshness separate from in
   }
   assert.equal(monitor.handleLine(JSON.stringify(sample)), true);
   assert.deepEqual(monitor.snapshot(), sample);
-  monitor.handleLine(JSON.stringify({ ...sample, adapters: [{ ...sample.adapters[0], status: 'Disconnected' }] }));
-  assert.deepEqual(monitor.usableAddresses('Cable'), [], 'a disconnected static address is not usable');
-  assert.deepEqual(monitor.usableAddresses('missing'), []);
+  assert.equal(monitor.handleLine(JSON.stringify({ ...sample, policy: 'unknown' })), true);
   monitor.emit('helperExit', 'network');
   assert.throws(() => monitor.snapshot(), /no current snapshot/);
   monitor.stop();
@@ -125,13 +118,17 @@ test('network stream restarts on death and silence, and stops its own helpers', 
   assert.equal(children.length, count);
 });
 
-test('lane health uses cached network readings and treats a dead helper as unknown', async () => {
-  const monitor = new NetworkMonitor({ helperPath: helper });
+test('lane health keeps checking Node addresses and route.exe when the helper dies or stalls', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: 1000 });
+  let fallback = [];
+  let fallbackCalls = 0;
+  const monitor = new NetworkMonitor({ helperPath: helper, readDefaultRoutes: async () => { fallbackCalls++; return fallback; } });
   const route = { gateway: '192.168.1.1', interfaceAddress: '192.168.1.2', metric: 25 };
   const update = (defaultRoutes) => monitor.handleLine(JSON.stringify({ ...sample, defaultRoutes }));
   let now = 0;
+  let interfaces = { Cable: [{ family: 'IPv4', internal: false, address: '192.168.1.2' }] };
   const lane = new LaneSwitch({ engine: { status: 'off' }, getAlias: () => 'Cable', now: () => now,
-    usableAddresses: (alias) => monitor.usableAddresses(alias), readDefaultRoutes: () => monitor.readDefaultRoutes(),
+    usableAddresses: (alias) => usableAddresses(alias, () => interfaces), readDefaultRoutes: () => monitor.readDefaultRoutes(),
   });
   const sampleLane = async () => { lane.sample(); await lane.routeReading; now += 5000; };
   update([route]);
@@ -141,64 +138,74 @@ test('lane health uses cached network readings and treats a dead helper as unkno
   await sampleLane();
   assert.equal(lane.health.up, true, 'one missing route is not an outage');
   await sampleLane();
-  lane.sample();
+  await sampleLane();
   assert.equal(lane.health.up, false, 'two missing readings confirm the outage');
   update([route]);
   await sampleLane();
   await sampleLane();
-  lane.sample();
+  await sampleLane();
   assert.equal(lane.health.up, true);
   monitor.emit('helperExit', 'network');
-  now += 5000;
   await sampleLane();
-  assert.equal(lane.health.up, true, 'helper failure is not a missing address');
-  assert.throws(() => monitor.usableAddresses('Cable'), /no current snapshot/);
-  await assert.rejects(monitor.readDefaultRoutes(), /no current snapshot/);
+  await sampleLane();
+  await sampleLane();
+  assert.equal(lane.health.up, false, 'route.exe confirms the lost route after helper death');
+  assert.ok(fallbackCalls > 0);
+  fallback = [route];
+  await sampleLane();
+  await sampleLane();
+  await sampleLane();
+  assert.equal(lane.health.up, true, 'recovery is visible without a helper');
+  update([route]);
+  t.mock.timers.tick(15_001);
+  fallback = [];
+  assert.deepEqual(await monitor.readDefaultRoutes(), [], 'a silent helper falls back too');
+  interfaces = {};
+  await sampleLane();
+  await sampleLane();
+  await sampleLane();
+  assert.equal(lane.health.up, false, 'Node notices unplugging despite the cached address');
+});
+
+test('policy-only reads accept known values and fail closed for Undo', async () => {
+  for (const policy of ['absent', 0, 3]) {
+    assert.equal(await readPolicyOnce(helper, async (file, args) => {
+      assert.equal(file, helper);
+      assert.deepEqual(args, ['policy']);
+      return JSON.stringify({ policy });
+    }), policy === 'absent' ? null : policy);
+  }
+  await assert.rejects(readPolicyOnce(helper, async () => '{"policy":"unknown"}'), /known Wi-Fi policy/);
+  await assert.rejects(readPolicyOnce(helper, async () => { throw new Error('access denied'); }), /access denied/);
+});
+
+test('adapter replacement needs two readings and twenty seconds, and resets on recovery or selection', () => {
+  const missing = new MissingAdapter();
+  assert.equal(missing.update('cable', true, 0), false);
+  assert.equal(missing.update('cable', true, 600), false);
+  assert.equal(missing.update('cable', true, 19_999), false);
+  assert.equal(missing.update('cable', true, 20_000), true);
+  assert.equal(missing.update('cable', false, 20_001), false);
+  assert.equal(missing.update('cable', true, 50_000), false);
+  assert.equal(missing.update('new-cable', true, 80_000), false);
+});
+
+test('one-off and stream updates serialize and discard old or repeated readings', async () => {
+  const applied = [];
+  let release;
+  const read = new Promise((resolve) => { release = resolve; });
+  const queue = new NetworkUpdates(async (snapshot) => { applied.push(snapshot.readAt); }, () => read);
+  const oneOff = queue.refresh();
+  const olderStream = queue.refresh({ readAt: 10 });
+  release({ readAt: 20 });
+  await Promise.all([oneOff, olderStream]);
+  await queue.refresh({ readAt: 20 });
+  await queue.refresh({ readAt: 30 });
+  assert.deepEqual(applied, [20, 30]);
 });
 
 test('native probe reports an unavailable interface without external traffic', needsHelper, async () => {
   const result = await quickProbe(helper, 0xffffffff, { targets: ['127.0.0.1:443'] });
   assert.equal(result.ok, false);
   assert.ok(result.error);
-});
-
-test('guard ends only its verified child after its parent exits', needsHelper, async () => {
-  const parent = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' });
-  await once(parent, 'spawn');
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' });
-  await once(child, 'spawn');
-  const guard = spawn(helper, ['guard', '--parent', String(parent.pid), '--child', String(child.pid), '--child-path', nodeImage.toUpperCase()], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  const lines = createInterface({ input: guard.stdout });
-  const errors = [];
-  guard.stderr.on('data', (chunk) => errors.push(String(chunk)));
-  try {
-    const [line] = await Promise.race([
-      once(lines, 'line', { signal: AbortSignal.timeout(5000) }),
-      once(guard, 'close').then(([code]) => { throw new Error(`guard exited ${code}: ${errors.join('')}`); }),
-    ]);
-    assert.equal(line, '{"ready":true}', errors.join(''));
-    const ended = once(child, 'exit', { signal: AbortSignal.timeout(5000) });
-    parent.kill();
-    await ended;
-  } finally { lines.close(); guard.kill(); child.kill(); parent.kill(); }
-});
-
-test('guard refuses a mismatched child image path', needsHelper, async () => {
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' });
-  await once(child, 'spawn');
-  try {
-    await assert.rejects(runFile(helper, ['guard', '--parent', String(process.pid), '--child', String(child.pid), '--child-path', path.resolve('wrong.exe')]), /guard refused child/);
-    assert.equal(child.exitCode, null);
-  } finally { child.kill(); }
-});
-
-test('guard refuses a matching image that was created before its parent', needsHelper, async () => {
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' });
-  await once(child, 'spawn');
-  const parent = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { windowsHide: true, stdio: 'ignore' });
-  await once(parent, 'spawn');
-  try {
-    await assert.rejects(runFile(helper, ['guard', '--parent', String(parent.pid), '--child', String(child.pid), '--child-path', nodeImage], { timeoutMs: 5000 }), /guard refused child/);
-    assert.equal(child.exitCode, null);
-  } finally { parent.kill(); child.kill(); }
 });
