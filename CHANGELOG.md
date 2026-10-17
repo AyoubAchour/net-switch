@@ -6,6 +6,32 @@ change behavior.
 
 ## [Unreleased]
 
+- **Any number of lines, and any adapter as the main one.** A line can be a
+  cable, built-in Wi-Fi, a USB Wi-Fi adapter or a tethered phone, and the
+  main line no longer has to be a cable. Add, rename, reorder and remove lines
+  in the window. Your cable and second connection from 0.2.0 become your first
+  two lines, and every app keeps its line.
+- **Combining by speed or by hand.** **Auto** gives each line a share of new
+  connections that follows its measured speed; **Manual** lets you set the
+  split with sliders.
+- **Gentle failback.** When a line comes back, new connections go back to it,
+  and nothing that is working gets cut off. Connections that moved while it was
+  down stay until they end, and **Reconnect** moves an app's back at once. A
+  line whose address comes back now has to pass an internet test before it's
+  trusted again, and a line that is busy uploading no longer counts as dead
+  when it misses a test.
+- **Phone data control.** Mark a line as metered to count what it uses, keep it
+  for the apps you choose, and give it a daily or monthly cap (from the day
+  your plan renews). Once the cap is reached, its apps use your other lines
+  until it starts over.
+- **Start with Windows**, in the window's new **Settings**, starts Net Switch
+  when you sign in, and stops the administrator prompt each time it starts.
+  **Check for updates** moved there too, along with the test sites for the
+  line checks.
+- IPv6 is now routed while every line has it; otherwise apps keep using IPv4
+  as before.
+- Line checks are lighter: a tiny connection every 15 seconds, and a full
+  HTTPS test only when that fails.
 - The tray icon is now a small program of its own instead of a PowerShell
   script compiled at every start: it appears in under a second instead of
   about four, and uses about half the memory (around 45 MB instead of 97 MB).
