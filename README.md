@@ -44,9 +44,14 @@ two, or as many as you have.
 
 ## Download
 
-Windows 10 or 11, 64-bit. Get `NetSwitch-Setup-<version>-x64.exe` from the
-[latest release](https://github.com/AyoubAchour/net-switch/releases/latest) and
-run it. It includes everything Net Switch needs.
+Get the installer for your PC from the
+[latest release](https://github.com/AyoubAchour/net-switch/releases/latest):
+
+- **Intel or AMD, Windows 10 or 11:** `NetSwitch-Setup-<version>-x64.exe`.
+- **ARM64, Windows 11:** `NetSwitch-Setup-<version>-arm64.exe`.
+
+Run it to install Net Switch and its bundled runtime and routing engine.
+The ARM64 tray uses .NET Framework 4.8.1, included in Windows 11 22H2 and newer.
 
 The installer isn't code-signed yet, so Windows SmartScreen may warn you about
 it. Choose **More info**, then **Run anyway**. If you'd like to check the file
@@ -55,6 +60,7 @@ verify it was built from this repository by GitHub Actions:
 
 ```
 gh attestation verify NetSwitch-Setup-<version>-x64.exe -R AyoubAchour/net-switch
+gh attestation verify NetSwitch-Setup-<version>-arm64.exe -R AyoubAchour/net-switch
 ```
 
 ## Before you install

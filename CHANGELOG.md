@@ -35,6 +35,8 @@ change behavior.
   as before.
 - Line checks are lighter: a tiny connection every 15 seconds, and a full
   HTTPS test only when that fails.
+- ARM64 PCs (Windows 11) now get a native build. An x64 copy running on an
+  ARM64 PC is offered it at its next update.
 - The tray icon is now a small program of its own instead of a PowerShell
   script compiled at every start: it appears in under a second instead of
   about four, and uses about half the memory (around 45 MB instead of 97 MB).

@@ -7,6 +7,16 @@
 #ifndef OutputDir
   #error Pass /DOutputDir with the release output directory
 #endif
+#ifndef AppArch
+  #error Pass /DAppArch from scripts/build-release.ps1
+#endif
+#if AppArch == "arm64"
+  #define AllowedArch "arm64"
+#elif AppArch == "x64"
+  #define AllowedArch "x64compatible"
+#else
+  #error AppArch must be x64 or arm64
+#endif
 
 [Setup]
 AppId={{3ECce0AD-AE44-4768-8219-2C15C098976C}
@@ -19,12 +29,15 @@ DisableProgramGroupPage=yes
 UsePreviousAppDir=yes
 WizardStyle=modern
 PrivilegesRequired=admin
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#AllowedArch}
+ArchitecturesInstallIn64BitMode={#AllowedArch}
+#if AppArch == "arm64"
+MinVersion=10.0.22000
+#endif
 SetupIconFile={#StageDir}\assets\net-switch.ico
 UninstallDisplayIcon={app}\assets\net-switch.ico
 OutputDir={#OutputDir}
-OutputBaseFilename=NetSwitch-Setup-{#AppVersion}-x64
+OutputBaseFilename=NetSwitch-Setup-{#AppVersion}-{#AppArch}
 Compression=lzma2
 SolidCompression=yes
 CloseApplications=no

@@ -1,6 +1,6 @@
-# Windows PowerShell 5.1. Puts the pinned routing engine (sing-box.exe and
-# libcronet.dll) into engine\, checked against packaging\versions.json and
-# engine\SHA256SUMS.txt, so a source checkout can turn routing on. The download
+# Windows PowerShell 5.1. Puts this PC's pinned routing engine into engine\,
+# checked against packaging\versions.json and that architecture's checksum
+# list, so a source checkout can turn routing on. Never starts it. The download
 # is cached like the release build's: in dist\cache, or in the folder
 # NETSWITCH_CACHE names (to share one cache between git worktrees).
 #
@@ -16,26 +16,17 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot 'build-common.ps1')
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$cache = if ($env:NETSWITCH_CACHE) { [IO.Path]::GetFullPath($env:NETSWITCH_CACHE) } else { Join-Path $repoRoot 'dist\cache' }
-$engine = Join-Path $repoRoot 'engine'
+$arch = Get-NativeArchitecture
 $pins = Get-Content -LiteralPath (Join-Path $repoRoot 'packaging/versions.json') -Raw | ConvertFrom-Json
-
-# The app checks the engine against this list before every start, so the pins
-# must agree with it.
-$sums = @{}
-foreach ($line in Get-Content -LiteralPath (Join-Path $engine 'SHA256SUMS.txt')) {
-  if ($line -match '^([a-fA-F0-9]{64})\s+\*?([^\s]+)\s*$') { $sums[$Matches[2]] = $Matches[1].ToLowerInvariant() }
-}
-foreach ($file in $pins.singBox.files.PSObject.Properties) {
-  if ($sums[$file.Name] -ne $file.Value) { throw "Engine pin disagrees with engine\SHA256SUMS.txt: $($file.Name)" }
-}
-
-foreach ($directory in @($cache, $engine)) {
-  if (Test-Path -LiteralPath $directory) { Assert-NoLink $directory }
-  else { New-Item -ItemType Directory -Path $directory -Force | Out-Null }
-}
-$archive = Get-Artifact $pins.singBox $cache
-foreach ($file in $pins.singBox.files.PSObject.Properties) {
+$pin = (Get-ArchitecturePins $pins $arch).singBox
+Assert-EnginePins $pin (Get-EngineChecksumFile $repoRoot $arch) $arch
+$cache = Get-BuildCache (Join-Path $repoRoot 'dist')
+if (Test-Path -LiteralPath $cache) { Assert-NoLink $cache }
+else { New-Item -ItemType Directory -Path $cache -Force | Out-Null }
+$zip = Get-Artifact $pin $cache
+$engine = Join-Path $repoRoot 'engine'
+Assert-NoLink $engine
+foreach ($file in $pin.files.PSObject.Properties) {
   $destination = Join-Path $engine $file.Name
   if (Test-Path -LiteralPath $destination) {
     Assert-NoLink $destination
@@ -43,7 +34,8 @@ foreach ($file in $pins.singBox.files.PSObject.Properties) {
     if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -eq $file.Value) { continue }
     Remove-Item -LiteralPath $destination -Force
   }
-  Copy-ArchiveFile $archive "$($pins.singBox.archiveRoot)/$($file.Name)" $destination
+  Copy-ArchiveFile $zip "$($pin.archiveRoot)/$($file.Name)" $destination
   Assert-Hash $destination $file.Value
+  Assert-PeArchitecture $destination $arch
 }
-Write-Host "The routing engine is in $engine"
+Write-Host "The $arch routing engine is in $engine"
