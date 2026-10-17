@@ -4,7 +4,11 @@ All notable changes to Net Switch are listed here. Versions follow
 [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change behavior.
 
-## [Unreleased]
+## [0.2.0] - 2026-10-17
+
+To update from 0.1.0, download the installer below and run it: it updates
+Net Switch in place and keeps your settings. From this version on, Net Switch
+tells you itself when a newer one is out.
 
 - While combining, an app can be kept on the cable: each app now offers
   **Both lines**, **Cable** and the second connection. Useful for calls, games
@@ -48,4 +52,5 @@ First public release.
 - Windows installer that bundles Node.js and sing-box, and offers to undo
   Net Switch's Windows setting changes when you uninstall.
 
+[0.2.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.2.0
 [0.1.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.1.0
