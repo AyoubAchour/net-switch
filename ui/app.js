@@ -1737,7 +1737,8 @@ async function saveCap(line, form) {
     failField('line-cap', 'Enter a data cap above 0 GB, like 10.');
     return;
   }
-  const cap = { bytes: Math.round(amount * GB), period };
+  const resetDay = Number(form.elements.resetDay?.value ?? 1);
+  const cap = { bytes: Math.round(amount * GB), period, ...(period === 'month' ? { resetDay } : {}) };
   if (await updateLine(line, { cap }, 'line-cap')) {
     drafts.cap = null;
     render();
@@ -1973,6 +1974,35 @@ function buildLinePanel(line) {
             ),
             save,
           ),
+          // Phone plans renew on their own date, not always on the 1st.
+          period === 'month'
+            ? h(
+                'label',
+                { class: 'cap-reset' },
+                'Starts over on day ',
+                h(
+                  'select',
+                  {
+                    class: 'input',
+                    name: 'resetDay',
+                    'data-focus': 'cap-reset',
+                    'aria-disabled': busy ? 'true' : null,
+                    onchange: (event) => {
+                      markChanged({ resetDay: Number(event.target.value), amount: event.currentTarget.form.elements.amount.value });
+                      markUnavailable(save, busy);
+                    },
+                  },
+                  Array.from({ length: 28 }, (_, index) =>
+                    h('option', {
+                      value: String(index + 1),
+                      text: String(index + 1),
+                      selected: (drafts.cap?.resetDay ?? line.cap?.resetDay ?? 1) === index + 1,
+                    }),
+                  ),
+                ),
+                ' of each month',
+              )
+            : null,
           fieldError('cap'),
           h('p', {
             class: 'field-help',
@@ -2058,7 +2088,7 @@ function buildLinePanel(line) {
 }
 
 function capHelp(line, period) {
-  const until = period === 'day' ? 'the next day' : 'next month';
+  const until = period === 'day' ? 'the next day' : 'it starts over';
   if (!line.cap) return `When it’s used up, this line’s apps use other lines until ${until}.`;
   if (line.exhausted) return `${usageText(line)}. It’s used up, so this line’s apps use other lines until ${until}.`;
   return `${usageText(line)}. When it’s used up, this line’s apps use other lines until ${until}.`;
@@ -2067,10 +2097,13 @@ function capHelp(line, period) {
 function parseTargets(text) {
   const items = text.split(/[\s,]+/).filter(Boolean);
   if (items.length === 0) return { error: 'Enter at least one test site, like 1.1.1.1:443.' };
+  if (items.length > 4) return { error: 'Enter up to four test sites.' };
   for (const item of items) {
-    const match = /^([\w.-]+):(\d{1,5})$/.exec(item);
-    if (!match || Number(match[2]) < 1 || Number(match[2]) > 65535) {
-      return { error: `“${item}” isn’t written as address:port, like 1.1.1.1:443.` };
+    // A number address, not a name: a name would be looked up through
+    // whichever line Windows prefers, not the line being checked.
+    const match = /^(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})$/.exec(item);
+    if (!match || match[1].split('.').some((part) => Number(part) > 255) || Number(match[2]) < 1 || Number(match[2]) > 65535) {
+      return { error: `“${item}” isn’t written as a number address and port, like 1.1.1.1:443.` };
     }
   }
   return { targets: items };

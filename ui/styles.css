@@ -1779,6 +1779,21 @@ label.setting-name {
   flex-shrink: 0;
 }
 
+.cap-reset {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
+.cap-reset .input {
+  flex: none;
+  width: auto;
+  padding: 4px 8px;
+  font-variant-numeric: tabular-nums;
+}
+
 .confirm {
   display: flex;
   flex-direction: column;
