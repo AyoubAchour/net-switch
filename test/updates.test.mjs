@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { createArchitectureReader, nativeArchitecture } from '../lib/architecture.mjs';
 import { isNewer, LATEST_RELEASE_URL, offerFrom, parseVersion, UpdateChecker } from '../lib/updates.mjs';
 
 const PAGE = 'https://github.com/AyoubAchour/net-switch/releases/tag/v0.3.0';
-const INSTALLER = 'https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/NetSwitch-Setup-0.3.0-x64.exe';
+const INSTALLER = `https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/NetSwitch-Setup-0.3.0-${nativeArchitecture()}.exe`;
 
 function release(overrides = {}) {
   return {
@@ -13,7 +14,7 @@ function release(overrides = {}) {
     prerelease: false,
     assets: [
       { name: 'SHA256SUMS.txt', browser_download_url: 'https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/SHA256SUMS.txt' },
-      { name: 'NetSwitch-Setup-0.3.0-x64.exe', browser_download_url: INSTALLER },
+      { name: `NetSwitch-Setup-0.3.0-${nativeArchitecture()}.exe`, browser_download_url: INSTALLER },
     ],
     ...overrides,
   };
@@ -33,6 +34,21 @@ test('a newer published release is offered with its page and installer', () => {
   assert.deepEqual(offerFrom(release(), '0.2.0'), { version: '0.3.0', page: PAGE, installer: INSTALLER });
 });
 
+test('updates choose the matching architecture regardless of asset order', () => {
+  const assets = ['arm64', 'x64'].map((arch) => {
+    const name = `NetSwitch-Setup-0.3.0-${arch}.exe`;
+    return { name, browser_download_url: `https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/${name}` };
+  });
+  for (const arch of ['x64', 'arm64']) {
+    const own = assets.find((asset) => asset.name.endsWith(`-${arch}.exe`));
+    assert.equal(offerFrom(release({ assets }), '0.2.0', arch).installer, own.browser_download_url);
+    assert.equal(offerFrom(release({ assets: assets.filter((asset) => asset !== own) }), '0.2.0', arch), null);
+    const swapped = { ...own, browser_download_url: assets.find((asset) => asset !== own).browser_download_url };
+    assert.equal(offerFrom(release({ assets: [swapped] }), '0.2.0', arch), null);
+  }
+  assert.equal(offerFrom(release({ assets }), '0.2.0', 'ia32'), null);
+});
+
 test('nothing is offered for the same or an older version, a draft or a prerelease', () => {
   assert.equal(offerFrom(release(), '0.3.0'), null);
   assert.equal(offerFrom(release(), '0.4.0'), null);
@@ -43,8 +59,11 @@ test('nothing is offered for the same or an older version, a draft or a prerelea
 
 test('links that don’t point at this project’s releases are never offered', () => {
   assert.equal(offerFrom(release({ html_url: 'https://example.com/net-switch' }), '0.2.0'), null);
-  const elsewhere = release({ assets: [{ name: 'NetSwitch-Setup-0.3.0-x64.exe', browser_download_url: 'https://example.com/NetSwitch-Setup-0.3.0-x64.exe' }] });
-  assert.equal(offerFrom(elsewhere, '0.2.0'), null);
+  for (const arch of ['x64', 'arm64']) {
+    const name = `NetSwitch-Setup-0.3.0-${arch}.exe`;
+    const elsewhere = release({ assets: [{ name, browser_download_url: `https://example.com/${name}` }] });
+    assert.equal(offerFrom(elsewhere, '0.2.0', arch), null);
+  }
   // A release without the installer has nothing to download.
   assert.equal(offerFrom(release({ assets: [] }), '0.2.0'), null);
 });
@@ -59,6 +78,36 @@ function fakeFetch(answers) {
   };
   return { fetch, calls };
 }
+
+test('an x64 runtime on ARM64 Windows is offered the ARM64 installer', async () => {
+  let queries = 0;
+  const architecture = createArchitectureReader({ platform: 'win32', arch: 'x64', query: () => {
+    queries++;
+    return '    PROCESSOR_ARCHITECTURE    REG_SZ    ARM64\r\n';
+  } });
+  const assets = ['x64', 'arm64'].map((arch) => {
+    const name = `NetSwitch-Setup-0.3.0-${arch}.exe`;
+    return { name, browser_download_url: `https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/${name}` };
+  });
+  const { fetch } = fakeFetch([1, 2].map(() => ({ status: 200, body: release({ assets }) })));
+  const checker = new UpdateChecker({ currentVersion: '0.2.0', fetch, architecture });
+  await checker.check();
+  await checker.check();
+  assert.equal(checker.offer.installer, assets[1].browser_download_url);
+  assert.equal(queries, 1);
+});
+
+test('an architecture detection failure explains why no update is offered', async () => {
+  const architecture = createArchitectureReader({ platform: 'win32', query: () => { throw new Error('access denied'); } });
+  const { fetch } = fakeFetch([1, 2].map(() => ({ status: 200, body: release() })));
+  const logs = [];
+  const checker = new UpdateChecker({ currentVersion: '0.2.0', fetch, architecture, log: (line) => logs.push(line) });
+  await checker.check();
+  await checker.check();
+  assert.equal(checker.offer, null);
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /could not check for updates: Could not read Windows architecture from the registry: access denied/);
+});
 
 test('the checker asks GitHub’s latest release, and keeps the offer it finds', async () => {
   const { fetch, calls } = fakeFetch([{ status: 200, body: release() }]);

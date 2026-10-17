@@ -44,6 +44,7 @@ const goMod = verifyOnly
 for (const [module, version] of [
   ['cronet-go', cronetGo.version],
   ['cronet-go/lib/windows_amd64', cronetGo.windowsModuleVersion],
+  ['cronet-go/lib/windows_arm64', cronetGo.windowsModuleVersion],
   ['sing-tun', singTun.version],
 ]) {
   if (!goMod.split('\n').some(line => {
@@ -70,8 +71,16 @@ const embeddedWintun = await download(raw('sing-tun', singTun.commit, 'internal/
 if (createHash('sha256').update(embeddedWintun).digest('hex') !== wintun.embeddedAmd64Sha256) {
   throw new Error('The embedded Wintun DLL does not match its provenance pin');
 }
+const armDll = await download(raw('cronet-go', cronetGo.windowsModuleCommit, 'lib/windows_arm64/libcronet.dll'));
+if (createHash('sha256').update(armDll).digest('hex') !== pins.arm64.singBox.files['libcronet.dll']) {
+  throw new Error('The ARM64 native module DLL does not match the packaged sing-box DLL');
+}
+const armWintun = await download(raw('sing-tun', singTun.commit, 'internal/wintun/arm64/wintun.dll'));
+if (createHash('sha256').update(armWintun).digest('hex') !== wintun.embeddedArm64Sha256) {
+  throw new Error('The embedded ARM64 Wintun DLL does not match its provenance pin');
+}
 if (verifyOnly) {
-  console.log('Verified immutable Go/native source pins and both native DLL hashes; no manifest written.');
+  console.log('Verified immutable Go/native source pins and x64/ARM64 native DLL hashes; no manifest written.');
   process.exit(0);
 }
 
@@ -100,6 +109,10 @@ Windows packaging: go run ./cmd/build-naive --target=windows/amd64 package
 The build uses GN, Ninja and Visual Studio; target cronet produces cronet.dll.
 Packaging renames it libcronet.dll and publishing commits it to the Go module.
 Packaged DLL SHA-256: ${singBox.files['libcronet.dll']}
+Windows ARM64 uses the same source revisions and windows_arm64 binary module.
+Windows ARM64 build: go run ./cmd/build-naive --target=windows/arm64 build
+Windows ARM64 packaging: go run ./cmd/build-naive --target=windows/arm64 package
+Packaged ARM64 DLL SHA-256: ${pins.arm64.singBox.files['libcronet.dll']}
 
 naiveproxy / Chromium ${naiveproxy.chromiumVersion}
 Repository: ${naiveproxy.repository}
@@ -119,6 +132,7 @@ Embedded Wintun ${wintun.version} (amd64), unchanged official prebuilt DLL
 Official archive: ${wintun.url}
 Archive SHA-256: ${wintun.sha256}
 Embedded DLL SHA-256: ${wintun.embeddedAmd64Sha256}
+Embedded ARM64 DLL SHA-256: ${wintun.embeddedArm64Sha256}
 License: wintun/LICENSE.txt in that archive (installed as licenses/wintun-LICENSE.txt)
 License SHA-256: ${pins.licenses.wintun.sha256}
 The prebuilt Wintun license differs from the Wintun source GPL-2.0 license.

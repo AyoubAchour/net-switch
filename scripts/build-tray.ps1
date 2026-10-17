@@ -33,6 +33,9 @@ $manifest = Join-Path $repoRoot 'lib\tray.manifest'
 # The 64-bit .NET Framework 4 compiler. It knows C# up to version 5, which is
 # why lib\tray.cs stays at C# 5.
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+if ((Get-NativeArchitecture) -eq 'arm64') {
+  $csc = Join-Path $env:WINDIR 'Microsoft.NET\FrameworkArm64\v4.0.30319\csc.exe'
+}
 if (-not (Test-Path -LiteralPath $csc -PathType Leaf)) {
   throw "The C# compiler that comes with Windows wasn't found at $csc. It is part of .NET Framework 4, which Windows 10 and 11 include."
 }
@@ -64,6 +67,8 @@ $arguments = @(
 ) + $references + @(
   "/win32icon:$icon", "/win32manifest:$manifest", "/out:$output"
 ) + $sources
+# AnyCPU (without Prefer32Bit) uses the native CLR on Windows 11 ARM64 with
+# .NET Framework 4.8.1, as well as the x64 CLR on x64 Windows.
 $messages = @(& $csc @arguments)
 if ($LASTEXITCODE -ne 0) {
   throw ("The tray program didn't build (csc exit $LASTEXITCODE):`n" + ($messages -join "`n") +
@@ -71,5 +76,6 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $built = Get-Item -LiteralPath $output
+Assert-PeArchitecture $output 'AnyCPU'
 $sum = (Get-FileHash -LiteralPath $output -Algorithm SHA256).Hash.ToLowerInvariant()
 Write-Host ("Built {0} ({1:N0} KB, SHA-256 {2})" -f $output.Substring($repoRoot.Length + 1), ($built.Length / 1KB), $sum)

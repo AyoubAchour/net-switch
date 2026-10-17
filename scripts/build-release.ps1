@@ -1,6 +1,9 @@
 # Windows PowerShell 5.1. Downloads are cached, but their hashes are always checked.
 [CmdletBinding()]
-param([switch] $SkipInstaller)
+param(
+  [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64',
+  [switch] $SkipInstaller
+)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -11,9 +14,11 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $dist = Join-Path $repoRoot 'dist'
-$stage = Join-Path $dist 'stage'
+$stage = Join-Path $dist "stage-$Arch"
 $cache = Get-BuildCache $dist
 $pins = Get-Content -LiteralPath (Join-Path $repoRoot 'packaging/versions.json') -Raw | ConvertFrom-Json
+$targetPins = Get-ArchitecturePins $pins $Arch
+$engineChecksumFile = Get-EngineChecksumFile $repoRoot $Arch
 $package = Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json
 if (-not $package.PSObject.Properties['version'] -or $package.version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
   throw 'package.json must contain a release version (for example 0.1.0). The build never invents or changes it.'
@@ -23,7 +28,7 @@ $version = $package.version
 # This is the entire repository allowlist. Never copy the repository root.
 $rootFiles = @(
   'launch.ps1', 'tray.ps1', 'server.mjs', 'package.json', 'LICENSE',
-  'THIRD_PARTY_NOTICES.md', 'assets/net-switch.ico', 'engine/SHA256SUMS.txt', 'engine/LICENSE'
+  'THIRD_PARTY_NOTICES.md', 'assets/net-switch.ico', 'engine/LICENSE'
 )
 $trees = @('lib', 'ui', 'tools', 'licenses', 'docs')
 $required = $rootFiles + $trees + @(
@@ -51,23 +56,8 @@ $inputs = @(
   }
 )
 
-# Check the manifest against the app's independent engine verification pins.
-$engineSums = @{}
-foreach ($line in Get-Content -LiteralPath (Join-Path $repoRoot 'engine/SHA256SUMS.txt')) {
-  if ($line -match '^\s*(?:#.*)?$') { continue }
-  if ($line -notmatch '^([a-fA-F0-9]{64})\s+\*?([^\s]+)\s*$') { throw "Invalid engine checksum line: $line" }
-  if ($engineSums.ContainsKey($Matches[2])) { throw "Duplicate engine checksum: $($Matches[2])" }
-  $engineSums[$Matches[2]] = $Matches[1]
-}
-if ($engineSums.Count -ne 2) { throw 'engine/SHA256SUMS.txt must pin exactly sing-box.exe and libcronet.dll.' }
-if (@($pins.singBox.files.PSObject.Properties).Count -ne 2 -or
-    -not $pins.singBox.files.PSObject.Properties['sing-box.exe'] -or
-    -not $pins.singBox.files.PSObject.Properties['libcronet.dll']) {
-  throw 'versions.json must pin exactly sing-box.exe and libcronet.dll.'
-}
-foreach ($file in $pins.singBox.files.PSObject.Properties) {
-  if ($engineSums[$file.Name] -ne $file.Value) { throw "Engine pin disagrees with engine/SHA256SUMS.txt: $($file.Name)" }
-}
+# Keep the source checkout's checksum list and release pins in agreement.
+Assert-EnginePins $targetPins.singBox $engineChecksumFile $Arch
 
 foreach ($directory in @($repoRoot, $dist, $cache)) {
   if (Test-Path -LiteralPath $directory) { Assert-NoLink $directory }
@@ -75,8 +65,8 @@ foreach ($directory in @($repoRoot, $dist, $cache)) {
 }
 # The native helper that reads the line meters, built from helper\ with the
 # pinned Go (its own tests run first). It shares this download cache.
-& (Join-Path $PSScriptRoot 'build-helper.ps1')
-$helperExe = Join-Path $repoRoot 'helper\bin\netswitch-helper.exe'
+& (Join-Path $PSScriptRoot 'build-helper.ps1') -Arch $Arch
+$helperExe = Get-HelperBinaryPath $repoRoot $Arch
 Assert-NoLink $helperExe
 # The tray icon as its own program, built with the C# compiler that comes with
 # Windows, so the installed tray needs no PowerShell running.
@@ -84,8 +74,8 @@ Assert-NoLink $helperExe
 $trayExe = Join-Path $repoRoot 'tray\bin\NetSwitchTray.exe'
 Assert-NoLink $trayExe
 $goZip = Get-Artifact $pins.go $cache
-$nodeZip = Get-Artifact $pins.node $cache
-$engineZip = Get-Artifact $pins.singBox $cache
+$nodeZip = Get-Artifact $targetPins.node $cache
+$engineZip = Get-Artifact $targetPins.singBox $cache
 $engineLicense = Get-Artifact $pins.licenses.singBox $cache
 $cronetLicense = Get-Artifact $pins.licenses.cronetGo $cache
 $wintunZip = Get-Artifact $pins.nativeSources.wintun $cache
@@ -101,7 +91,7 @@ $nativeLicenses = @(
 )
 
 # Only this resolved build-owned directory is cleaned. Never touch data/ or design/.
-if ([IO.Path]::GetFullPath($stage) -ne [IO.Path]::Combine($repoRoot, 'dist', 'stage')) {
+if ([IO.Path]::GetFullPath($stage) -ne [IO.Path]::Combine($repoRoot, 'dist', "stage-$Arch")) {
   throw "Unsafe staging directory: $stage"
 }
 if (Test-Path -LiteralPath $stage) {
@@ -115,8 +105,9 @@ foreach ($file in $inputs) {
   New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
   Copy-Item -LiteralPath $file.FullName -Destination $destination
 }
-Copy-ArchiveFile $nodeZip "$($pins.node.archiveRoot)/node.exe" (Join-Path $stage 'runtime/node.exe')
-Copy-ArchiveFile $nodeZip "$($pins.node.archiveRoot)/LICENSE" (Join-Path $stage 'runtime/LICENSE')
+Copy-Item -LiteralPath $engineChecksumFile -Destination (Join-Path $stage 'engine/SHA256SUMS.txt')
+Copy-ArchiveFile $nodeZip "$($targetPins.node.archiveRoot)/node.exe" (Join-Path $stage 'runtime/node.exe')
+Copy-ArchiveFile $nodeZip "$($targetPins.node.archiveRoot)/LICENSE" (Join-Path $stage 'runtime/LICENSE')
 Assert-Hash (Join-Path $stage 'runtime/LICENSE') $pins.licenses.node.sha256
 Copy-Item -LiteralPath (Join-Path $stage 'runtime/LICENSE') -Destination (Join-Path $stage 'licenses/node-LICENSE.txt')
 Copy-Item -LiteralPath $engineLicense -Destination (Join-Path $stage 'licenses/sing-box-LICENSE.txt')
@@ -133,9 +124,9 @@ foreach ($license in $nativeLicenses) {
 }
 Copy-ArchiveFile $wintunZip $pins.licenses.wintun.archiveEntry (Join-Path $stage 'licenses/wintun-LICENSE.txt')
 Assert-Hash (Join-Path $stage 'licenses/wintun-LICENSE.txt') $pins.licenses.wintun.sha256
-foreach ($file in $pins.singBox.files.PSObject.Properties) {
+foreach ($file in $targetPins.singBox.files.PSObject.Properties) {
   $destination = Join-Path $stage "engine/$($file.Name)"
-  Copy-ArchiveFile $engineZip "$($pins.singBox.archiveRoot)/$($file.Name)" $destination
+  Copy-ArchiveFile $engineZip "$($targetPins.singBox.archiveRoot)/$($file.Name)" $destination
   Assert-Hash $destination $file.Value
 }
 # The helper has the Go runtime and golang.org/x/sys compiled in; both are under
@@ -150,12 +141,18 @@ $stagedTray = Join-Path $stage 'tray/NetSwitchTray.exe'
 New-Item -ItemType Directory -Path (Split-Path $stagedTray -Parent) -Force | Out-Null
 Copy-Item -LiteralPath $trayExe -Destination $stagedTray
 
+# Read every executable's PE header before an installer can be produced.
+foreach ($file in Get-SafeFiles $stage | Where-Object { $_.Extension -in @('.exe', '.dll') }) {
+  $expected = if ($file.FullName -eq $stagedTray) { 'AnyCPU' } else { $Arch }
+  Assert-PeArchitecture $file.FullName $expected
+}
+
 # An inventory outside the installed tree makes an allowlist review straightforward.
 $stageSums = @(Get-SafeFiles $stage | Sort-Object FullName | ForEach-Object {
   $relative = $_.FullName.Substring($stage.Length + 1).Replace('\', '/')
   '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
 })
-[IO.File]::WriteAllLines((Join-Path $dist 'STAGE-SHA256SUMS.txt'), $stageSums, [Text.Encoding]::ASCII)
+[IO.File]::WriteAllLines((Join-Path $dist "STAGE-SHA256SUMS-$Arch.txt"), $stageSums, [Text.Encoding]::ASCII)
 [IO.File]::WriteAllText((Join-Path $dist 'version.txt'), "$version`n", [Text.Encoding]::ASCII)
 Write-Host "Staged Net Switch $version ($($stageSums.Count) files) at $stage"
 if ($SkipInstaller) { return }
@@ -174,11 +171,17 @@ $compilerVersion = & $iscc --version
 if ($LASTEXITCODE -ne 0 -or $compilerVersion.Trim() -ne $pins.innoSetup.version) {
   throw "Expected Inno Setup $($pins.innoSetup.version), got '$compilerVersion'."
 }
-$installer = Join-Path $dist "NetSwitch-Setup-$version-x64.exe"
+$installer = Join-Path $dist "NetSwitch-Setup-$version-$Arch.exe"
 if (Test-Path -LiteralPath $installer) { Assert-NoLink $installer; Remove-Item -LiteralPath $installer -Force }
-& $iscc --no-ide-signtools "/DAppVersion=$version" "/DStageDir=$stage" "/DOutputDir=$dist" (Join-Path $repoRoot 'packaging/NetSwitch.iss')
+& $iscc --no-ide-signtools "/DAppVersion=$version" "/DAppArch=$Arch" "/DStageDir=$stage" "/DOutputDir=$dist" (Join-Path $repoRoot 'packaging/NetSwitch.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed (exit $LASTEXITCODE)." }
 if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) { throw "ISCC did not produce $installer" }
-$sum = '{0}  {1}' -f (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant(), [IO.Path]::GetFileName($installer)
-[IO.File]::WriteAllText((Join-Path $dist 'SHA256SUMS.txt'), "$sum`n", [Text.Encoding]::ASCII)
+$sums = @(foreach ($target in @('x64', 'arm64')) {
+  $file = Join-Path $dist "NetSwitch-Setup-$version-$target.exe"
+  if (Test-Path -LiteralPath $file) {
+    Assert-NoLink $file
+    '{0}  {1}' -f (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant(), [IO.Path]::GetFileName($file)
+  }
+})
+[IO.File]::WriteAllLines((Join-Path $dist 'SHA256SUMS.txt'), $sums, [Text.Encoding]::ASCII)
 Write-Host "Built $installer"
