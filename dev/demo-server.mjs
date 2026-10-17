@@ -73,6 +73,11 @@ const APPS = [
   { name: 'Windows services', kb: 1, line: null, service: true },
 ];
 
+// The Start menu's apps, for Add an app. Some aren't running.
+const INSTALLED = ['Discord', 'Epic Games Launcher', 'Firefox', 'OBS Studio', 'Slack', 'Spotify', 'Steam', 'Visual Studio Code', 'Zoom'].map(
+  (name) => ({ name, path: `C:\\Program Files\\${name}\\${name}.exe`, hasIcon: false }),
+);
+
 const DEMO_UPDATE = {
   version: '9.9.9',
   page: 'https://github.com/AyoubAchour/net-switch/releases/latest',
@@ -317,7 +322,7 @@ function state() {
     elevated: true,
     version: '0.2.0',
     update: offerUpdate && settings.checkForUpdates ? DEMO_UPDATE : null,
-    features: { reconnect: true, combine: true },
+    features: { reconnect: true, combine: true, lines: true, installedApps: true },
     combine: { on: combine.on, active: combineActive(), mode: combine.mode },
     routing: { status: routingOn ? 'on' : 'off', wanted: routingOn, error: null, measuring: routingOn, proxyPort: null, retryAt: null },
     lines: lineRows,
@@ -360,9 +365,19 @@ const actions = {
     routingOn = Boolean(on);
     return state();
   },
+  'GET /api/installed-apps': async () => {
+    await sleep(RESTART_MS);
+    return INSTALLED;
+  },
   'POST /api/app-line': async ({ path: appPath, line }) => {
     await sleep(QUICK_MS);
-    const app = apps.find((item) => appPath?.includes(`\\${item.name}.exe`));
+    let app = apps.find((item) => appPath?.includes(`\\${item.name}.exe`));
+    // An app from the Start menu that isn't running yet: listed from now on.
+    const fromMenu = INSTALLED.find((item) => item.path === appPath);
+    if (!app && fromMenu) {
+      app = { name: fromMenu.name, kb: 0, line: null };
+      apps.push(app);
+    }
     if (!app) throw clientError('That app isn’t using the internet any more.');
     if (line !== null) lineFor(line);
     // Connections that were open stay on the old line for a while, as for real.

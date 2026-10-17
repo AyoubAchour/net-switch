@@ -30,6 +30,7 @@ const els = {
   channels: document.querySelector('.channels'),
   footerNote: document.getElementById('footer-note'),
   openSettings: document.getElementById('open-settings'),
+  addApp: document.getElementById('add-app'),
   quit: document.getElementById('quit'),
   panel: document.getElementById('panel'),
 };
@@ -59,8 +60,16 @@ let confirmingReconnect = null;
 // After Quit only the closed screen is left: nothing polls or redraws any more.
 let closed = false;
 
-// The side panel: { kind: 'line', id } or { kind: 'settings' }, or null.
+// The side panel: { kind: 'line', id }, { kind: 'settings' } or { kind: 'apps' }, or null.
 let panel = null;
+// The apps in the Start menu, for choosing a line before an app has run:
+// null until asked for, then [{ name, path, key?, hasIcon? }].
+let installed = null;
+let installedError = null;
+let loadingInstalled = false;
+let appQuery = '';
+// The path of the app whose line is being chosen in that list.
+let pickedApp = null;
 let confirmingRemove = false;
 // What's typed in the panel and not saved yet; null while nothing is.
 const drafts = { label: null, cap: null, probeTargets: null };
@@ -529,6 +538,8 @@ function renderTopbar() {
   // Quit and the settings need a working connection to the server; without one they would only pretend.
   els.quit.hidden = stale || !token;
   els.openSettings.hidden = stale || !state;
+  // Only a server that can list the Start menu's apps offers this.
+  els.addApp.hidden = stale || !state?.features?.installedApps;
   renderFooter();
 
   const toggle = els.toggle;
@@ -1620,6 +1631,142 @@ function openSettingsPanel() {
   render();
 }
 
+function openAppsPanel() {
+  panel = { kind: 'apps' };
+  appQuery = '';
+  pickedApp = null;
+  actionError = null;
+  failedAction = null;
+  render();
+  loadInstalled();
+}
+
+// Asked once per window; the server keeps the list for a few minutes.
+async function loadInstalled() {
+  if (loadingInstalled || installed) return;
+  loadingInstalled = true;
+  installedError = null;
+  render();
+  try {
+    const answer = await api('/api/installed-apps');
+    installed = Array.isArray(answer) ? answer : (answer?.apps ?? []);
+  } catch (error) {
+    installedError = error.message;
+  } finally {
+    loadingInstalled = false;
+    render();
+  }
+}
+
+// The line an app is on already, by its program path.
+function lineOfPath(path) {
+  const app = state.apps.find((item) => item.path.toLowerCase() === path.toLowerCase());
+  return app?.line ? lineById(app.line) : null;
+}
+
+function buildAppsPanel() {
+  const busy = Boolean(busyAction);
+  const query = appQuery.trim().toLowerCase();
+  const search = h('input', {
+    id: 'app-search',
+    class: 'input',
+    type: 'search',
+    placeholder: 'Search',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    'aria-label': 'Search the apps',
+    'aria-controls': 'app-choices',
+    'data-focus': 'app-search',
+    value: appQuery,
+    oninput: (event) => {
+      appQuery = event.target.value;
+      render();
+    },
+  });
+
+  let body;
+  if (installedError) {
+    body = h(
+      'div',
+      { class: 'apps-message' },
+      h('p', { text: installedError }),
+      h('button', {
+        class: 'button',
+        type: 'button',
+        'data-focus': 'apps-retry',
+        text: 'Try again',
+        onclick: () => loadInstalled(),
+      }),
+    );
+  } else if (!installed) {
+    body = h('p', { class: 'apps-message', role: 'status', text: 'Looking for apps in the Start menu…' });
+  } else {
+    const shown = installed.filter((app) => !query || app.name.toLowerCase().includes(query));
+    body = shown.length
+      ? h(
+          'ul',
+          { id: 'app-choices', class: 'app-choices', 'aria-label': 'Apps in the Start menu' },
+          shown.map((app) => {
+            const picked = pickedApp === app.path;
+            const current = lineOfPath(app.path);
+            return h(
+              'li',
+              { class: 'app-choice', 'data-picked': picked ? '' : null },
+              h(
+                'button',
+                {
+                  class: 'app-choice-name',
+                  type: 'button',
+                  'data-focus': `app-choice:${app.path}`,
+                  'aria-expanded': String(picked),
+                  title: app.path,
+                  onclick: () => {
+                    pickedApp = picked ? null : app.path;
+                    render();
+                  },
+                },
+                appIcon({ name: app.name, key: app.key, hasIcon: Boolean(app.key && app.hasIcon) }),
+                h('span', { class: 'app-choice-label', text: app.name }),
+                current ? h('span', { class: 'app-choice-line', text: `On the ${current.label}` }) : null,
+              ),
+              picked
+                ? h(
+                    'div',
+                    { class: 'keys', role: 'group', 'aria-label': `Line for ${app.name}` },
+                    allLines().map((line, index) => {
+                      const key = h(
+                        'button',
+                        {
+                          class: 'key',
+                          type: 'button',
+                          'data-focus': `app-line:${app.path}:${line.id}`,
+                          'aria-pressed': String(current?.id === line.id),
+                          'aria-disabled': busy ? 'true' : null,
+                          onclick: async () => {
+                            if (busyAction || current?.id === line.id) return;
+                            const ok = await run('add-app', () => api('/api/app-line', { path: app.path, line: line.id }));
+                            if (ok) closePanel();
+                          },
+                        },
+                        h('span', { class: 'key-label', text: line.label }),
+                      );
+                      key.dataset.color = String(index % PALETTE_SIZE);
+                      return key;
+                    }),
+                  )
+                : null,
+            );
+          }),
+        )
+      : h('p', { class: 'apps-message', text: query ? 'No app in the Start menu matches that.' : 'No apps were found in the Start menu.' });
+  }
+
+  return [
+    panelHead('Add an app', 'Choose its line before it starts'),
+    h('div', { class: 'panel-body' }, panelError(), h('section', { class: 'panel-section apps-section' }, search, body)),
+  ];
+}
+
 function closePanel() {
   if (els.panel.open) els.panel.close();
 }
@@ -2258,11 +2405,22 @@ function renderPanel() {
           !line.cap && drafts.cap !== null,
           drafts.cap?.period ?? null,
         ])
-      : JSON.stringify(['settings', state.settings, state.updateChecks, state.mode, state.version, busyAction, actionError, failedAction]);
+      : panel.kind === 'apps'
+        ? JSON.stringify([
+            'apps',
+            installed?.length ?? null,
+            installedError,
+            appQuery,
+            pickedApp,
+            allLines().map((item) => [item.id, item.label]),
+            state.apps.filter((app) => app.line).map((app) => [app.path, app.line]),
+            busyAction,
+            actionError,
+          ])
+        : JSON.stringify(['settings', state.settings, state.updateChecks, state.mode, state.version, busyAction, actionError, failedAction]);
   if (dialog.dataset.signature !== signature) {
-    rebuildKeepingFocus(dialog, () => [
-      h('div', { class: 'panel' }, ...(panel.kind === 'line' ? buildLinePanel(line) : buildSettingsPanel())),
-    ]);
+    const build = panel.kind === 'line' ? () => buildLinePanel(line) : panel.kind === 'apps' ? buildAppsPanel : buildSettingsPanel;
+    rebuildKeepingFocus(dialog, () => [h('div', { class: 'panel' }, ...build())]);
     dialog.dataset.signature = signature;
   }
   // The data used moves every second; only its text changes.
@@ -2282,6 +2440,8 @@ els.panel.addEventListener('close', () => {
   drafts.label = null;
   drafts.cap = null;
   drafts.probeTargets = null;
+  appQuery = '';
+  pickedApp = null;
   // An error shown in the panel was seen there.
   actionError = null;
   failedAction = null;
@@ -2331,6 +2491,7 @@ async function poll() {
 els.toggle.addEventListener('click', toggleRouting);
 els.quit.addEventListener('click', quit);
 els.openSettings.addEventListener('click', openSettingsPanel);
+els.addApp.addEventListener('click', openAppsPanel);
 narrowWindow.addEventListener('change', () => {
   if (state) render();
 });
