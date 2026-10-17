@@ -29,7 +29,13 @@ Only the latest release gets security fixes.
   byte counters and the list of TCP connections, turns on Windows' byte counts
   for connections that go around routing, and reports them to the server. It
   makes no network requests.
-- **The window and the tray icon** run as you, not as administrator.
+- **The window and the tray icon** run as you, not as administrator. The tray
+  icon is Net Switch's own small program (`tray\NetSwitchTray.exe`, built from
+  `lib\tray.cs` in this repository with the C# compiler that comes with
+  Windows). It talks only to the server on `127.0.0.1`. **Open Net Switch**
+  opens the window in your browser (or runs `launch.ps1` when Net Switch isn't
+  running), and its update offer opens only installer links from this
+  project's GitHub releases.
 
 The window and tray talk to the server with a random key made at each start.
 It is saved in `%LOCALAPPDATA%\Net Switch\server.json`, readable by your

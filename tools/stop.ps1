@@ -9,7 +9,9 @@
 # - its line meter helpers: <AppDir>\helper\netswitch-helper.exe (they end with
 #   the server anyway, but the installer can't replace the file while they run);
 # - its server: <AppDir>\runtime\node.exe running <AppDir>\server.mjs;
-# - its tray icon: powershell.exe running -File "<AppDir>\tray.ps1".
+# - its tray icon: <AppDir>\tray\NetSwitchTray.exe, or powershell.exe running
+#   -File "<AppDir>\tray.ps1" (how older copies, and copies without that
+#   program, run it).
 # Nothing else is touched: not the installer or uninstaller, not other copies,
 # not other programs called node.exe or powershell.exe, and not an editor that
 # happens to have tray.ps1 open. Stopping the engine puts Windows routing back
@@ -25,6 +27,7 @@ $engine = "$app\engine\sing-box.exe"
 $helper = "$app\helper\netswitch-helper.exe"
 $node = "$app\runtime\node.exe"
 $server = "$app\server.mjs"
+$trayProgram = "$app\tray\NetSwitchTray.exe"
 $trayArgument = "-File `"$app\tray.ps1`""
 
 function Test-Same([string] $a, [string] $b) {
@@ -39,6 +42,7 @@ function Get-OwnProcesses {
   @(Get-CimInstance Win32_Process | Where-Object {
       (Test-Same $_.ExecutablePath $engine) -or
       (Test-Same $_.ExecutablePath $helper) -or
+      (Test-Same $_.ExecutablePath $trayProgram) -or
       ((Test-Same $_.ExecutablePath $node) -and (Test-Contains $_.CommandLine $server)) -or
       ($_.Name -ieq 'powershell.exe' -and (Test-Contains $_.CommandLine $trayArgument))
     })

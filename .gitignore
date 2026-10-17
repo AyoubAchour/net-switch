@@ -13,6 +13,9 @@ runtime/
 # The native helper, built from helper/ by scripts/build-helper.ps1.
 helper/bin/
 
+# The tray icon's program, built from lib/tray.cs by scripts/build-tray.ps1.
+tray/bin/
+
 # Release build output.
 dist/
 

@@ -78,6 +78,11 @@ foreach ($directory in @($repoRoot, $dist, $cache)) {
 & (Join-Path $PSScriptRoot 'build-helper.ps1')
 $helperExe = Join-Path $repoRoot 'helper\bin\netswitch-helper.exe'
 Assert-NoLink $helperExe
+# The tray icon as its own program, built with the C# compiler that comes with
+# Windows, so the installed tray needs no PowerShell running.
+& (Join-Path $PSScriptRoot 'build-tray.ps1')
+$trayExe = Join-Path $repoRoot 'tray\bin\NetSwitchTray.exe'
+Assert-NoLink $trayExe
 $goZip = Get-Artifact $pins.go $cache
 $nodeZip = Get-Artifact $pins.node $cache
 $engineZip = Get-Artifact $pins.singBox $cache
@@ -140,6 +145,10 @@ New-Item -ItemType Directory -Path (Split-Path $stagedHelper -Parent) -Force | O
 Copy-Item -LiteralPath $helperExe -Destination $stagedHelper
 Copy-ArchiveFile $goZip $pins.licenses.go.archiveEntry (Join-Path $stage 'licenses/go-LICENSE.txt')
 Assert-Hash (Join-Path $stage 'licenses/go-LICENSE.txt') $pins.licenses.go.sha256
+# Installed as <app>\tray\NetSwitchTray.exe, where launch.ps1 and stop.ps1 look for it.
+$stagedTray = Join-Path $stage 'tray/NetSwitchTray.exe'
+New-Item -ItemType Directory -Path (Split-Path $stagedTray -Parent) -Force | Out-Null
+Copy-Item -LiteralPath $trayExe -Destination $stagedTray
 
 # An inventory outside the installed tree makes an allowlist review straightforward.
 $stageSums = @(Get-SafeFiles $stage | Sort-Object FullName | ForEach-Object {
