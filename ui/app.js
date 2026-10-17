@@ -243,6 +243,8 @@ function usageText(line) {
 // A line's health in its card: [text, tone]. The ping is the last internet
 // test's round trip, which only runs while routing is on.
 function lineHealth(line) {
+  // Connected again, and trusted once an internet test passes.
+  if (line.problem === 'checking') return ['Checking…', 'warn'];
   if (line.problem === 'no internet') return ['No internet', 'warn'];
   if (line.problem) return [line.problem === 'no address' ? 'No address' : 'No route', 'down'];
   if (!line.connected) return ['Not connected', 'down'];
@@ -1876,12 +1878,13 @@ function buildLinePanel(line) {
       onToggle: () => updateLine(line, { metered: !line.metered }, 'line-metered'),
     }),
   ];
-  if (line.metered) {
+  // Any line but the main one, which carries every app without a line of its own.
+  if (index !== 0) {
     data.push(
       switchRow({
         id: 'line-strict',
         name: 'Only apps I choose',
-        help: `Other apps never use it, even when another line drops.${restartNote}`,
+        help: 'Other apps never use it, even when another line drops.',
         checked: Boolean(line.strict),
         busy: busyAction === 'line-strict',
         disabled: busy,
