@@ -37,7 +37,9 @@ jobs:
       - name: Check tag and changelog
         id: metadata
         run: node scripts/release-metadata.mjs
-      - name: Test app and C# tray
+      - name: Build and test the native helper with the pinned Go
+        run: ./scripts/build-helper.ps1
+      - name: Test app, native helper and C# tray
         run: npm test
       - name: Build with the pinned Inno Setup compiler
         run: ./scripts/build-release.ps1

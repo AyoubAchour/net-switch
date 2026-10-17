@@ -48,15 +48,16 @@ function Assert-Installed {
     'tools\stop.ps1', 'tools\restore-windows.mjs',
     'runtime\node.exe', 'runtime\LICENSE',
     'engine\sing-box.exe', 'engine\libcronet.dll', 'engine\SHA256SUMS.txt', 'engine\LICENSE',
+    'helper\netswitch-helper.exe',
     'licenses\GPL-3.0.txt', 'licenses\sing-box-LICENSE.txt', 'licenses\node-LICENSE.txt', 'licenses\lucide-ISC.txt',
     'licenses\cronet-go-LICENSE.txt', 'licenses\cronet-native\LICENSE', 'licenses\cronet-native\src\LICENSE',
-    'licenses\wintun-LICENSE.txt',
+    'licenses\wintun-LICENSE.txt', 'licenses\go-LICENSE.txt',
     'unins000.exe'
   )
   foreach ($file in $expected) {
     if (-not (Test-Path -LiteralPath (Join-Path $app $file))) { throw "Missing from the installed copy: $file" }
   }
-  foreach ($unwanted in 'data', 'data-test', 'design', 'dev', 'test', '.git') {
+  foreach ($unwanted in 'data', 'data-test', 'design', 'dev', 'test', '.git', 'helper\bin', 'helper\go.mod') {
     if (Test-Path -LiteralPath (Join-Path $app $unwanted)) { throw "Should not be installed: $unwanted" }
   }
   foreach ($link in @($shortcut, $desktopShortcut)) {
@@ -72,16 +73,21 @@ function Assert-Installed {
   if ((Get-FileHash -LiteralPath (Join-Path $app 'licenses/wintun-LICENSE.txt')).Hash -ne $pins.licenses.wintun.sha256) {
     throw 'Installed Wintun license hash mismatch'
   }
+  if ((Get-FileHash -LiteralPath (Join-Path $app 'licenses/go-LICENSE.txt')).Hash -ne $pins.licenses.go.sha256) {
+    throw 'Installed Go license hash mismatch'
+  }
   Write-Host 'Installed files and shortcut are in place'
 }
 
 function Get-AppProcesses {
   $engine = Join-Path $app 'engine\sing-box.exe'
+  $helper = Join-Path $app 'helper\netswitch-helper.exe'
   $server = Join-Path $app 'server.mjs'
   $trayArgument = '-File "' + (Join-Path $app 'tray.ps1') + '"'
-  Get-CimInstance Win32_Process -Filter "Name = 'node.exe' OR Name = 'sing-box.exe' OR Name = 'powershell.exe'" |
+  Get-CimInstance Win32_Process -Filter "Name = 'node.exe' OR Name = 'sing-box.exe' OR Name = 'netswitch-helper.exe' OR Name = 'powershell.exe'" |
     Where-Object {
       $_.ExecutablePath -eq $engine -or
+      $_.ExecutablePath -eq $helper -or
       ($_.ExecutablePath -eq $node -and $_.CommandLine -and $_.CommandLine.IndexOf($server, [StringComparison]::OrdinalIgnoreCase) -ge 0) -or
       ($_.Name -eq 'powershell.exe' -and $_.CommandLine -and $_.CommandLine.IndexOf($trayArgument, [StringComparison]::OrdinalIgnoreCase) -ge 0)
     }
@@ -122,7 +128,7 @@ function Wait-Until([scriptblock] $Condition, [string] $Failure, [int] $Seconds 
 
 function Start-InstalledApp {
   if (@(Get-AppProcesses).Count) { throw 'Installed app processes already exist before launch.' }
-  # PrepareToInstall force-stops only the three app processes. Its old server
+  # PrepareToInstall force-stops only the app's own processes. Its old server
   # record can remain; launch.ps1 must recognize that and replace it itself.
   $shell = New-Object -ComObject WScript.Shell
   $link = $null
@@ -150,6 +156,8 @@ function Start-InstalledApp {
     } catch { return $false }
   } 'Installed shortcut did not create an authenticated, reachable server within 60 seconds.'
   Wait-Until { @(Get-AppProcesses | Where-Object { $_.Name -eq 'powershell.exe' }).Count -gt 0 } 'Installed shortcut did not start tray.ps1.'
+  # The meters and the connections around routing, read by the installed native helper.
+  Wait-Until { @(Get-AppProcesses | Where-Object { $_.Name -eq 'netswitch-helper.exe' }).Count -eq 2 } 'Installed server did not start its two line meter helpers.'
   Wait-Until { $process.HasExited } 'The installed launcher did not finish opening the app window.'
   $process.WaitForExit()
   if ($process.ExitCode -ne 0) { throw "Installed launcher exited with code $($process.ExitCode)." }

@@ -6,6 +6,13 @@
     "checksumsUrl": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
     "archiveRoot": "node-v24.21.0-win-x64"
   },
+  "go": {
+    "version": "1.27.2",
+    "url": "https://go.dev/dl/go1.27.2.windows-amd64.zip",
+    "sha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f",
+    "checksumsUrl": "https://go.dev/dl/?mode=json&include=all",
+    "archiveRoot": "go"
+  },
   "singBox": {
     "version": "1.14.2",
     "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-amd64.zip",
@@ -316,6 +323,11 @@
     "wintun": {
       "archiveEntry": "wintun/LICENSE.txt",
       "sha256": "183adac21e7d96c508c8fd34d394b7b6708bc81564ad1bad61ab66143a008cd2"
+    },
+    "go": {
+      "archiveEntry": "go/LICENSE",
+      "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+      "note": "golang.org/x/sys, also compiled into the helper, has this same license text."
     }
   },
   "innoSetup": {

@@ -11,7 +11,7 @@ import { AppInfo } from './lib/appinfo.mjs';
 import { Engine } from './lib/engine.mjs';
 import { LaneSwitch } from './lib/lane-switch.mjs';
 import { createLog } from './lib/logfile.mjs';
-import { LineMonitor } from './lib/monitor.mjs';
+import { findHelper, LineMonitor } from './lib/monitor.mjs';
 import {
   allowSimultaneousConnections,
   applyCableAsMain,
@@ -231,7 +231,13 @@ const monitor = new LineMonitor({
   // Measuring connections that go around routing needs administrator rights.
   watchOutside: !testMode,
   enginePath: engine.singBoxPath,
+  helperPath: findHelper(ROOT),
 });
+log(
+  monitor.helperPath
+    ? `line readings come from ${path.relative(ROOT, monitor.helperPath)}`
+    : 'line readings come from PowerShell: the native helper is not built (npm run build:helper)',
+);
 const token = randomBytes(24).toString('hex');
 
 let adapters = [];

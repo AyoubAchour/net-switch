@@ -1,10 +1,13 @@
-# Stops a running Net Switch: its server, its routing engine and its tray icon.
-# The installer runs this (as administrator) before upgrading or uninstalling.
+# Stops a running Net Switch: its server, its routing engine, its line meter
+# helpers and its tray icon. The installer runs this (as administrator) before
+# upgrading or uninstalling.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\stop.ps1 -AppDir "C:\Program Files\Net Switch"
 #
 # Only these processes of this copy are stopped, matched exactly:
 # - its routing engine: <AppDir>\engine\sing-box.exe;
+# - its line meter helpers: <AppDir>\helper\netswitch-helper.exe (they end with
+#   the server anyway, but the installer can't replace the file while they run);
 # - its server: <AppDir>\runtime\node.exe running <AppDir>\server.mjs;
 # - its tray icon: powershell.exe running -File "<AppDir>\tray.ps1".
 # Nothing else is touched: not the installer or uninstaller, not other copies,
@@ -19,6 +22,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $app = [System.IO.Path]::GetFullPath($AppDir).TrimEnd('\')
 $engine = "$app\engine\sing-box.exe"
+$helper = "$app\helper\netswitch-helper.exe"
 $node = "$app\runtime\node.exe"
 $server = "$app\server.mjs"
 $trayArgument = "-File `"$app\tray.ps1`""
@@ -34,6 +38,7 @@ function Test-Contains([string] $text, [string] $part) {
 function Get-OwnProcesses {
   @(Get-CimInstance Win32_Process | Where-Object {
       (Test-Same $_.ExecutablePath $engine) -or
+      (Test-Same $_.ExecutablePath $helper) -or
       ((Test-Same $_.ExecutablePath $node) -and (Test-Contains $_.CommandLine $server)) -or
       ($_.Name -ieq 'powershell.exe' -and (Test-Contains $_.CommandLine $trayArgument))
     })

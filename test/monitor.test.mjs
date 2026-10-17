@@ -1,13 +1,24 @@
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
+import { spawn as spawnProcess } from 'node:child_process';
+import { EventEmitter, once } from 'node:events';
+import { existsSync } from 'node:fs';
 import { networkInterfaces } from 'node:os';
+import path from 'node:path';
+import { createInterface } from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
-import { ADAPTER_STATS, LineMonitor } from '../lib/monitor.mjs';
-import { runPowerShellJson } from '../lib/ps.mjs';
+import { fileURLToPath } from 'node:url';
+import { parseOutsideId } from '../lib/apps.mjs';
+import { ADAPTER_STATS, findHelper, LineMonitor } from '../lib/monitor.mjs';
+import { runFile, runPowerShellJson } from '../lib/ps.mjs';
 
 const reading = (...adapters) => JSON.stringify({ adapters: adapters.map(([alias, rx, tx]) => ({ alias, rx, tx })) });
+
+// The native helper, when this checkout has built it (npm run build:helper).
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
+const HELPER = path.join(ROOT, 'helper', 'bin', 'netswitch-helper.exe');
+const needsHelper = { skip: existsSync(HELPER) ? false : 'helper\\bin\\netswitch-helper.exe is not built; run npm run build:helper' };
 
 test('the line meters read adapter counters through .NET, so the USB Wi-Fi stick is listed', async () => {
   // The same Windows PowerShell 5.1 the monitor runs in.
@@ -42,6 +53,111 @@ test('the real meters helper reports a speed for a connected adapter within a fe
   } finally {
     monitor.stop();
   }
+});
+
+test('the native meters helper lists the same adapters as .NET does in PowerShell, in the same shape', needsHelper, async () => {
+  const [output, list] = await Promise.all([
+    runFile(HELPER, ['meters', '--once']),
+    runPowerShellJson(`${ADAPTER_STATS}\nConvertTo-Json -InputObject @($adapters) -Compress`),
+  ]);
+  // One line, and only that.
+  assert.equal(output.indexOf('\n'), output.length - 1);
+  const sample = JSON.parse(output);
+  assert.deepEqual(Object.keys(sample), ['adapters']);
+  assert.ok(sample.adapters.length > 0);
+  for (const item of sample.adapters) {
+    assert.deepEqual(Object.keys(item), ['alias', 'rx', 'tx']);
+    assert.equal(typeof item.alias, 'string');
+    assert.ok(Number.isSafeInteger(item.rx) && item.rx >= 0, `${item.alias} rx`);
+    assert.ok(Number.isSafeInteger(item.tx) && item.tx >= 0, `${item.alias} tx`);
+  }
+  const aliases = (items) => items.map((item) => item.alias).sort();
+  assert.deepEqual(aliases(sample.adapters), aliases(list));
+});
+
+test('the native outside helper reports connections around routing in the PowerShell shape', needsHelper, async (t) => {
+  const sample = JSON.parse(await runFile(HELPER, ['outside', '--once']));
+  assert.deepEqual(Object.keys(sample), ['estats', 'outside']);
+  assert.equal(typeof sample.estats, 'boolean');
+  assert.ok(Array.isArray(sample.outside));
+  for (const entry of sample.outside) {
+    assert.deepEqual(Object.keys(entry), ['id', 'pid', 'path', 'local', 'created', 'down', 'up']);
+    const id = parseOutsideId(entry.id);
+    assert.ok(id, entry.id);
+    assert.deepEqual([id.local, id.pid, id.created], [entry.local, entry.pid, entry.created]);
+    assert.match(entry.created, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{7}Z$/);
+    assert.ok(Number.isFinite(Date.parse(entry.created)));
+    assert.equal(typeof entry.path, 'string');
+    assert.ok(!['127.0.0.1', '0.0.0.0', '198.18.0.1'].includes(entry.local), entry.id);
+    // Without administrator rights Windows won't measure a connection: then both are null.
+    assert.equal(entry.down === null, entry.up === null);
+    for (const bytes of [entry.down, entry.up]) assert.ok(bytes === null || (Number.isSafeInteger(bytes) && bytes >= 0));
+  }
+  t.diagnostic(`${sample.outside.length} connections, ${sample.outside.filter((entry) => entry.down !== null).length} measured`);
+
+  // The engine's own connections are left out, whatever the case of its path.
+  const owner = sample.outside.find((entry) => entry.path)?.path;
+  if (!owner) {
+    t.diagnostic('no connection with a known program to leave out');
+    return;
+  }
+  const without = JSON.parse(await runFile(HELPER, ['outside', '--once', '--engine', owner.toUpperCase()]));
+  assert.ok(!without.outside.some((entry) => entry.path.toLowerCase() === owner.toLowerCase()), `${owner} was not left out`);
+});
+
+test('the native helper ends by itself when the server is gone, or when it closes its input', { ...needsHelper, timeout: 15_000 }, async (t) => {
+  const started = [];
+  t.after(() => started.forEach((child) => child.exitCode === null && child.kill()));
+  const run = (args) => {
+    const child = spawnProcess(HELPER, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    started.push(child);
+    const lines = [];
+    createInterface({ input: child.stdout }).on('line', (line) => lines.push(line));
+    return { child, lines };
+  };
+
+  // A stand-in server that lives for a moment.
+  const server = spawnProcess(process.execPath, ['-e', 'setTimeout(() => {}, 2500)'], { stdio: 'ignore' });
+  started.push(server);
+  const meters = run(['meters', '--parent', String(server.pid)]);
+  await once(server, 'exit');
+  const serverGoneAt = Date.now();
+  const [code] = await once(meters.child, 'exit');
+  assert.equal(code, 0);
+  assert.ok(Date.now() - serverGoneAt < 2000, 'it outlived the server');
+  assert.ok(meters.lines.length >= 1 && meters.lines.every((line) => Array.isArray(JSON.parse(line).adapters)));
+
+  const outside = run(['outside']);
+  await once(outside.child.stdout, 'data');
+  outside.child.stdin.end();
+  const [closedCode] = await once(outside.child, 'exit');
+  assert.equal(closedCode, 0);
+});
+
+test('the real native helper gives the meters a speed within a few seconds', { ...needsHelper, timeout: 20_000 }, async () => {
+  const alias = Object.entries(networkInterfaces())
+    .find(([name, entries]) => name !== 'NetSwitch' && entries.some((entry) => entry.family === 'IPv4' && !entry.internal))?.[0];
+  assert.ok(alias, 'no connected adapter to measure');
+  const monitor = new LineMonitor({ watchOutside: false, enginePath: '', helperPath: HELPER });
+  monitor.start();
+  try {
+    const until = Date.now() + 15_000;
+    while (Date.now() < until && !monitor.rate(alias)) await delay(250);
+    const rate = monitor.rate(alias);
+    assert.ok(rate && Number.isFinite(rate.down) && Number.isFinite(rate.up), `no speed arrived for ${alias}`);
+    assert.equal(monitor.isFresh(), true);
+  } finally {
+    monitor.stop();
+  }
+});
+
+test('the helper is found where the installer puts it, or where a source build puts it', () => {
+  const root = path.join('C:', 'Program Files', 'Net Switch');
+  const installed = path.join(root, 'helper', 'netswitch-helper.exe');
+  const built = path.join(root, 'helper', 'bin', 'netswitch-helper.exe');
+  assert.equal(findHelper(root, (file) => file === installed || file === built), installed);
+  assert.equal(findHelper(root, (file) => file === built), built);
+  assert.equal(findHelper(root, () => false), null);
 });
 
 test('speed is the growth between two readings, and a counter that restarts never gives a negative speed', () => {
@@ -98,7 +214,7 @@ test('without the second helper, as in test mode, the meters tell whether the mo
   assert.equal(monitor.isFresh(), true);
 });
 
-// A stand-in for a PowerShell helper.
+// A stand-in for a helper process.
 function fakeSpawn() {
   const children = [];
   const spawn = () => {
@@ -130,6 +246,66 @@ test('a helper that goes silent is ended and started again, and a meter helper n
   } finally {
     monitor.stop();
   }
+});
+
+test('with the native helper, each mode runs from it, following this server and leaving out the engine', async () => {
+  const { spawn, children } = fakeSpawn();
+  const calls = [];
+  const spawnHelper = (file, args) => {
+    calls.push([file, args]);
+    return spawn();
+  };
+  let powershell = 0;
+  const helperPath = 'C:\\Program Files\\Net Switch\\helper\\netswitch-helper.exe';
+  const enginePath = 'C:\\Program Files\\Net Switch\\engine\\sing-box.exe';
+  const monitor = new LineMonitor({
+    watchOutside: true,
+    enginePath,
+    helperPath,
+    spawn: () => {
+      powershell += 1;
+      return spawn();
+    },
+    spawnHelper,
+    restartMinMs: 30,
+    watchdogMs: 20,
+    silentMs: 100000,
+  });
+  monitor.start();
+  try {
+    const parent = String(process.pid);
+    assert.deepEqual(calls, [
+      [helperPath, ['meters', '--parent', parent]],
+      [helperPath, ['outside', '--parent', parent, '--engine', enginePath]],
+    ]);
+    assert.equal(powershell, 0);
+    // Its lines are read like the PowerShell ones.
+    children[0].stdout.write(`${reading(['Ethernet', 1, 1])}\n`);
+    children[1].stdout.write(`${JSON.stringify({ estats: true, outside: [] })}\n`);
+    await delay(20);
+    assert.ok(monitor.adapters.has('Ethernet'));
+    assert.equal(monitor.isFresh(), true);
+    // One that ends is started again the same way.
+    children[1].emit('exit');
+    await delay(80);
+    assert.deepEqual(calls[2], calls[1]);
+    assert.equal(powershell, 0);
+  } finally {
+    monitor.stop();
+  }
+
+  // Without routing to watch, only the meters run; without an engine path, none is passed.
+  calls.length = 0;
+  for (const watchOutside of [false, true]) {
+    const other = new LineMonitor({ watchOutside, enginePath: '', helperPath, spawnHelper });
+    other.start();
+    other.stop();
+  }
+  assert.deepEqual(calls.map(([, args]) => args), [
+    ['meters', '--parent', String(process.pid)],
+    ['meters', '--parent', String(process.pid)],
+    ['outside', '--parent', String(process.pid)],
+  ]);
 });
 
 test('a helper that keeps dying is restarted after longer and longer waits', async () => {

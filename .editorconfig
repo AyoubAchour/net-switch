@@ -15,5 +15,10 @@ indent_size = 4
 [*.ps1]
 indent_size = 2
 
+# gofmt's layout: tabs.
+[*.go]
+indent_style = tab
+indent_size = 4
+
 [*.md]
 trim_trailing_whitespace = false

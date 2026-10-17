@@ -28,6 +28,8 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
+      - name: Build and test the native helper with the pinned Go
+        run: ./scripts/build-helper.ps1
       - name: Test app and compile C# tray with Windows PowerShell 5.1
         run: npm test
       - name: Verify pinned downloads and stage the installer payload

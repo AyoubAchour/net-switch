@@ -10,6 +10,9 @@ engine/*.dll
 # A bundled Node.js runtime, added by the release build.
 runtime/
 
+# The native helper, built from helper/ by scripts/build-helper.ps1.
+helper/bin/
+
 # Release build output.
 dist/
 
