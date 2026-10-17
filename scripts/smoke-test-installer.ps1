@@ -5,13 +5,27 @@
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\smoke-test-installer.ps1 -Installer dist\NetSwitch-Setup-0.1.0-x64.exe
 [CmdletBinding()]
-param([Parameter(Mandatory = $true)] [string] $Installer)
+param(
+  [Parameter(Mandatory = $true)] [string] $Installer,
+  [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64'
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows') {
   throw 'This destructive install/uninstall smoke test is only for a disposable GitHub Actions Windows runner.'
 }
+. (Join-Path $PSScriptRoot 'build-common.ps1')
+if ((Get-NativeArchitecture) -ne $Arch) { throw "Smoke test needs a native $Arch runner." }
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class SmokeProcessArchitecture {
+  [DllImport("kernel32.dll", SetLastError = true)]
+  [return: MarshalAs(UnmanagedType.Bool)]
+  public static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
+}
+'@
 $installer = (Resolve-Path -LiteralPath $Installer).Path
 $app = Join-Path $env:ProgramFiles 'Net Switch'
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { $env:TEMP }
@@ -47,7 +61,7 @@ function Assert-Installed {
     'lib\engine.mjs', 'lib\tray.cs', 'ui\index.html', 'assets\net-switch.ico',
     'tools\stop.ps1', 'tools\restore-windows.mjs',
     'runtime\node.exe', 'runtime\LICENSE',
-    'engine\sing-box.exe', 'engine\libcronet.dll', 'engine\SHA256SUMS.txt', 'engine\LICENSE',
+    'engine\sing-box.exe', 'engine\SHA256SUMS.txt', 'engine\LICENSE',
     'helper\netswitch-helper.exe', 'tray\NetSwitchTray.exe',
     'licenses\GPL-3.0.txt', 'licenses\sing-box-LICENSE.txt', 'licenses\node-LICENSE.txt', 'licenses\lucide-ISC.txt',
     'licenses\cronet-go-LICENSE.txt', 'licenses\cronet-native\LICENSE', 'licenses\cronet-native\src\LICENSE',
@@ -64,6 +78,21 @@ function Assert-Installed {
     if (-not (Test-Path -LiteralPath $link)) { throw "Shortcut missing: $link" }
   }
   $pins = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../packaging/versions.json') -Raw | ConvertFrom-Json
+  $enginePin = (Get-ArchitecturePins $pins $Arch).singBox
+  Assert-EnginePins $enginePin (Join-Path $app 'engine/SHA256SUMS.txt') $Arch
+  foreach ($file in $enginePin.files.PSObject.Properties) {
+    $installed = Join-Path $app "engine/$($file.Name)"
+    Assert-Hash $installed $file.Value
+    Assert-PeArchitecture $installed $Arch
+  }
+  foreach ($file in @('runtime/node.exe', 'helper/netswitch-helper.exe')) {
+    Assert-PeArchitecture (Join-Path $app $file) $Arch
+  }
+  Assert-PeArchitecture (Join-Path $app 'tray/NetSwitchTray.exe') 'AnyCPU'
+  if (-not $enginePin.files.PSObject.Properties['libcronet.dll'] -and
+      (Test-Path -LiteralPath (Join-Path $app 'engine/libcronet.dll'))) {
+    throw 'Installed engine has an unpinned libcronet.dll.'
+  }
   foreach ($license in $pins.licenses.cronetNative) {
     $file = Join-Path (Join-Path $app 'licenses') $license.installPath
     if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $license.sha256) {
@@ -159,8 +188,28 @@ function Start-InstalledApp {
   # An installed copy runs its tray icon as tray\NetSwitchTray.exe, never as
   # tray.ps1 in PowerShell. Stop-InstalledApp then checks it notices the quit and ends.
   Wait-Until { @(Get-AppProcesses | Where-Object { $_.ExecutablePath -eq $trayProgram }).Count -gt 0 } 'Installed shortcut did not start tray\NetSwitchTray.exe.'
-  # The meters and the connections around routing, read by the installed native helper.
-  Wait-Until { @(Get-AppProcesses | Where-Object { $_.Name -eq 'netswitch-helper.exe' }).Count -eq 2 } 'Installed server did not start its two line meter helpers.'
+  # Check modes, not a total count: the network watcher and engine guard also
+  # use this executable. A count of two can pass while a required reader is missing.
+  foreach ($mode in @('meters', 'outside', 'network')) {
+    Wait-Until {
+      @(Get-AppProcesses | Where-Object { $_.Name -eq 'netswitch-helper.exe' -and $_.CommandLine -match "\s$mode\s" }).Count -eq 1
+    } "Installed server did not start its $mode helper."
+  }
+  foreach ($running in Get-AppProcesses | Where-Object { $_.Name -ne 'powershell.exe' }) {
+    $processHandle = [Diagnostics.Process]::GetProcessById($running.ProcessId)
+    try {
+      [uint16]$processMachine = 0
+      [uint16]$nativeMachine = 0
+      if (-not [SmokeProcessArchitecture]::IsWow64Process2($processHandle.Handle, [ref]$processMachine, [ref]$nativeMachine)) {
+        throw "Could not read process architecture for $($running.Name)."
+      }
+      $expected = if ($Arch -eq 'arm64') { 0xaa64 } else { 0x8664 }
+      if ($processMachine -ne 0 -or $nativeMachine -ne $expected) {
+        throw "$($running.Name) is running under emulation instead of native $Arch."
+      }
+      Write-Host "$($running.Name) runs natively on $Arch"
+    } finally { $processHandle.Dispose() }
+  }
   Wait-Until { $process.HasExited } 'The installed launcher did not finish opening the app window.'
   $process.WaitForExit()
   if ($process.ExitCode -ne 0) { throw "Installed launcher exited with code $($process.ExitCode)." }
@@ -186,6 +235,8 @@ Assert-Installed
 
 $version = & $node --version
 Write-Host "Bundled Node.js $version"
+$nodeArch = & $node -p process.arch
+if ($LASTEXITCODE -ne 0 -or $nodeArch -ne $Arch) { throw "Bundled Node runs as $nodeArch, expected $Arch" }
 
 # The installed engine files must pass the same checksum check Net Switch runs before every start.
 $engineModule = ([Uri](Join-Path $app 'lib\engine.mjs')).AbsoluteUri

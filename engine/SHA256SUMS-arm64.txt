@@ -1,0 +1,5 @@
+# sing-box 1.14.2 for Windows ARM64, from the official release:
+# https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-arm64.zip
+# Put sing-box.exe and libcronet.dll from that zip into this folder. Their SHA-256 must match:
+c3c2a8ad804e3189b314b12fa3ac111388cad9db165a2dc698e5df8be242dff4  sing-box.exe
+a75a1b99a7e31802cf67ee14763e5cb9db6a24aaf7062f86c49f2fc1c030fcf0  libcronet.dll

@@ -7,6 +7,82 @@ function Get-BuildCache([string] $Dist) {
   return Join-Path $Dist 'cache'
 }
 
+function Get-NativeArchitecture {
+  # PROCESSOR_ARCHITEW6432 identifies the OS when this shell is emulated.
+  $native = $env:PROCESSOR_ARCHITEW6432
+  if (-not $native) { $native = $env:PROCESSOR_ARCHITECTURE }
+  switch ($native) {
+    'AMD64' { return 'x64' }
+    'ARM64' { return 'arm64' }
+    default { throw "Unsupported Windows architecture: $native" }
+  }
+}
+
+function Get-ArchitecturePins($Pins, [string] $Arch) {
+  switch ($Arch) {
+    'x64' { return $Pins }
+    'arm64' {
+      # Licenses and source revisions are shared, so both payloads must use the
+      # same upstream versions even though their binary hashes differ.
+      if ($Pins.arm64.node.version -ne $Pins.node.version -or
+          $Pins.arm64.singBox.version -ne $Pins.singBox.version) {
+        throw 'ARM64 and x64 runtime/engine versions disagree; review the shared licenses and source pins.'
+      }
+      return $Pins.arm64
+    }
+    default { throw "Unsupported build architecture: $Arch" }
+  }
+}
+
+function Get-EngineChecksumFile([string] $RepoRoot, [string] $Arch) {
+  $name = if ($Arch -eq 'arm64') { 'SHA256SUMS-arm64.txt' } else { 'SHA256SUMS.txt' }
+  return Join-Path $RepoRoot "engine/$name"
+}
+
+function Assert-EnginePins($Pin, [string] $ChecksumFile, [string] $Arch) {
+  Assert-NoLink $ChecksumFile
+  $sums = @{}
+  foreach ($line in Get-Content -LiteralPath $ChecksumFile) {
+    if ($line -match '^\s*(?:#.*)?$') { continue }
+    if ($line -notmatch '^([a-fA-F0-9]{64})\s+\*?([^\s]+)\s*$') { throw "Invalid engine checksum line: $line" }
+    if ($sums.ContainsKey($Matches[2])) { throw "Duplicate engine checksum: $($Matches[2])" }
+    $sums[$Matches[2]] = $Matches[1]
+  }
+  $files = @($Pin.files.PSObject.Properties)
+  if (-not $sums.ContainsKey('sing-box.exe') -or
+      ($Arch -eq 'x64' -and -not $sums.ContainsKey('libcronet.dll')) -or
+      @($sums.Keys | Where-Object { $_ -notin @('sing-box.exe', 'libcronet.dll') }).Count -or
+      $sums.Count -ne $files.Count) {
+    throw "Invalid $Arch engine file list in versions.json or $ChecksumFile"
+  }
+  foreach ($file in $files) {
+    if ($sums[$file.Name] -ne $file.Value) { throw "Engine pin disagrees with ${ChecksumFile}: $($file.Name)" }
+  }
+}
+
+function Assert-PeArchitecture([string] $Path, [string] $Arch) {
+  $reader = [IO.BinaryReader]::new([IO.File]::OpenRead($Path))
+  try {
+    if ($reader.ReadUInt16() -ne 0x5a4d) { throw "Not a PE file: $Path" }
+    $reader.BaseStream.Position = 0x3c
+    $offset = $reader.ReadUInt32()
+    $reader.BaseStream.Position = $offset
+    if ($reader.ReadUInt32() -ne 0x4550) { throw "Invalid PE signature: $Path" }
+    $machine = $reader.ReadUInt16()
+  } finally { $reader.Dispose() }
+  $expected = if ($Arch -eq 'arm64') { 0xaa64 } elseif ($Arch -eq 'x64') { 0x8664 } else { 0x14c }
+  if ($machine -ne $expected) { throw ('Wrong architecture for {0}: PE 0x{1:x4}, expected {2}' -f $Path, $machine, $Arch) }
+  if ($Arch -eq 'AnyCPU') {
+    # AnyCPU uses an I386 PE header, but IL-only code with neither 32-bit flag.
+    $assembly = [Reflection.Assembly]::ReflectionOnlyLoad([IO.File]::ReadAllBytes($Path))
+    $kind = [Reflection.PortableExecutableKinds]0
+    $image = [Reflection.ImageFileMachine]0
+    $assembly.ManifestModule.GetPEKind([ref]$kind, [ref]$image)
+    if ([int]$kind -ne 1) { throw "Tray must be IL-only AnyCPU without Prefer32Bit: $Path ($kind)" }
+  }
+  Write-Host ('PE 0x{0:x4} ({1}): {2}' -f $machine, $Arch, $Path)
+}
+
 function Assert-NoLink([string] $Path) {
   if ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw "Refusing a symlink or junction in packaging input/output: $Path"

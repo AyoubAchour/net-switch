@@ -10,7 +10,7 @@
 # build-release.ps1 runs this too. Net Switch works without the helper (it
 # falls back to PowerShell), so running from source doesn't need it.
 [CmdletBinding()]
-param()
+param([ValidateSet('x64', 'arm64')] [string] $Arch)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -18,6 +18,9 @@ Set-StrictMode -Version Latest
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot 'build-common.ps1')
+$hostArch = Get-NativeArchitecture
+if (-not $Arch) { $Arch = $hostArch }
+$goArch = if ($Arch -eq 'arm64') { 'arm64' } else { 'amd64' }
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $dist = Join-Path $repoRoot 'dist'
@@ -67,14 +70,15 @@ $goEnv = [ordered]@{
   GOROOT = $goRoot
   GOTOOLCHAIN = 'local'
   GOWORK = 'off'
-  # A plain Windows x64 program that runs on any x64 CPU, with no C compiler involved.
+  # Both targets use the pinned x64 toolchain; cross-compilation needs no C compiler.
   CGO_ENABLED = '0'
   GOOS = 'windows'
-  GOARCH = 'amd64'
+  GOARCH = $goArch
   GOAMD64 = 'v1'
   GOEXPERIMENT = $null
   # A build never changes go.mod or go.sum: every module must match go.sum.
-  GOFLAGS = '-mod=readonly'
+  GOFLAGS = '-mod=readonly -p=2'
+  GOMAXPROCS = '2'
   GOPROXY = 'https://proxy.golang.org,direct'
   GOSUMDB = 'sum.golang.org'
   # Everything Go writes stays in the cache. Go also keeps settings and usage
@@ -119,7 +123,11 @@ try {
     throw "These Go files need formatting: $($unformatted -join ', ')`nRun: `"$gofmt`" -w `"$helperDir`""
   }
   Invoke-Go vet -C $helperDir ./...
-  Invoke-Go test -C $helperDir ./...
+  if ($Arch -eq $hostArch) {
+    Invoke-Go test -C $helperDir ./...
+  } else {
+    Write-Host "Cross-compiling $Arch on $hostArch; helper tests run on the matching CI runner."
+  }
 
   # The same source and toolchain always give the same file: no local paths,
   # build id or commit stamped into it, and no debug symbols.

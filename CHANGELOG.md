@@ -6,6 +6,7 @@ change behavior.
 
 ## [Unreleased]
 
+- Added a native Windows ARM64 installer alongside the x64 installer.
 - The tray icon is now a small program of its own instead of a PowerShell
   script compiled at every start: it appears in under a second instead of
   about four, and uses about half the memory (around 45 MB instead of 97 MB).

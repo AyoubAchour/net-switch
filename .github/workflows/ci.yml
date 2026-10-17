@@ -54,3 +54,36 @@ jobs:
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-x64.exe"
+
+  arm64:
+    name: Windows ARM64 / tests and installer
+    runs-on: windows-11-arm
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          architecture: arm64
+          package-manager-cache: false
+      - name: Confirm native Node and build and test the helper
+        run: |
+          node -e "if (process.arch !== 'arm64') process.exit(1)"
+          ./scripts/build-helper.ps1 -Arch arm64
+      - name: Build the AnyCPU tray
+        run: ./scripts/build-tray.ps1
+      - name: Test app, native helper and tray on ARM64
+        run: npm test
+      - name: Verify source provenance for both engine architectures
+        run: node scripts/write-source-manifest.mjs --verify-only
+      - name: Build the ARM64 installer and verify its payload
+        run: ./scripts/build-release.ps1 -Arch arm64
+      - name: Install, upgrade and uninstall it
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-arm64.exe" -Arch arm64

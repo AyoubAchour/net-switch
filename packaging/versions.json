@@ -6,6 +6,25 @@
     "checksumsUrl": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
     "archiveRoot": "node-v24.21.0-win-x64"
   },
+  "arm64": {
+    "node": {
+      "version": "24.21.0",
+      "url": "https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-arm64.zip",
+      "sha256": "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921",
+      "checksumsUrl": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
+      "archiveRoot": "node-v24.21.0-win-arm64"
+    },
+    "singBox": {
+      "version": "1.14.2",
+      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-arm64.zip",
+      "sha256": "2bb467039310452380958b821983d5bb4f78fb70a2583914e4bea8b011582b64",
+      "archiveRoot": "sing-box-1.14.2-windows-arm64",
+      "files": {
+        "sing-box.exe": "c3c2a8ad804e3189b314b12fa3ac111388cad9db165a2dc698e5df8be242dff4",
+        "libcronet.dll": "a75a1b99a7e31802cf67ee14763e5cb9db6a24aaf7062f86c49f2fc1c030fcf0"
+      }
+    }
+  },
   "go": {
     "version": "1.27.2",
     "url": "https://go.dev/dl/go1.27.2.windows-amd64.zip",
@@ -360,7 +379,8 @@
       "version": "0.14.1",
       "url": "https://www.wintun.net/builds/wintun-0.14.1.zip",
       "sha256": "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51",
-      "embeddedAmd64Sha256": "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
+      "embeddedAmd64Sha256": "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce",
+      "embeddedArm64Sha256": "f7ba89005544be9d85231a9e0d5f23b2d15b3311667e2dad0debd344918a3f80"
     }
   }
 }

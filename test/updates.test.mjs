@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { isNewer, LATEST_RELEASE_URL, offerFrom, parseVersion, UpdateChecker } from '../lib/updates.mjs';
 
 const PAGE = 'https://github.com/AyoubAchour/net-switch/releases/tag/v0.3.0';
-const INSTALLER = 'https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/NetSwitch-Setup-0.3.0-x64.exe';
+const INSTALLER = `https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/NetSwitch-Setup-0.3.0-${process.arch}.exe`;
 
 function release(overrides = {}) {
   return {
@@ -13,7 +13,7 @@ function release(overrides = {}) {
     prerelease: false,
     assets: [
       { name: 'SHA256SUMS.txt', browser_download_url: 'https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/SHA256SUMS.txt' },
-      { name: 'NetSwitch-Setup-0.3.0-x64.exe', browser_download_url: INSTALLER },
+      { name: `NetSwitch-Setup-0.3.0-${process.arch}.exe`, browser_download_url: INSTALLER },
     ],
     ...overrides,
   };
@@ -31,6 +31,21 @@ test('versions compare by number, and anything that isn’t a plain version is n
 
 test('a newer published release is offered with its page and installer', () => {
   assert.deepEqual(offerFrom(release(), '0.2.0'), { version: '0.3.0', page: PAGE, installer: INSTALLER });
+});
+
+test('updates choose the matching architecture regardless of asset order', () => {
+  const assets = ['arm64', 'x64'].map((arch) => {
+    const name = `NetSwitch-Setup-0.3.0-${arch}.exe`;
+    return { name, browser_download_url: `https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/${name}` };
+  });
+  for (const arch of ['x64', 'arm64']) {
+    const own = assets.find((asset) => asset.name.endsWith(`-${arch}.exe`));
+    assert.equal(offerFrom(release({ assets }), '0.2.0', arch).installer, own.browser_download_url);
+    assert.equal(offerFrom(release({ assets: assets.filter((asset) => asset !== own) }), '0.2.0', arch), null);
+    const swapped = { ...own, browser_download_url: assets.find((asset) => asset !== own).browser_download_url };
+    assert.equal(offerFrom(release({ assets: [swapped] }), '0.2.0', arch), null);
+  }
+  assert.equal(offerFrom(release({ assets }), '0.2.0', 'ia32'), null);
 });
 
 test('nothing is offered for the same or an older version, a draft or a prerelease', () => {
