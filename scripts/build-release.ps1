@@ -7,6 +7,7 @@ $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+. (Join-Path $PSScriptRoot 'build-common.ps1')
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $dist = Join-Path $repoRoot 'dist'
@@ -18,74 +19,6 @@ if (-not $package.PSObject.Properties['version'] -or $package.version -notmatch 
   throw 'package.json must contain a release version (for example 0.1.0). The build never invents or changes it.'
 }
 $version = $package.version
-
-function Assert-NoLink([string] $Path) {
-  if ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
-    throw "Refusing a symlink or junction in packaging input/output: $Path"
-  }
-}
-
-function Get-SafeFiles([string] $Directory) {
-  Assert-NoLink $Directory
-  foreach ($entry in Get-ChildItem -LiteralPath $Directory -Force) {
-    Assert-NoLink $entry.FullName
-    if ($entry.PSIsContainer) { Get-SafeFiles $entry.FullName } else { $entry }
-  }
-}
-
-function Assert-Hash([string] $Path, [string] $Expected) {
-  if ($Expected -notmatch '^[0-9a-fA-F]{64}$') { throw "Invalid SHA-256 pin for $Path" }
-  $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actual -ne $Expected) {
-    throw "SHA-256 mismatch for $Path`nExpected: $Expected`nActual:   $actual`nThe file was NOT used. Remove this cache file and retry; do not update pins to silence this error."
-  }
-  Write-Host "Verified SHA-256: $([IO.Path]::GetFileName($Path))"
-}
-
-function Get-Artifact($Pin) {
-  $uri = [Uri]$Pin.url
-  if ($uri.Scheme -ne 'https') { throw "Artifact URL must use HTTPS: $uri" }
-  $cacheName = [IO.Path]::GetFileName($uri.AbsolutePath)
-  if ($Pin.PSObject.Properties['cacheName']) { $cacheName = $Pin.cacheName }
-  if (-not $cacheName -or $cacheName -ne [IO.Path]::GetFileName($cacheName)) { throw 'Invalid artifact cache filename.' }
-  $target = Join-Path $cache $cacheName
-  if (Test-Path -LiteralPath $target) {
-    Assert-NoLink $target
-  } else {
-    Write-Host "Downloading $uri"
-    # A partial download is never considered a reusable artifact.
-    $partial = "$target.partial"
-    if (Test-Path -LiteralPath $partial) { Assert-NoLink $partial }
-    # A host can refuse a connection for a moment, so a failed download is
-    # retried. A file that downloads but doesn't match its pin is never
-    # retried: that stops the build below.
-    $waits = @(5, 15, 30)
-    for ($attempt = 0; ; $attempt++) {
-      try {
-        Invoke-WebRequest -UseBasicParsing -Uri $uri -OutFile $partial
-        break
-      } catch {
-        if ($attempt -ge $waits.Count) { throw "Download failed after $($attempt + 1) attempts: $uri`n$($_.Exception.Message)" }
-        Write-Host "Download failed ($($_.Exception.Message)); retrying in $($waits[$attempt]) s"
-        Start-Sleep -Seconds $waits[$attempt]
-      }
-    }
-    Assert-Hash $partial $Pin.sha256
-    Move-Item -LiteralPath $partial -Destination $target
-  }
-  Assert-Hash $target $Pin.sha256
-  return $target
-}
-
-function Copy-ArchiveFile([string] $Archive, [string] $Entry, [string] $Destination) {
-  $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
-  try {
-    $matches = @($zip.Entries | Where-Object { $_.FullName -ceq $Entry })
-    if ($matches.Count -ne 1) { throw "Expected exactly one '$Entry' in $Archive; found $($matches.Count)." }
-    New-Item -ItemType Directory -Path (Split-Path $Destination -Parent) -Force | Out-Null
-    [IO.Compression.ZipFileExtensions]::ExtractToFile($matches[0], $Destination, $false)
-  } finally { $zip.Dispose() }
-}
 
 # This is the entire repository allowlist. Never copy the repository root.
 $rootFiles = @(
@@ -140,11 +73,17 @@ foreach ($directory in @($repoRoot, $dist, $cache)) {
   if (Test-Path -LiteralPath $directory) { Assert-NoLink $directory }
   else { New-Item -ItemType Directory -Path $directory | Out-Null }
 }
-$nodeZip = Get-Artifact $pins.node
-$engineZip = Get-Artifact $pins.singBox
-$engineLicense = Get-Artifact $pins.licenses.singBox
-$cronetLicense = Get-Artifact $pins.licenses.cronetGo
-$wintunZip = Get-Artifact $pins.nativeSources.wintun
+# The native helper that reads the line meters, built from helper\ with the
+# pinned Go (its own tests run first). It shares this download cache.
+& (Join-Path $PSScriptRoot 'build-helper.ps1')
+$helperExe = Join-Path $repoRoot 'helper\bin\netswitch-helper.exe'
+Assert-NoLink $helperExe
+$goZip = Get-Artifact $pins.go $cache
+$nodeZip = Get-Artifact $pins.node $cache
+$engineZip = Get-Artifact $pins.singBox $cache
+$engineLicense = Get-Artifact $pins.licenses.singBox $cache
+$cronetLicense = Get-Artifact $pins.licenses.cronetGo $cache
+$wintunZip = Get-Artifact $pins.nativeSources.wintun $cache
 $nativeLicenses = @(
   foreach ($pin in $pins.licenses.cronetNative) {
     if ([IO.Path]::IsPathRooted($pin.installPath) -or
@@ -152,7 +91,7 @@ $nativeLicenses = @(
         @($pin.installPath -split '[/\\]' | Where-Object { $_ -in @('', '.', '..') }).Count) {
       throw "Invalid native license destination: $($pin.installPath)"
     }
-    [PSCustomObject]@{ Pin = $pin; File = (Get-Artifact $pin) }
+    [PSCustomObject]@{ Pin = $pin; File = (Get-Artifact $pin $cache) }
   }
 )
 
@@ -194,6 +133,13 @@ foreach ($file in $pins.singBox.files.PSObject.Properties) {
   Copy-ArchiveFile $engineZip "$($pins.singBox.archiveRoot)/$($file.Name)" $destination
   Assert-Hash $destination $file.Value
 }
+# The helper has the Go runtime and golang.org/x/sys compiled in; both are under
+# the Go authors' license, taken from the pinned Go archive.
+$stagedHelper = Join-Path $stage 'helper/netswitch-helper.exe'
+New-Item -ItemType Directory -Path (Split-Path $stagedHelper -Parent) -Force | Out-Null
+Copy-Item -LiteralPath $helperExe -Destination $stagedHelper
+Copy-ArchiveFile $goZip $pins.licenses.go.archiveEntry (Join-Path $stage 'licenses/go-LICENSE.txt')
+Assert-Hash (Join-Path $stage 'licenses/go-LICENSE.txt') $pins.licenses.go.sha256
 
 # An inventory outside the installed tree makes an allowlist review straightforward.
 $stageSums = @(Get-SafeFiles $stage | Sort-Object FullName | ForEach-Object {
@@ -207,7 +153,7 @@ if ($SkipInstaller) { return }
 
 # Install the verified compiler privately in the build cache, without elevation or
 # file associations. Reinstall it each build so an old local compiler is never used.
-$innoInstaller = Get-Artifact $pins.innoSetup
+$innoInstaller = Get-Artifact $pins.innoSetup $cache
 $compilerDir = Join-Path $cache "inno-$($pins.innoSetup.version)"
 if (Test-Path -LiteralPath $compilerDir) { $null = @(Get-SafeFiles $compilerDir) }
 $installArgs = '/CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NOICONS /TASKS="" /DIR="{0}"' -f $compilerDir

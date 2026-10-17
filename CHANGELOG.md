@@ -23,6 +23,10 @@ change behavior.
 - The window shows which version you're running.
 - The faintest text is a little brighter, so it's readable for everyone
   (WCAG AA contrast).
+- The line speeds and the check for connections that go around routing now
+  come from a small native helper instead of two PowerShell processes running
+  in the background. They used over 200 MB of memory and a steady bit of CPU;
+  the helper uses under 20 MB and almost no CPU.
 
 ## [0.1.0] - 2026-10-15
 

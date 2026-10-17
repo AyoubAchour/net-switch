@@ -2,8 +2,9 @@
 
 Net Switch's own code is under the MIT license (see `LICENSE`). The installer
 also ships the separate programs below, each under its own license. They run as
-separate programs; Net Switch does not modify them. "MIT" applies to Net
-Switch's code only, not to the installer as a whole.
+separate programs; Net Switch does not modify them. The one exception is the Go
+code compiled into Net Switch's own helper program (see the end). "MIT" applies
+to Net Switch's code only, not to the installer as a whole.
 
 ## sing-box 1.14.2
 
@@ -67,3 +68,16 @@ Switch's code only, not to the installer as a whole.
 - What it does here: the shapes of several icons in the window and tray.
 - ISC license (with some icons from Feather under MIT): see
   `licenses\lucide-ISC.txt`.
+
+## Go runtime and golang.org/x/sys
+
+- What it does here: `helper\netswitch-helper.exe` is Net Switch's own small
+  program (its source is in the repository's `helper` folder) that reads the
+  line meters and the connections that go around routing. It is written in Go, so the Go runtime
+  and standard library (Go 1.27.2) and
+  [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys) v0.49.0 are compiled
+  into it, unmodified.
+- Copyright 2009 The Go Authors. Both are under the same BSD-style
+  (3-clause) license. License text in the installed copy:
+  `licenses\go-LICENSE.txt`, taken unchanged from the official Go release.
+  golang.org/x/sys ships the same text.

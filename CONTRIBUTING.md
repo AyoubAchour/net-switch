@@ -14,7 +14,20 @@ Git. There are no npm dependencies to install.
    (`sing-box-1.14.2-windows-amd64.zip`). Put `sing-box.exe` and
    `libcronet.dll` in `engine\`. Net Switch refuses to start the engine unless
    both match `engine\SHA256SUMS.txt`.
-3. Start it with `launch.ps1`:
+3. Optional: build the small native helper that reads the line speeds and the
+   connections that go around routing:
+
+   ```powershell
+   npm run build:helper
+   ```
+
+   This downloads the Go version pinned in `packaging\versions.json` into
+   `dist\cache` (nothing is installed on your PC), runs the helper's tests and
+   builds `helper\bin\netswitch-helper.exe`. Without it, Net Switch reads the
+   same things with PowerShell instead: everything works, it just uses about
+   200 MB more memory. `server.log` says which one is used. Quit Net Switch
+   before rebuilding the helper, since Windows won't replace a running program.
+4. Start it with `launch.ps1`:
 
    ```powershell
    powershell -NoProfile -ExecutionPolicy Bypass -File launch.ps1
@@ -42,6 +55,11 @@ npm test
 The tray tests compile `lib\tray.cs` with Windows PowerShell 5.1, so that code
 must stay C# 5: no string interpolation, no `?.`, no expression-bodied members.
 
+When the native helper is built, `npm test` also runs it and checks its output
+against the PowerShell version; otherwise those tests are skipped and say so.
+The helper's own Go tests run in `npm run build:helper`, which also checks
+`gofmt` and `go vet`.
+
 Tests can't plug and unplug network cables. If you change routing, failover or
 the Windows settings code, please also check by hand, and say what you tried
 in the pull request:
@@ -57,10 +75,10 @@ in the pull request:
 npm run build
 ```
 
-This downloads the pinned Node.js, sing-box and
+This downloads the pinned Node.js, sing-box, Go and
 [Inno Setup](https://jrsoftware.org/isinfo.php) files listed in
-`packaging\versions.json`, checks their hashes, and builds
-`dist\NetSwitch-Setup-<version>-x64.exe`. Pushing a `v*` tag builds
+`packaging\versions.json`, checks their hashes, builds the native helper, and
+builds `dist\NetSwitch-Setup-<version>-x64.exe`. Pushing a `v*` tag builds
 and publishes a release on GitHub; the tag must match `package.json` and have
 a section in `CHANGELOG.md`.
 
@@ -68,6 +86,9 @@ a section in `CHANGELOG.md`.
 
 - Plain JavaScript modules, no build step, no dependencies. Please keep it that
   way unless there's a strong reason.
+- The native helper (`helper\`) is Go, laid out by `gofmt`, with
+  `golang.org/x/sys` as its only dependency. Its output lines must stay
+  exactly the same as the PowerShell fallback's in `lib\monitor.mjs`.
 - Comments explain why, in plain sentences.
 - Text in the window should say what is happening and what to do next, in
   words a non-technical person understands.
