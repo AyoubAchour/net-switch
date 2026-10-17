@@ -256,6 +256,8 @@ namespace NetSwitch
         public string Name;
         public string Path;
         public string Lane;
+        // "second", "cable" (kept on the cable while combining) or "main".
+        public string Choice;
         public string Speed;
         public string Initial;
         public int ColorIndex;
@@ -276,6 +278,9 @@ namespace NetSwitch
         public bool CombineOn;
         public bool CanCombine;
         public string MainOption;
+        // Shown between the two while combining, when the server can keep an
+        // app on the cable; null otherwise.
+        public string CableOption;
         public string SecondOption;
         public string Health;
         public string HealthTone;
@@ -306,6 +311,7 @@ namespace NetSwitch
             view.CanCombine = second != null;
             view.CombineOn = second != null && TrayModel.Flag(TrayModel.Child(state, "combine"), "on");
             view.MainOption = view.CombineOn ? "Both" : "Cable";
+            view.CableOption = view.CombineOn && TrayModel.Flag(TrayModel.Child(state, "features"), "cableOnly") ? "Cable" : null;
             view.SecondOption = ShortOption(second);
             view.Main = Line(TrayModel.Child(lanes, "main"), "Cable");
             view.Second = second == null ? null : Line(second, TrayModel.Text(second, "label") ?? "Second connection");
@@ -333,6 +339,7 @@ namespace NetSwitch
                     if (string.IsNullOrWhiteSpace(row.Name)) row.Name = "App";
                     row.Path = TrayModel.Text(app, "path") ?? "";
                     row.Lane = TrayModel.Text(app, "lane") == "second" ? "second" : "main";
+                    row.Choice = row.Lane == "second" ? "second" : TrayModel.Flag(app, "cableOnly") ? "cable" : "main";
                     row.Speed = TrayModel.Rate(TrayModel.Number(rate, "down"));
                     row.Score = TrayModel.Number(app, "sortScore");
                     row.HasTraffic = TrayModel.Number(rate, "down") + TrayModel.Number(rate, "up") > 0;
@@ -852,15 +859,24 @@ namespace NetSwitch
             Round(g, avatar, 5, Avatars[app.ColorIndex], Color.Transparent);
             Caption(g, app.Initial, letter, AvatarInk, avatar.X, middle, avatar.Width, StringAlignment.Center);
 
-            // The segmented control, sized by its captions; both are measured in
+            // The segmented control, sized by its captions; all are measured in
             // the bold face so the control doesn't move when the choice changes.
             float mainWidth = Measure(g, view.MainOption, smallStrong) + 16;
+            float cableWidth = view.CableOption == null ? 0 : Measure(g, view.CableOption, smallStrong) + 16;
             float secondWidth = Measure(g, view.SecondOption, smallStrong) + 16;
+            float options = mainWidth + secondWidth + 2 + (view.CableOption == null ? 0 : cableWidth + 2);
             float segmentRight = WidthDip - Pad - 8;
-            RectangleF segment = new RectangleF(segmentRight - (mainWidth + secondWidth + 6), middle - 11.5f, mainWidth + secondWidth + 6, 23);
+            RectangleF segment = new RectangleF(segmentRight - (options + 4), middle - 11.5f, options + 4, 23);
             Round(g, segment, 6, SegmentFill, Color.Transparent);
-            AppOption(g, app, "main", view.MainOption, new RectangleF(segment.X + 2, segment.Y + 2, mainWidth, 19), app.CanMove);
-            AppOption(g, app, "second", view.SecondOption, new RectangleF(segment.X + 4 + mainWidth, segment.Y + 2, secondWidth, 19), app.CanSecond);
+            float x = segment.X + 2;
+            AppOption(g, app, "main", view.MainOption, new RectangleF(x, segment.Y + 2, mainWidth, 19), app.CanMove);
+            x += mainWidth + 2;
+            if (view.CableOption != null)
+            {
+                AppOption(g, app, "cable", view.CableOption, new RectangleF(x, segment.Y + 2, cableWidth, 19), app.CanMove);
+                x += cableWidth + 2;
+            }
+            AppOption(g, app, "second", view.SecondOption, new RectangleF(x, segment.Y + 2, secondWidth, 19), app.CanSecond);
             if (!app.CanMove) notes.Add(new Hit { Bounds = segment, Tip = app.Name + " can\u2019t be moved" });
 
             float speedRight = segment.X - 10;
@@ -870,11 +886,15 @@ namespace NetSwitch
             Caption(g, app.Name, body, Color.White, nameLeft, middle, speedRight - speedWidth - 10 - nameLeft, StringAlignment.Near);
         }
 
+        // lane is the choice the option makes. Without the Cable option, the
+        // Cable caption stands for both "main" and "cable", which mean the same
+        // line then; pressing it sends the app's own choice, so a kept app stays kept.
         void AppOption(Graphics g, FlyoutApp app, string lane, string caption, RectangleF bounds, bool enabled)
         {
-            bool selected = app.Lane == lane;
+            bool selected = app.Choice == lane || (lane == "main" && app.Choice == "cable" && view.CableOption == null);
+            string send = selected ? app.Choice : lane;
             FlyoutAction action = new FlyoutAction { Key = "app:" + app.Path + ":" + lane, Endpoint = "/api/app-lane",
-                Body = new Dictionary<string, object> { { "path", app.Path }, { "lane", lane } } };
+                Body = new Dictionary<string, object> { { "path", app.Path }, { "lane", send } } };
             Button(g, bounds, action, "Move " + app.Name + " to " + caption, enabled && !quitting && pending == null, selected ? SelectedFill : SegmentFill, false, 4);
             Color color = selected ? enabled ? Color.White : Dim : enabled ? Dim : Faint;
             Caption(g, caption, selected ? smallStrong : small, color, bounds.X, bounds.Y + bounds.Height / 2, bounds.Width, StringAlignment.Center);

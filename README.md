@@ -19,7 +19,9 @@ can be a USB Wi-Fi adapter or a phone with USB tethering.
   browser and calls on the other.
 - **Combine both lines.** New connections from the apps you haven't moved are
   spread across both lines. Downloads that open several connections at once
-  (Steam, browsers, speed tests, download managers) can use both lines.
+  (Steam, browsers, speed tests, download managers) can use both lines. Apps
+  that should stay on one line, like calls or a picky website, can be kept on
+  the cable.
 - **Fail over.** If a line drops, or stays connected but stops reaching the
   internet, its apps move to the other line while that one works, and come back
   when it returns.
@@ -55,8 +57,8 @@ gh attestation verify NetSwitch-Setup-<version>-x64.exe -R AyoubAchour/net-switc
   one connection gets one line's speed. That would need a bonding server on the
   internet (like Speedify or OpenMPTCProuter), which Net Switch doesn't use.
 - **While combining, websites can see two different addresses.** Most don't
-  care. If one keeps signing you out, stop combining, or move that browser to
-  the second connection.
+  care. If one keeps signing you out, set that browser to **Cable** so it stays
+  on one line.
 - **Routing is IPv4 only** while it's on.
 - **Watch your data plan on a phone.** If the cable drops, everything moves to
   the second connection. And while routing is on with two lines, Net Switch
@@ -76,7 +78,8 @@ gh attestation verify NetSwitch-Setup-<version>-x64.exe -R AyoubAchour/net-switc
    New connections move at once. A download that's already running keeps its
    line until you pause and resume it.
 4. Turn on **Combine both lines** if you want the apps you haven't moved to use
-   both lines.
+   both lines. Each app then offers **Both lines**, **Cable** and the second
+   connection, so you can keep some apps on the cable.
 
 Closing the window keeps routing on, and the tray icon brings it back. **Quit
 Net Switch** turns routing off, and every app goes back to Windows' normal

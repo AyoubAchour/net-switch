@@ -16,6 +16,7 @@ const els = {
   empty: document.getElementById('empty'),
   listMessage: document.getElementById('list-message'),
   legends: document.querySelector('.legends'),
+  channels: document.querySelector('.channels'),
   quit: document.getElementById('quit'),
 };
 
@@ -185,6 +186,25 @@ function sharing() {
   return combining() && Boolean(state.combine.active);
 }
 
+// While combining, an app can also be kept on the cable alone. An older Net
+// Switch that can't do that sends no such feature, so this window offers it
+// only when the running one can.
+function offersCableOnly() {
+  return combining() && Boolean(state.features?.cableOnly);
+}
+
+// What the person chose for the app: 'second', 'cable' (kept on the cable
+// while combining) or 'main' (the cable, or both lines while combining).
+function choiceOf(app) {
+  if (app.lane === 'second') return 'second';
+  return app.cableOnly ? 'cable' : 'main';
+}
+
+// This app's new connections are spread over both lines right now.
+function sharesBothLines(app) {
+  return app.lane === 'main' && !app.cableOnly && sharing();
+}
+
 // ------------------------------------------------------------ meters
 
 function createMeter(count, kind) {
@@ -225,7 +245,7 @@ async function run(name, task) {
 }
 
 async function chooseLane(app, lane) {
-  if (app.lane === lane || pendingLane.has(app.key)) return;
+  if (choiceOf(app) === lane || pendingLane.has(app.key)) return;
   pendingLane.set(app.key, lane);
   actionError = null;
   render();
@@ -541,7 +561,9 @@ function renderCombine() {
   } else if (waiting) {
     message = `Paused while the ${second.label} isn’t connected. New connections use the cable until it’s back.`;
   } else {
-    message = `Every app you haven’t moved to the ${second.label} shares both lines. If a website keeps signing you out or a download fails, stop combining.`;
+    message = offersCableOnly()
+      ? `Apps set to Both lines share the cable and the ${second.label}. If a website keeps signing you out, set that app to Cable.`
+      : `Every app you haven’t moved to the ${second.label} shares both lines. If a website keeps signing you out or a download fails, stop combining.`;
   }
   if (text.textContent !== message) text.textContent = message;
 
@@ -722,10 +744,14 @@ function createRow(app) {
   return row;
 }
 
-// look colors the key: 'both' while the cable key stands for both lines.
+// lane is the choice the key makes ('main', 'cable' or 'second'). look colors
+// the key: 'both' while the default key stands for both lines. Without
+// combining, the default and "kept on the cable" both mean the cable, so the
+// one Cable key shows either as chosen; pressing it then changes nothing.
 function laneKey(app, lane, label, look = lane) {
   const pending = pendingLane.get(app.key);
-  const pressed = pending ? false : app.lane === lane;
+  const choice = choiceOf(app);
+  const pressed = pending ? false : choice === lane || (lane === 'main' && choice === 'cable' && !offersCableOnly());
   const unavailable = lane === 'second' && !state.lanes.second;
   // No line changes for this app while its reconnect is running.
   const reconnecting = busyAction === `reconnect:${app.key}`;
@@ -738,7 +764,9 @@ function laneKey(app, lane, label, look = lane) {
     disabled: unavailable || Boolean(pending) || reconnecting,
     title: unavailable ? 'Set up the second connection first' : null,
     text: label,
-    onclick: () => chooseLane(app, lane),
+    onclick: () => {
+      if (!pressed) chooseLane(app, lane);
+    },
   });
 }
 
@@ -751,10 +779,11 @@ function rowNote(app) {
 }
 
 // What a reconnect would interrupt: the app's connections on the other line.
-// While combining splits traffic, both lines are right for an app on the cable,
-// so only the connections that go around Net Switch are interrupted (line is null then).
+// While combining splits traffic, both lines are right for an app that shares
+// them, so only the connections that go around Net Switch are interrupted
+// (line is null then).
 function reconnectSummary(app) {
-  if (app.lane === 'main' && sharing()) return { count: app.outside?.connections ?? 0, line: null };
+  if (sharesBothLines(app)) return { count: app.outside?.connections ?? 0, line: null };
   const other = app.lane === 'second' ? 'main' : 'second';
   const count = app.connections[other] + (app.outside?.byLane?.[other] ?? 0);
   const line = other === 'main' ? 'cable' : (state.lanes.second?.label ?? 'second connection');
@@ -816,8 +845,9 @@ function baseRowNote(app, orReconnect) {
       movable: true,
     };
   }
-  // While combining splits traffic, connections on the second connection are where they belong.
-  if (app.lane === 'main' && app.connections.second > 0 && !sharing()) {
+  // While combining splits traffic, connections on the second connection are
+  // where they belong, unless the app is kept on the cable.
+  if (app.lane === 'main' && app.connections.second > 0 && !sharesBothLines(app)) {
     return {
       kind: 'moving',
       text: `${connectionWord(app.connections.second)} still on the ${second?.label ?? 'second connection'}. Try pausing and resuming in ${app.name}${orReconnect}.`,
@@ -830,7 +860,7 @@ function baseRowNote(app, orReconnect) {
 function reconnectButton(app) {
   const line = app.lane === 'second' ? (state.lanes.second?.label ?? 'second connection') : 'cable';
   const title =
-    app.lane === 'main' && sharing()
+    sharesBothLines(app)
       ? `Closes ${app.name}’s connections that go around Net Switch, so new ones share both lines.`
       : `Closes ${app.name}’s connections that aren’t on the ${line}, so new ones use the ${line}.`;
   return h('button', {
@@ -901,19 +931,22 @@ function updateRow(row, app) {
 
   const keysSignature = [
     app.switchable,
-    app.lane,
+    choiceOf(app),
     pendingLane.get(app.key) ?? '',
     busyAction === `reconnect:${app.key}`,
     Boolean(state.lanes.second),
     secondLabel(),
     app.name,
     combining(),
+    offersCableOnly(),
   ].join('|');
   if (row.signature.keys !== keysSignature) {
     if (app.switchable) {
-      const main = combining() ? laneKey(app, 'main', 'Both lines', 'both') : laneKey(app, 'main', 'Cable');
+      const keys = offersCableOnly()
+        ? [laneKey(app, 'main', 'Both lines', 'both'), laneKey(app, 'cable', 'Cable', 'main')]
+        : [combining() ? laneKey(app, 'main', 'Both lines', 'both') : laneKey(app, 'main', 'Cable')];
       parts.keys.setAttribute('aria-label', `Connection for ${app.name}`);
-      parts.keys.replaceChildren(main, laneKey(app, 'second', secondLabel()));
+      parts.keys.replaceChildren(...keys, laneKey(app, 'second', secondLabel()));
     } else {
       parts.keys.removeAttribute('aria-label');
       parts.keys.replaceChildren(h('span', { class: 'key-placeholder', text: 'Can’t be moved' }));
@@ -973,6 +1006,9 @@ function renderApps() {
   });
 
   els.legends.hidden = apps.length === 0;
+  // Three keys per row while an app can also be kept on the cable; the
+  // columns widen for them.
+  els.channels.dataset.keys = offersCableOnly() ? '3' : '2';
   renderEmpty(apps.length === 0);
 }
 

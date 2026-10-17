@@ -79,6 +79,26 @@ test('apps moved to the second connection stay listed even when they are not run
   assert.deepEqual(rows[0].connections, { main: 0, second: 0 });
 });
 
+test('apps kept on the cable stay listed and say so; moved apps never count as kept', () => {
+  const tracker = new AppTracker();
+  const t0 = Date.parse('2026-10-07T00:01:00Z');
+  tracker.ingest([connection('a', CHROME)], t0);
+  const rows = tracker.snapshot([LM], [CHROME.toUpperCase(), 'C:\\Idle\\app.exe']);
+  const byKey = new Map(rows.map((row) => [row.key, row]));
+  assert.equal(rows.length, 3);
+  assert.deepEqual([byKey.get(appKey(CHROME)).lane, byKey.get(appKey(CHROME)).cableOnly], ['main', true]);
+  assert.deepEqual([byKey.get(appKey('C:\\Idle\\app.exe')).lane, byKey.get(appKey('C:\\Idle\\app.exe')).cableOnly], ['main', true]);
+  assert.deepEqual([byKey.get(appKey(LM)).lane, byKey.get(appKey(LM)).cableOnly], ['second', false]);
+  // In both lists by mistake: the second connection wins, as in the rules.
+  const both = tracker.snapshot([LM], [LM]);
+  assert.deepEqual([both.find((row) => row.key === appKey(LM)).lane, both.find((row) => row.key === appKey(LM)).cableOnly], ['second', false]);
+
+  const outside = new OutsideTracker();
+  outside.ingest([{ id: '192.168.1.11:50799>172.67.69.92:443', path: 'C:\\Old\\download.exe', lane: 'main', down: 1, up: 1, beforeRouting: true }], t0);
+  const merged = mergeRows(new AppTracker().snapshot([]), outside, [], ['C:\\Old\\download.exe']);
+  assert.equal(merged[0].cableOnly, true);
+});
+
 test('a download that started before routing is measured, merged into its app row and colored by its lane', () => {
   const outside = new OutsideTracker();
   const t0 = Date.parse('2026-10-07T01:10:00Z');

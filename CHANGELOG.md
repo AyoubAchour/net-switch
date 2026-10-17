@@ -4,6 +4,13 @@ All notable changes to Net Switch are listed here. Versions follow
 [Semantic Versioning](https://semver.org/); before 1.0, minor versions may
 change behavior.
 
+## [Unreleased]
+
+- While combining, an app can be kept on the cable: each app now offers
+  **Both lines**, **Cable** and the second connection. Useful for calls, games
+  and websites that sign you out when your address changes. If the cable drops,
+  those apps still move to the second connection until it's back.
+
 ## [0.1.0] - 2026-10-15
 
 First public release.

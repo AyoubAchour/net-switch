@@ -59,6 +59,12 @@ const CASES = {
   flyoutStarting: flyout({ routing: { status: 'starting', wanted: true } }),
   flyoutStopping: flyout({ routing: { status: 'stopping', wanted: false } }),
   flyoutCombine: flyout({ combine: { on: true } }),
+  flyoutKept: flyout({
+    combine: { on: true },
+    features: { cableOnly: true },
+    apps: [app('Calls', 30, 30, { cableOnly: true }), app('Browser', 20), app('Game', 10, 10, { lane: 'second' })],
+  }),
+  flyoutKeptNoCombine: flyout({ features: { cableOnly: true }, apps: [app('Calls', 30, 30, { cableOnly: true })] }),
   flyoutMissing: flyout({ lanes: { main: cable, second: null }, combine: { on: true }, apps: [app('Browser', 50)] }),
   flyoutNoMove: flyout({ apps: [app('Windows', 80, 80, { switchable: false, lane: 'second' })] }),
   flyoutTop: flyout({ apps: [app('Idle', 999, 0), app('Fourth', 10), app('Third', 20), app('First', 50), app('Second', 30)] }),
@@ -223,6 +229,18 @@ test('the flyout labels app options and disables unsupported changes', () => {
   assert.equal(results.flyoutNoMove.Apps[0].CanMove, false);
   assert.equal(results.flyoutNoMove.Apps[0].CanSecond, false);
   assert.equal(results.flyoutNoMove.Apps[0].Lane, 'second');
+});
+
+test('while combining, the flyout offers Cable between the two and shows which apps are kept on it', () => {
+  assert.deepEqual(
+    [results.flyoutKept.MainOption, results.flyoutKept.CableOption, results.flyoutKept.SecondOption],
+    ['Both', 'Cable', 'Wi-Fi'],
+  );
+  assert.deepEqual(results.flyoutKept.Apps.map((a) => a.Choice), ['cable', 'main', 'second']);
+  // Without combining, or with a server that can't keep apps on the cable, there are two options.
+  assert.equal(results.flyoutKeptNoCombine.CableOption, null);
+  assert.equal(results.flyoutKeptNoCombine.Apps[0].Choice, 'cable');
+  assert.equal(results.flyoutCombine.CableOption, null);
 });
 
 test('flyout health describes healthy lines, stopped routing, and actual fallback', () => {

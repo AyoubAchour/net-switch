@@ -51,6 +51,53 @@ test('combining adds one rule that sends exactly half of ports 1024 to 65535 to 
   assert.equal(combinedSecondPorts(), ports);
 });
 
+const DISCORD = 'C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0\\Discord.exe';
+
+// How sing-box reads a headless rule: fields of one rule must all match,
+// invert flips the whole rule, a logical "and" needs every inner rule.
+function ruleMatches(rule, { processPath, sourcePort }) {
+  let result;
+  if (rule.type === 'logical') {
+    result = rule.mode === 'and' ? rule.rules.every((inner) => ruleMatches(inner, { processPath, sourcePort })) : rule.rules.some((inner) => ruleMatches(inner, { processPath, sourcePort }));
+  } else {
+    const checks = [];
+    if (rule.source_port) checks.push(rule.source_port.includes(sourcePort));
+    if (rule.process_path) checks.push(rule.process_path.includes(processPath));
+    if (rule.process_path_regex) {
+      checks.push(rule.process_path_regex.some((pattern) => new RegExp(pattern.replace('(?i)', ''), 'i').test(processPath ?? '')));
+    }
+    result = checks.every(Boolean);
+  }
+  return rule.invert ? !result : result;
+}
+
+test('while combining, apps kept on the cable are left out of the second connection’s share', () => {
+  const ruleSet = buildRuleSet([LM], { combine: true, cableAppPaths: [DISCORD] });
+  assert.equal(ruleSet.rules.length, 2);
+  assert.deepEqual(ruleSet.rules[0], LM_RULE);
+  const [share, notKept] = ruleSet.rules[1].rules;
+  assert.deepEqual(
+    { type: ruleSet.rules[1].type, mode: ruleSet.rules[1].mode, ports: share.source_port, notKept },
+    { type: 'logical', mode: 'and', ports: combinedSecondPorts(), notKept: { process_path_regex: [exactPathPattern(DISCORD)], invert: true } },
+  );
+
+  const secondPort = combinedSecondPorts()[100];
+  const cablePort = Array.from({ length: 200 }, (_, index) => 50000 + index).find((port) => !portUsesSecond(port));
+  const toSecond = (processPath, sourcePort) => ruleSet.rules.some((rule) => ruleMatches(rule, { processPath, sourcePort }));
+  assert.equal(toSecond(DISCORD, secondPort), false, 'kept on the cable');
+  assert.equal(toSecond(DISCORD.toUpperCase(), secondPort), false, 'in any letter case');
+  assert.equal(toSecond('C:\\Other\\app.exe', secondPort), true, 'everything else still shares');
+  assert.equal(toSecond('C:\\Other\\app.exe', cablePort), false);
+  assert.equal(toSecond(LM, 1), true, 'moved apps use the second connection');
+  // A program Windows couldn't name still shares both lines.
+  assert.equal(toSecond(undefined, secondPort), true);
+});
+
+test('apps kept on the cable change nothing without combining, and an empty list adds no rule sing-box would refuse', () => {
+  assert.deepEqual(buildRuleSet([LM], { combine: false, cableAppPaths: [DISCORD] }), { version: 3, rules: [LM_RULE] });
+  assert.deepEqual(buildRuleSet([LM], { combine: true, cableAppPaths: [] }).rules[1], { source_port: combinedSecondPorts() });
+});
+
 test('the ports Windows handed out on this PC split four and four', () => {
   // Eight connections through the TUN, each followed by the engine's own socket.
   const throughTun = [64393, 64395, 64397, 64399, 64401, 64403, 64405, 64407];
@@ -108,6 +155,33 @@ test('the engine writes moved apps and combining together, and keeps both across
   }
 });
 
+test('moved apps and apps kept on the cable are written in one change, and kept when combining changes', async () => {
+  const dataDir = await mkdtemp(path.join(tmpdir(), 'net-switch-test-'));
+  try {
+    const engine = new Engine({ singBoxPath: 'sing-box.exe', dataDir, mode: 'proxy' });
+    const written = async () => JSON.parse(await readFile(path.join(dataDir, 'second-apps.json'), 'utf8'));
+
+    await engine.setCombine(true);
+    await engine.setAppLanes([LM], [DISCORD]);
+    assert.deepEqual([engine.secondAppPaths, engine.cableAppPaths], [[LM], [DISCORD]]);
+    let ruleSet = await written();
+    assert.deepEqual(ruleSet.rules[0], LM_RULE);
+    assert.equal(ruleSet.rules[1].type, 'logical');
+
+    // Moving the second connection's apps alone keeps the cable's list.
+    await engine.setSecondApps([]);
+    ruleSet = await written();
+    assert.deepEqual(ruleSet.rules[1].rules[1], { process_path_regex: [exactPathPattern(DISCORD)], invert: true });
+
+    await engine.setCombine(false);
+    assert.deepEqual(await written(), { version: 3, rules: [{ process_path: [PLACEHOLDER] }] });
+    await engine.setCombine(true);
+    assert.equal((await written()).rules[1].type, 'logical');
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 test('a change whose rule file could not be written never slips into the next change', async () => {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'net-switch-test-'));
   try {
@@ -129,7 +203,7 @@ test('a change whose rule file could not be written never slips into the next ch
 });
 
 // A stand-in for the engine's control API: it lists connections and accepts DELETE.
-async function fakeEngineApi(connections, { answers = {}, delayMs = 0, listDelayMs = 0, secondApps = [LM], combine = false } = {}) {
+async function fakeEngineApi(connections, { answers = {}, delayMs = 0, listDelayMs = 0, secondApps = [LM], cableApps = [], combine = false } = {}) {
   const deleted = [];
   const server = createServer((request, response) => {
     if (request.headers.authorization !== 'Bearer secret') {
@@ -157,6 +231,7 @@ async function fakeEngineApi(connections, { answers = {}, delayMs = 0, listDelay
   engine.apiSecret = 'secret';
   // The rules the engine has now decide which stuck connections still belong on the second connection.
   engine.secondAppPaths = secondApps;
+  engine.cableAppPaths = cableApps;
   engine.combine = combine;
   const stop = () => {
     server.closeAllConnections?.();
@@ -264,6 +339,35 @@ test('a connection the rules no longer send to the second connection stays where
   try {
     assert.deepEqual(await api.engine.releaseFallbackConnections(), { found: 2, closed: 2, failed: 0, interrupted: false });
     assert.deepEqual(api.deleted.sort(), ['combined-second', 'moved-app']);
+  } finally {
+    api.stop();
+  }
+});
+
+test('when lines come back while combining, an app kept on the cable gets back all its connections', async () => {
+  const secondPort = Array.from({ length: 200 }, (_, index) => 50000 + index).find(portUsesSecond);
+  const stuck = (id, processPath, chains) => ({ id, chains, metadata: { processPath, sourcePort: String(secondPort) } });
+  const OTHER = 'C:\\Other\\app.exe';
+  const connections = [
+    // The cable dropped: Discord's connection fell back to the second connection.
+    stuck('kept-on-second', DISCORD, ['second', 'main-lane']),
+    // The second connection dropped: this one, in the share, fell back to the cable.
+    stuck('kept-share-on-cable', DISCORD, ['cable', 'second-lane']),
+    stuck('other-share-on-cable', OTHER, ['cable', 'second-lane']),
+  ];
+  let api = await fakeEngineApi(connections, { secondApps: [], cableApps: [DISCORD], combine: true });
+  try {
+    // Cable back: Discord's connection on the second connection is out of place.
+    assert.deepEqual(await api.engine.releaseFallbackConnections({ lane: 'main' }), { found: 1, closed: 1, failed: 0, interrupted: false });
+    assert.deepEqual(api.deleted, ['kept-on-second']);
+  } finally {
+    api.stop();
+  }
+  api = await fakeEngineApi(connections, { secondApps: [], cableApps: [DISCORD], combine: true });
+  try {
+    // Second connection back: only the sharing app's connection returns to it.
+    assert.deepEqual(await api.engine.releaseFallbackConnections(), { found: 1, closed: 1, failed: 0, interrupted: false });
+    assert.deepEqual(api.deleted, ['other-share-on-cable']);
   } finally {
     api.stop();
   }

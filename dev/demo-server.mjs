@@ -24,7 +24,8 @@ const KB = 1024;
 const apps = [
   { name: 'Steam', kb: 2600, lane: 'main' },
   { name: 'Firefox', kb: 640, lane: 'second' },
-  { name: 'Discord', kb: 14, lane: 'main' },
+  // Kept on the cable: calls stay on one line even while combining.
+  { name: 'Discord', kb: 14, lane: 'main', cableOnly: true },
   { name: 'Spotify', kb: 160, lane: 'second' },
   { name: 'OneDrive', kb: 40, lane: 'main' },
   { name: 'Visual Studio Code', kb: 3, lane: 'main' },
@@ -42,8 +43,9 @@ function wobble(base, seed) {
 function state() {
   const rows = apps.map((app, index) => {
     const down = wobble(app.kb * KB, index);
-    // While combining, an app on the cable spreads over both lines.
-    const share = app.lane === 'second' ? 1 : combine ? 0.45 : 0;
+    // While combining, an app on the cable spreads over both lines, unless it
+    // is kept on the cable.
+    const share = app.lane === 'second' ? 1 : combine && !app.cableOnly ? 0.45 : 0;
     return {
       key: app.name.toLowerCase(),
       path: `C:\\Program Files\\${app.name}\\${app.name}.exe`,
@@ -52,6 +54,7 @@ function state() {
       switchable: true,
       reconnectable: !app.service,
       lane: app.lane,
+      cableOnly: Boolean(app.cableOnly),
       rate: { down, up: down * 0.03 },
       laneDown: { main: down * (1 - share), second: down * share },
       sortScore: down,
@@ -63,7 +66,7 @@ function state() {
   return {
     mode: 'tun',
     elevated: true,
-    features: { reconnect: true, combine: true },
+    features: { reconnect: true, combine: true, cableOnly: true },
     combine: { on: combine, active: combine },
     routing: { status: 'on', wanted: true, error: null, measuring: true, proxyPort: null, retryAt: null },
     lanes: {
@@ -92,7 +95,10 @@ const actions = {
   'GET /api/state': async () => state(),
   'POST /api/app-lane': async ({ path: appPath, lane }) => {
     const app = apps.find((item) => appPath?.includes(`\\${item.name}.exe`));
-    if (app) app.lane = lane;
+    if (app) {
+      app.lane = lane === 'second' ? 'second' : 'main';
+      app.cableOnly = lane === 'cable';
+    }
     return state();
   },
   'POST /api/combine': async ({ on }) => {

@@ -84,11 +84,23 @@ OpenMPTCProuter work that way). Net Switch doesn't relay your traffic through
 a server like that; each connection goes straight out through one of your
 lines.
 
-While combining, websites can see your two lines' different public addresses.
-If a site keeps signing you out or a download fails, stop combining.
+While combining, each app has three keys:
 
-Apps you moved to the second connection stay on it while combining. The app
-keys read **Both lines** instead of **Cable**.
+- **Both lines**: its new connections are spread over both lines. This is
+  where every app starts.
+- **Cable**: it stays on the cable, and combining leaves it alone.
+- The second connection's key: it uses only the second connection, as without
+  combining.
+
+While combining, websites can see your two lines' different public addresses.
+If a site keeps signing you out or a download fails, set that browser or app
+to **Cable**, or stop combining. Calls and games are often happier on one line
+too.
+
+**Cable** still follows failover: if the cable drops, the app uses the second
+connection until the cable is back. Net Switch remembers the choice when you
+stop combining, and the app goes back to the cable alone when you combine
+again.
 
 ## When a line drops
 

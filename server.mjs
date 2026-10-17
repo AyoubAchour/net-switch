@@ -662,23 +662,27 @@ function inLaneQueue(run) {
 // One change at a time. The engine's rule file is the routing truth, so it is
 // written first; the saved choice follows, and is rolled back if saving fails.
 // Reports back only once sing-box has reloaded the rules.
+// lane: 'second' moves the app to the second connection, 'cable' keeps it on
+// the cable even while combining, and 'main' is the default: the cable, or
+// both lines while combining.
 function setAppLane(processPath, lane) {
   return inLaneQueue(async () => {
-    if (typeof processPath !== 'string' || processPath === '' || !['main', 'second'].includes(lane)) {
+    if (typeof processPath !== 'string' || processPath === '' || !['main', 'cable', 'second'].includes(lane)) {
       throw clientError('Choose an app and a connection, then try again.');
     }
     if (lane === 'second' && !settings.values.secondAlias) {
       throw clientError('Set up the second connection first.');
     }
-    const previous = settings.values.secondApps;
+    const { secondApps: previousSecond, cableApps: previousCable } = settings.values;
     const key = appKey(processPath);
-    const others = previous.filter((item) => appKey(item) !== key);
-    const secondApps = lane === 'second' ? [...others, processPath] : others;
-    await engine.setSecondApps(secondApps);
+    const without = (paths) => paths.filter((item) => appKey(item) !== key);
+    const secondApps = lane === 'second' ? [...without(previousSecond), processPath] : without(previousSecond);
+    const cableApps = lane === 'cable' ? [...without(previousCable), processPath] : without(previousCable);
+    await engine.setAppLanes(secondApps, cableApps);
     try {
-      await settings.update({ secondApps });
+      await settings.update({ secondApps, cableApps });
     } catch (error) {
-      await engine.setSecondApps(previous).catch(() => {});
+      await engine.setAppLanes(previousSecond, previousCable).catch(() => {});
       throw error;
     }
     await delay(RULE_RELOAD_MS);
@@ -738,10 +742,13 @@ function reconnectApp(key) {
       throw clientError('The cable isn’t connected, so there’s nowhere to move it yet.');
     }
     const chosen = onSecond ? 'second' : 'main';
-    // While combining splits traffic, both lines are right for an app on the
-    // cable: only its connections that go around routing are out of place.
+    // While combining splits traffic, both lines are right for an app that
+    // shares them: only its connections that go around routing are out of
+    // place. An app kept on the cable doesn't share, so its connections on the
+    // second connection are out of place too.
     // While a line is down, new connections use the other one as usual.
-    const bothLines = !onSecond && combineActive();
+    const keptOnCable = settings.values.cableApps.some((item) => appKey(item) === key);
+    const bothLines = !onSecond && !keptOnCable && combineActive();
     let closed = 0;
     let failed = 0;
     // Routed connections: the engine's own count, from the last poll.
@@ -911,7 +918,7 @@ function lanePing(lane) {
 }
 
 function buildState() {
-  const { mainAlias, secondAlias, secondApps, secondLabel, secondKind } = settings.values;
+  const { mainAlias, secondAlias, secondApps, cableApps, secondLabel, secondKind } = settings.values;
   const main = adapters.find((item) => item.alias === mainAlias) ?? null;
   const second = secondAlias ? (adapters.find((item) => item.alias === secondAlias) ?? null) : null;
   const routingOn = engine.status === 'on';
@@ -920,7 +927,7 @@ function buildState() {
   const wifiPresent = adapters.some((item) => item.kind === 'wifi');
   const undo = windowsUndo.values;
 
-  const apps = mergeRows(tracker.snapshot(secondApps), outside, secondApps).map((app) => {
+  const apps = mergeRows(tracker.snapshot(secondApps, cableApps), outside, secondApps, cableApps).map((app) => {
     const info = appInfo.describe(app.path);
     return {
       key: app.key,
@@ -930,6 +937,7 @@ function buildState() {
       switchable: info.switchable,
       reconnectable: info.reconnectable,
       lane: app.lane,
+      cableOnly: app.cableOnly,
       rate: app.rate,
       laneDown: app.laneDown,
       sortScore: app.sortScore,
@@ -944,7 +952,7 @@ function buildState() {
   return {
     mode,
     elevated,
-    features: { reconnect: true, combine: true },
+    features: { reconnect: true, combine: true, cableOnly: true },
     // From the engine's rules rather than the saved choice, so the window
     // shows what routing really does even if saving the choice failed.
     combine: { on: engine.combine, active: combineActive() },
@@ -1184,7 +1192,7 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
 await checkElevation();
 await refreshAdapters();
 await engine.setCombine(Boolean(settings.values.combine));
-await engine.setSecondApps(settings.values.secondApps);
+await engine.setAppLanes(settings.values.secondApps, settings.values.cableApps);
 await writeFile(SERVER_FILE, JSON.stringify({ port, token, pid: process.pid, mode, startedAt: new Date().toISOString() }));
 await log(`started on port ${port} (mode ${mode}, elevated ${elevated})`);
 console.log(`Net Switch is running at http://127.0.0.1:${port}/#token=${token}`);

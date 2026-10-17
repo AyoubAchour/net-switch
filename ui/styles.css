@@ -679,6 +679,11 @@ h1 {
   column-gap: 14px;
 }
 
+/* While combining, a third key (Cable) needs room; the traffic meter gives a little. */
+.channels[data-keys='3'] {
+  --row-columns: 24px minmax(0, 1fr) 96px 76px 280px;
+}
+
 .legends {
   position: sticky;
   top: 0;
@@ -767,7 +772,8 @@ h1 {
    a dot in its color. */
 .keys {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   gap: 2px;
   padding: 3px;
   border-radius: 8px;
@@ -960,6 +966,10 @@ body[data-stale] .channels {
 @media (max-width: 640px) {
   :root {
     --row-columns: 24px minmax(0, 1fr) 70px 168px;
+  }
+
+  .channels[data-keys='3'] {
+    --row-columns: 24px minmax(0, 1fr) 70px 240px;
   }
 
   .lines {
