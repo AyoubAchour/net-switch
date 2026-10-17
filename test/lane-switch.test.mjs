@@ -22,6 +22,9 @@ function setup({ lane: which = 'second', withProbe = false } = {}) {
     routeError: null,
     online: true,
     probes: [],
+    probeOptions: [],
+    // Internet traffic arriving through the line right now.
+    carrying: false,
     otherUp: true,
   };
   const engine = {
@@ -61,11 +64,13 @@ function setup({ lane: which = 'second', withProbe = false } = {}) {
       return world.routes;
     },
     probe: withProbe
-      ? async (outbound) => {
+      ? async (outbound, options) => {
           world.probes.push(outbound);
+          world.probeOptions.push(options);
           return world.online;
         }
       : null,
+    carryingTraffic: () => world.carrying,
     log: (line) => logs.push(line),
     now: () => world.now,
   });
@@ -601,6 +606,34 @@ test('a passing internet test keeps its round trip for the window, and a failing
   assert.equal(lane.delay, null);
   lane.reset({ sameLine: true });
   assert.equal(lane.delay, null);
+});
+
+test('a busy line that is too slow to answer its tests stays up while traffic arrives through it', async () => {
+  const { world, engine, logs, lane, seconds } = setup({ withProbe: true });
+  await seconds(3);
+  // A big download fills the line: the tests time out, but data keeps arriving.
+  world.online = false;
+  world.carrying = true;
+  await seconds(60);
+  assert.equal(lane.target, 'second');
+  assert.deepEqual(engine.points, ['second']);
+  assert.ok(logs.includes("second connection didn't answer an internet test in time, but it is carrying traffic, so it still counts as working"));
+  assert.ok(!logs.includes('second connection is down (no internet)'));
+  // The traffic stops and the tests still fail: now it is a dead line.
+  world.carrying = false;
+  await seconds(45);
+  assert.equal(lane.target, 'cable');
+  assert.ok(logs.includes('second connection is down (no internet)'));
+});
+
+test('a healthy line asks one test site; after a failed test, both at once', async () => {
+  const { world, seconds } = setup({ withProbe: true });
+  await seconds(3);
+  assert.deepEqual(world.probeOptions, [{ both: false }]);
+  world.online = false;
+  // The next test, 30 s after the first, fails; the retry 5 s later asks both.
+  await seconds(36);
+  assert.deepEqual(world.probeOptions, [{ both: false }, { both: false }, { both: true }]);
 });
 
 test('an internet test that could not be run never takes the line down', async () => {

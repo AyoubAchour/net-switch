@@ -119,8 +119,13 @@ after a failed test. A line that is connected but reaches nothing (a phone with
 mobile data off, a router whose own internet is down) counts as down after
 three failed tests in a row, and as back after two passes.
 
+A line that's busy with a big download can be too slow to answer a test in
+time. A failed test doesn't count while internet traffic is still arriving
+through that line: the line is busy, not dead.
+
 Each test is a small HTTPS request to `1.1.1.1` (Cloudflare), or to `8.8.8.8`
-(Google) when that fails. By my estimate that's about 6 KB per test, roughly
+(Google) when that fails. After a failed test, the next ones ask both at once,
+so a verdict comes sooner. By my estimate that's about 6 KB per test, roughly
 17 MB a day for a healthy line, and more while a line keeps failing. **Keep
 that in mind on a metered phone connection.** The tests use IP addresses, so a
 test never depends on looking up a name through the other line.

@@ -249,21 +249,28 @@ const laneOptions = {
   engine,
   usableAddresses,
   readDefaultRoutes,
-  probe: (outbound) => engine.probe(outbound),
+  probe: (outbound, options) => engine.probe(outbound, options),
   runExclusive: (task) => inLaneQueue(task),
   log: (line) => log(line),
 };
+// Download speed, through the routing engine, above which a line counts as
+// carrying traffic. The engine only sees internet traffic (local networks
+// bypass it), so this is data really arriving from the internet on that line;
+// a few keep-alives stay well below it.
+const CARRYING_MIN_BYTES_PER_SECOND = 16 * 1024;
 const secondLane = new LaneSwitch({
   ...laneOptions,
   lane: 'second',
   getAlias: () => settings.values.secondAlias,
   otherIsUp: () => cableLane.isUp(),
+  carryingTraffic: () => tracker.laneRates.second.down >= CARRYING_MIN_BYTES_PER_SECOND,
 });
 const cableLane = new LaneSwitch({
   ...laneOptions,
   lane: 'main',
   getAlias: () => settings.values.mainAlias,
   otherIsUp: () => secondLane.isUp(),
+  carryingTraffic: () => tracker.laneRates.main.down >= CARRYING_MIN_BYTES_PER_SECOND,
 });
 
 engine.on('status', (status) => {

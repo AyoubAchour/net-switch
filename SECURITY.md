@@ -55,7 +55,8 @@ No telemetry, and no update check. The only requests Net Switch makes on its
 own are connectivity checks through each line while routing is on with two
 lines: every 30 seconds while the line is healthy, more often after a failure.
 Each is an HTTPS request to `1.1.1.1` (Cloudflare), or to `8.8.8.8` (Google)
-if that fails. They carry nothing about you, though like any request they show
+if that fails (both at once after a failed check). They carry nothing about
+you, though like any request they show
 those companies your public addresses.
 
 ## Bug reports and logs
