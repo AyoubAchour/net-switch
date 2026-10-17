@@ -123,12 +123,65 @@ func readPolicy() (any, error) {
 	return int32(value), nil
 }
 
-// The IP interface table includes hidden WAN miniports and Wi-Fi Direct
-// devices. NCF_HIDDEN is stored by each network driver's INF; checking it
-// keeps the same visible-device list as Get-NetAdapter without using WMI.
+const networkDeviceClass = "{4d36e972-e325-11ce-bfc1-08002be10318}"
+
+// GetIfTable2 also retains interfaces for removed PnP devices (for example
+// old Hyper-V NICs in an Azure VM image). Get-NetAdapter omits those even
+// with -IncludeHidden. Check PnP presence, not OperStatus: a present but
+// disabled adapter can report Not Present too and must remain in the list.
+// https://learn.microsoft.com/windows-hardware/drivers/install/determining-whether-a-device-is-plugged-in
+func phantomAdapterDrivers() (map[string]bool, error) {
+	guid, err := windows.GUIDFromString(networkDeviceClass)
+	if err != nil {
+		return nil, err
+	}
+	devices, err := windows.SetupDiGetClassDevsEx(&guid, "", 0, 0, 0, "")
+	if err != nil {
+		return nil, err
+	}
+	defer windows.SetupDiDestroyDeviceInfoList(devices)
+	phantoms := map[string]bool{}
+	for i := 0; ; i++ {
+		device, err := windows.SetupDiEnumDeviceInfo(devices, i)
+		if errors.Is(err, windows.ERROR_NO_MORE_ITEMS) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		var status, problem uint32
+		err = windows.CM_Get_DevNode_Status(&status, &problem, device.DevInst, 0)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, windows.CR_NO_SUCH_DEVINST) {
+			return nil, fmt.Errorf("read PnP device status: %w", err)
+		}
+		driver, err := windows.SetupDiGetDeviceRegistryProperty(devices, device, windows.SPDRP_DRIVER)
+		if errors.Is(err, windows.ERROR_INVALID_DATA) {
+			continue // An unconfigured device has no driver/interface to exclude.
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read phantom adapter driver: %w", err)
+		}
+		name, ok := driver.(string)
+		if !ok {
+			return nil, fmt.Errorf("unexpected adapter driver property type %T", driver)
+		}
+		phantoms[strings.ToLower(name)] = true
+	}
+	return phantoms, nil
+}
+
+// Exclude NCF_HIDDEN devices and phantom PnP devices. Do not require every
+// interface to have a PnP device: Hyper-V virtual ports can lack one.
 func hiddenAdapters() (map[string]bool, error) {
+	phantoms, err := phantomAdapterDrivers()
+	if err != nil {
+		return nil, err
+	}
 	result := map[string]bool{}
-	class, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}`, registry.ENUMERATE_SUB_KEYS)
+	class, err := registry.OpenKey(registry.LOCAL_MACHINE, `SYSTEM\CurrentControlSet\Control\Class\`+networkDeviceClass, registry.ENUMERATE_SUB_KEYS)
 	if err != nil {
 		return nil, err
 	}
@@ -151,8 +204,8 @@ func hiddenAdapters() (map[string]bool, error) {
 		guid, _, guidErr := key.GetStringValue("NetCfgInstanceId")
 		flags, _, flagsErr := key.GetIntegerValue("Characteristics")
 		key.Close()
-		if guidErr == nil && flagsErr == nil {
-			result[strings.ToLower(guid)] = flags&8 != 0
+		if guidErr == nil {
+			result[strings.ToLower(guid)] = (flagsErr == nil && flags&8 != 0) || phantoms[networkDeviceClass+`\`+name]
 		}
 	}
 	return result, nil

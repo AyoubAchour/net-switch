@@ -21,7 +21,8 @@ const sample = { adapters: [{ alias: 'Cable', index: 3, status: 'Up', ipv4s: ['1
 test('native adapters match the PowerShell scan field by field', needsHelper, async (t) => {
   const native = JSON.parse(await runFile(helper, ['network', '--once']));
   const shell = await runPowerShellJson(ADAPTERS_SCRIPT, { timeoutMs: 30_000 });
-  assert.deepEqual(native.adapters.map((a) => a.alias).sort(), shell.map((a) => a.alias).sort());
+  assert.deepEqual(native.adapters.map((a) => a.alias).sort(), shell.map((a) => a.alias).sort(),
+    `Visible adapter list differs. Native identities/status: ${JSON.stringify(native.adapters.map(({ alias, guid, index, status }) => ({ alias, guid, index, status })))}`);
   for (const adapter of shell) {
     const actual = native.adapters.find((a) => a.index === adapter.index);
     assert.ok(actual, adapter.alias);
