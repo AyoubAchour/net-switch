@@ -28,6 +28,7 @@ import {
 } from './lib/lines.mjs';
 import { createLog } from './lib/logfile.mjs';
 import { findHelper, LineMonitor } from './lib/monitor.mjs';
+import { NetworkMonitor, quickProbe, readNetworkOnce } from './lib/helper.mjs';
 import {
   allowSimultaneousConnections,
   applyCableAsMain,
@@ -38,6 +39,7 @@ import {
   findAdapter,
   hasGlobalIPv6,
   isElevated,
+  prepareAdapters,
   readDefaultRoutes,
   readMetrics,
   readMinimizeConnectionsPolicy,
@@ -97,8 +99,10 @@ const STEADY_RUN_MS = 120_000;
 // The administrator check is tried again this often while it says no: on a
 // slow start Windows may not have answered it in time.
 const ELEVATION_RECHECK_MS = 30_000;
-// A chosen adapter missing from this many good scans in a row counts as gone.
+// A chosen adapter missing from this many good scans in a row, for at least
+// this long, counts as gone.
 const ADAPTER_GONE_SCANS = 2;
+const ADAPTER_GONE_MS = 20_000;
 // More lines than this would make combining's shares too thin to matter.
 const MAX_LINES = 8;
 // Auto combining rewrites the shares at most this often, and only when one
@@ -249,10 +253,13 @@ function updateOffer() {
 // Test mode may use the engine of another checkout (a git worktree has none).
 // Never the real one: it runs the engine as administrator.
 const ENGINE_DIR = (testMode && argument('--engine-dir')) || path.join(ROOT, 'engine');
+const helperPath = findHelper(ROOT);
+const networkMonitor = helperPath ? new NetworkMonitor({ helperPath, log }) : null;
 const engine = new Engine({
   singBoxPath: path.join(ENGINE_DIR, 'sing-box.exe'),
   dataDir: MACHINE_DIR,
   mode,
+  helperPath,
 });
 const tracker = new AppTracker();
 const outside = new OutsideTracker();
@@ -262,13 +269,16 @@ const monitor = new LineMonitor({
   // Measuring connections that go around routing needs administrator rights.
   watchOutside: !testMode,
   enginePath: engine.singBoxPath,
-  helperPath: findHelper(ROOT),
+  helperPath,
+  log,
 });
 log(
   monitor.helperPath
     ? `line readings come from ${path.relative(ROOT, monitor.helperPath)}`
     : 'line readings come from PowerShell: the native helper is not built (npm run build:helper)',
 );
+log(networkMonitor ? 'network readings come from the native helper (Windows change notifications)'
+  : 'network readings come from PowerShell and route.exe: the native helper is not built');
 const token = randomBytes(24).toString('hex');
 
 let adapters = [];
@@ -287,8 +297,9 @@ let scanFailures = 0;
 let laneQueue = Promise.resolve();
 let startQueue = Promise.resolve();
 let setupQueue = Promise.resolve();
-// Good scans in a row without each line's adapter, by line id.
+// Good scans in a row without each line's adapter, and since when, by line id.
 const adapterMissing = new Map();
+const adapterMissingSince = new Map();
 // Line events for the window and the tray's notifications, newest last.
 const events = [];
 // Lines out of data for this period, as of the last poll.
@@ -319,6 +330,31 @@ const retry = { attempts: 0, at: 0 };
 // busy sending a big file is as slow to answer a test as one downloading.
 const CARRYING_MIN_BYTES_PER_SECOND = 16 * 1024;
 
+// The helper's latest reading when it runs, Windows' own readers otherwise. A
+// failed reading says nothing about a line's health.
+const readAddresses = networkMonitor ? (alias) => networkMonitor.usableAddresses(alias) : usableAddresses;
+const readRoutes = networkMonitor ? () => networkMonitor.readDefaultRoutes() : readDefaultRoutes;
+
+// The quick line check: a TCP connection to a test address from the line's
+// adapter, through the native helper. Without the helper, the HTTPS test
+// through the routing engine does all the checking.
+// Answers the round trip in ms, false when no test address answered, or null
+// when the check couldn't be run, which says nothing about the line.
+const QUICK_CHECK_TIMEOUT_MS = 3000;
+async function quickLineCheck(line) {
+  const adapter = adapters.find((item) => item.alias === line?.alias);
+  if (!helperPath || !Number.isInteger(adapter?.index)) return null;
+  try {
+    const result = await quickProbe(helperPath, adapter.index, {
+      targets: settings.values.probeTargets,
+      timeoutMs: QUICK_CHECK_TIMEOUT_MS,
+    });
+    return result.ok ? result.ms : false;
+  } catch {
+    return null;
+  }
+}
+
 // One switch per line keeps its selector following the lines' health: its
 // apps use the next line that works while it is down. Their look at the
 // lines doesn't depend on the adapter scan, which can fail.
@@ -339,9 +375,10 @@ function syncLanes() {
         getLines: () => settings.values.lines,
         isLineUp: (other) => lanes.get(other)?.isUp() ?? false,
         exhausted: () => exhaustedIds,
-        usableAddresses,
-        readDefaultRoutes,
+        usableAddresses: readAddresses,
+        readDefaultRoutes: readRoutes,
         probe: (lineId, options) => engine.probe(lineId, { ...options, urls: probeUrls(settings.values.probeTargets) }),
+        quickProbe: quickLineCheck,
         carryingTraffic: () => {
           const rate = tracker.lineRate(id);
           return rate.down >= CARRYING_MIN_BYTES_PER_SECOND || rate.up >= CARRYING_MIN_BYTES_PER_SECOND;
@@ -541,20 +578,28 @@ async function migrateLines() {
 
 // The adapter list is for the window and the setup notices (names, Wi-Fi
 // network, link details), and to notice when a chosen adapter is renamed or
-// replaced. Whether each line is up is decided elsewhere, so a scan Windows
-// can't answer never moves anyone to the other line.
-async function refreshAdapters() {
+// replaced. Line health is decided separately; a failed reading never moves
+// anyone to the other line.
+async function refreshAdapters(snapshot = null) {
   try {
-    adapters = await detectAdapters();
+    if (networkMonitor) {
+      snapshot ??= await readNetworkOnce(helperPath);
+      adapters = prepareAdapters(snapshot.adapters);
+      minimizePolicy = snapshot.policy === 'absent' ? null : snapshot.policy;
+    } else {
+      adapters = await detectAdapters();
+    }
     scanFailures = 0;
   } catch (error) {
     scanFailures += 1;
-    log(`adapter scan failed: ${describeFailure(error)}; next try in ${Math.round(nextScanDelay() / 1000)} s`);
+    const next = networkMonitor ? 'keeping the last good adapter list' : `next try in ${Math.round(nextScanDelay() / 1000)} s`;
+    log(`adapter scan failed: ${describeFailure(error)}; ${next}`);
     return;
   }
   // In the lane queue, like adding or removing a line, so a scan never
   // writes back a choice the person has just replaced.
   await inLaneQueue(followAdapters);
+  if (networkMonitor) return;
   // The Wi-Fi policy rarely changes, and reading it costs a PowerShell start,
   // so it is read once a minute; Net Switch's own changes re-read it at once.
   if (Date.now() - policyReadAt < POLICY_READ_EVERY_MS) return;
@@ -564,6 +609,19 @@ async function refreshAdapters() {
   } catch {
     // Unknown this time; the last reading stands and the next scan tries again.
   }
+}
+
+// Stream snapshots are applied in order, including the missing-adapter count
+// and GUID following. A failed read never counts as an adapter disappearing.
+let networkUpdates = Promise.resolve();
+networkMonitor?.on('network', (snapshot) => {
+  networkUpdates = networkUpdates.then(() => refreshAdapters(snapshot)).catch((error) => log(`network update failed: ${error.message}`));
+});
+
+async function readCurrentPolicy() {
+  if (!networkMonitor) return readMinimizeConnectionsPolicy();
+  const { policy } = await readNetworkOnce(helperPath);
+  return policy === 'absent' ? null : policy;
 }
 
 function nextScanDelay() {
@@ -594,10 +652,13 @@ async function followAdapters() {
   // record stays with the old name.
   const renamed = [];
   let changed = false;
+  const now = Date.now();
   const next = lines.map((line, index) => {
     const found = findAdapter(adapters, { alias: line.alias, guid: line.guid });
     const missing = found ? 0 : (adapterMissing.get(line.id) ?? 0) + 1;
     adapterMissing.set(line.id, missing);
+    if (found) adapterMissingSince.delete(line.id);
+    else if (!adapterMissingSince.has(line.id)) adapterMissingSince.set(line.id, now);
     if (found) {
       if (found.alias !== line.alias) {
         notes.push(`${line.label}'s adapter was renamed from ${line.alias} to ${found.alias}`);
@@ -607,7 +668,10 @@ async function followAdapters() {
       changed = true;
       return { ...line, alias: found.alias, guid: found.guid || null };
     }
-    if (index !== 0 || line.kind !== 'wired' || missing < ADAPTER_GONE_SCANS) return line;
+    // Readings can come in bursts (one unplug sends several), so both the
+    // count and the time matter.
+    const gone = missing >= ADAPTER_GONE_SCANS && now - adapterMissingSince.get(line.id) >= ADAPTER_GONE_MS;
+    if (index !== 0 || line.kind !== 'wired' || !gone) return line;
     const taken = new Set(lines.map((item) => item.alias));
     const replacement = pickFirstAdapter(adapters.filter((item) => item.kind === 'wired' && !taken.has(item.alias)));
     if (!replacement) return line;
@@ -1090,6 +1154,7 @@ function removeLine(id) {
     const appLines = Object.fromEntries(Object.entries(settings.values.appLines).filter(([, lineId]) => lineId !== id));
     await applyLines(withMainOpen(lines.filter((item) => item.id !== id)), appLines);
     adapterMissing.delete(id);
+    adapterMissingSince.delete(id);
     log(`removed ${line.label} (${line.alias})`);
     if (engine.status !== 'off') await restartEngine();
   });
@@ -1195,7 +1260,7 @@ function keepBothConnected() {
     if (!('value' in windowsUndo.values.policy)) {
       let before;
       try {
-        before = await readMinimizeConnectionsPolicy();
+        before = await readCurrentPolicy();
       } catch (error) {
         log(`could not read the Wi-Fi policy before changing it: ${error.message}`);
         throw clientError('Windows didn’t say how this setting is now, so Net Switch can’t change it safely. Try again in a moment.');
@@ -1203,7 +1268,7 @@ function keepBothConnected() {
       await windowsUndo.update({ policy: { value: before } });
     }
     await allowSimultaneousConnections();
-    minimizePolicy = await readMinimizeConnectionsPolicy().catch(() => minimizePolicy);
+    minimizePolicy = await readCurrentPolicy().catch(() => minimizePolicy);
   });
 }
 
@@ -1217,7 +1282,7 @@ function undoAll() {
       log(`undo failed: ${error.message}`);
       throw clientError(`Net Switch couldn’t undo the Windows changes: ${error.message}.`);
     }
-    minimizePolicy = await readMinimizeConnectionsPolicy().catch(() => minimizePolicy);
+    minimizePolicy = await readCurrentPolicy().catch(() => minimizePolicy);
     await refreshAdapters();
     if (unreachable.length) {
       throw clientError(`Connect ${unreachable.join(' and ')} again to finish undoing, then press Undo again.`);
@@ -1322,6 +1387,7 @@ function shutdown(code = 0) {
     exiting = true;
     try {
       monitor.stop();
+      networkMonitor?.stop();
       await saveUsage().catch((error) => log(`could not save the data use record: ${error.message}`));
       // Windows can refuse while another program has the file open; the
       // tray then notices the quit when the server stops answering.
@@ -1646,7 +1712,13 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
 }
 
 await checkElevation();
-await refreshAdapters();
+if (networkMonitor) {
+  networkMonitor.start();
+  await networkMonitor.ready().catch((error) => log(`waiting for network helper: ${error.message}`));
+  await networkUpdates;
+} else {
+  await refreshAdapters();
+}
 await refreshAutostart();
 // The rule files are written for these when routing starts.
 await engine.changeRules({
@@ -1661,7 +1733,7 @@ console.log(`Net Switch is running at http://127.0.0.1:${port}/#token=${token}`)
 
 monitor.start();
 updates.start();
-every(nextScanDelay, refreshAdapters);
+if (!networkMonitor) every(nextScanDelay, refreshAdapters);
 every(1000, pollConnections);
 every(1000, superviseRouting);
 every(USAGE_SAVE_EVERY_MS, saveUsage);

@@ -229,7 +229,10 @@ function fakeSpawn() {
   return { spawn, children };
 }
 
-test('a helper that goes silent is ended and started again, and a meter helper never blocks the other', async () => {
+test('a helper that goes silent is ended and started again, and a meter helper never blocks the other', (t) => {
+  // A busy PC may delay all real timers by more than this test's short
+  // silence limit. Advance the helpers and watchdog together instead.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout', 'setInterval'], now: 1000 });
   const { spawn, children } = fakeSpawn();
   const monitor = new LineMonitor({ watchOutside: true, enginePath: '', spawn, silentMs: 60, watchdogMs: 20, restartMinMs: 30 });
   monitor.start();
@@ -237,7 +240,7 @@ test('a helper that goes silent is ended and started again, and a meter helper n
     assert.equal(children.length, 2);
     // The meters keep talking; the outside helper does not.
     const talking = setInterval(() => children[0].stdout.write(`${reading(['Ethernet', 1, 1])}\n`), 20);
-    await delay(250);
+    for (let tick = 0; tick < 13; tick++) t.mock.timers.tick(20);
     clearInterval(talking);
     assert.equal(children[0].killed, false);
     assert.equal(children[1].killed, true);

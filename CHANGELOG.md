@@ -40,6 +40,12 @@ change behavior.
   about four, and uses about half the memory (around 45 MB instead of 97 MB).
   Windows sees it as a new icon, so if it shows up under the ^ arrow after
   updating, drag it back onto the taskbar.
+- Net Switch now hears about network changes from Windows instead of asking
+  every few seconds, through its native helper. That took its steady
+  background CPU use from about 0.4 of a core to almost nothing, and the
+  scans that sometimes hung for 20 seconds are gone.
+- If Net Switch's server is ended by force, the routing engine now stops with
+  it instead of routing on unmanaged until the next start.
 
 ## [0.2.0] - 2026-10-17
 

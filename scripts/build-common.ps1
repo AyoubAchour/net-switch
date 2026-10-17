@@ -2,6 +2,11 @@
 # dot-source it, so both download, cache and check pinned files the same way.
 # Downloads are cached, but their hashes are always checked.
 
+function Get-BuildCache([string] $Dist) {
+  if ($env:NETSWITCH_CACHE) { return [IO.Path]::GetFullPath($env:NETSWITCH_CACHE) }
+  return Join-Path $Dist 'cache'
+}
+
 function Assert-NoLink([string] $Path) {
   if ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw "Refusing a symlink or junction in packaging input/output: $Path"
