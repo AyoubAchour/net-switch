@@ -45,6 +45,11 @@ Name: "{autodesktop}\Net Switch"; Filename: "{sys}\WindowsPowerShell\v1.0\powers
 [Run]
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\launch.ps1"""; WorkingDir: "{app}"; Description: "Open Net Switch"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
+[UninstallRun]
+; The tasks that start Net Switch with Windows would otherwise point at files
+; that are gone. A failure is logged and doesn't stop the uninstall.
+Filename: "{app}\runtime\node.exe"; Parameters: """{app}\tools\remove-autostart.mjs"""; WorkingDir: "{app}"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAutostart"
+
 [Code]
 var
   DeleteMachineData: Boolean;

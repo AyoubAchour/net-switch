@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { appKey, AppTracker, connectionLine, mergeRows, OutsideTracker, parseOutsideId } from './lib/apps.mjs';
 import { AppInfo } from './lib/appinfo.mjs';
+import { canAutostart, disableAutostart, enableAutostart, readAutostart } from './lib/autostart.mjs';
 import { Engine, probeUrls } from './lib/engine.mjs';
 import { LaneSwitch } from './lib/lane-switch.mjs';
 import {
@@ -1205,12 +1206,48 @@ function validProbeTarget(target) {
   return match.slice(1, 5).every((part) => Number(part) <= 255) && port >= 1 && port <= 65535;
 }
 
+// Starting with Windows needs an installed copy (see lib/autostart.mjs), and
+// test mode, which runs beside the real one, never touches it.
+const AUTOSTART_ALLOWED = !testMode && USER_DIR !== DEFAULT_DIR && canAutostart({ root: ROOT, nodePath: process.execPath });
+// Whether the startup task is there, or null while unknown.
+let autostart = null;
+
+async function refreshAutostart() {
+  if (!AUTOSTART_ALLOWED) return;
+  autostart = await readAutostart().catch((error) => {
+    log(`could not read whether Net Switch starts with Windows: ${describeFailure(error, 10_000)}`);
+    return autostart;
+  });
+}
+
+// In the setup queue, like the other changes to Windows.
+function setAutostart(on) {
+  return inSetupQueue(async () => {
+    if (!AUTOSTART_ALLOWED) throw clientError('Starting with Windows needs Net Switch installed from its installer.');
+    try {
+      if (on) {
+        await enableAutostart({ root: ROOT, nodePath: process.execPath, userDir: USER_DIR, machineDir: MACHINE_DIR });
+      } else {
+        await disableAutostart();
+      }
+    } catch (error) {
+      log(`could not turn starting with Windows ${on ? 'on' : 'off'}: ${describeFailure(error, 30_000)}`);
+      throw clientError(`Windows didn’t accept the change. Try again in a moment.`);
+    } finally {
+      await refreshAutostart();
+    }
+    log(`starting with Windows is ${on ? 'on' : 'off'}`);
+  });
+}
+
 // changes: { autostart?, checkForUpdates?, probeTargets? }; missing ones stay.
-async function changeSettings({ autostart, checkForUpdates, probeTargets }) {
+async function changeSettings({ autostart: startWithWindows, checkForUpdates, probeTargets }) {
   if (checkForUpdates !== undefined && typeof checkForUpdates !== 'boolean') {
     throw clientError('Choose whether to check for updates, then try again.');
   }
-  if (autostart !== undefined) throw clientError('Starting with Windows can only be set in an installed copy of Net Switch.');
+  if (startWithWindows !== undefined && typeof startWithWindows !== 'boolean') {
+    throw clientError('Choose whether Net Switch starts with Windows, then try again.');
+  }
   let targets;
   if (probeTargets !== undefined) {
     if (!Array.isArray(probeTargets) || probeTargets.length === 0 || probeTargets.length > MAX_PROBE_TARGETS || !probeTargets.every(validProbeTarget)) {
@@ -1218,6 +1255,7 @@ async function changeSettings({ autostart, checkForUpdates, probeTargets }) {
     }
     targets = [...new Set(probeTargets.map((target) => target.trim()))];
   }
+  if (startWithWindows !== undefined) await setAutostart(startWithWindows);
   await settings.update({
     ...(checkForUpdates !== undefined ? { checkForUpdates } : {}),
     ...(targets ? { probeTargets: targets } : {}),
@@ -1362,8 +1400,9 @@ function buildState() {
     apps,
     events,
     settings: {
-      // Null until it can be read (and in a source checkout, which has no task).
-      autostart: null,
+      // Whether Net Switch starts with Windows; null when this copy can't
+      // (a source checkout, test mode) or it couldn't be read yet.
+      autostart: AUTOSTART_ALLOWED ? autostart : null,
       checkForUpdates: !testMode && settings.values.checkForUpdates,
       probeTargets: settings.values.probeTargets,
     },
@@ -1572,13 +1611,15 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
 
 await checkElevation();
 await refreshAdapters();
+await refreshAutostart();
 // The rule files are written for these when routing starts.
 await engine.changeRules({
   appLines: settings.values.appLines,
   combine: Boolean(settings.values.combine),
   shares: computeShares(),
 });
-await writeFile(SERVER_FILE, JSON.stringify({ port, token, pid: process.pid, mode, startedAt: new Date().toISOString() }));
+// Swapped in whole, so the launcher and the tray never read half of it.
+await writeFileAtomic(SERVER_FILE, JSON.stringify({ port, token, pid: process.pid, mode, startedAt: new Date().toISOString() }));
 await log(`started on port ${port} (mode ${mode}, elevated ${elevated})`);
 console.log(`Net Switch is running at http://127.0.0.1:${port}/#token=${token}`);
 
