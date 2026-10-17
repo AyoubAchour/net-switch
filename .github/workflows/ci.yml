@@ -33,8 +33,9 @@ jobs:
       - name: Diagnose adapter visibility on the runner
         run: |
           Get-NetAdapter -IncludeHidden | Format-List *
-          Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}' | ForEach-Object { Get-ItemProperty $_.PSPath } | Select-Object NetCfgInstanceId, DriverDesc, Characteristics | Format-List
-          Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Network\{4d36e972-e325-11ce-bfc1-08002be10318}' | ForEach-Object { Get-ItemProperty ($_.PSPath + '\Connection') -ErrorAction SilentlyContinue } | Format-List *
+          Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty $_.PSPath } | Select-Object NetCfgInstanceId, DriverDesc, Characteristics | Format-List
+          Get-ChildItem 'HKLM:\SYSTEM\CurrentControlSet\Control\Network\{4d36e972-e325-11ce-bfc1-08002be10318}' -ErrorAction SilentlyContinue | ForEach-Object { Get-ItemProperty ($_.PSPath + '\Connection') -ErrorAction SilentlyContinue } | Format-List *
+          Get-PnpDevice -Class Net | Format-List Status, Class, FriendlyName, InstanceId, Present
           ./helper/bin/netswitch-helper.exe network --once
       - name: Build the tray program with the C# compiler that comes with Windows
         run: ./scripts/build-tray.ps1
