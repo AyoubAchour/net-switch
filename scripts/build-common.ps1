@@ -69,17 +69,34 @@ function Assert-PeArchitecture([string] $Path, [string] $Arch) {
     $reader.BaseStream.Position = $offset
     if ($reader.ReadUInt32() -ne 0x4550) { throw "Invalid PE signature: $Path" }
     $machine = $reader.ReadUInt16()
+    if ($Arch -eq 'AnyCPU') {
+      # Read the CLR header directly: loading two copies of the tray assembly
+      # into PowerShell's AppDomain fails even in reflection-only mode.
+      $sections = $reader.ReadUInt16()
+      $reader.BaseStream.Position = $offset + 20
+      $optionalSize = $reader.ReadUInt16()
+      $reader.BaseStream.Position = $offset + 24
+      if ($reader.ReadUInt16() -ne 0x10b) { throw "AnyCPU tray must use a PE32 header: $Path" }
+      $reader.BaseStream.Position = $offset + 24 + 96 + 14 * 8
+      $clrRva = $reader.ReadUInt32()
+      $flags = $null
+      for ($i = 0; $i -lt $sections; $i++) {
+        $reader.BaseStream.Position = $offset + 24 + $optionalSize + $i * 40 + 12
+        $virtualAddress = $reader.ReadUInt32()
+        $rawSize = $reader.ReadUInt32()
+        $rawOffset = $reader.ReadUInt32()
+        if ($clrRva -ge $virtualAddress -and $clrRva + 20 -le $virtualAddress + $rawSize) {
+          $reader.BaseStream.Position = $rawOffset + ($clrRva - $virtualAddress) + 16
+          $flags = $reader.ReadUInt32()
+          break
+        }
+      }
+      # ILONLY=1, with neither 32BITREQUIRED=2 nor 32BITPREFERRED=0x20000.
+      if ($null -eq $flags -or $flags -ne 1) { throw "Tray must be IL-only AnyCPU without Prefer32Bit: $Path (CLR flags $flags)" }
+    }
   } finally { $reader.Dispose() }
   $expected = if ($Arch -eq 'arm64') { 0xaa64 } elseif ($Arch -eq 'x64') { 0x8664 } else { 0x14c }
   if ($machine -ne $expected) { throw ('Wrong architecture for {0}: PE 0x{1:x4}, expected {2}' -f $Path, $machine, $Arch) }
-  if ($Arch -eq 'AnyCPU') {
-    # AnyCPU uses an I386 PE header, but IL-only code with neither 32-bit flag.
-    $assembly = [Reflection.Assembly]::ReflectionOnlyLoad([IO.File]::ReadAllBytes($Path))
-    $kind = [Reflection.PortableExecutableKinds]0
-    $image = [Reflection.ImageFileMachine]::I386
-    $assembly.ManifestModule.GetPEKind([ref]$kind, [ref]$image)
-    if ([int]$kind -ne 1) { throw "Tray must be IL-only AnyCPU without Prefer32Bit: $Path ($kind)" }
-  }
   Write-Host ('PE 0x{0:x4} ({1}): {2}' -f $machine, $Arch, $Path)
 }
 

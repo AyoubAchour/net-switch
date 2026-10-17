@@ -80,10 +80,14 @@ jobs:
       - name: Test app, native helper and tray on ARM64
         run: npm test
       - name: Verify source provenance for both engine architectures
+        if: ${{ !cancelled() }}
         run: node scripts/write-source-manifest.mjs --verify-only
       - name: Build the ARM64 installer and verify its payload
+        if: ${{ !cancelled() }}
+        id: arm64-build
         run: ./scripts/build-release.ps1 -Arch arm64
       - name: Install, upgrade and uninstall it
+        if: ${{ !cancelled() && steps.arm64-build.outcome == 'success' }}
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-arm64.exe" -Arch arm64
