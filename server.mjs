@@ -6,10 +6,24 @@ import { createServer as createTcpServer } from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { appKey, AppTracker, connectionLane, mergeRows, OutsideTracker, parseOutsideId } from './lib/apps.mjs';
+import { appKey, AppTracker, connectionLine, mergeRows, OutsideTracker, parseOutsideId } from './lib/apps.mjs';
 import { AppInfo } from './lib/appinfo.mjs';
-import { Engine } from './lib/engine.mjs';
+import { Engine, probeUrls } from './lib/engine.mjs';
 import { LaneSwitch } from './lib/lane-switch.mjs';
+import {
+  LEGACY_KEYS,
+  lineLabel,
+  MAX_LABEL_LENGTH,
+  migrateSettings,
+  newLine,
+  normalizeLines,
+  pickFirstAdapter,
+  SHARE_STEP,
+  sharesFromWeights,
+  sharingLines,
+  validCap,
+  withoutLegacyKeys,
+} from './lib/lines.mjs';
 import { createLog } from './lib/logfile.mjs';
 import { findHelper, LineMonitor } from './lib/monitor.mjs';
 import {
@@ -21,17 +35,15 @@ import {
   effectiveMetric,
   findAdapter,
   isElevated,
-  laneLabel,
-  pickMainAlias,
   readDefaultRoutes,
   readMetrics,
   readMinimizeConnectionsPolicy,
-  secondCandidates,
   usableAddresses,
 } from './lib/network.mjs';
 import { runFile, runPowerShell, SYSTEM32 } from './lib/ps.mjs';
-import { Settings } from './lib/settings.mjs';
+import { Settings, writeFileAtomic } from './lib/settings.mjs';
 import { UpdateChecker } from './lib/updates.mjs';
+import { Usage } from './lib/usage.mjs';
 import { openUndoRecord, undoWindowsChanges } from './lib/windows-undo.mjs';
 
 const mode = process.argv.includes('--dev-proxy') ? 'proxy' : 'tun';
@@ -61,6 +73,9 @@ const MACHINE_DIR = argument('--machine-data') ?? DEFAULT_DIR;
 const UI_DIR = path.join(ROOT, 'ui');
 const SERVER_FILE = path.join(USER_DIR, 'server.json');
 const SERVER_LOG = path.join(USER_DIR, 'server.log');
+// What each line used this period, and how fast each line can go.
+const USAGE_FILE = path.join(USER_DIR, 'usage.json');
+const USAGE_SAVE_EVERY_MS = 60_000;
 const PREFERRED_PORT = testMode ? 47831 : 47821;
 // Holding this port is the single-instance lock: Windows releases it the moment
 // the process ends, so a crash can never leave a stale lock behind.
@@ -81,6 +96,14 @@ const STEADY_RUN_MS = 120_000;
 const ELEVATION_RECHECK_MS = 30_000;
 // A chosen adapter missing from this many good scans in a row counts as gone.
 const ADAPTER_GONE_SCANS = 2;
+// More lines than this would make combining's shares too thin to matter.
+const MAX_LINES = 8;
+// Auto combining rewrites the shares at most this often, and only when one
+// moves at least this much, so the rule files don't churn with every reading.
+const AUTO_SHARE_EVERY_MS = 60_000;
+const AUTO_SHARE_MIN_MOVE = 2 * SHARE_STEP;
+// Line events (down, back, out of data) the window and tray can show.
+const EVENTS_KEPT = 20;
 // The adapter list is read this often. When Windows doesn't answer, each try
 // that is given up on can leave a stuck request inside Windows, so the wait
 // grows with every failure instead of piling them up.
@@ -204,6 +227,7 @@ const windowsUndo = openUndoRecord(MACHINE_DIR, {
 await windowsUndo.load();
 if (windowsUndo.recovery) log(`the Windows undo record was damaged: ${windowsUndo.recovery.reason}`);
 await moveUndoOutOfSettings();
+await migrateLines();
 
 // Looks for a newer release, unless the person turned that off. Test mode
 // never checks: it runs beside a real copy, which already does.
@@ -250,60 +274,115 @@ let elevationCheckedAt = 0;
 let quitting = false;
 let exiting = false;
 let monitorFailures = 0;
-// Routed connections each line carries, from the last poll.
-let lineConnections = { main: 0, second: 0 };
+// Routed connections each line carries, from the last poll: { [lineId]: n }.
+let lineConnections = {};
 let scanFailures = 0;
 let laneQueue = Promise.resolve();
 let startQueue = Promise.resolve();
 let setupQueue = Promise.resolve();
-// Good scans in a row without each chosen adapter.
-const adapterMissing = { main: 0, second: 0 };
+// Good scans in a row without each line's adapter, by line id.
+const adapterMissing = new Map();
+// Line events for the window and the tray's notifications, newest last.
+const events = [];
+// Lines out of data for this period, as of the last poll.
+let exhaustedIds = new Set();
+// When Auto combining last rewrote the shares.
+let sharesWrittenAt = 0;
+
+const usage = new Usage();
+try {
+  usage.load(JSON.parse(await readFile(USAGE_FILE, 'utf8')));
+} catch (error) {
+  if (error.code !== 'ENOENT') log(`could not read the data use record, starting it over: ${error.message}`);
+}
+usage.keepOnly(settings.values.lines.map((line) => line.id));
 
 // Routing should be on unless the person turned it off. While it should be on
 // and isn't, it is started again, waiting longer after each failure.
 let wantRouting = true;
 const retry = { attempts: 0, at: 0 };
 
-// Each lane's selector follows its line: the second connection's apps use the
-// cable while it is down, and everything else uses the second connection while
-// the cable is down. Their look at the lines doesn't depend on the adapter
-// scan, which can fail.
-const laneOptions = {
-  engine,
-  usableAddresses,
-  readDefaultRoutes,
-  probe: (outbound, options) => engine.probe(outbound, options),
-  runExclusive: (task) => inLaneQueue(task),
-  log: (line) => log(line),
-};
-// Download speed, through the routing engine, above which a line counts as
-// carrying traffic. The engine only sees internet traffic (local networks
-// bypass it), so this is data really arriving from the internet on that line;
-// a few keep-alives stay well below it.
+// Speed, through the routing engine and in either direction, above which a
+// line counts as carrying traffic. The engine only sees internet traffic
+// (local networks bypass it), so this is data really crossing the internet on
+// that line; a few keep-alives stay well below it. Uploads count too: a line
+// busy sending a big file is as slow to answer a test as one downloading.
 const CARRYING_MIN_BYTES_PER_SECOND = 16 * 1024;
-const secondLane = new LaneSwitch({
-  ...laneOptions,
-  lane: 'second',
-  getAlias: () => settings.values.secondAlias,
-  otherIsUp: () => cableLane.isUp(),
-  carryingTraffic: () => tracker.laneRates.second.down >= CARRYING_MIN_BYTES_PER_SECOND,
-});
-const cableLane = new LaneSwitch({
-  ...laneOptions,
-  lane: 'main',
-  getAlias: () => settings.values.mainAlias,
-  otherIsUp: () => secondLane.isUp(),
-  carryingTraffic: () => tracker.laneRates.main.down >= CARRYING_MIN_BYTES_PER_SECOND,
-});
+
+// One switch per line keeps its selector following the lines' health: its
+// apps use the next line that works while it is down. Their look at the
+// lines doesn't depend on the adapter scan, which can fail.
+const lanes = new Map();
+
+function syncLanes() {
+  const lines = settings.values.lines;
+  const ids = new Set(lines.map((line) => line.id));
+  for (const id of lanes.keys()) if (!ids.has(id)) lanes.delete(id);
+  for (const line of lines) {
+    if (lanes.has(line.id)) continue;
+    const id = line.id;
+    lanes.set(
+      id,
+      new LaneSwitch({
+        engine,
+        lineId: id,
+        getLines: () => settings.values.lines,
+        isLineUp: (other) => lanes.get(other)?.isUp() ?? false,
+        exhausted: () => exhaustedIds,
+        usableAddresses,
+        readDefaultRoutes,
+        probe: (lineId, options) => engine.probe(lineId, { ...options, urls: probeUrls(settings.values.probeTargets) }),
+        carryingTraffic: () => {
+          const rate = tracker.lineRate(id);
+          return rate.down >= CARRYING_MIN_BYTES_PER_SECOND || rate.up >= CARRYING_MIN_BYTES_PER_SECOND;
+        },
+        onChange: ({ up, reason }) => noteLineChange(id, up, reason),
+        log: (text) => log(text),
+      }),
+    );
+  }
+}
+
+function lineById(id) {
+  return settings.values.lines.find((line) => line.id === id) ?? null;
+}
+
+function isLineUp(id) {
+  return lanes.get(id)?.isUp() ?? false;
+}
+
+// Routing runs with a selector per line, so lines can stand in for each other.
+function routingThroughLanes() {
+  return engine.status === 'on' && (engine.startedWith?.lines?.length ?? 0) > 1;
+}
+
+function noteEvent(kind, lineId, text) {
+  events.push({ id: randomBytes(6).toString('hex'), at: Date.now(), kind, lineId, text });
+  if (events.length > EVENTS_KEPT) events.splice(0, events.length - EVENTS_KEPT);
+}
+
+const DOWN_REASONS = {
+  'no address': 'it isn’t connected',
+  'no default route': 'Windows has no internet route through it',
+  'no internet': 'it doesn’t reach the internet',
+};
+
+function noteLineChange(id, up, reason) {
+  const line = lineById(id);
+  if (!line) return;
+  if (up) noteEvent('up', id, `${line.label} is back.`);
+  else noteEvent('down', id, `${line.label} is down: ${DOWN_REASONS[reason] ?? 'it doesn’t work right now'}.`);
+}
+
+syncLanes();
 
 engine.on('status', (status) => {
   if (status !== 'on') {
     tracker.reset();
     outside.reset();
-    secondLane.reset({ sameLine: true });
-    cableLane.reset({ sameLine: true });
+    for (const lane of lanes.values()) lane.reset({ sameLine: true });
     monitorFailures = 0;
-    lineConnections = { main: 0, second: 0 };
+    lineConnections = {};
   }
   // The wait before the next try counts from the failure, not from when the
   // failed start began, and grows with each failure in a row.
@@ -315,21 +394,24 @@ engine.on('status', (status) => {
 });
 
 // Connections that go around routing belong to the line whose address they
-// use; connections on any other adapter are not on either line.
+// use; connections on any other adapter are on none of the lines.
 monitor.on('sample', ({ outside: samples, at }) => {
   if (engine.status !== 'on') return;
-  const addressesOf = (alias) => new Set(adapters.find((item) => item.alias === alias)?.ipv4s ?? []);
-  const lanes = { main: addressesOf(settings.values.mainAlias), second: addressesOf(settings.values.secondAlias) };
-  const laneOf = (local) => (lanes.main.has(local) ? 'main' : lanes.second.has(local) ? 'second' : null);
+  const owners = new Map();
+  for (const line of settings.values.lines) {
+    for (const address of adapters.find((item) => item.alias === line.alias)?.ipv4s ?? []) {
+      if (!owners.has(address)) owners.set(address, line.id);
+    }
+  }
   // The engine's own outbound sockets also use the line addresses; they are
   // the routed traffic itself and must not be counted twice.
   const enginePid = engine.child?.pid;
   const relevant = samples
-    .filter((sample) => sample.pid !== enginePid && laneOf(sample.local))
+    .filter((sample) => sample.pid !== enginePid && owners.has(sample.local))
     .map((sample) => ({
       id: sample.id,
       path: sample.path,
-      lane: laneOf(sample.local),
+      line: owners.get(sample.local),
       down: sample.down,
       up: sample.up,
       beforeRouting: Date.parse(sample.created) < engine.startedAt,
@@ -414,10 +496,33 @@ async function moveUndoOutOfSettings() {
       policy: 'value' in values.policy || !('policy' in old) ? values.policy : { value: old.policy },
     }));
   }
-  // update() merges, so the key is removed by leaving it undefined, which the
-  // saved JSON drops.
+  // A key set to undefined is removed.
   await settings.update({ setupUndo: undefined });
-  delete settings.values.setupUndo;
+}
+
+// Versions 0.2.0 and earlier knew two lines, the cable and a second
+// connection; they become the first two lines. Lines a hand edit damaged are
+// repaired or dropped, and pinned apps follow only lines that exist.
+async function migrateLines() {
+  const migration = migrateSettings(settings.values);
+  if (migration) {
+    await settings.update(migration);
+    log(`settings moved to lines: ${settings.values.lines.map((line) => `${line.label} (${line.alias})`).join(', ') || 'none yet'}`);
+  } else if (LEGACY_KEYS.some((key) => Object.hasOwn(settings.values, key))) {
+    // Lines are already there: old keys a restored backup brought back mean nothing.
+    await settings.update(withoutLegacyKeys());
+  }
+  const lines = normalizeLines(settings.values.lines);
+  const ids = new Set(lines.map((line) => line.id));
+  const appLines = Object.fromEntries(
+    Object.entries(settings.values.appLines).filter(([programPath, id]) => programPath && typeof id === 'string' && ids.has(id)),
+  );
+  const combineMode = ['auto', 'manual'].includes(settings.values.combineMode) ? settings.values.combineMode : 'auto';
+  const changed =
+    JSON.stringify(lines) !== JSON.stringify(settings.values.lines) ||
+    JSON.stringify(appLines) !== JSON.stringify(settings.values.appLines) ||
+    combineMode !== settings.values.combineMode;
+  if (changed) await settings.update({ lines, appLines, combineMode });
 }
 
 // ---------------------------------------------------------------- polling
@@ -435,7 +540,7 @@ async function refreshAdapters() {
     log(`adapter scan failed: ${describeFailure(error)}; next try in ${Math.round(nextScanDelay() / 1000)} s`);
     return;
   }
-  // In the lane queue, like choosing a second connection, so a scan never
+  // In the lane queue, like adding or removing a line, so a scan never
   // writes back a choice the person has just replaced.
   await inLaneQueue(followAdapters);
   // The Wi-Fi policy rarely changes, and reading it costs a PowerShell start,
@@ -454,58 +559,53 @@ function nextScanDelay() {
 }
 
 // Routing binds each line by adapter name, and Windows can rename an adapter
-// (a driver update, a USB adapter in another port). Each chosen adapter is
-// also known by its id, so a renamed one is followed. A cable adapter that is
-// gone for good is replaced by the wired adapter Windows now uses. The
-// supervisor then restarts routing so it binds the new name.
+// (a driver update, a USB adapter in another port). Each line's adapter is
+// also known by its id, so a renamed one is followed. A wired main line whose
+// adapter is gone for good (a new driver gives it a new name and id) is moved
+// to the wired adapter Windows now uses; any other line may just be unplugged
+// for now, so it waits. With no lines yet, the adapter Windows uses for the
+// internet becomes the main line. The supervisor then restarts routing so it
+// binds the new names.
 async function followAdapters() {
-  const { mainAlias, mainGuid, secondAlias, secondGuid } = settings.values;
-  const changes = {};
+  const lines = settings.values.lines;
+  if (lines.length === 0) {
+    const picked = pickFirstAdapter(adapters);
+    if (!picked) return;
+    await settings.update({ lines: [newLine(picked, [])] });
+    syncLanes();
+    log(`${picked.alias} is the main line`);
+    return;
+  }
   const notes = [];
-
   // Adapters that are the same one under a new name, [from, to]: their Undo
   // records follow them. A replaced adapter is a different one, so its
   // record stays with the old name.
   const renamed = [];
+  let changed = false;
+  const next = lines.map((line, index) => {
+    const found = findAdapter(adapters, { alias: line.alias, guid: line.guid });
+    const missing = found ? 0 : (adapterMissing.get(line.id) ?? 0) + 1;
+    adapterMissing.set(line.id, missing);
+    if (found) {
+      if (found.alias !== line.alias) {
+        notes.push(`${line.label}'s adapter was renamed from ${line.alias} to ${found.alias}`);
+        renamed.push([line.alias, found.alias]);
+      }
+      if (found.alias === line.alias && (!found.guid || found.guid === line.guid)) return line;
+      changed = true;
+      return { ...line, alias: found.alias, guid: found.guid || null };
+    }
+    if (index !== 0 || line.kind !== 'wired' || missing < ADAPTER_GONE_SCANS) return line;
+    const taken = new Set(lines.map((item) => item.alias));
+    const replacement = pickFirstAdapter(adapters.filter((item) => item.kind === 'wired' && !taken.has(item.alias)));
+    if (!replacement) return line;
+    notes.push(`${line.label}'s adapter ${line.alias} is gone; using ${replacement.alias} instead`);
+    changed = true;
+    return { ...line, alias: replacement.alias, guid: replacement.guid || null };
+  });
 
-  const main = mainAlias ? findAdapter(adapters, { alias: mainAlias, guid: mainGuid }) : null;
-  adapterMissing.main = mainAlias && !main ? adapterMissing.main + 1 : 0;
-  if (!mainAlias) {
-    const picked = adapters.find((item) => item.alias === pickMainAlias(adapters));
-    if (picked) Object.assign(changes, { mainAlias: picked.alias, mainGuid: picked.guid || null });
-  } else if (main) {
-    if (main.alias !== mainAlias) {
-      notes.push(`the cable adapter was renamed from ${mainAlias} to ${main.alias}`);
-      renamed.push([mainAlias, main.alias]);
-    }
-    if (main.alias !== mainAlias || (main.guid && main.guid !== mainGuid)) {
-      Object.assign(changes, { mainAlias: main.alias, mainGuid: main.guid || null });
-    }
-  } else if (adapterMissing.main >= ADAPTER_GONE_SCANS) {
-    const replacement = adapters.find(
-      (item) => item.alias === pickMainAlias(adapters.filter((other) => other.alias !== secondAlias)),
-    );
-    if (replacement) {
-      notes.push(`the cable adapter ${mainAlias} is gone; using ${replacement.alias} instead`);
-      Object.assign(changes, { mainAlias: replacement.alias, mainGuid: replacement.guid || null });
-    }
-  }
-
-  // A second connection that is missing may just be unplugged for now, so it
-  // is only followed when renamed, never replaced.
-  if (secondAlias) {
-    const second = findAdapter(adapters, { alias: secondAlias, guid: secondGuid });
-    if (second && second.alias !== secondAlias) {
-      notes.push(`the second connection's adapter was renamed from ${secondAlias} to ${second.alias}`);
-      renamed.push([secondAlias, second.alias]);
-    }
-    if (second && (second.alias !== secondAlias || (second.guid && second.guid !== secondGuid))) {
-      Object.assign(changes, { secondAlias: second.alias, secondGuid: second.guid || null });
-    }
-  }
-
-  if (Object.keys(changes).length === 0) return;
-  await settings.update(changes);
+  if (!changed) return;
+  await settings.update({ lines: next });
   for (const note of notes) log(note);
   // Undo records are kept by adapter name. A record already under the new
   // name is the older one, from before Net Switch changed anything, so it
@@ -528,44 +628,110 @@ async function followAdapters() {
 // start), it restarts with the new ones. In the lane queue, so it runs after
 // any choice of connection that restarts routing itself.
 function rebindIfNeeded() {
-  const differs = () =>
-    engine.startedWith &&
-    (engine.startedWith.mainAlias !== settings.values.mainAlias ||
-      engine.startedWith.secondAlias !== settings.values.secondAlias);
+  const bound = (lines) => JSON.stringify(lines.map(({ id, alias }) => [id, alias]));
+  const differs = () => engine.startedWith && bound(engine.startedWith.lines) !== bound(settings.values.lines);
   if (!differs()) return null;
   return inLaneQueue(async () => {
     if (!wantRouting || quitting || engine.status !== 'on' || !differs()) return;
-    const { mainAlias, secondAlias } = settings.values;
-    log(`routing restarts to use ${mainAlias}${secondAlias ? ` and ${secondAlias}` : ''}`);
+    log(`routing restarts to use ${settings.values.lines.map((line) => line.alias).join(', ')}`);
     await restartEngine();
   });
 }
 
-function secondConnectionIsUp() {
-  return secondLane.isUp();
+// In priority order, so the main line's apps are placed first.
+async function tickLanes() {
+  for (const line of settings.values.lines) await lanes.get(line.id)?.tick();
 }
 
-async function tickLanes() {
-  await cableLane.tick();
-  await secondLane.tick();
+// Data use per line for caps, and each line's top speed for Auto combining.
+// Counted while routing is off too: a phone's data is used either way.
+function noteUsage() {
+  const lines = settings.values.lines;
+  const now = Date.now();
+  usage.ingest(lines, (line) => monitor.counters(line.alias), (line) => monitor.rate(line.alias)?.down ?? null, now);
+  const next = usage.exhausted(lines, now);
+  for (const line of lines) {
+    if (next.has(line.id) && !exhaustedIds.has(line.id)) {
+      noteEvent('exhausted', line.id, `${line.label} has used its data cap. Its apps use other lines until the cap resets.`);
+      log(`${line.label} reached its data cap`);
+    } else if (!next.has(line.id) && exhaustedIds.has(line.id)) {
+      noteEvent('cap-reset', line.id, `${line.label} can be used again: its data cap has reset.`);
+      log(`${line.label}'s data cap reset`);
+    }
+  }
+  exhaustedIds = next;
+}
+
+async function saveUsage() {
+  await writeFileAtomic(USAGE_FILE, JSON.stringify(usage.toJSON()));
+}
+
+// How combining shares new connections now: every line that may carry other
+// lines' traffic takes part, by the weights the person set (manual) or by
+// each line's measured top speed (auto). Empty with fewer than two.
+function computeShares({ lines, combineMode } = settings.values) {
+  const sharing = sharingLines(lines, exhaustedIds);
+  if (sharing.length < 2) return {};
+  const weights =
+    combineMode === 'manual' ? Object.fromEntries(sharing.map((line) => [line.id, line.weight])) : usage.autoWeights(sharing);
+  return sharesFromWeights(sharing, weights);
+}
+
+// Whether the rule files' shares should be rewritten: at once when a line
+// joins or leaves sharing (it went out of data, or was kept to its own apps);
+// in auto mode, at most once a minute and only for a real move, since every
+// rewrite is a reload for the engine. Open connections never move either way.
+function sharesOutdated(next) {
+  const current = engine.shares;
+  const ids = (shares) => Object.keys(shares).sort().join(',');
+  if (ids(current) !== ids(next)) return true;
+  const moved = (min) => Object.keys(next).some((id) => Math.abs(next[id] - current[id]) >= min);
+  if (settings.values.combineMode !== 'auto') return moved(1e-9);
+  return Date.now() - sharesWrittenAt >= AUTO_SHARE_EVERY_MS && moved(AUTO_SHARE_MIN_MOVE - 1e-9);
+}
+
+async function followShares() {
+  if (!engine.combine) return;
+  const next = computeShares();
+  if (!sharesOutdated(next)) return;
+  await engine.setShares(next);
+  sharesWrittenAt = Date.now();
+  log(`combining shares: ${Object.entries(next).map(([id, share]) => `${lineById(id)?.label ?? id} ${Math.round(share * 100)}%`).join(', ')}`);
+}
+
+// From the poll, without waiting: a line change may be holding the queue.
+let sharesPending = false;
+function followSharesSoon() {
+  if (sharesPending || !engine.combine || !sharesOutdated(computeShares())) return;
+  sharesPending = true;
+  inLaneQueue(followShares)
+    .catch((error) => log(`could not update combining's shares: ${error.message}`))
+    .finally(() => {
+      sharesPending = false;
+    });
 }
 
 async function pollConnections() {
+  syncLanes();
   // The window shows whether each line is connected, also while routing is off.
-  cableLane.sample();
-  secondLane.sample();
+  for (const lane of lanes.values()) lane.sample();
   // A stalled monitor must not leave old speeds on screen.
   if (!monitor.isFresh()) outside.reset();
+  noteUsage();
   if (engine.status !== 'on') return;
-  // Each lane's apps use the other line while their own is down (the
-  // person's choice), and go back as soon as it returns.
+  // Each line's apps use the next working line while their own is down, and
+  // their new connections go back as soon as it returns.
   await tickLanes();
+  followSharesSoon();
   try {
     const connections = await engine.connections();
     monitorFailures = 0;
     tracker.ingest(connections, Date.now());
-    lineConnections = { main: 0, second: 0 };
-    for (const connection of connections) lineConnections[connectionLane(connection)] += 1;
+    lineConnections = {};
+    for (const connection of connections) {
+      const id = connectionLine(connection);
+      if (id) lineConnections[id] = (lineConnections[id] ?? 0) + 1;
+    }
     for (const connection of connections) appInfo.describe(connection.metadata?.processPath ?? '');
     appInfo.lookupPending();
   } catch {
@@ -624,8 +790,7 @@ function startEngine() {
       await tickLanes();
       return;
     }
-    const { mainAlias, secondAlias } = settings.values;
-    await engine.start({ mainAlias, secondAlias });
+    await engine.start({ lines: settings.values.lines });
     await tickLanes();
   };
   const result = startQueue.then(run, run);
@@ -689,63 +854,95 @@ function inLaneQueue(run) {
   return result;
 }
 
-// One change at a time. The engine's rule file is the routing truth, so it is
-// written first; the saved choice follows, and is rolled back if saving fails.
-// Reports back only once sing-box has reloaded the rules.
-// lane: 'second' moves the app to the second connection, 'cable' keeps it on
-// the cable even while combining, and 'main' is the default: the cable, or
-// both lines while combining.
-function setAppLane(processPath, lane) {
+// One change at a time. The engine's rule files are the routing truth, so they
+// are written first; the saved choice follows, and is rolled back if saving
+// fails. Reports back only once sing-box has reloaded the rules.
+// lineId: the line the app is pinned to, or null for the default: the main
+// line, or every sharing line while combining. An app pinned to the main line
+// stays on it even while combining.
+function setAppLine(processPath, lineId) {
   return inLaneQueue(async () => {
-    if (typeof processPath !== 'string' || processPath === '' || !['main', 'cable', 'second'].includes(lane)) {
-      throw clientError('Choose an app and a connection, then try again.');
+    if (typeof processPath !== 'string' || processPath === '' || (lineId !== null && typeof lineId !== 'string')) {
+      throw clientError('Choose an app and a line, then try again.');
     }
-    if (lane === 'second' && !settings.values.secondAlias) {
-      throw clientError('Set up the second connection first.');
-    }
-    const { secondApps: previousSecond, cableApps: previousCable } = settings.values;
+    if (lineId !== null && !lineById(lineId)) throw clientError('That line isn’t there any more.');
+    const previous = settings.values.appLines;
     const key = appKey(processPath);
-    const without = (paths) => paths.filter((item) => appKey(item) !== key);
-    const secondApps = lane === 'second' ? [...without(previousSecond), processPath] : without(previousSecond);
-    const cableApps = lane === 'cable' ? [...without(previousCable), processPath] : without(previousCable);
-    await engine.setAppLanes(secondApps, cableApps);
+    const appLines = Object.fromEntries(Object.entries(previous).filter(([item]) => appKey(item) !== key));
+    if (lineId !== null) appLines[processPath] = lineId;
+    await engine.setAppLines(appLines);
     try {
-      await settings.update({ secondApps, cableApps });
+      await settings.update({ appLines });
     } catch (error) {
-      await engine.setAppLanes(previousSecond, previousCable).catch(() => {});
+      await engine.setAppLines(previous).catch(() => {});
       throw error;
     }
     await delay(RULE_RELOAD_MS);
   });
 }
 
+// The line an app is pinned to, if it is and that line exists.
+function pinnedLine(key) {
+  for (const [programPath, id] of Object.entries(settings.values.appLines)) {
+    if (appKey(programPath) === key && lineById(id)) return id;
+  }
+  return null;
+}
+
+// Where a line's apps' new connections go now: the line itself, or the line
+// standing in for it while it is down.
+function laneTargetNow(id) {
+  if (!routingThroughLanes()) return id;
+  return lanes.get(id)?.target ?? id;
+}
+
 // New connections are really being split: the engine's rules combine, routing
-// is on and both lines carry their own traffic. While either line is down,
-// everything uses the other one.
+// is on, and at least two sharing lines carry their own traffic. While a line
+// is down, its share goes where its apps go.
 function combineActive() {
-  return engine.combine && engine.status === 'on' && secondLane.home && cableLane.home;
+  if (!engine.combine || engine.status !== 'on') return false;
+  return Object.keys(engine.shares).filter((id) => engine.shares[id] > 0 && laneTargetNow(id) === id).length >= 2;
 }
 
-// While routing is on with a second connection, the cable's apps use the
-// second connection whenever the cable is down.
-function cableCarryingApps() {
-  return engine.status !== 'on' || !engine.startedWith?.secondAlias || cableLane.target !== 'second';
-}
-
-// Combining is one more rule in the same rule file, so it turns on and off
-// without restarting routing. Like a line change, it applies to new connections.
-function setCombine(on) {
+// Combining is a rule file per line, so it turns on and off, and its shares
+// change, without restarting routing. Like an app's line, it applies to new
+// connections. weights: { [lineId]: number } for manual mode.
+function setCombine({ on, mode: combineMode, weights }) {
   return inLaneQueue(async () => {
-    if (typeof on !== 'boolean') throw clientError('Choose whether to combine both lines, then try again.');
-    if (on && !settings.values.secondAlias) throw clientError('Set up the second connection first.');
-    const previous = engine.combine;
-    await engine.setCombine(on);
+    if (on !== undefined && typeof on !== 'boolean') throw clientError('Choose whether to combine the lines, then try again.');
+    if (combineMode !== undefined && !['auto', 'manual'].includes(combineMode)) {
+      throw clientError('Choose Auto or Manual, then try again.');
+    }
+    if (weights !== undefined && (weights === null || typeof weights !== 'object' || Array.isArray(weights))) {
+      throw clientError('Set how much each line takes, then try again.');
+    }
+    const lines = settings.values.lines.map((line) => {
+      const weight = weights?.[line.id];
+      if (weight === undefined) return line;
+      if (typeof weight !== 'number' || !Number.isFinite(weight) || weight < 0 || weight > 1000) {
+        throw clientError('Set how much each line takes, then try again.');
+      }
+      return { ...line, weight };
+    });
+    const next = {
+      lines,
+      combine: on ?? settings.values.combine,
+      combineMode: combineMode ?? settings.values.combineMode,
+    };
+    // A line out of data still counts, as it will share again once its cap resets.
+    if (next.combine && sharingLines(lines).length < 2) {
+      throw clientError('Combining needs two lines that any app may use. Add a line, or let one take any app.');
+    }
+    const shares = computeShares(next);
+    const previous = { combine: engine.combine, shares: engine.shares };
+    await engine.changeRules({ combine: next.combine, shares });
     try {
-      await settings.update({ combine: on });
+      await settings.update(next);
     } catch (error) {
-      await engine.setCombine(previous).catch((undo) => log(`combining was left ${on ? 'on' : 'off'} after a failed save: ${undo.message}`));
+      await engine.changeRules(previous).catch((undo) => log(`combining was left changed after a failed save: ${undo.message}`));
       throw error;
     }
+    sharesWrittenAt = Date.now();
     await delay(RULE_RELOAD_MS);
   });
 }
@@ -758,31 +955,28 @@ function reconnectApp(key) {
   return inLaneQueue(async () => {
     if (typeof key !== 'string' || key === '') throw clientError('Choose an app, then try again.');
     if (engine.status !== 'on') throw clientError('Turn routing on first.');
-    const programPath = tracker.snapshot([]).find((row) => row.key === key)?.path ?? outside.get(key)?.path ?? '';
+    const programPath = tracker.snapshot().find((row) => row.key === key)?.path ?? outside.get(key)?.path ?? '';
     if (!appInfo.describe(programPath).reconnectable) {
       throw clientError('This one can’t be reconnected, because other programs share its connections.');
     }
-    const onSecond = settings.values.secondApps.some((item) => appKey(item) === key);
-    if (onSecond && !secondConnectionIsUp()) {
-      throw clientError(`The ${settings.values.secondLabel ?? 'second connection'} isn’t connected, so there’s nowhere to move it yet.`);
+    // Its new connections go to its line, or to the one standing in for it
+    // while that line is down: there is where the old ones belong too. When
+    // a line comes back, nothing is closed by itself, so this is how an app's
+    // connections return at once.
+    const pinned = pinnedLine(key);
+    const home = pinned ?? settings.values.lines[0]?.id;
+    const target = home ? laneTargetNow(home) : null;
+    if (!target || !isLineUp(target)) {
+      throw clientError(`${lineById(home)?.label ?? 'Its line'} isn’t connected, so there’s nowhere to move it yet.`);
     }
-    // Its connections on the second connection are the fallback working as it
-    // should; closing them would only open new ones there again.
-    if (!onSecond && !cableCarryingApps()) {
-      throw clientError('The cable isn’t connected, so there’s nowhere to move it yet.');
-    }
-    const chosen = onSecond ? 'second' : 'main';
-    // While combining splits traffic, both lines are right for an app that
-    // shares them: only its connections that go around routing are out of
-    // place. An app kept on the cable doesn't share, so its connections on the
-    // second connection are out of place too.
-    // While a line is down, new connections use the other one as usual.
-    const keptOnCable = settings.values.cableApps.some((item) => appKey(item) === key);
-    const bothLines = !onSecond && !keptOnCable && combineActive();
+    // While combining splits traffic, every sharing line is right for an app
+    // that shares them: only its connections that go around routing are out
+    // of place. An app pinned to a line doesn't share.
+    const shared = !pinned && combineActive();
     let closed = 0;
     let failed = 0;
     // Routed connections: the engine's own count, from the last poll.
-    for (const id of bothLines ? [] : tracker.connectionIdsFor(key, onSecond ? 'main' : 'second')) {
+    for (const id of shared ? [] : tracker.connectionIdsOffLine(key, target)) {
       try {
         await engine.closeConnection(id);
         closed += 1;
@@ -790,8 +984,8 @@ function reconnectApp(key) {
         failed += 1;
       }
     }
-    // Connections around routing, but only those not already on the chosen line.
-    const outsideIds = bothLines ? outside.idsOf(key) : outside.idsOffLane(key, chosen);
+    // Connections around routing, but only those not already on the right line.
+    const outsideIds = shared ? outside.idsOf(key) : outside.idsOffLine(key, target);
     const result = await closeTcpConnections(outsideIds.map(parseOutsideId).filter(Boolean));
     closed += result.closed;
     failed += result.failed;
@@ -800,34 +994,116 @@ function reconnectApp(key) {
   });
 }
 
-// Waits behind any pending line change. Removing the second connection also
-// stops combining, which can't work without it.
-function chooseSecondConnection(alias) {
+// Adding, removing and reordering lines changes what routing binds, so each
+// restarts it; they wait behind any pending line change. Renaming a line,
+// keeping it to its own apps and its data cap are decided here, so they apply
+// at once without a restart.
+
+function knownLine(id) {
+  const line = typeof id === 'string' ? lineById(id) : null;
+  if (!line) throw clientError('That line isn’t there any more.');
+  return line;
+}
+
+// The main line carries every app without a choice, so it can't be kept to
+// its own apps; a line that becomes the main one loses that.
+function withMainOpen(lines) {
+  return lines.map((line, index) => (index === 0 && line.strict ? { ...line, strict: false } : line));
+}
+
+// Combining stays on only while two lines may share. A line out of data still
+// counts: that lasts only until its cap resets, and combining picks it up again.
+function combineStillPossible(lines) {
+  return settings.values.combine && sharingLines(lines).length >= 2;
+}
+
+async function applyLines(lines, appLines = settings.values.appLines) {
+  const combine = combineStillPossible(lines);
+  const next = { lines, appLines, combine };
+  const previous = { appLines: engine.appLines, combine: engine.combine, shares: engine.shares };
+  await engine.changeRules({ appLines, combine, shares: computeShares({ ...settings.values, ...next }) });
+  try {
+    await settings.update(next);
+  } catch (error) {
+    await engine.changeRules(previous).catch(() => {});
+    throw error;
+  }
+  usage.keepOnly(lines.map((line) => line.id));
+  syncLanes();
+}
+
+function addLine(alias) {
   return inLaneQueue(async () => {
-    if (alias === null) {
-      const wasCombining = engine.combine;
-      await engine.setCombine(false);
-      try {
-        await settings.update({ secondAlias: null, secondGuid: null, secondLabel: null, secondKind: null, combine: false });
-      } catch (error) {
-        await engine.setCombine(wasCombining).catch(() => {});
-        throw error;
-      }
-    } else {
-      const adapter = adapters.find((item) => item.alias === alias && item.connected);
-      // Test mode may reuse the cable as the "second" connection to check routing without a second network.
-      const reusesCable = adapter?.alias === settings.values.mainAlias && mode !== 'proxy';
-      if (!adapter || reusesCable) {
-        throw clientError('That connection isn’t available. Check that it’s connected, then try again.');
-      }
-      await settings.update({
-        secondAlias: alias,
-        secondGuid: adapter.guid || null,
-        secondLabel: laneLabel(adapter),
-        secondKind: adapter.kind,
-      });
-    }
+    const lines = settings.values.lines;
+    const adapter = typeof alias === 'string' ? adapters.find((item) => item.alias === alias && item.connected) : null;
+    // Test mode may use one adapter twice, to check routing without a second network.
+    const taken = lines.some((line) => line.alias === alias) && mode !== 'proxy';
+    if (!adapter || taken) throw clientError('That connection isn’t available. Check that it’s connected, then try again.');
+    if (lines.length >= MAX_LINES) throw clientError(`Net Switch can use up to ${MAX_LINES} lines.`);
+    const line = newLine(adapter, lines);
+    await applyLines([...lines, line]);
+    log(`added ${line.label} (${line.alias})`);
     if (engine.status !== 'off') await restartEngine();
+  });
+}
+
+// Apps pinned to a removed line go back to the default.
+function removeLine(id) {
+  return inLaneQueue(async () => {
+    const line = knownLine(id);
+    const lines = settings.values.lines;
+    if (lines.length === 1) throw clientError('Net Switch needs at least one line.');
+    const appLines = Object.fromEntries(Object.entries(settings.values.appLines).filter(([, lineId]) => lineId !== id));
+    await applyLines(withMainOpen(lines.filter((item) => item.id !== id)), appLines);
+    adapterMissing.delete(id);
+    log(`removed ${line.label} (${line.alias})`);
+    if (engine.status !== 'off') await restartEngine();
+  });
+}
+
+// ids: every line's id, in the new priority order; the first is the main line.
+function orderLines(ids) {
+  return inLaneQueue(async () => {
+    const lines = settings.values.lines;
+    const valid =
+      Array.isArray(ids) && ids.length === lines.length && new Set(ids).size === ids.length && ids.every((id) => lineById(id));
+    if (!valid) throw clientError('The lines changed meanwhile. Try again.');
+    await applyLines(withMainOpen(ids.map((id) => lineById(id))));
+    log(`line order: ${settings.values.lines.map((line) => line.label).join(', ')}`);
+    if (engine.status !== 'off') await restartEngine();
+  });
+}
+
+// changes: { label?, metered?, strict?, cap? }; cap is { bytes, period, resetDay } or null.
+function updateLine(id, changes) {
+  return inLaneQueue(async () => {
+    const line = knownLine(id);
+    const main = settings.values.lines[0].id === id;
+    const next = { ...line };
+    if (changes.label !== undefined) {
+      const label = typeof changes.label === 'string' ? changes.label.trim() : '';
+      if (!label || label.length > MAX_LABEL_LENGTH) throw clientError(`Give the line a name of up to ${MAX_LABEL_LENGTH} characters.`);
+      next.label = label;
+    }
+    if (changes.metered !== undefined) {
+      if (typeof changes.metered !== 'boolean') throw clientError('Choose whether this line costs data, then try again.');
+      next.metered = changes.metered;
+    }
+    if (changes.strict !== undefined) {
+      if (typeof changes.strict !== 'boolean') throw clientError('Choose which apps may use this line, then try again.');
+      if (changes.strict && main) {
+        throw clientError('The main line carries every app without a line of its own, so it can’t be kept to chosen apps.');
+      }
+      next.strict = changes.strict;
+    }
+    if (changes.cap !== undefined) {
+      const cap = changes.cap === null ? null : validCap(changes.cap);
+      if (changes.cap !== null && !cap) throw clientError('Set the data cap as an amount per day or per month, then try again.');
+      next.cap = cap;
+    }
+    // Whether the line is out of data, and where its apps go, follows at the
+    // next poll, a second later.
+    await applyLines(settings.values.lines.map((item) => (item.id === id ? next : item)));
   });
 }
 
@@ -844,23 +1120,38 @@ function inSetupQueue(run) {
 // Windows changes always save how things were before they change anything,
 // one record per adapter, and only from a reading that worked, so Undo can
 // restore exactly.
-function makeCableTheDefault() {
+// The other lines' adapters Windows would prefer over the main line's, or use
+// as much, when Net Switch is off.
+function outrankingMain() {
+  const [first, ...rest] = settings.values.lines;
+  const main = first ? adapters.find((item) => item.alias === first.alias && item.connected) : null;
+  if (!main) return { main: null, others: [] };
+  const others = rest
+    .map((line) => adapters.find((item) => item.alias === line.alias && item.connected))
+    .filter((item) => item && item.alias !== main.alias && effectiveMetric(item) <= effectiveMetric(main));
+  return { main, others };
+}
+
+// Makes Windows prefer the main line while Net Switch is off: every other
+// line that Windows would use first gets a clearly higher metric.
+function makeMainTheDefault() {
   return inSetupQueue(async () => {
-    const main = adapters.find((item) => item.alias === settings.values.mainAlias);
-    const second = adapters.find((item) => item.alias === settings.values.secondAlias);
-    if (!main || !second) throw clientError('Connect both the cable and the second connection, then try again.');
-    // An empty record, from versions that saved a failed reading, holds nothing to restore.
-    if (!windowsUndo.values.metrics[second.alias]?.length) {
-      let before;
-      try {
-        before = await readMetrics(second.alias);
-      } catch (error) {
-        log(`could not read ${second.alias}'s settings before changing them: ${error.message}`);
-        throw clientError('Windows didn’t say how this connection is set up now, so Net Switch can’t change it safely. Try again in a moment.');
+    const { main, others } = outrankingMain();
+    if (!main || others.length === 0) throw clientError('Connect the main line and the others, then try again.');
+    for (const other of others) {
+      // An empty record, from versions that saved a failed reading, holds nothing to restore.
+      if (!windowsUndo.values.metrics[other.alias]?.length) {
+        let before;
+        try {
+          before = await readMetrics(other.alias);
+        } catch (error) {
+          log(`could not read ${other.alias}'s settings before changing them: ${error.message}`);
+          throw clientError('Windows didn’t say how this connection is set up now, so Net Switch can’t change it safely. Try again in a moment.');
+        }
+        await windowsUndo.update((values) => ({ metrics: { ...values.metrics, [other.alias]: before } }));
       }
-      await windowsUndo.update((values) => ({ metrics: { ...values.metrics, [second.alias]: before } }));
+      await applyCableAsMain(main, other, windowsUndo.values.metrics[other.alias]);
     }
-    await applyCableAsMain(main, second, windowsUndo.values.metrics[second.alias]);
     await refreshAdapters();
   });
 }
@@ -900,6 +1191,41 @@ function undoAll() {
   });
 }
 
+// ---------------------------------------------------------------- settings
+
+const MAX_PROBE_TARGETS = 4;
+const PROBE_TARGET = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3}):(\d{1,5})$/;
+
+// address:port, IPv4 only: the quick check connects from each line's IPv4
+// address, and a name would be looked up through whichever line Windows prefers.
+function validProbeTarget(target) {
+  const match = typeof target === 'string' ? PROBE_TARGET.exec(target.trim()) : null;
+  if (!match) return false;
+  const port = Number(match[5]);
+  return match.slice(1, 5).every((part) => Number(part) <= 255) && port >= 1 && port <= 65535;
+}
+
+// changes: { autostart?, checkForUpdates?, probeTargets? }; missing ones stay.
+async function changeSettings({ autostart, checkForUpdates, probeTargets }) {
+  if (checkForUpdates !== undefined && typeof checkForUpdates !== 'boolean') {
+    throw clientError('Choose whether to check for updates, then try again.');
+  }
+  if (autostart !== undefined) throw clientError('Starting with Windows can only be set in an installed copy of Net Switch.');
+  let targets;
+  if (probeTargets !== undefined) {
+    if (!Array.isArray(probeTargets) || probeTargets.length === 0 || probeTargets.length > MAX_PROBE_TARGETS || !probeTargets.every(validProbeTarget)) {
+      throw clientError(`Enter one to ${MAX_PROBE_TARGETS} test addresses as address:port, like 1.1.1.1:443.`);
+    }
+    targets = [...new Set(probeTargets.map((target) => target.trim()))];
+  }
+  await settings.update({
+    ...(checkForUpdates !== undefined ? { checkForUpdates } : {}),
+    ...(targets ? { probeTargets: targets } : {}),
+  });
+  if (checkForUpdates === true) await updates.check();
+  else if (checkForUpdates === false) updates.offer = null;
+}
+
 // ---------------------------------------------------------------- quit
 
 let shuttingDown = null;
@@ -925,6 +1251,7 @@ function shutdown(code = 0) {
     exiting = true;
     try {
       monitor.stop();
+      await saveUsage().catch((error) => log(`could not save the data use record: ${error.message}`));
       // Windows can refuse while another program has the file open; the
       // tray then notices the quit when the server stops answering.
       await rm(SERVER_FILE, { force: true }).catch((error) => log(`could not remove server.json: ${error.message}`));
@@ -938,26 +1265,54 @@ function shutdown(code = 0) {
 
 // ---------------------------------------------------------------- state
 
-function laneState(lane) {
-  return lane.health.up === false ? lane.health.reason : null;
-}
-
-// The last internet test's round trip, while the line counts as up.
-function lanePing(lane) {
-  return lane.health.up === true ? lane.delay : null;
+function lineState(line, index) {
+  const adapter = adapters.find((item) => item.alias === line.alias) ?? null;
+  const lane = lanes.get(line.id);
+  const health = lane?.health;
+  const target = engine.status === 'on' ? laneTargetNow(line.id) : null;
+  return {
+    id: line.id,
+    alias: line.alias,
+    label: line.label,
+    kind: line.kind ?? adapter?.kind ?? null,
+    main: index === 0,
+    connected: lane?.isUp() ?? false,
+    // Why the line counts as down, while it does: 'no address', 'no default
+    // route', 'no internet', or 'checking' (connected again, waiting for a
+    // test to pass).
+    problem: health?.up === false ? health.reason : null,
+    // Round trip in ms of the last passing test, while the line counts as up
+    // (only tested while routing runs with two lines or more).
+    ping: health?.up === true ? lane.delay : null,
+    connections: lineConnections[line.id] ?? 0,
+    // Whether its own apps' new connections go to it now, and the line they
+    // go to: another one while it is down.
+    carrying: target === line.id,
+    target,
+    // Real speed from Windows, including traffic that goes around routing.
+    // No fallback to the engine's own count: that misses exactly this traffic.
+    rate: monitor.rate(line.alias),
+    ssid: adapter?.ssid || null,
+    metered: line.metered,
+    strict: line.strict,
+    cap: line.cap,
+    usage: usage.used(line.id),
+    exhausted: exhaustedIds.has(line.id),
+    weight: line.weight,
+    // Its part of new connections while combining, from the rule files.
+    share: engine.combine ? (engine.shares[line.id] ?? 0) : null,
+  };
 }
 
 function buildState() {
-  const { mainAlias, secondAlias, secondApps, cableApps, secondLabel, secondKind } = settings.values;
-  const main = adapters.find((item) => item.alias === mainAlias) ?? null;
-  const second = secondAlias ? (adapters.find((item) => item.alias === secondAlias) ?? null) : null;
+  const lines = settings.values.lines;
+  const { appLines } = settings.values;
   const routingOn = engine.status === 'on';
   const measuring = routingOn && monitorFailures < MONITOR_FAILURE_LIMIT;
-  const secondUp = secondConnectionIsUp();
   const wifiPresent = adapters.some((item) => item.kind === 'wifi');
   const undo = windowsUndo.values;
 
-  const apps = mergeRows(tracker.snapshot(secondApps, cableApps), outside, secondApps, cableApps).map((app) => {
+  const apps = mergeRows(tracker.snapshot(appLines), outside, appLines).map((app) => {
     const info = appInfo.describe(app.path);
     return {
       key: app.key,
@@ -966,18 +1321,14 @@ function buildState() {
       hasIcon: info.hasIcon,
       switchable: info.switchable,
       reconnectable: info.reconnectable,
-      lane: app.lane,
-      cableOnly: app.cableOnly,
+      line: app.line,
       rate: app.rate,
-      laneDown: app.laneDown,
+      lineDown: app.lineDown,
       sortScore: app.sortScore,
       connections: app.connections,
       outside: app.outside,
     };
   });
-  // Real line speeds from Windows, including traffic that goes around routing.
-  // No fallback to the engine's own count: that misses exactly this traffic.
-  const lineRate = (alias) => monitor.rate(alias);
 
   return {
     mode,
@@ -987,10 +1338,10 @@ function buildState() {
     // whether checking is on, for the switch in the window.
     update: updateOffer(),
     updateChecks: !testMode && settings.values.checkForUpdates,
-    features: { reconnect: true, combine: true, cableOnly: true },
+    features: { reconnect: true, combine: true, lines: true },
     // From the engine's rules rather than the saved choice, so the window
     // shows what routing really does even if saving the choice failed.
-    combine: { on: engine.combine, active: combineActive() },
+    combine: { on: engine.combine, active: combineActive(), mode: settings.values.combineMode },
     routing: {
       status: engine.status,
       // Whether the person wants routing on. While a start is failing it is
@@ -1002,58 +1353,30 @@ function buildState() {
       // When routing that should be on is started again by itself.
       retryAt: wantRouting && engine.status === 'error' && (mode !== 'tun' || elevated) ? retry.at : null,
     },
-    lanes: {
-      main: {
-        alias: mainAlias,
-        label: 'Cable',
-        connected: Boolean(main?.connected),
-        // Why the cable counts as down, while it does: 'no address', 'no default route' or 'no internet'.
-        problem: laneState(cableLane),
-        // Round trip in ms of the last internet test, or null (only tested
-        // while routing runs with a second connection).
-        ping: lanePing(cableLane),
-        connections: lineConnections.main,
-        // False while its apps' new connections are going to the second connection.
-        carryingApps: cableCarryingApps(),
-        rate: lineRate(mainAlias),
-        movedBack: cableLane.lastRelease,
-      },
-      second: secondAlias
-        ? {
-            alias: secondAlias,
-            label: secondLabel ?? laneLabel(second),
-            kind: secondKind ?? second?.kind ?? null,
-            connected: secondUp,
-            problem: laneState(secondLane),
-            ping: lanePing(secondLane),
-            connections: lineConnections.second,
-            ssid: second?.ssid || null,
-            // False while its apps' new connections are going to the cable.
-            carryingApps: routingOn && secondLane.home,
-            rate: lineRate(secondAlias),
-            // The last time connections that had moved to the cable were closed so they could return.
-            movedBack: secondLane.lastRelease,
-          }
-        : null,
-    },
-    candidates: secondCandidates(adapters, mainAlias).map((item) => ({
-      alias: item.alias,
-      label: laneLabel(item),
-      kind: item.kind,
-      ssid: item.ssid || null,
-    })),
+    // In priority order: the first is the main line.
+    lines: lines.map(lineState),
+    // Connected adapters that aren't a line yet, to add as one.
+    candidates: adapters
+      .filter((item) => item.connected && !lines.some((line) => line.alias === item.alias))
+      .map((item) => ({ alias: item.alias, label: lineLabel(item), kind: item.kind, ssid: item.ssid || null })),
     apps,
+    events,
+    settings: {
+      // Null until it can be read (and in a source checkout, which has no task).
+      autostart: null,
+      checkForUpdates: !testMode && settings.values.checkForUpdates,
+      probeTargets: settings.values.probeTargets,
+    },
     setup: {
-      cableNotDefault: Boolean(
-        main?.connected &&
-          second?.connected &&
-          second.alias !== main.alias &&
-          effectiveMetric(second) <= effectiveMetric(main),
-      ),
-      // Policy 3 blocks even connecting Wi-Fi by hand while the cable is plugged in.
+      // Windows would use another line before the main one while Net Switch is off.
+      cableNotDefault: outrankingMain().others.length > 0,
+      // Policy 3 blocks even connecting Wi-Fi by hand while a cable is plugged in.
       wifiBlocked: minimizePolicy === 3 && wifiPresent,
       keepBothConnected: Boolean(
-        secondAlias && (secondKind ?? second?.kind) === 'wifi' && minimizePolicy !== 0 && minimizePolicy !== 3,
+        lines.length > 1 &&
+          lines.some((line) => (line.kind ?? adapters.find((item) => item.alias === line.alias)?.kind) === 'wifi') &&
+          minimizePolicy !== 0 &&
+          minimizePolicy !== 3,
       ),
       changed: {
         cableDefault: Object.values(undo.metrics).some((record) => record.length > 0),
@@ -1102,8 +1425,24 @@ const actions = {
     await setRouting(Boolean(on));
     return buildState();
   },
-  'POST /api/app-lane': async ({ path: processPath, lane }) => {
-    await setAppLane(processPath, lane);
+  'POST /api/app-line': async ({ path: processPath, line }) => {
+    await setAppLine(processPath, line ?? null);
+    return buildState();
+  },
+  'POST /api/lines/add': async ({ alias }) => {
+    await addLine(alias);
+    return buildState();
+  },
+  'POST /api/lines/remove': async ({ id }) => {
+    await removeLine(id);
+    return buildState();
+  },
+  'POST /api/lines/update': async ({ id, label, metered, strict, cap }) => {
+    await updateLine(id, { label, metered, strict, cap });
+    return buildState();
+  },
+  'POST /api/lines/order': async ({ ids }) => {
+    await orderLines(ids);
     return buildState();
   },
   'POST /api/reconnect': async ({ key }) => ({ ...(await reconnectApp(key)), state: buildState() }),
@@ -1113,23 +1452,17 @@ const actions = {
     await settings.update({ skippedUpdate: version });
     return buildState();
   },
-  'POST /api/update/checks': async ({ on }) => {
-    if (typeof on !== 'boolean') throw clientError('Choose whether to check for updates, then try again.');
-    await settings.update({ checkForUpdates: on });
-    if (on) await updates.check();
-    else updates.offer = null;
+  'POST /api/combine': async ({ on, mode: combineMode, weights }) => {
+    await setCombine({ on, mode: combineMode, weights });
     return buildState();
   },
-  'POST /api/combine': async ({ on }) => {
-    await setCombine(on);
+  'POST /api/settings': async ({ autostart, checkForUpdates, probeTargets }) => {
+    await changeSettings({ autostart, checkForUpdates, probeTargets });
     return buildState();
   },
-  'POST /api/second-connection': async ({ alias }) => {
-    await chooseSecondConnection(alias ?? null);
-    return buildState();
-  },
+  // The path is from when the main line was always the cable.
   'POST /api/setup/cable-default': async () => {
-    await makeCableTheDefault();
+    await makeMainTheDefault();
     return buildState();
   },
   'POST /api/setup/keep-both': async () => {
@@ -1239,8 +1572,12 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
 
 await checkElevation();
 await refreshAdapters();
-await engine.setCombine(Boolean(settings.values.combine));
-await engine.setAppLanes(settings.values.secondApps, settings.values.cableApps);
+// The rule files are written for these when routing starts.
+await engine.changeRules({
+  appLines: settings.values.appLines,
+  combine: Boolean(settings.values.combine),
+  shares: computeShares(),
+});
 await writeFile(SERVER_FILE, JSON.stringify({ port, token, pid: process.pid, mode, startedAt: new Date().toISOString() }));
 await log(`started on port ${port} (mode ${mode}, elevated ${elevated})`);
 console.log(`Net Switch is running at http://127.0.0.1:${port}/#token=${token}`);
@@ -1250,3 +1587,4 @@ updates.start();
 every(nextScanDelay, refreshAdapters);
 every(1000, pollConnections);
 every(1000, superviseRouting);
+every(USAGE_SAVE_EVERY_MS, saveUsage);
