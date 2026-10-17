@@ -76,7 +76,7 @@ function Assert-PeArchitecture([string] $Path, [string] $Arch) {
     # AnyCPU uses an I386 PE header, but IL-only code with neither 32-bit flag.
     $assembly = [Reflection.Assembly]::ReflectionOnlyLoad([IO.File]::ReadAllBytes($Path))
     $kind = [Reflection.PortableExecutableKinds]0
-    $image = [Reflection.ImageFileMachine]0
+    $image = [Reflection.ImageFileMachine]::I386
     $assembly.ManifestModule.GetPEKind([ref]$kind, [ref]$image)
     if ([int]$kind -ne 1) { throw "Tray must be IL-only AnyCPU without Prefer32Bit: $Path ($kind)" }
   }
