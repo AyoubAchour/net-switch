@@ -244,8 +244,11 @@ function updateOffer() {
   return offer && offer.version !== settings.values.skippedUpdate ? offer : null;
 }
 
+// Test mode may use the engine of another checkout (a git worktree has none).
+// Never the real one: it runs the engine as administrator.
+const ENGINE_DIR = (testMode && argument('--engine-dir')) || path.join(ROOT, 'engine');
 const engine = new Engine({
-  singBoxPath: path.join(ROOT, 'engine', 'sing-box.exe'),
+  singBoxPath: path.join(ENGINE_DIR, 'sing-box.exe'),
   dataDir: MACHINE_DIR,
   mode,
 });

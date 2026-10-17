@@ -34,6 +34,11 @@ jobs:
         run: ./scripts/build-tray.ps1
       - name: Test app, tray program and C# tray with Windows PowerShell 5.1
         run: npm test
+      - name: Route real connections through the engine, per app and combined
+        run: |
+          ./scripts/fetch-engine.ps1
+          node scripts/e2e-routing.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify pinned downloads and stage the installer payload
         run: ./scripts/build-release.ps1 -SkipInstaller
 

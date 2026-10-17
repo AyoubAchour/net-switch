@@ -19,6 +19,8 @@
     "test": "node --test test/*.test.mjs",
     "build:helper": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-helper.ps1",
     "build:tray": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-tray.ps1",
+    "fetch:engine": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/fetch-engine.ps1",
+    "test:routing": "node scripts/e2e-routing.mjs",
     "build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release.ps1"
   }
 }
