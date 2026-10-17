@@ -287,7 +287,7 @@ func readNetwork() (networkLine, error) {
 	return assembleNetwork(line, unsafe.Slice(&table.Table[0], table.NumEntries), addresses, defaults, ssids, hidden, windows.GetIpInterfaceEntry)
 }
 
-func vanishedAdapter(err error) bool {
+func missingIPInterface(err error) bool {
 	return errors.Is(err, windows.ERROR_NOT_FOUND) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND)
 }
 
@@ -321,11 +321,15 @@ func assembleNetwork(line networkLine, rows []windows.MibIfRow2, addresses map[u
 		if err := readIP(&ipif); err == nil {
 			automatic := ipif.UseAutomaticMetric != 0
 			adapter.Metric, adapter.AutomaticMetric = &ipif.Metric, &automatic
-		} else if vanishedAdapter(err) {
+		} else if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
 			continue
-		} else {
+		} else if !errors.Is(err, windows.ERROR_NOT_FOUND) {
 			return line, fmt.Errorf("read IPv4 interface %d: %w", row.InterfaceIndex, err)
 		}
+		// ERROR_NOT_FOUND means this adapter has no interface for AF_INET,
+		// not that the adapter vanished (ERROR_FILE_NOT_FOUND). Azure's
+		// Mellanox VF is visible in Get-NetAdapter without its own IPv4 stack.
+		// Keep the adapter with null metrics in that case.
 		if ssid, ok := ssids[strings.ToLower(adapter.GUID)]; ok {
 			adapter.SSID = &ssid
 		}
@@ -350,7 +354,7 @@ func assembleNetwork(line networkLine, rows []windows.MibIfRow2, addresses map[u
 		}
 		ipif := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceIndex: route.InterfaceIndex}
 		if err := readIP(&ipif); err != nil {
-			if vanishedAdapter(err) {
+			if missingIPInterface(err) {
 				continue
 			}
 			return line, fmt.Errorf("read route interface %d: %w", route.InterfaceIndex, err)
