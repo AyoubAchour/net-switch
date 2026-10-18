@@ -18,10 +18,11 @@ const RUNNER = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
+[Console]::InputEncoding = [Text.Encoding]::UTF8
 Add-Type -Path $env:NETSWITCH_TRAY_CS -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Net.Http, System.Web.Extensions
 $json = New-Object System.Web.Script.Serialization.JavaScriptSerializer
 $json.MaxJsonLength = 16MB
-$results = foreach ($case in $json.DeserializeObject($env:NETSWITCH_CASES)) {
+$results = foreach ($case in $json.DeserializeObject([Console]::In.ReadToEnd())) {
   switch ($case['kind']) {
     'flyout' {
       $view = [NetSwitch.FlyoutModel]::FromState($case['state'])
@@ -182,9 +183,12 @@ before(() => {
   let output;
   try {
     output = execFileSync(POWERSHELL, ['-NoProfile', '-NonInteractive', '-OutputFormat', 'Text', '-EncodedCommand', encoded], {
-      env: { ...process.env, NETSWITCH_TRAY_CS: path.join(ROOT, 'lib', 'tray.cs'), NETSWITCH_CASES: JSON.stringify(Object.values(CASES)) },
+      // The fixture can push a hosted runner's environment past .NET's 64 KB
+      // process limit when Add-Type starts csc.exe. Send data over stdin.
+      env: { ...process.env, NETSWITCH_TRAY_CS: path.join(ROOT, 'lib', 'tray.cs') },
+      input: JSON.stringify(Object.values(CASES)),
       encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
       timeout: 90_000,
     });
