@@ -23,15 +23,16 @@ if ($Action -eq 'inspect') {
 } else {
   $index = [int]$env:NETSWITCH_TEST_ADAPTER
   if ($index -le 0) { throw 'Missing test adapter index.' }
+  $dnsClient = Get-DnsClientServerAddress -InterfaceIndex $index -AddressFamily IPv4
   if ($Action -eq 'dns-change') {
     $before = @((Get-DnsClientServerAddress -InterfaceIndex $index -AddressFamily IPv4).ServerAddresses)
     $servers = if (($before -join ',') -eq '1.1.1.1,8.8.8.8') { @('8.8.8.8', '1.1.1.1') } else { @('1.1.1.1', '8.8.8.8') }
-    Set-DnsClientServerAddress -InterfaceIndex $index -ServerAddresses $servers
+    $dnsClient | Set-DnsClientServerAddress -ServerAddresses $servers
   } else {
     if ($env:NETSWITCH_TEST_STATIC_DNS) {
-      Set-DnsClientServerAddress -InterfaceIndex $index -ServerAddresses ($env:NETSWITCH_TEST_STATIC_DNS -split '[,;\s]+' | Where-Object { $_ })
+      $dnsClient | Set-DnsClientServerAddress -ServerAddresses ($env:NETSWITCH_TEST_STATIC_DNS -split '[,;\s]+' | Where-Object { $_ })
     } else {
-      Set-DnsClientServerAddress -InterfaceIndex $index -ResetServerAddresses
+      $dnsClient | Set-DnsClientServerAddress -ResetServerAddresses
     }
   }
   @((Get-DnsClientServerAddress -InterfaceIndex $index -AddressFamily IPv4).ServerAddresses) | ConvertTo-Json -Compress

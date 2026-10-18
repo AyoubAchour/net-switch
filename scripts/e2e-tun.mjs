@@ -116,6 +116,9 @@ try {
   await engine.setAppLines({ [clientExe]: 'bb' });
   await engine.start({ lines });
   alive();
+  // The app's warn-level log can legitimately be empty. Keep a marked test
+  // header so the artifact exists even when the engine emitted no warnings.
+  await engine.log.append(`[test] Engine ${pins.singBox.version} started; subsequent engine output uses the app's warn level.`);
   const state = await network('state');
   assert(state.adapters.some((item) => item.Name === 'NetSwitch' && item.Status === 'Up'), JSON.stringify(state));
   assert(state.routes.length > 0, 'No TUN routes installed');
@@ -190,6 +193,7 @@ try {
   log('ok - new HTTPS connection after DNS restoration');
   await client('close');
   // Save the interesting first run before lifecycle rotations replace its log.
+  await engine.log.append('[test] Traffic probes finished; engine still running.');
   await writeFile(path.join(dir, 'traffic-engine.log'), await readFile(engine.logPath));
   await engine.stop();
   await clean('cycle 1/20');
