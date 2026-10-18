@@ -8,6 +8,59 @@ permissions:
   contents: read
 
 jobs:
+  engine:
+    name: Windows ${{ matrix.arch }} / engine configs and TUN
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the exact bundled Node version
+        id: node
+        run: |
+          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "version=$($pins.node.version)`n")
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Unit tests on the exact bundled Node
+        run: |
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Fetch the verified engine
+        run: ./scripts/fetch-engine.ps1
+      - name: Check generated configs, deprecations and build tags
+        run: |
+          node scripts/check-engine-config.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test real TUN routing and report port reuse and DNS changes
+        run: |
+          node scripts/e2e-tun.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Keep TUN logs and probe results, including on failure
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tun-test-${{ matrix.arch }}
+          path: |
+            dist/tun-test/*.log
+            dist/tun-test/report.txt
+          retention-days: 14
+
   linux:
     name: Linux / Node ${{ matrix.node }} (shared code)
     runs-on: ubuntu-24.04

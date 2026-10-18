@@ -1,0 +1,45 @@
+# Temporary preparation job for the stacked engine update; removed after the
+# independently verified binary hashes have been recorded in the update PR.
+name: Prepare engine update pins
+on: push
+permissions:
+  contents: read
+jobs:
+  hashes:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify archives and report executable and DLL hashes
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+          $expected = @{
+            amd64 = 'd8b86ef58936dba9230ec6a57ffa4243933f3c14ef4809828b6c553440ed1518'
+            arm64 = '195b35424c6e3f5913954c7f08c5d8ba2d2199f6d18eb27a3972a5a29cdaa78c'
+          }
+          foreach ($arch in 'amd64', 'arm64') {
+            $zip = Join-Path $env:RUNNER_TEMP "$arch.zip"
+            Invoke-WebRequest "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-windows-$arch.zip" -OutFile $zip -UseBasicParsing
+            if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected[$arch]) { throw 'Archive checksum mismatch' }
+            $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+            try {
+              foreach ($name in 'sing-box.exe', 'libcronet.dll') {
+                $stream = $archive.GetEntry("sing-box-1.14.3-windows-$arch/$name").Open()
+                try {
+                  $sha = [Security.Cryptography.SHA256]::Create()
+                  $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+                  Write-Host "VERIFIED $arch $name $hash"
+                  if ($name -eq 'libcronet.dll') {
+                    $old = if ($arch -eq 'amd64') { $pins.singBox.files.'libcronet.dll' } else { $pins.arm64.singBox.files.'libcronet.dll' }
+                    if ($hash -ne $old) { throw 'Cronet changed' }
+                  }
+                } finally { $stream.Dispose() }
+              }
+            } finally { $archive.Dispose() }
+          }
