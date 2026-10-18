@@ -106,6 +106,25 @@ function Assert-PeArchitecture([string] $Path, [string] $Arch) {
   Write-Host ('PE 0x{0:x4} ({1}): {2}' -f $machine, $Arch, $Path)
 }
 
+# Whether Windows gives the program a console window: subsystem 2 is a
+# windowless (GUI) program, 3 a console program. The startup task runs the
+# helper directly, so it must be windowless.
+function Assert-PeWindowless([string] $Path) {
+  $reader = [IO.BinaryReader]::new([IO.File]::OpenRead($Path))
+  try {
+    if ($reader.ReadUInt16() -ne 0x5a4d) { throw "Not a PE file: $Path" }
+    $reader.BaseStream.Position = 0x3c
+    $offset = $reader.ReadUInt32()
+    $reader.BaseStream.Position = $offset
+    if ($reader.ReadUInt32() -ne 0x4550) { throw "Invalid PE signature: $Path" }
+    # The subsystem sits at the same place in 32- and 64-bit optional headers.
+    $reader.BaseStream.Position = $offset + 24 + 68
+    $subsystem = $reader.ReadUInt16()
+  } finally { $reader.Dispose() }
+  if ($subsystem -ne 2) { throw "Expected a windowless program (subsystem 2), got subsystem ${subsystem}: $Path" }
+  Write-Host "Windowless program: $Path"
+}
+
 function Assert-NoLink([string] $Path) {
   if ((Get-Item -LiteralPath $Path -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw "Refusing a symlink or junction in packaging input/output: $Path"

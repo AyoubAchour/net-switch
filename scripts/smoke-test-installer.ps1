@@ -50,7 +50,7 @@ function Assert-Installed {
   $expected = @(
     'launch.ps1', 'tray.ps1', 'server.mjs', 'package.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
     'lib\engine.mjs', 'lib\tray.cs', 'ui\index.html', 'assets\net-switch.ico',
-    'tools\stop.ps1', 'tools\restore-windows.mjs', 'tools\remove-autostart.mjs',
+    'tools\stop.ps1', 'tools\restore-windows.mjs', 'tools\remove-autostart.mjs', 'tools\update-autostart.mjs',
     'runtime\node.exe', 'runtime\LICENSE',
     'engine\sing-box.exe', 'engine\SHA256SUMS.txt', 'engine\LICENSE',
     'helper\netswitch-helper.exe', 'tray\NetSwitchTray.exe',
@@ -79,6 +79,8 @@ function Assert-Installed {
   foreach ($file in @('runtime/node.exe', 'helper/netswitch-helper.exe')) {
     Assert-PeArchitecture (Join-Path $app $file) $Arch
   }
+  # The startup task runs the helper directly; a console program would open a window.
+  Assert-PeWindowless (Join-Path $app 'helper/netswitch-helper.exe')
   Assert-PeArchitecture (Join-Path $app 'tray/NetSwitchTray.exe') 'AnyCPU'
   if (-not $enginePin.files.PSObject.Properties['libcronet.dll'] -and
       (Test-Path -LiteralPath (Join-Path $app 'engine/libcronet.dll'))) {
@@ -247,6 +249,70 @@ function Test-StartupTask([string] $Name) {
   return $query.ExitCode -eq 0
 }
 
+# What the Server task runs, through the Task Scheduler's own interface.
+function Get-ServerTaskAction {
+  $service = New-Object -ComObject Schedule.Service
+  $service.Connect()
+  $action = $service.GetFolder('\Net Switch').GetTask('Server').Definition.Actions.Item(1)
+  return [pscustomobject]@{ Path = $action.Path; Arguments = $action.Arguments }
+}
+
+# Visible windows titled with the installed node.exe path. A console program's
+# window carries its path as the title, whoever draws it: conhost, or Windows
+# Terminal on Windows 11. Asking node.exe for its own main window doesn't work:
+# under Windows Terminal it has none, even while its console shows on screen.
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class NetSwitchSmokeWindows {
+  delegate bool EnumProc(IntPtr window, IntPtr data);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback, IntPtr data);
+  [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int size);
+  public static List<string> Titles() {
+    var titles = new List<string>();
+    EnumWindows((window, data) => {
+      if (!IsWindowVisible(window)) return true;
+      var text = new StringBuilder(512);
+      GetWindowText(window, text, 512);
+      if (text.Length > 0) titles.Add(text.ToString());
+      return true;
+    }, IntPtr.Zero);
+    return titles;
+  }
+}
+'@
+function Get-NodeWindows {
+  @([NetSwitchSmokeWindows]::Titles() | Where-Object { $_.IndexOf($node, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
+}
+
+# Waits for the server a task started, and returns its server.json.
+function Wait-TaskServer([string] $Failure) {
+  $script:runningServer = $null
+  Wait-Until {
+    try {
+      $saved = Get-Content -LiteralPath $serverFile -Raw | ConvertFrom-Json
+      $ping = Invoke-RestMethod -Uri "http://127.0.0.1:$($saved.port)/api/ping" -Headers @{ 'X-Token' = $saved.token } -TimeoutSec 2
+      if ($ping.ok -eq $true) { $script:runningServer = $saved; return $true }
+    } catch {}
+    return $false
+  } $Failure 120
+  return $script:runningServer
+}
+
+function Set-ServerTaskAction([string] $Path, [string] $Arguments) {
+  $service = New-Object -ComObject Schedule.Service
+  $service.Connect()
+  $folder = $service.GetFolder('\Net Switch')
+  $definition = $folder.GetTask('Server').Definition
+  $action = $definition.Actions.Item(1)
+  $action.Path = $Path
+  $action.Arguments = $Arguments
+  [void]$folder.RegisterTaskDefinition('Server', $definition, 4, $null, $null, $definition.Principal.LogonType)
+}
+
 function Stop-InstalledApp($Server) {
   $null = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$($Server.port)/api/quit" -Headers @{ 'X-Token' = $Server.token } -ContentType 'application/json' -Body '{}' -TimeoutSec 60
   Wait-Until { -not (Test-Path -LiteralPath $serverFile) } '/api/quit did not remove server.json.'
@@ -295,24 +361,66 @@ if ($state.settings.autostart -ne $true) { throw 'Turning on starting with Windo
 foreach ($name in 'Server', 'Sign-in') {
   if (-not (Test-StartupTask $name)) { throw "Startup task missing: $name" }
 }
+# The Server task starts node.exe through the windowless helper: run directly
+# by the task, the console program node.exe opens a window on the desktop.
+$helperProgram = Join-Path $app 'helper\netswitch-helper.exe'
+$serverAction = Get-ServerTaskAction
+$expectedArguments = "run `"$node`" `"$(Join-Path $app 'server.mjs')`" --user-data `"$userData`" --machine-data `"$machineData`""
+if ($serverAction.Path -ne $helperProgram -or $serverAction.Arguments -ne $expectedArguments) {
+  throw "The Server task runs $($serverAction.Path) $($serverAction.Arguments)"
+}
 Stop-InstalledApp $server
+
+# A 0.3.0 task ran node.exe directly, which showed a console window. Start the
+# server that way once, so the window check below is known to see such a
+# window on this machine; otherwise "no window" would prove nothing.
+$legacyArguments = "`"$(Join-Path $app 'server.mjs')`" --user-data `"$userData`" --machine-data `"$machineData`""
+Set-ServerTaskAction $node $legacyArguments
+$taskStart = Start-Process -FilePath $schtasks -ArgumentList '/Run', '/TN', '"\Net Switch\Server"' -WindowStyle Hidden -Wait -PassThru
+if ($taskStart.ExitCode -ne 0) { throw "Running the 0.3.0-style Server task failed (schtasks exit code $($taskStart.ExitCode))." }
+$server = Wait-TaskServer 'The 0.3.0-style Server task did not bring up the server within 120 seconds.'
+Wait-Until { @(Get-NodeWindows).Count -gt 0 } 'The window check saw no window for the 0.3.0-style start, so it cannot be trusted here.' 30
+Write-Host 'The window check sees the console window of the 0.3.0-style start'
+# The server started that way repairs its own task in the background, for a
+# task the installer missed.
+Wait-Until {
+  $action = Get-ServerTaskAction
+  return $action.Path -eq $helperProgram -and $action.Arguments -eq $expectedArguments
+} 'The server did not update the 0.3.0-style task it was started by.' 60
+Write-Host 'A server started by a 0.3.0-style task updates the task itself'
+Stop-InstalledApp $server
+
+# The installer's update step must point a 0.3.0 task at the helper, keeping
+# its arguments, and leave a current one alone.
+Set-ServerTaskAction $node $legacyArguments
+$update = & $node (Join-Path $app 'tools\update-autostart.mjs')
+if ($LASTEXITCODE -ne 0 -or "$update" -notmatch 'Startup task: updated') { throw "Updating a 0.3.0 startup task failed: $update" }
+$serverAction = Get-ServerTaskAction
+if ($serverAction.Path -ne $helperProgram -or $serverAction.Arguments -ne $expectedArguments) {
+  throw "The updated Server task runs $($serverAction.Path) $($serverAction.Arguments)"
+}
+$update = & $node (Join-Path $app 'tools\update-autostart.mjs')
+if ($LASTEXITCODE -ne 0 -or "$update" -notmatch 'Startup task: current') { throw "A current startup task was not left alone: $update" }
+Write-Host 'A 0.3.0 startup task is updated to start the server without a window'
 $signIn = Start-Process -FilePath $windowsPowerShell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$(Join-Path $app 'launch.ps1')`"", '-Background' -WindowStyle Hidden -PassThru
 $launchers.Add($signIn)
-$script:runningServer = $null
-Wait-Until {
-  try {
-    $saved = Get-Content -LiteralPath $serverFile -Raw | ConvertFrom-Json
-    $ping = Invoke-RestMethod -Uri "http://127.0.0.1:$($saved.port)/api/ping" -Headers @{ 'X-Token' = $saved.token } -TimeoutSec 2
-    if ($ping.ok -eq $true) { $script:runningServer = $saved; return $true }
-  } catch {}
-  return $false
-} 'The sign-in start did not bring up the server within 120 seconds.' 120
-$server = $script:runningServer
+$server = Wait-TaskServer 'The sign-in start did not bring up the server within 120 seconds.'
 $serverProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $($server.pid)"
 $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $($serverProcess.ParentProcessId)"
-$parentName = if ($parent) { $parent.Name } else { 'gone' }
-# The Task Scheduler service starts it; a permission prompt would make the launcher its parent.
-if ($parentName -ne 'svchost.exe') { throw "The sign-in start did not use the startup task (the server's parent is $parentName)." }
+$grandparent = if ($parent) { Get-CimInstance Win32_Process -Filter "ProcessId = $($parent.ParentProcessId)" } else { $null }
+$chain = '{0} <- {1}' -f $(if ($parent) { $parent.Name } else { 'gone' }), $(if ($grandparent) { $grandparent.Name } else { 'gone' })
+# The Task Scheduler service starts the windowless helper, which starts the
+# server. A permission prompt would make the launcher its parent.
+if (-not $parent -or $parent.ExecutablePath -ne $helperProgram -or $parent.CommandLine -notmatch ' run ' -or
+    -not $grandparent -or $grandparent.Name -ne 'svchost.exe') {
+  throw "The sign-in start did not use the startup task through the helper (the server's parents: $chain)."
+}
+# No window on screen for the server (checked a few seconds in, when the
+# 0.3.0-style start above already showed one).
+Start-Sleep -Seconds 3
+$windows = @(Get-NodeWindows)
+if ($windows.Count) { throw "The server started at sign-in shows a window: $($windows -join ', ')" }
+Write-Host 'The server started at sign-in shows no window'
 Wait-Until { $signIn.HasExited } 'The sign-in start did not finish.' 120
 if ($signIn.ExitCode -ne 0) { throw "The sign-in start exited with code $($signIn.ExitCode)." }
 Wait-Until { @(Get-AppProcesses | Where-Object { $_.ExecutablePath -eq $trayProgram }).Count -eq 1 } 'The sign-in start did not start the tray program.'

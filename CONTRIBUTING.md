@@ -102,7 +102,10 @@ built, `npm test` also runs it and checks its output against the PowerShell
 version. Without them, those tests are skipped and say so. The helper's own Go
 tests run in `npm run build:helper`, which also checks `gofmt` and `go vet`.
 
-The helper has five modes: `meters`, `outside`, `network`, `probe` and `policy`.
+The helper has six modes: `meters`, `outside`, `network`, `probe`, `policy`, and
+`run`, which the startup task uses to start the server without a console window.
+The helper is built as a windowless program for that reason, so to see its
+output by hand, pipe it: `helper\bin\netswitch-helper.exe network --once | more`.
 `network --once` prints adapters, IPv4 default routes and the Wi-Fi policy.
 Without `--once`, it subscribes to Windows interface, address and route changes,
 groups IPv4 notifications for 300 ms, and refreshes every 10 seconds as a safeguard

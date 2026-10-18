@@ -145,6 +145,26 @@ test('with checking turned off, or no release published yet, nothing is offered'
   assert.equal(empty.offer, null);
 });
 
+test('each check says what it found, for Check now', async () => {
+  const { fetch } = fakeFetch([{ status: 200, body: release() }, { status: 200, body: release() }, new Error('getaddrinfo ENOTFOUND'), { status: 404 }]);
+  const newer = new UpdateChecker({ currentVersion: '0.2.0', fetch });
+  assert.equal(await newer.check(), 'available');
+  const current = new UpdateChecker({ currentVersion: '0.3.0', fetch });
+  assert.equal(await current.check(), 'latest');
+  assert.equal(await current.check(), 'failed');
+  // No release published yet: nothing newer exists.
+  assert.equal(await current.check(), 'latest');
+});
+
+test('Check now runs even with the automatic checks turned off', async () => {
+  const { fetch, calls } = fakeFetch([{ status: 200, body: release() }]);
+  const checker = new UpdateChecker({ currentVersion: '0.2.0', fetch, enabled: () => false });
+  assert.equal(await checker.check(), 'off');
+  assert.equal(calls.length, 0);
+  assert.equal(await checker.check({ force: true }), 'available');
+  assert.equal(checker.offer?.version, '0.3.0');
+});
+
 test('two checks at once make one request', async () => {
   const { fetch, calls } = fakeFetch([{ status: 200, body: release() }]);
   const checker = new UpdateChecker({ currentVersion: '0.2.0', fetch });

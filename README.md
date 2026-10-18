@@ -124,7 +124,8 @@ from older versions. You can also just download the latest installer from the
 run it over your current copy.
 
 Net Switch asks GitHub about new versions twice a day; turn that off with
-**Check for updates** in its settings.
+**Check for updates** in its settings, or press **Check now** there to look
+right away.
 
 ## Uninstalling
 

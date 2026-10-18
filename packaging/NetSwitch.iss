@@ -56,6 +56,10 @@ Name: "{autoprograms}\Net Switch"; Filename: "{sys}\WindowsPowerShell\v1.0\power
 Name: "{autodesktop}\Net Switch"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\launch.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\net-switch.ico"; Tasks: desktopicon
 
 [Run]
+; Before Net Switch opens again: a startup task from 0.3.0 ran node.exe
+; directly, which showed a console window. Missing tasks are fine, and a
+; failure is logged without stopping the install (the server retries).
+Filename: "{app}\runtime\node.exe"; Parameters: """{app}\tools\update-autostart.mjs"""; WorkingDir: "{app}"; StatusMsg: "Updating the startup task..."; Flags: runhidden waituntilterminated
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""{app}\launch.ps1"""; WorkingDir: "{app}"; Description: "Open Net Switch"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [UninstallRun]

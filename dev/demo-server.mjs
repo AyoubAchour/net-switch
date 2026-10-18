@@ -325,7 +325,7 @@ function state() {
     mode: 'tun',
     elevated: true,
     version: VERSION,
-    update: offerUpdate && settings.checkForUpdates ? DEMO_UPDATE : null,
+    update: offerUpdate ? DEMO_UPDATE : null,
     features: { reconnect: true, combine: true, lines: true, installedApps: true },
     combine: { on: combine.on, active: combineActive(), mode: combine.mode },
     routing: { status: routingOn ? 'on' : 'off', wanted: routingOn, error: null, measuring: routingOn, proxyPort: null, retryAt: null },
@@ -470,6 +470,8 @@ const actions = {
     await sleep(QUICK_MS);
     if (autostart !== undefined) settings.autostart = Boolean(autostart);
     if (checkForUpdates !== undefined) settings.checkForUpdates = Boolean(checkForUpdates);
+    // Like the real server: turning checks off drops the offer, back on finds it.
+    if (checkForUpdates !== undefined) offerUpdate = Boolean(checkForUpdates) && Boolean(startOptions.update);
     if (probeTargets !== undefined) {
       const valid =
         Array.isArray(probeTargets) &&
@@ -483,6 +485,13 @@ const actions = {
   'POST /api/update/dismiss': async () => {
     offerUpdate = false;
     return state();
+  },
+  // Check now: finds the demo release when started with --update.
+  'POST /api/update/check': async () => {
+    await sleep(QUICK_MS);
+    const found = Boolean(startOptions.update);
+    if (found) offerUpdate = true;
+    return { ...state(), check: { result: found ? 'available' : 'latest', version: found ? DEMO_UPDATE.version : null } };
   },
   'POST /api/setup/cable-default': async () => {
     await sleep(RESTART_MS);

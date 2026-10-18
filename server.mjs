@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { appKey, appPins, AppTracker, connectionLine, mergeRows, OutsideTracker, parseOutsideId } from './lib/apps.mjs';
 import { AppInfo } from './lib/appinfo.mjs';
-import { canAutostart, disableAutostart, enableAutostart, readAutostart } from './lib/autostart.mjs';
+import { canAutostart, disableAutostart, enableAutostart, installedHelper, readAutostart, upgradeAutostart } from './lib/autostart.mjs';
 import { Engine, probeUrls } from './lib/engine.mjs';
 import { InstalledApps } from './lib/installed-apps.mjs';
 import { LaneSwitch } from './lib/lane-switch.mjs';
@@ -1650,6 +1650,16 @@ const actions = {
     return buildState();
   },
   'POST /api/reconnect': async ({ key }) => ({ ...(await reconnectApp(key)), state: buildState() }),
+  // Check now, in Settings. The person asked, so it runs even with the
+  // automatic checks off, and a release they said "not now" to is offered again.
+  'POST /api/update/check': async () => {
+    if (testMode) throw clientError('Test mode doesn’t check for updates.');
+    const result = await updates.check({ force: true });
+    if (result === 'available' && updates.offer?.version === settings.values.skippedUpdate) {
+      await settings.update({ skippedUpdate: null });
+    }
+    return { ...buildState(), check: { result, version: updates.offer?.version ?? null } };
+  },
   // "Not now" for one release: it isn't offered again, a later one is.
   'POST /api/update/dismiss': async ({ version }) => {
     if (typeof version !== 'string' || !version) throw clientError('Choose which update to skip, then try again.');
@@ -1783,6 +1793,17 @@ if (networkMonitor) {
   await refreshAdapters();
 }
 await refreshAutostart();
+// A startup task from 0.3.0 runs node.exe directly, which shows a console
+// window. The installer updates it; this catches one it couldn't. In the
+// background: it never holds up starting.
+if (AUTOSTART_ALLOWED && elevated && autostart) {
+  upgradeAutostart({ nodePath: process.execPath, helperPath: installedHelper(ROOT) })
+    .then((result) => {
+      if (result === 'updated') log('updated the startup task to start the server without a window');
+      else if (result === 'unknown') log('the startup task runs something unexpected; left it as it is');
+    })
+    .catch((error) => log(`could not check the startup task: ${describeFailure(error, 30_000)}`));
+}
 // The rule files are written for these when routing starts.
 await engine.changeRules({
   appLines: settings.values.appLines,

@@ -6,7 +6,8 @@ import { canAutostart, taskDefinitions } from '../lib/autostart.mjs';
 const PROGRAM_FILES = 'C:\\Program Files';
 const ROOT = 'C:\\Program Files\\Net Switch';
 const NODE = path.join(ROOT, 'runtime', 'node.exe');
-const exists = (file) => file.toLowerCase() === NODE.toLowerCase();
+const HELPER = path.join(ROOT, 'helper', 'netswitch-helper.exe');
+const exists = (file) => [NODE, HELPER].some((known) => file.toLowerCase() === known.toLowerCase());
 
 test('only an installed copy in Program Files, run by its own Node.js, may start with Windows', () => {
   assert.equal(canAutostart({ root: ROOT, nodePath: NODE, programFiles: PROGRAM_FILES, exists }), true);
@@ -27,9 +28,11 @@ test('only an installed copy in Program Files, run by its own Node.js, may start
   );
   // Windows didn't say where Program Files is.
   assert.equal(canAutostart({ root: ROOT, nodePath: NODE, programFiles: null, exists }), false);
+  // Without the helper the task starts the server through, it would fail at sign-in.
+  assert.equal(canAutostart({ root: ROOT, nodePath: NODE, programFiles: PROGRAM_FILES, exists: (file) => file === NODE }), false);
 });
 
-test('the service task runs the installed server as administrator on request; the sign-in task runs the launcher as the person', () => {
+test('the service task runs the installed server as administrator on request, without a window; the sign-in task runs the launcher as the person', () => {
   const { server, signIn } = taskDefinitions({
     root: ROOT,
     nodePath: NODE,
@@ -38,11 +41,12 @@ test('the service task runs the installed server as administrator on request; th
   });
   assert.match(server, /<RunLevel>HighestAvailable<\/RunLevel>/);
   assert.match(server, /<Triggers><\/Triggers>/, 'started by launch.ps1 only');
-  assert.match(server, /<Command>C:\\Program Files\\Net Switch\\runtime\\node\.exe<\/Command>/);
+  // Through the windowless helper: node.exe run by the task directly opens a console window.
+  assert.match(server, /<Command>C:\\Program Files\\Net Switch\\helper\\netswitch-helper\.exe<\/Command>/);
   // Text is escaped for XML, and every path is quoted.
   assert.match(
     server,
-    /<Arguments>&#34;C:\\Program Files\\Net Switch\\server\.mjs&#34; --user-data &#34;C:\\Users\\A &#38; B\\AppData\\Local\\Net Switch&#34; --machine-data &#34;C:\\ProgramData\\Net Switch&#34;<\/Arguments>/,
+    /<Arguments>run &#34;C:\\Program Files\\Net Switch\\runtime\\node\.exe&#34; &#34;C:\\Program Files\\Net Switch\\server\.mjs&#34; --user-data &#34;C:\\Users\\A &#38; B\\AppData\\Local\\Net Switch&#34; --machine-data &#34;C:\\ProgramData\\Net Switch&#34;<\/Arguments>/,
   );
   assert.match(signIn, /<RunLevel>LeastPrivilege<\/RunLevel>/);
   assert.match(signIn, /<LogonTrigger><Enabled>true<\/Enabled><UserId>__NETSWITCH_USER_SID__<\/UserId>/);

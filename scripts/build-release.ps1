@@ -33,7 +33,7 @@ $rootFiles = @(
 $trees = @('lib', 'ui', 'tools', 'licenses', 'docs')
 $required = $rootFiles + $trees + @(
   'lib/tray.cs', 'ui/index.html', 'ui/app.js', 'ui/styles.css', 'ui/favicon.svg',
-  'tools/stop.ps1', 'tools/restore-windows.mjs', 'tools/remove-autostart.mjs', 'licenses/lucide-ISC.txt', 'docs/user-guide.md',
+  'tools/stop.ps1', 'tools/restore-windows.mjs', 'tools/remove-autostart.mjs', 'tools/update-autostart.mjs', 'licenses/lucide-ISC.txt', 'docs/user-guide.md',
   # Kept in the repository rather than downloaded: gnu.org refuses connections
   # from GitHub's runners. Its hash is still checked against the pin below.
   'licenses/GPL-3.0.txt'
@@ -68,6 +68,7 @@ foreach ($directory in @($repoRoot, $dist, $cache)) {
 & (Join-Path $PSScriptRoot 'build-helper.ps1') -Arch $Arch
 $helperExe = Get-HelperBinaryPath $repoRoot $Arch
 Assert-NoLink $helperExe
+Assert-PeWindowless $helperExe
 # The tray icon as its own program, built with the C# compiler that comes with
 # Windows, so the installed tray needs no PowerShell running.
 & (Join-Path $PSScriptRoot 'build-tray.ps1')
