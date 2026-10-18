@@ -205,7 +205,48 @@ async function proxied() {
   console.log(`answer ${data.split('\r\n')[0]} | ${data.trim().split('\n').pop()}`);
 }
 
-const modes = { whoami, udp, stream, 'hold-files': holdFiles, proxied };
+// Connects again and again from one fixed source port, as an app that binds
+// its port would, each after the last one closed. --late adds one more try
+// after that long.
+async function reuse() {
+  const target = endpoint(option('--to'));
+  const localPort = Number(option('--local-port'));
+  const count = Number(option('--count', '4'));
+  const gap = Number(option('--gap', '1000'));
+  const timeout = Number(option('--timeout', '5000'));
+  const late = Number(option('--late', '0'));
+  const once = () =>
+    new Promise((resolve) => {
+      const started = performance.now();
+      const socket = connect({ host: target.host, port: target.port, localPort });
+      let data = '';
+      let done = false;
+      const finish = (what) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        socket.destroy();
+        resolve(`${what}@${Math.round(performance.now() - started)}ms`);
+      };
+      const timer = setTimeout(() => finish('TIMEOUT'), timeout);
+      socket.setEncoding('utf8');
+      socket.on('data', (chunk) => (data += chunk));
+      socket.on('error', (error) => finish(error.code ?? error.message));
+      socket.on('close', () => finish(data.trim() ? `ok:${data.trim()}` : 'EMPTY'));
+    });
+  const outcomes = [];
+  for (let i = 0; i < count; i += 1) {
+    outcomes.push(await once());
+    await delay(gap);
+  }
+  if (late > 0) {
+    await delay(late);
+    outcomes.push(`after ${Math.round(late / 1000)} s: ${await once()}`);
+  }
+  console.log(JSON.stringify({ localPort, outcomes }));
+}
+
+const modes = { whoami, udp, stream, 'hold-files': holdFiles, proxied, reuse };
 if (!modes[mode]) {
   console.error(`unknown mode ${mode}`);
   process.exit(2);

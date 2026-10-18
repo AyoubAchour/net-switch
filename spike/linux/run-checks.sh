@@ -632,9 +632,38 @@ check14() {
   done
 }
 
+check15() {
+  begin check15 "Connecting again from a source port that was just used"
+  local spec
+  for spec in none:on gvisor:on gvisor:off system:on mixed:on; do
+    local stack=${spec%%:*} lookup=${spec#*:}
+    topo_up && servers_up || {
+      fail "$spec: topology did not come up"
+      continue
+    }
+    local dir="$OUT/check15-$stack-$lookup" opts=(--stack "$stack") late=0 out
+    [ "$lookup" = off ] && opts+=(--no-rules)
+    # gvisor keeps a closed connection in TIME_WAIT for 60 s by default.
+    [ "$spec" = gvisor:on ] && late=65000
+    if [ "$stack" != none ]; then
+      gen "$dir" "${opts[@]}" && engine_start "$dir" || continue
+    fi
+    out=$(as_app /opt/nsapps/alpha/node "$CLIENT" reuse --to "$WHOAMI" --local-port 45000 --count 4 --gap 1000 --timeout 5000 --late "$late" 2>&1 | tail -1)
+    local outcomes
+    outcomes=$(jq -r '.outcomes | join(", ")' <<< "$out" 2>/dev/null || echo "$out")
+    if grep -q TIMEOUT <<< "$outcomes"; then
+      fail "$stack stack, process lookup $lookup: 4 connections from port 45000, 1 s apart: $outcomes"
+    else
+      pass "$stack stack, process lookup $lookup: 4 connections from port 45000, 1 s apart: $outcomes"
+    fi
+    engine_stop
+    topo_down
+  done
+}
+
 apps_setup
 summary "## Routing checks: $(. /etc/os-release && echo "$PRETTY_NAME"), $(uname -m), kernel $(uname -r)"
-for check in ${CHECKS:-check1 check2 check3 check4 check5 check6 check7 check8 check9 check10 check11 check13}; do
+for check in ${CHECKS:-check1 check2 check3 check4 check5 check6 check7 check8 check9 check10 check11 check13 check15}; do
   "$check"
 done
 CHECK=total
