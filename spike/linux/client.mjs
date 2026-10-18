@@ -56,12 +56,16 @@ async function whoami() {
       const socket = connect({ host: target.host, port: target.port });
       const timer = setTimeout(() => {
         result.error = 'TIMEOUT';
+        // A socket still in SYN_SENT has its port already.
+        result.port ??= socket.localPort ?? null;
+        result.connected = false;
         socket.destroy();
         finish();
       }, timeout);
       socket.setEncoding('utf8');
       socket.on('connect', () => {
         result.port = socket.localPort;
+        result.connected = true;
         result.connectMs = Math.round((performance.now() - started) * 10) / 10;
       });
       socket.on('data', (chunk) => (data += chunk));
@@ -94,11 +98,18 @@ async function whoami() {
     connectP50: percentile(ok.map((result) => result.connectMs ?? 0), 50),
     // A lost SYN is sent again after 1 s, so these show dropped handshakes.
     over1s: ok.filter((result) => result.ms >= 1000).length,
-    // The worst connections: how long, and whether the handshake finished.
+    // Source ports the kernel handed out more than once in this run.
+    reusedPorts: results.filter((result, index) => result.port && results.findIndex((other) => other.port === result.port) < index).length,
+    // The worst connections: how long, whether the handshake finished, and
+    // whether an earlier connection in this run had used the same port.
     stalls: results
       .filter((result) => result.error || result.ms >= 1000)
       .slice(0, 8)
-      .map((result) => `${result.error ?? 'ok'}@${Math.round(result.ms)}ms${result.port ? `:port${result.port}` : ':no-handshake'}`),
+      .map((result) => {
+        const earlier = results.findIndex((other) => other.port && other.port === result.port);
+        const reuse = earlier >= 0 && earlier < result.index ? `,reused-from-#${earlier}` : '';
+        return `${result.error ?? 'ok'}@${Math.round(result.ms)}ms:#${result.index}:port${result.port ?? '?'}${result.connected ? '' : ',no-handshake'}${reuse}`;
+      }),
   };
   const out = option('--out');
   if (out) writeFileSync(out, JSON.stringify({ summary, results }));

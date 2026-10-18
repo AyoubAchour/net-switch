@@ -602,28 +602,30 @@ goroutine_stacks() {
 
 check14() {
   begin check14 "gvisor + process lookup: hunting handshakes that never finish"
-  local round
-  for round in 1 2 3 4 5; do
+  local round dumped=
+  for round in 1 2 3 4 5 6 7 8; do
     topo_up && servers_up || {
       fail "round $round: topology did not come up"
       continue
     }
-    local dir="$OUT/check14-round$round" result timeouts
-    gen "$dir" --log-level info && engine_start "$dir" || continue
+    # Odd rounds look processes up, even rounds don't.
+    local dir="$OUT/check14-round$round" result timeouts mode=lookup opts=(--log-level info)
+    if [ $((round % 2)) -eq 0 ]; then
+      mode=no-lookup
+      opts+=(--no-rules)
+    fi
+    gen "$dir" "${opts[@]}" && engine_start "$dir" || continue
     result=$(as_app /opt/nsapps/alpha/node "$CLIENT" whoami --to "$WHOAMI" --count 2000 --concurrency 10 --timeout 10000 2>&1 | tail -1)
     timeouts=$(jq -r '.errors.TIMEOUT // 0' <<< "$result" 2>/dev/null)
-    info "round $round: $result"
-    note "round $round: ${timeouts:-?} of 2,000 handshakes never finished; the engine logged $(grep -c 'inbound connection from' "$dir/engine.log") inbound connections and $(grep -c 'outbound connection to' "$dir/engine.log") outbound ones"
-    if [ "${timeouts:-0}" -gt 0 ]; then
-      block "round $round: client sockets still waiting" "$(in_dut ss -tan state syn-sent | head -12)"
+    note "round $round ($mode): ${timeouts:-?} of 2,000 handshakes never finished; source ports reused in the run: $(jq -r .reusedPorts <<< "$result" 2>/dev/null); stuck: $(jq -c .stalls <<< "$result" 2>/dev/null); the engine logged $(grep -c 'inbound connection from' "$dir/engine.log") inbound connections"
+    if [ "${timeouts:-0}" -gt 0 ] && [ -z "$dumped" ]; then
+      dumped=1
       kill -QUIT "$SB_PID"
       sleep 3
-      info "round $round: dump has $(grep -c '^goroutine ' "$dir/engine.log") goroutines; it starts: $(grep -m3 -E 'SIGQUIT|^goroutine ' "$dir/engine.log" | tr '\n' ' ')"
+      info "round $round: dump has $(grep -c '^goroutine ' "$dir/engine.log") goroutines"
       block "round $round: goroutines by state and first sing-box frame" "$(goroutine_kinds "$dir/engine.log")"
       block "round $round: stacks through the forwarder or process lookup" "$(goroutine_stacks "$dir/engine.log")"
       SB_PID=
-      topo_down
-      break
     fi
     engine_stop
     topo_down
