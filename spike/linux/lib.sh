@@ -136,11 +136,44 @@ topo_up() {
   # main line's with the lower metric.
   ip -n dut route add default via 192.168.10.1 dev vethA metric 100
   ip -n dut route add default via 192.168.20.1 dev vethB metric 200
+  # Snapshots taken before IPv6 link-local addresses settle would differ.
+  wait_for "IPv6 duplicate address detection in dut" 15 dad_done
+}
+dad_done() {
+  [ -z "$(ip -n dut -6 addr show tentative)" ] && [ "$(ip -n dut -6 addr show scope link | grep -c inet6)" -ge 2 ]
+}
+
+# Ways to keep local networks out of the engine, as a check's variant:
+#   ranges     route_exclude_address with Net Switch's LOCAL_RANGES (Windows today)
+#   none       no route_exclude_address
+#   own-rules  no route_exclude_address; Net Switch's own "to <range> lookup main"
+#              rules just before sing-box's
+V4_LOCAL="10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 224.0.0.0/4 255.255.255.255/32"
+V6_LOCAL="fc00::/7 fe80::/10 ff00::/8"
+variant_flags() {
+  case "$1" in
+    none | own-rules) echo --no-exclude-ranges ;;
+  esac
+}
+own_rules() {
+  local action=$1 range
+  for range in $V4_LOCAL; do in_dut ip rule "$action" to "$range" lookup main pref 31090; done
+  for range in $V6_LOCAL; do in_dut ip -6 rule "$action" to "$range" lookup main pref 31090; done
+}
+variant_setup() {
+  [ "$1" = own-rules ] && own_rules add
+  return 0
+}
+
+# Long route lists collapsed to a count.
+compact() {
+  awk '/via (198\.18\.0\.2|fdfe:dcba:9876::2) dev NetSwitch/ { split_routes++; next } { print } END { if (split_routes) print "(+ " split_routes " routes via the TUN)" }'
 }
 
 servers_up() {
   rm -f "$OUT/server.log"
   ip netns exec inet "$NODE" "$HERE/server.mjs" > "$OUT/server.log" 2>&1 &
+  disown
   wait_for "the fake internet's servers" 15 grep -q ready "$OUT/server.log" || return 1
   if [ "${1:-}" = iperf ]; then
     ip netns exec inet iperf3 -s -D -B 192.0.2.10 || return 1
@@ -152,7 +185,7 @@ apps_setup() {
   local app
   for app in alpha bravo; do
     mkdir -p "/opt/nsapps/$app"
-    cp "$(command -v curl)" "/opt/nsapps/$app/curl"
+    cp /usr/bin/curl "/opt/nsapps/$app/curl"
     cp "$(readlink -f "$NODE")" "/opt/nsapps/$app/node"
   done
   chmod -R a+rX /opt/nsapps
@@ -170,10 +203,11 @@ gen() {
 API_PORT=9090
 api() {
   local ns=$1 route=$2 method=${3:-GET}
+  # /usr/bin/curl: installing the curl snap puts another curl first on PATH.
   if [ "$ns" = root ]; then
-    curl -s --max-time 5 -H "Authorization: Bearer spike" -X "$method" "http://127.0.0.1:$API_PORT$route"
+    /usr/bin/curl -s --max-time 5 -H "Authorization: Bearer spike" -X "$method" "http://127.0.0.1:$API_PORT$route"
   else
-    ip netns exec "$ns" curl -s --max-time 5 -H "Authorization: Bearer spike" -X "$method" "http://127.0.0.1:$API_PORT$route"
+    ip netns exec "$ns" /usr/bin/curl -s --max-time 5 -H "Authorization: Bearer spike" -X "$method" "http://127.0.0.1:$API_PORT$route"
   fi
 }
 api_ok() { api "$1" /version | grep -q version; }

@@ -92,6 +92,8 @@ async function whoami() {
     p95: percentile(ok.map((result) => result.ms), 95),
     max: percentile(ok.map((result) => result.ms), 100),
     connectP50: percentile(ok.map((result) => result.connectMs ?? 0), 50),
+    // A lost SYN is sent again after 1 s, so these show dropped handshakes.
+    over1s: ok.filter((result) => result.ms >= 1000).length,
   };
   const out = option('--out');
   if (out) writeFileSync(out, JSON.stringify({ summary, results }));

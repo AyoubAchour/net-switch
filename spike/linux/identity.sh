@@ -73,14 +73,16 @@ deleted_case() {
     rm) rm -f "/opt/nsapps/$app/node" ;;
     replace) cp "$(readlink -f "$NODE")" "/opt/nsapps/$app/node.new" && mv -f "/opt/nsapps/$app/node.new" "/opt/nsapps/$app/node" ;;
   esac
-  info "$label: /proc/$pid/exe -> $(readlink "/proc/$pid/exe")"
+  local node_pid
+  node_pid=$(pgrep -n -f "/opt/nsapps/$app/node")
+  info "$label: /proc/$node_pid/exe -> $(readlink "/proc/$node_pid/exe")"
   touch "$trigger"
   observe "$label" "$pid"
 }
 
 begin check12 "App identity: the path sing-box reports, and whether rules match"
 for app in alpha delta epsilon zeta; do mkdir -p "/opt/nsapps/$app"; done
-cp "$(command -v curl)" /opt/nsapps/alpha/curl
+cp /usr/bin/curl /opt/nsapps/alpha/curl
 for app in delta epsilon zeta; do cp "$(readlink -f "$NODE")" "/opt/nsapps/$app/node"; done
 chmod -R a+rX /opt/nsapps
 
@@ -158,6 +160,31 @@ if [ -n "$flatpak_ok" ]; then
   else
     note "flatpak: the runtime ran but has neither curl nor python3: $probe"
   fi
+  # A real Flatpak app keeps its own programs under /app: a tiny one whose
+  # program is the runtime's curl, installed from a local repository.
+  build_flatpak_app() {
+    local work="$DIR/flatpak-app" location
+    rm -rf "$work"
+    mkdir -p "$work"
+    location=$(flatpak info --system --show-location "$runtime") || return 1
+    flatpak build-init "$work/app" com.example.NsCurl org.freedesktop.Platform org.freedesktop.Platform "$flatpak_ok" || return 1
+    mkdir -p "$work/app/files/bin"
+    cp "$location/files/bin/curl" "$work/app/files/bin/curl" || return 1
+    flatpak build-finish "$work/app" --command=curl --share=network || return 1
+    flatpak build-export "$work/repo" "$work/app" || return 1
+    flatpak remote-add --system --no-gpg-verify --if-not-exists nslocal "$work/repo" || return 1
+    flatpak install --system -y --noninteractive nslocal com.example.NsCurl
+  }
+  if build_flatpak_app > "$DIR/flatpak-app.log" 2>&1; then
+    as_user flatpak run com.example.NsCurl -s -x "$PROXY" "$SLOW" > "$DIR/flatpak-app.out" 2>&1 &
+    pid=$!
+    sleep 1.2
+    describe_pid flatpak-app "$(pgrep -n -x curl)"
+    observe flatpak-app-com.example.NsCurl "$pid"
+  else
+    note "flatpak app: couldn't build one here: $(tail -3 "$DIR/flatpak-app.log" | tr '\n' ' ')"
+  fi
+  rm -rf "$DIR/flatpak-app"
 else
   note "flatpak: not possible here: $(tail -3 "$DIR/flatpak-install.log" | tr '\n' ' ')"
 fi
@@ -165,22 +192,22 @@ fi
 # AppImage: a tiny one wrapping this system's curl, built with the pinned appimagetool.
 build_appimage() {
   local work="$DIR/appimage"
-  rm -rf "$work"
-  mkdir -p "$work/AppDir/usr/bin"
-  timeout 120 apt-get install -y -q fuse3 > "$work/fuse.log" 2>&1 || true
-  curl -fsSL --retry 3 -o "$work/appimagetool" "$APPIMAGETOOL_URL/appimagetool-$APPIMAGE_ARCH.AppImage" &&
-    curl -fsSL --retry 3 -o "$work/runtime" "$RUNTIME_URL/runtime-$APPIMAGE_ARCH" || return 1
+  timeout 120 apt-get install -y -q fuse3 || true
+  /usr/bin/curl -fsSL --retry 3 -o "$work/appimagetool" "$APPIMAGETOOL_URL/appimagetool-$APPIMAGE_ARCH.AppImage" &&
+    /usr/bin/curl -fsSL --retry 3 -o "$work/runtime" "$RUNTIME_URL/runtime-$APPIMAGE_ARCH" || return 1
   printf '%s  %s\n' "$APPIMAGETOOL_SHA" "$work/appimagetool" "$RUNTIME_SHA" "$work/runtime" | sha256sum -c - || return 1
   chmod +x "$work/appimagetool"
-  cp "$(command -v curl)" "$work/AppDir/usr/bin/curl"
+  cp /usr/bin/curl "$work/AppDir/usr/bin/curl"
   printf '%s\n' '#!/bin/sh' 'exec "$APPDIR/usr/bin/curl" "$@"' > "$work/AppDir/AppRun"
   chmod +x "$work/AppDir/AppRun"
   printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=NsCurl' 'Exec=curl' 'Icon=nscurl' 'Categories=Network;' > "$work/AppDir/nscurl.desktop"
   printf '%s\n' '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#3a6"/></svg>' > "$work/AppDir/nscurl.svg"
-  ARCH=$APPIMAGE_ARCH APPIMAGE_EXTRACT_AND_RUN=1 "$work/appimagetool" --no-appstream --runtime-file "$work/runtime" "$work/AppDir" "$work/NsCurl.AppImage" > "$work/build.log" 2>&1 || return 1
+  ARCH=$APPIMAGE_ARCH APPIMAGE_EXTRACT_AND_RUN=1 "$work/appimagetool" --no-appstream --runtime-file "$work/runtime" "$work/AppDir" "$work/NsCurl.AppImage" || return 1
   chmod a+rx "$work" "$work/NsCurl.AppImage"
 }
-if build_appimage; then
+rm -rf "$DIR/appimage"
+mkdir -p "$DIR/appimage/AppDir/usr/bin"
+if build_appimage > "$DIR/appimage-build.log" 2>&1; then
   appimage="$DIR/appimage/NsCurl.AppImage"
   as_user "$appimage" -s -x "$PROXY" "$SLOW" > "$DIR/appimage.out" 2>&1 &
   pid=$!
@@ -190,7 +217,7 @@ if build_appimage; then
   as_user env APPIMAGE_EXTRACT_AND_RUN=1 "$appimage" -s -x "$PROXY" "$SLOW" > "$DIR/appimage-extracted.out" 2>&1 &
   observe appimage-extract-and-run $!
 else
-  note "AppImage: not possible here: $(tail -3 "$DIR/appimage/build.log" 2>/dev/null | tr '\n' ' ')"
+  note "AppImage: not possible here: $(tail -3 "$DIR/appimage-build.log" 2>/dev/null | tr '\n' ' ')"
 fi
 # Keep the uploaded results to text.
 rm -rf "$DIR/appimage/AppDir" "$DIR/appimage/appimagetool" "$DIR/appimage/runtime" "$DIR/appimage/NsCurl.AppImage"

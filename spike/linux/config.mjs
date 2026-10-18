@@ -6,7 +6,7 @@
 //
 //   node config.mjs --out DIR [--stack gvisor|system|mixed] [--auto-redirect]
 //     [--exclude if1,if2] [--no-rules] [--share-b 0.3333] [--extra-rule JSON]
-//     [--log-level warn]
+//     [--log-level warn] [--no-exclude-ranges]
 //   node config.mjs --out DIR --identity
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -68,6 +68,9 @@ tun.iproute2_rule_index = RULE_INDEX;
 if (flag('--auto-redirect')) tun.auto_redirect = true;
 const exclude = option('--exclude');
 if (exclude) tun.exclude_interface = exclude.split(',');
+// Without route_exclude_address, sing-tun's table holds a plain default route
+// instead of the many routes that cover everything but the local ranges.
+if (flag('--no-exclude-ranges')) delete tun.route_exclude_address;
 
 if (flag('--no-rules')) {
   // Process lookup fully off: no rule may name a process, including the

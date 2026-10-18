@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Linux feasibility checks 1-11 for Net Switch's routing engine (sing-box TUN),
-# in network namespaces on a CI runner, so the runner's own connection is never
-# routed. Needs root. CHECKS="check2 check6" runs only those.
+# Linux feasibility checks 1-11 and 13 for Net Switch's routing engine
+# (sing-box TUN), in network namespaces on a CI runner, so the runner's own
+# connection is never routed. Needs root. CHECKS="check2 check6" runs only those.
 set -uo pipefail
 # shellcheck source=spike/linux/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -73,7 +73,7 @@ check2() {
   note "QUIC: not tested. This runner's curl $(curl --version | grep -q HTTP3 && echo has || echo lacks) HTTP/3 and the fake internet has no QUIC server; the UDP echo above covers datagram routing."
   block "ip rule while the engine runs" "$(ip -n dut rule show)"
   block "ip -6 rule while the engine runs" "$(ip -n dut -6 rule show)"
-  block "route table 3110 while the engine runs" "$(ip -n dut route show table 3110; ip -n dut -6 route show table 3110)"
+  block "route table 3110 while the engine runs" "$( (ip -n dut route show table 3110; ip -n dut -6 route show table 3110) | compact)"
   block "engine log" "$(tail -15 "$dir/engine.log")"
   engine_stop
   topo_down
@@ -179,19 +179,20 @@ uid_fds() {
 }
 
 check5() {
-  begin check5 "Process lookup cost: 2,000 short connections, 10 at a time"
+  begin check5 "Process lookup cost: 2,000 short connections, 10 at a time, then 300 one at a time"
   summary ""
-  summary "| variant | wall time | sing-box CPU | CPU per connection | p50 / p95 per connection | errors | open fds of the app's user |"
-  summary "|---|---|---|---|---|---|---|"
+  summary "| variant | wall time | sing-box CPU | CPU per connection | p50 / p95, 10 at once | handshakes over 1 s | errors | p50 one at a time | open fds of the app's user |"
+  summary "|---|---|---|---|---|---|---|---|---|"
   local variant
-  for variant in off on on+5000-files-same-user on+5000-files-root; do
+  for variant in off on on+5000-files-same-user on+5000-files-root system-off system-on system-on+5000-files-same-user; do
     topo_up && servers_up || {
       fail "$variant: topology did not come up"
       continue
     }
-    local dir="$OUT/check5-${variant//+/-}"
-    if [ "$variant" = off ]; then gen "$dir" --no-rules; else gen "$dir"; fi
-    engine_start "$dir" || continue
+    local dir="$OUT/check5-${variant//+/-}" opts=()
+    case "$variant" in *off*) opts+=(--no-rules) ;; esac
+    case "$variant" in system*) opts+=(--stack system) ;; esac
+    gen "$dir" "${opts[@]}" && engine_start "$dir" || continue
     local holder=
     case "$variant" in
       *same-user)
@@ -206,15 +207,19 @@ check5() {
     if [ -n "$holder" ]; then
       wait_for "the file holder" 20 grep -q holding "$dir/holder.log" || fail "$variant: holder: $(cat "$dir/holder.log")"
     fi
-    local fds c0 c1 result
+    local fds c0 c1 result serial
     fds=$(uid_fds "$APP_UID")
     c0=$(cpu_ms)
     result=$(as_app /opt/nsapps/alpha/node "$CLIENT" whoami --to "$WHOAMI" --count 2000 --concurrency 10 2>&1 | tail -1)
     c1=$(cpu_ms)
+    serial=$(as_app /opt/nsapps/alpha/node "$CLIENT" whoami --to "$WHOAMI" --count 300 --concurrency 1 2>&1 | tail -1)
     local cpu=$((c1 - c0))
-    info "$variant: $result; sing-box CPU $cpu ms; fds of uid $APP_UID: $fds"
-    summary "$(jq -r --arg cpu "$cpu" --arg fds "$fds" --arg v "$variant" \
-      '"| \($v) | \(.wallMs) ms | \($cpu) ms | \(($cpu | tonumber) * 1000 / 2000 | floor) µs | \(.p50) / \(.p95) ms | \(.errors | tostring) | \($fds) |"' <<< "$result" 2>/dev/null || echo "| $variant | $result |")"
+    info "$variant: $result; one at a time: $serial; sing-box CPU $cpu ms; fds of uid $APP_UID: $fds; engine log lines: $(wc -l < "$dir/engine.log")"
+    summary "$(jq -r --arg cpu "$cpu" --arg fds "$fds" --arg v "$variant" --arg serial "$(jq -r .p50 <<< "$serial" 2>/dev/null)" \
+      '"| \($v) | \(.wallMs) ms | \($cpu) ms | \(($cpu | tonumber) * 1000 / 2000 | floor) µs | \(.p50) / \(.p95) ms | \(.over1s) | \(.errors | tostring) | \($serial) ms | \($fds) |"' <<< "$result" 2>/dev/null || echo "| $variant | $result |")"
+    if grep -q -i -E 'error|warn' "$dir/engine.log"; then
+      info "$variant: engine log: $(grep -i -E 'error|warn' "$dir/engine.log" | cut -c1-200 | sort | uniq -c | sort -rn | head -3 | tr '\n' ' ')"
+    fi
     if [ -n "$holder" ]; then
       kill "$holder" 2>/dev/null
       wait "$holder" 2>/dev/null
@@ -261,14 +266,16 @@ check6() {
 
 check7() {
   begin check7 "Connections opened before the engine starts"
-  local stack
-  for stack in gvisor system; do
+  local spec
+  for spec in gvisor:ranges system:ranges gvisor:none gvisor:own-rules; do
+    local stack=${spec%%:*} variant=${spec#*:}
     topo_up && servers_up || {
-      fail "$stack: topology did not come up"
+      fail "$spec: topology did not come up"
       continue
     }
-    local dir="$OUT/check7-$stack"
-    gen "$dir" --stack "$stack" || continue
+    local dir="$OUT/check7-$stack-$variant"
+    # shellcheck disable=SC2046
+    gen "$dir" --stack "$stack" $(variant_flags "$variant") || continue
     local pa pb
     as_app /opt/nsapps/alpha/node "$CLIENT" stream --to 192.0.2.10:7002 --seconds 28 --interval 250 --log "$dir/alpha.log" &
     pa=$!
@@ -277,27 +284,30 @@ check7() {
     sleep 4
     local t_start t_ready t_stop
     t_start=$(now_ms)
+    variant_setup "$variant"
     engine_start "$dir" || {
       kill "$pa" "$pb" 2>/dev/null
       continue
     }
     t_ready=$(now_ms)
-    expect_seen "$stack: a new bravo connection while the engine runs" 192.0.2.2 as_app /opt/nsapps/bravo/curl -s --max-time 5 "$URL"
-    sleep 11
+    info "$spec: an established socket's route now: $(in_dut ip route get 192.0.2.10 from 192.168.10.2 2>&1 | head -1); a new socket's: $(in_dut ip route get 192.0.2.10 2>&1 | head -1)"
+    expect_seen "$spec: a new bravo connection while the engine runs" 192.0.2.2 as_app /opt/nsapps/bravo/curl -s --max-time 5 "$URL"
+    expect_seen "$spec: a new alpha connection while the engine runs" 192.0.2.1 as_app /opt/nsapps/alpha/curl -s --max-time 5 "$URL"
+    sleep 10
     t_stop=$(now_ms)
     engine_stop
     wait "$pa" "$pb"
     local app result
     for app in alpha bravo; do
       result=$("$NODE" "$ANALYZE" stream --log "$dir/$app.log" --start "$t_start" --ready "$t_ready" --stop "$t_stop" 2>&1)
-      note "$stack, $app ($([ "$app" = alpha ] && echo unplaced || echo placed on B)), engine ran $(((t_stop - t_ready) / 1000)) s: $result"
+      note "$spec, $app ($([ "$app" = alpha ] && echo unplaced || echo placed on B)), engine ran $(((t_stop - t_ready) / 1000)) s: $result"
     done
     topo_down
   done
 }
 
 check8() {
-  begin check8 "Cleanup after kill -9"
+  begin check8 "Cleanup after a clean stop and after kill -9"
   local mode
   for mode in off on; do
     topo_up && servers_up || {
@@ -307,11 +317,22 @@ check8() {
     local dir="$OUT/check8-auto-redirect-$mode" label="auto_redirect $mode" left burst
     if [ "$mode" = on ]; then gen "$dir" --auto-redirect; else gen "$dir"; fi || continue
     snapshot "$dir/before.txt"
+    # First a clean start and stop.
+    engine_start "$dir" && engine_stop
+    snapshot "$dir/after-clean-stop.txt"
+    left=$(diff "$dir/before.txt" "$dir/after-clean-stop.txt" | grep '^[<>]')
+    if [ -z "$left" ]; then
+      pass "$label: a clean stop leaves nothing behind"
+    else
+      fail "$label: a clean stop leaves $(grep -c . <<< "$left") lines behind"
+      block "$label: left behind after a clean stop (> still there, < missing)" "$(compact <<< "$left")"
+    fi
+    snapshot "$dir/before.txt"
     engine_start "$dir" || continue
     expect_seen "$label, running: alpha" 192.0.2.1 as_app /opt/nsapps/alpha/curl -s --max-time 5 "$URL"
     expect_seen "$label, running: bravo" 192.0.2.2 as_app /opt/nsapps/bravo/curl -s --max-time 5 "$URL"
     snapshot "$dir/running.txt"
-    block "$label: what the engine added while running (> added, < removed)" "$(diff "$dir/before.txt" "$dir/running.txt" | grep '^[<>]')"
+    block "$label: what the engine adds while running (> added, < removed)" "$(diff "$dir/before.txt" "$dir/running.txt" | grep '^[<>]' | compact)"
     kill -9 "$SB_PID"
     wait "$SB_PID" 2>/dev/null
     SB_PID=
@@ -322,7 +343,7 @@ check8() {
       pass "$label: nothing left behind after kill -9"
     else
       fail "$label: kill -9 left $(grep -c . <<< "$left") lines behind"
-      block "$label: left behind after kill -9 (> still there, < missing)" "$left"
+      block "$label: left behind after kill -9 (> still there, < missing)" "$(compact <<< "$left")"
     fi
     expect_seen "$label, after kill -9: alpha curl" 192.0.2.1 as_app /opt/nsapps/alpha/curl -s --max-time 5 "$URL"
     expect_seen "$label, after kill -9: bravo curl" 192.0.2.1 as_app /opt/nsapps/bravo/curl -s --max-time 5 "$URL"
@@ -342,7 +363,7 @@ check8() {
       pass "$label: the next start and a clean stop put everything back"
     else
       fail "$label: still left after the next start and a clean stop"
-      block "$label: left after restart + clean stop" "$left"
+      block "$label: left after restart + clean stop" "$(compact <<< "$left")"
     fi
     expect_seen "$label, after restart + clean stop: alpha curl" 192.0.2.1 as_app /opt/nsapps/alpha/curl -s --max-time 5 "$URL"
     topo_down
@@ -366,31 +387,47 @@ rpf_try() {
 
 check9() {
   begin check9 "Strict reverse-path filtering (rp_filter=1) on dut"
-  topo_up && servers_up || {
-    fail "topology did not come up"
-    return
-  }
-  local key
-  for key in all default lo vethA vethB; do in_dut sysctl -qw "net.ipv4.conf.$key.rp_filter=1"; done
-  rpf_try "no engine: curl bound to vethB" 192.0.2.2 in_dut curl -s --max-time 4 --interface vethB "$URL"
-  rpf_try "no engine: plain curl (main line)" 192.0.2.1 in_dut curl -s --max-time 4 "$URL"
-  local dir="$OUT/check9"
-  gen "$dir" && engine_start "$dir" || return
-  info "NetSwitch interface rp_filter=$(in_dut sysctl -n net.ipv4.conf.NetSwitch.rp_filter)"
-  rpf_try "engine: bravo (placed on B)" 192.0.2.2 as_app /opt/nsapps/bravo/curl -s --max-time 4 "$URL"
-  rpf_try "engine: alpha (unplaced)" 192.0.2.1 as_app /opt/nsapps/alpha/curl -s --max-time 4 "$URL"
-  rpf_try "engine: bravo UDP" 192.0.2.2 sh -c "ip netns exec dut setpriv --reuid=$APP_UID --regid=$APP_GID --clear-groups /opt/nsapps/bravo/node $CLIENT udp --to 192.0.2.10:7001 --count 3 | jq -r '.seen | keys | join(\",\")'"
-  # Fix 1: a source rule per line, so the reverse lookup finds the line.
-  in_dut ip route add default via 192.168.20.1 dev vethB table 3201
-  in_dut ip rule add from 192.168.20.2 lookup 3201 pref 31000
-  rpf_try "engine + rule 'from 192.168.20.2 lookup 3201': bravo" 192.0.2.2 as_app /opt/nsapps/bravo/curl -s --max-time 4 "$URL"
-  rpf_try "engine + that rule: alpha" 192.0.2.1 as_app /opt/nsapps/alpha/curl -s --max-time 4 "$URL"
-  in_dut ip rule del from 192.168.20.2 lookup 3201 pref 31000
-  # Fix 2: loose filtering on that line only (the kernel uses max(all, interface)).
-  in_dut sysctl -qw net.ipv4.conf.vethB.rp_filter=2
-  rpf_try "engine + rp_filter=2 on vethB only (all=1): bravo" 192.0.2.2 as_app /opt/nsapps/bravo/curl -s --max-time 4 "$URL"
-  engine_stop
-  topo_down
+  local variant
+  for variant in ranges none own-rules; do
+    topo_up && servers_up || {
+      fail "$variant: topology did not come up"
+      continue
+    }
+    local key
+    for key in all default lo vethA vethB; do in_dut sysctl -qw "net.ipv4.conf.$key.rp_filter=1"; done
+    if [ "$variant" = ranges ]; then
+      rpf_try "no engine: curl bound to vethB" 192.0.2.2 in_dut curl -s --max-time 4 --interface vethB "$URL"
+      rpf_try "no engine: plain curl (main line)" 192.0.2.1 in_dut curl -s --max-time 4 "$URL"
+    fi
+    local dir="$OUT/check9-$variant"
+    # shellcheck disable=SC2046
+    gen "$dir" $(variant_flags "$variant") || continue
+    variant_setup "$variant"
+    engine_start "$dir" || continue
+    [ "$variant" = ranges ] && info "NetSwitch interface rp_filter=$(in_dut sysctl -n net.ipv4.conf.NetSwitch.rp_filter)"
+    rpf_try "$variant: bravo (placed on B)" 192.0.2.2 as_app /opt/nsapps/bravo/curl -s --max-time 4 "$URL"
+    rpf_try "$variant: alpha (unplaced)" 192.0.2.1 as_app /opt/nsapps/alpha/curl -s --max-time 4 "$URL"
+    # The fix: per line, a table with its default route and a rule for its own
+    # address, so the reverse lookup for a reply finds the line it came in on.
+    in_dut ip route add default via 192.168.10.1 dev vethA table 3200
+    in_dut ip route add default via 192.168.20.1 dev vethB table 3201
+    in_dut ip rule add from 192.168.10.2 lookup 3200 pref 31000
+    in_dut ip rule add from 192.168.20.2 lookup 3201 pref 31000
+    rpf_try "$variant + a source rule per line: bravo" 192.0.2.2 as_app /opt/nsapps/bravo/curl -s --max-time 4 "$URL"
+    rpf_try "$variant + a source rule per line: alpha" 192.0.2.1 as_app /opt/nsapps/alpha/curl -s --max-time 4 "$URL"
+    rpf_try "$variant + a source rule per line: bravo UDP" 192.0.2.2 sh -c "ip netns exec dut setpriv --reuid=$APP_UID --regid=$APP_GID --clear-groups /opt/nsapps/bravo/node $CLIENT udp --to 192.0.2.10:7001 --count 3 | jq -r '.seen | keys | join(\",\")'"
+    in_dut ip rule del from 192.168.10.2 lookup 3200 pref 31000
+    in_dut ip rule del from 192.168.20.2 lookup 3201 pref 31000
+    if [ "$variant" = ranges ]; then
+      # Or loose filtering on the lines only (the kernel uses max(all, interface)).
+      in_dut sysctl -qw net.ipv4.conf.vethA.rp_filter=2
+      in_dut sysctl -qw net.ipv4.conf.vethB.rp_filter=2
+      rpf_try "$variant + rp_filter=2 on the line interfaces only (all=1): bravo" 192.0.2.2 as_app /opt/nsapps/bravo/curl -s --max-time 4 "$URL"
+      rpf_try "$variant + rp_filter=2 on the line interfaces only (all=1): alpha" 192.0.2.1 as_app /opt/nsapps/alpha/curl -s --max-time 4 "$URL"
+    fi
+    engine_stop
+    topo_down
+  done
 }
 
 check10() {
@@ -478,9 +515,59 @@ check11() {
   topo_down
 }
 
+check13() {
+  begin check13 "Local networks and routers stay on normal routing"
+  local variant
+  for variant in ranges none own-rules; do
+    topo_up && servers_up || {
+      fail "$variant: topology did not come up"
+      continue
+    }
+    # Each router serves its own LAN, so it sees dut's LAN address.
+    ip netns exec ispA "$NODE" "$HERE/server.mjs" --host 192.168.10.1 > "$OUT/lanA.log" 2>&1 &
+    disown
+    ip netns exec ispB "$NODE" "$HERE/server.mjs" --host 192.168.20.1 > "$OUT/lanB.log" 2>&1 &
+    disown
+    wait_for "router A's LAN server" 15 grep -q ready "$OUT/lanA.log"
+    wait_for "router B's LAN server" 15 grep -q ready "$OUT/lanB.log"
+    local dir="$OUT/check13-$variant"
+    # shellcheck disable=SC2046
+    gen "$dir" $(variant_flags "$variant") || continue
+    variant_setup "$variant"
+    engine_start "$dir" || continue
+    expect_seen "$variant: alpha (unplaced) -> router A's LAN" 192.168.10.2 as_app /opt/nsapps/alpha/curl -s --max-time 5 http://192.168.10.1:8080/
+    expect_seen "$variant: alpha (unplaced) -> router B's LAN" 192.168.20.2 as_app /opt/nsapps/alpha/curl -s --max-time 5 http://192.168.20.1:8080/
+    expect_seen "$variant: bravo (placed on B) -> router A's LAN" 192.168.10.2 as_app /opt/nsapps/bravo/curl -s --max-time 5 http://192.168.10.1:8080/
+    expect_seen "$variant: alpha (unplaced) -> internet" 192.0.2.1 as_app /opt/nsapps/alpha/curl -s --max-time 5 "$URL"
+    expect_seen "$variant: bravo (placed on B) -> internet" 192.0.2.2 as_app /opt/nsapps/bravo/curl -s --max-time 5 "$URL"
+    # Did any of that LAN traffic go through the engine?
+    local pids=() conns
+    as_app /opt/nsapps/alpha/curl -s --max-time 10 "http://192.168.10.1:8080/slow?ms=3000" > /dev/null &
+    pids+=($!)
+    as_app /opt/nsapps/bravo/curl -s --max-time 10 "http://192.168.20.1:8080/slow?ms=3000" > /dev/null &
+    pids+=($!)
+    as_app /opt/nsapps/alpha/node "$CLIENT" udp --to 224.0.0.251:5353 --count 2 > /dev/null 2>&1 &
+    pids+=($!)
+    sleep 1.5
+    conns=$(api dut /connections | "$NODE" "$ANALYZE" conns | grep -E '192\.168\.|224\.' || echo '(none to the LANs or multicast)')
+    wait "${pids[@]}"
+    if grep -q '^(none' <<< "$conns"; then
+      pass "$variant: LAN and multicast traffic stayed out of the engine"
+    else
+      fail "$variant: the engine saw LAN or multicast traffic"
+    fi
+    block "$variant: engine connections to LAN or multicast addresses" "$conns"
+    block "$variant: route lookups" "$(for target in 192.168.10.1 192.168.20.1 224.0.0.251 10.9.9.9 192.0.2.10; do in_dut ip route get "$target" 2>&1 | head -1; done)"
+    [ "$variant" != ranges ] && block "$variant: table 3110" "$( (ip -n dut route show table 3110; ip -n dut -6 route show table 3110) | compact)"
+    [ "$variant" = own-rules ] && block "own-rules: ip rule" "$(ip -n dut rule show)"
+    engine_stop
+    topo_down
+  done
+}
+
 apps_setup
 summary "## Routing checks: $(. /etc/os-release && echo "$PRETTY_NAME"), $(uname -m), kernel $(uname -r)"
-for check in ${CHECKS:-check1 check2 check3 check4 check5 check6 check7 check8 check9 check10 check11}; do
+for check in ${CHECKS:-check1 check2 check3 check4 check5 check6 check7 check8 check9 check10 check11 check13}; do
   "$check"
 done
 CHECK=total
