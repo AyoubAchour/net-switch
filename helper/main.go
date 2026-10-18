@@ -7,11 +7,17 @@
 //   - network: adapters, default routes and policy on Windows change notifications.
 //   - probe: concurrent TCP tests bound to one interface.
 //   - policy: read only the Wi-Fi policy, for setup and Undo.
+//   - run: start a program with no console window and wait for it (see run.go).
 //
 // Usage:
 //
 //	netswitch-helper.exe meters  [--parent PID] [--once]
 //	netswitch-helper.exe outside [--parent PID] [--engine PATH] [--once]
+//	netswitch-helper.exe run PROGRAM [ARGUMENTS...]
+//
+// It is built as a windowless program (no console), so the startup task can
+// run it without a window appearing. Its output still reaches the server,
+// which starts it with pipes.
 //
 // It replaces long-running PowerShell processes that printed the same
 // lines and used about a hundred megabytes each. The server still runs each
@@ -42,6 +48,9 @@ type options struct {
 	index   uint
 	targets string
 	timeout int
+	// For run: the program and its arguments, passed on unchanged.
+	program     string
+	programArgs []string
 }
 
 const usage = `usage:
@@ -49,7 +58,8 @@ const usage = `usage:
   netswitch-helper.exe outside [--parent PID] [--engine PATH] [--once]
   netswitch-helper.exe network [--parent PID] [--once]
   netswitch-helper.exe probe --interface-index N --targets IP:PORT,IP:PORT [--timeout-ms 2000]
-  netswitch-helper.exe policy`
+  netswitch-helper.exe policy
+  netswitch-helper.exe run PROGRAM [ARGUMENTS...]`
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -64,6 +74,8 @@ func run(args []string) int {
 
 	var sample func() any
 	switch opts.mode {
+	case "run":
+		return runHidden(opts.program, opts.programArgs)
 	case "policy":
 		policy, err := readPolicy()
 		if err != nil {
@@ -123,9 +135,17 @@ func run(args []string) int {
 
 func parseArgs(args []string) (options, error) {
 	if len(args) == 0 {
-		return options{}, errors.New("choose a mode: meters, outside, network, probe or policy")
+		return options{}, errors.New("choose a mode: meters, outside, network, probe, policy or run")
 	}
 	opts := options{mode: args[0]}
+	// Everything after the program belongs to it, flags included.
+	if opts.mode == "run" {
+		if len(args) < 2 || args[1] == "" {
+			return options{}, errors.New("run needs a program")
+		}
+		opts.program, opts.programArgs = args[1], args[2:]
+		return opts, nil
+	}
 	if opts.mode != "meters" && opts.mode != "outside" && opts.mode != "network" && opts.mode != "probe" && opts.mode != "policy" {
 		return options{}, fmt.Errorf("unknown mode %q", opts.mode)
 	}

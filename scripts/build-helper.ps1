@@ -130,9 +130,11 @@ try {
   }
 
   # The same source and toolchain always give the same file: no local paths,
-  # build id or commit stamped into it, and no debug symbols.
+  # build id or commit stamped into it, and no debug symbols. Built as a
+  # windowless program, so the startup task that runs it shows no console
+  # window; the server reads it through pipes, which still work.
   New-Item -ItemType Directory -Path $binDir -Force | Out-Null
-  Invoke-Go build -C $helperDir -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o $output .
+  Invoke-Go build -C $helperDir -trimpath -buildvcs=false -ldflags '-s -w -buildid= -H=windowsgui' -o $output .
 } finally {
   foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
 }
