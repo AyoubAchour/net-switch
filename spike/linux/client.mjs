@@ -94,6 +94,11 @@ async function whoami() {
     connectP50: percentile(ok.map((result) => result.connectMs ?? 0), 50),
     // A lost SYN is sent again after 1 s, so these show dropped handshakes.
     over1s: ok.filter((result) => result.ms >= 1000).length,
+    // The worst connections: how long, and whether the handshake finished.
+    stalls: results
+      .filter((result) => result.error || result.ms >= 1000)
+      .slice(0, 8)
+      .map((result) => `${result.error ?? 'ok'}@${Math.round(result.ms)}ms${result.port ? `:port${result.port}` : ':no-handshake'}`),
   };
   const out = option('--out');
   if (out) writeFileSync(out, JSON.stringify({ summary, results }));

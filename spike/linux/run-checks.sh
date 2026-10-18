@@ -184,7 +184,7 @@ check5() {
   summary "| variant | wall time | sing-box CPU | CPU per connection | p50 / p95, 10 at once | handshakes over 1 s | errors | p50 one at a time | open fds of the app's user |"
   summary "|---|---|---|---|---|---|---|---|---|"
   local variant
-  for variant in off on on+5000-files-same-user on+5000-files-root system-off system-on system-on+5000-files-same-user; do
+  for variant in ${CHECK5_VARIANTS:-off on on+5000-files-same-user on+5000-files-root system-off system-on system-on+5000-files-same-user on-info-log}; do
     topo_up && servers_up || {
       fail "$variant: topology did not come up"
       continue
@@ -192,6 +192,7 @@ check5() {
     local dir="$OUT/check5-${variant//+/-}" opts=()
     case "$variant" in *off*) opts+=(--no-rules) ;; esac
     case "$variant" in system*) opts+=(--stack system) ;; esac
+    case "$variant" in *info-log*) opts+=(--log-level info) ;; esac
     gen "$dir" "${opts[@]}" && engine_start "$dir" || continue
     local holder=
     case "$variant" in
@@ -210,9 +211,10 @@ check5() {
     local fds c0 c1 result serial
     fds=$(uid_fds "$APP_UID")
     c0=$(cpu_ms)
-    result=$(as_app /opt/nsapps/alpha/node "$CLIENT" whoami --to "$WHOAMI" --count 2000 --concurrency 10 2>&1 | tail -1)
+    # A long timeout shows whether stuck connections ever finish (SYN retries at 1, 3, 7, 15, 31 s).
+    result=$(as_app /opt/nsapps/alpha/node "$CLIENT" whoami --to "$WHOAMI" --count 2000 --concurrency 10 --timeout 35000 2>&1 | tail -1)
     c1=$(cpu_ms)
-    serial=$(as_app /opt/nsapps/alpha/node "$CLIENT" whoami --to "$WHOAMI" --count 300 --concurrency 1 2>&1 | tail -1)
+    serial=$(as_app /opt/nsapps/alpha/node "$CLIENT" whoami --to "$WHOAMI" --count 300 --concurrency 1 --timeout 35000 2>&1 | tail -1)
     local cpu=$((c1 - c0))
     info "$variant: $result; one at a time: $serial; sing-box CPU $cpu ms; fds of uid $APP_UID: $fds; engine log lines: $(wc -l < "$dir/engine.log")"
     summary "$(jq -r --arg cpu "$cpu" --arg fds "$fds" --arg v "$variant" --arg serial "$(jq -r .p50 <<< "$serial" 2>/dev/null)" \
@@ -220,6 +222,12 @@ check5() {
     if grep -q -i -E 'error|warn' "$dir/engine.log"; then
       info "$variant: engine log: $(grep -i -E 'error|warn' "$dir/engine.log" | cut -c1-200 | sort | uniq -c | sort -rn | head -3 | tr '\n' ' ')"
     fi
+    case "$variant" in
+      *info-log*)
+        # The kinds of engine messages, numbers masked, rarest last.
+        block "$variant: engine message kinds" "$(sed -E 's/^.*(INFO|WARN|ERROR|DEBUG) \[[^]]*\] //; s/[0-9]+/N/g' "$dir/engine.log" | sort | uniq -c | sort -rn | head -25)"
+        ;;
+    esac
     if [ -n "$holder" ]; then
       kill "$holder" 2>/dev/null
       wait "$holder" 2>/dev/null

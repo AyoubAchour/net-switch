@@ -62,6 +62,8 @@ jobs:
 
   identity:
     name: App identity / ${{ matrix.runner }}
+    # A manual run that names routing checks skips this job.
+    if: ${{ inputs.checks == '' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
