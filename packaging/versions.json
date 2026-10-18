@@ -15,12 +15,12 @@
       "archiveRoot": "node-v24.21.0-win-arm64"
     },
     "singBox": {
-      "version": "1.14.2",
-      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-arm64.zip",
-      "sha256": "2bb467039310452380958b821983d5bb4f78fb70a2583914e4bea8b011582b64",
-      "archiveRoot": "sing-box-1.14.2-windows-arm64",
+      "version": "1.14.3",
+      "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-windows-arm64.zip",
+      "sha256": "195b35424c6e3f5913954c7f08c5d8ba2d2199f6d18eb27a3972a5a29cdaa78c",
+      "archiveRoot": "sing-box-1.14.3-windows-arm64",
       "files": {
-        "sing-box.exe": "c3c2a8ad804e3189b314b12fa3ac111388cad9db165a2dc698e5df8be242dff4",
+        "sing-box.exe": "db11afc05195e2e6484830a0a62050a22b3d488e080bfa8e21023e55ca3153d4",
         "libcronet.dll": "a75a1b99a7e31802cf67ee14763e5cb9db6a24aaf7062f86c49f2fc1c030fcf0"
       }
     }
@@ -33,18 +33,18 @@
     "archiveRoot": "go"
   },
   "singBox": {
-    "version": "1.14.2",
-    "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-amd64.zip",
-    "sha256": "c2d8bfff918755808781dfdeeb8581b6c91eb3a243d9a7b55483cfc0c0684d32",
-    "archiveRoot": "sing-box-1.14.2-windows-amd64",
+    "version": "1.14.3",
+    "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-windows-amd64.zip",
+    "sha256": "d8b86ef58936dba9230ec6a57ffa4243933f3c14ef4809828b6c553440ed1518",
+    "archiveRoot": "sing-box-1.14.3-windows-amd64",
     "files": {
-      "sing-box.exe": "7bbef1dea9189ee12799ae834ea4b4658355da25c47a21ad8804904c0ccd9410",
+      "sing-box.exe": "5c19bb3f8c12d4e85b3d47fe63123a7624b314b58dd7a8e32f51004f1c4d2faf",
       "libcronet.dll": "3217c6260fbca5f16072e0b79735742f40109a63bb0ff88fd6b96dd6b54a2928"
     },
     "source": {
       "repository": "https://github.com/SagerNet/sing-box.git",
-      "tag": "v1.14.2",
-      "commit": "af6e64c3b69e6132ebaee0e1a3d24e93903f6709",
+      "tag": "v1.14.3",
+      "commit": "7054cac5124465ffdb145870d7c01885566711b1",
       "goVersion": "1.25.5"
     }
   },
@@ -55,8 +55,8 @@
       "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
     },
     "singBox": {
-      "url": "https://raw.githubusercontent.com/SagerNet/sing-box/v1.14.2/LICENSE",
-      "cacheName": "sing-box-1.14.2-LICENSE.txt",
+      "url": "https://raw.githubusercontent.com/SagerNet/sing-box/v1.14.3/LICENSE",
+      "cacheName": "sing-box-1.14.3-LICENSE.txt",
       "sha256": "650d5e3b99a446fb38e820fa87a49562e0c79eab868fff58618ac487a58e554c"
     },
     "node": {
@@ -372,8 +372,8 @@
     },
     "singTun": {
       "repository": "https://github.com/SagerNet/sing-tun.git",
-      "version": "v0.9.6-0.20260924001923-ddaa4ca25e3b",
-      "commit": "ddaa4ca25e3bcb776d6ce81f4477b3becb5426de"
+      "version": "v0.9.7-0.20261009020158-bca4bf029237",
+      "commit": "bca4bf029237e444104626bb25f947dda90b06b5"
     },
     "wintun": {
       "version": "0.14.1",

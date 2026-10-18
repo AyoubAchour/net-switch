@@ -6,7 +6,7 @@ separate programs; Net Switch does not modify them. The one exception is the Go
 code compiled into Net Switch's own helper program (see the end). "MIT" applies
 to Net Switch's code only, not to the installer as a whole.
 
-## sing-box 1.14.2
+## sing-box 1.14.3
 
 - What it does here: the routing engine (`engine\sing-box.exe`).
 - Copyright (C) 2022 by nekohasekai. Licensed under the GNU General Public
@@ -19,8 +19,8 @@ to Net Switch's code only, not to the installer as a whole.
 - License texts in the installed copy: `licenses\GPL-3.0.txt` and
   `licenses\sing-box-LICENSE.txt`, and `engine\LICENSE`.
 - Source: the exact version is
-  [v1.14.2](https://github.com/SagerNet/sing-box/tree/v1.14.2). Each Net Switch
-  release also attaches `sing-box-1.14.2-source-with-deps.tar.gz`, that source
+  [v1.14.3](https://github.com/SagerNet/sing-box/tree/v1.14.3). Each Net Switch
+  release also attaches `sing-box-1.14.3-source-with-deps.tar.gz`, that source
   with its Go dependencies included.
 
 ## libcronet.dll
@@ -38,7 +38,7 @@ to Net Switch's code only, not to the installer as a whole.
   from that source tree are in `licenses\cronet-native\`.
 - Source: cronet-go commit
   [`0d28acc`](https://github.com/SagerNet/cronet-go/tree/0d28acc44093df24b2526dea3d6ffefd6b0a54f0),
-  as pinned by sing-box 1.14.2's `go.mod` (included in the source bundle
+  as pinned by sing-box 1.14.3's `go.mod` (included in the source bundle
   above). The Windows DLL was built at cronet-go commit
   [`049f290`](https://github.com/SagerNet/cronet-go/tree/049f2909701ca088c9569f6b303bba5376a2b2ff)
   and published in commit

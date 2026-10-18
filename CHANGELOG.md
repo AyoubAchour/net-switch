@@ -6,6 +6,8 @@ change behavior.
 
 ## [Unreleased]
 
+- The routing engine is updated to sing-box 1.14.3.
+
 ## [0.3.1] - 2026-10-18
 
 To update, use the update offer in Net Switch or download the installer below

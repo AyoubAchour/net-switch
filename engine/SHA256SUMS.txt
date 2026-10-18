@@ -1,5 +1,5 @@
-# sing-box 1.14.2 for Windows is not stored in this repo. Get it from the official release:
-# https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-windows-amd64.zip
+# sing-box 1.14.3 for Windows is not stored in this repo. Get it from the official release:
+# https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-windows-amd64.zip
 # Put sing-box.exe and libcronet.dll from that zip into this folder. Their SHA-256 must match:
-7bbef1dea9189ee12799ae834ea4b4658355da25c47a21ad8804904c0ccd9410  sing-box.exe
+5c19bb3f8c12d4e85b3d47fe63123a7624b314b58dd7a8e32f51004f1c4d2faf  sing-box.exe
 3217c6260fbca5f16072e0b79735742f40109a63bb0ff88fd6b96dd6b54a2928  libcronet.dll
