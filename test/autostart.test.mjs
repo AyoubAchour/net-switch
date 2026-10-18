@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import path from 'node:path';
+import { win32 as path } from 'node:path';
 import { test } from 'node:test';
 import { canAutostart, taskDefinitions } from '../lib/autostart.mjs';
 
