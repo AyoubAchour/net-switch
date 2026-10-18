@@ -26,6 +26,32 @@ jobs:
           package-manager-cache: false
       - run: npm test
 
+  linux-helper:
+    name: Linux / helper build and shared tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: helper
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=readonly -p=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the pinned Go version
+        id: pins
+        run: echo "go_version=$(jq -r .go.version ../packaging/versions.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.pins.outputs.go_version }}
+          cache: false
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go build ./...
+
   test:
     name: Windows / Node ${{ matrix.node }}
     runs-on: windows-latest
