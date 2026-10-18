@@ -216,10 +216,11 @@ api_ok() { api "$1" /version | grep -q version; }
 # its API answers and (for TUN configs) its interface exists.
 engine_start() {
   local dir=$1 ns=${2:-dut}
+  # GOTRACEBACK=all: SIGQUIT then dumps every goroutine into the log.
   if [ "$ns" = root ]; then
-    "$SB" run -c "$dir/config.json" --disable-color > "$dir/engine.log" 2>&1 &
+    GOTRACEBACK=all "$SB" run -c "$dir/config.json" --disable-color > "$dir/engine.log" 2>&1 &
   else
-    ip netns exec "$ns" "$SB" run -c "$dir/config.json" --disable-color > "$dir/engine.log" 2>&1 &
+    GOTRACEBACK=all ip netns exec "$ns" "$SB" run -c "$dir/config.json" --disable-color > "$dir/engine.log" 2>&1 &
   fi
   SB_PID=$!
   if ! wait_for "the engine's API" 20 api_ok "$ns"; then

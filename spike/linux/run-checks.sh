@@ -573,6 +573,61 @@ check13() {
   done
 }
 
+# Goroutines in a Go stack dump, by state and first sing-box/sing-tun frame.
+goroutine_kinds() {
+  awk '
+    function flush() { if (state != "") print state " | " (fn != "" ? fn : top) }
+    /^goroutine [0-9]+ \[/ {
+      flush()
+      state = $0; sub(/^goroutine [0-9]+ /, "", state); sub(/:$/, "", state); sub(/, [0-9]+ minutes/, "", state)
+      fn = ""; top = ""; next
+    }
+    state != "" && /^[^\t]/ && !/^created by/ {
+      name = $0; sub(/\([^()]*\)$/, "", name)
+      if (top == "") top = name
+      if (fn == "" && name ~ /sagernet/) fn = name
+    }
+    END { flush() }
+  ' "$1" | sort | uniq -c | sort -rn | head -25
+}
+# Whole stacks of goroutines that pass through the TUN TCP forwarder or process lookup.
+goroutine_stacks() {
+  awk '
+    function flush() { if (block ~ /Forward|JudgeFlow|PreMatch|FindProcess|findProcess|searcher/ && shown < 4) { print block; shown++ } }
+    /^goroutine [0-9]+ \[/ { flush(); block = $0; next }
+    block != "" { block = block "\n" $0 }
+    END { flush() }
+  ' "$1" | head -120
+}
+
+check14() {
+  begin check14 "gvisor + process lookup: hunting handshakes that never finish"
+  local round
+  for round in 1 2 3; do
+    topo_up && servers_up || {
+      fail "round $round: topology did not come up"
+      continue
+    }
+    local dir="$OUT/check14-round$round" result timeouts
+    gen "$dir" --log-level info && engine_start "$dir" || continue
+    result=$(as_app /opt/nsapps/alpha/node "$CLIENT" whoami --to "$WHOAMI" --count 2000 --concurrency 10 --timeout 10000 2>&1 | tail -1)
+    timeouts=$(jq -r '.errors.TIMEOUT // 0' <<< "$result" 2>/dev/null)
+    info "round $round: $result"
+    note "round $round: ${timeouts:-?} of 2,000 handshakes never finished; the engine logged $(grep -c 'inbound connection from' "$dir/engine.log") inbound connections and $(grep -c 'outbound connection to' "$dir/engine.log") outbound ones"
+    if [ "${timeouts:-0}" -gt 0 ]; then
+      kill -QUIT "$SB_PID"
+      sleep 3
+      block "round $round: goroutines by state and first sing-box frame" "$(goroutine_kinds "$dir/engine.log")"
+      block "round $round: stacks through the forwarder or process lookup" "$(goroutine_stacks "$dir/engine.log")"
+      SB_PID=
+      topo_down
+      break
+    fi
+    engine_stop
+    topo_down
+  done
+}
+
 apps_setup
 summary "## Routing checks: $(. /etc/os-release && echo "$PRETTY_NAME"), $(uname -m), kernel $(uname -r)"
 for check in ${CHECKS:-check1 check2 check3 check4 check5 check6 check7 check8 check9 check10 check11 check13}; do
