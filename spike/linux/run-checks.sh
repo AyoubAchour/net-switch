@@ -147,10 +147,13 @@ check4() {
     in_dut nft add chain inet spikefw input '{ type filter hook input priority 0 ; policy drop ; }'
     in_dut nft add rule inet spikefw input ct state established,related accept
     in_dut nft add rule inet spikefw input iif lo accept
-    local fa fb fu
+    local fa fb fu ft
     fa=$(as_app /opt/nsapps/alpha/curl -s --max-time 4 "$URL")
     fb=$(as_app /opt/nsapps/bravo/curl -s --max-time 4 "$URL")
     fu=$(as_app /opt/nsapps/bravo/node "$CLIENT" udp --to 192.0.2.10:7001 --count 5 2>&1 | tail -1 | jq -r '"\(.received)/\(.sent) \(.seen | keys | join(","))"' 2>/dev/null)
+    # The same firewall, told to trust the TUN interface.
+    in_dut nft add rule inet spikefw input iifname NetSwitch accept
+    ft=$(as_app /opt/nsapps/bravo/curl -s --max-time 4 "$URL")
     in_dut nft delete table inet spikefw
     local cpu1=$((c1 - c0)) cpu8=$((c2 - c1)) gb1 gb8 per1 per8
     gb1=$(awk '{ print $3 }' <<< "$one")
@@ -160,8 +163,8 @@ check4() {
     if [ "$stack" = none ]; then
       cpu1=n/a cpu8=n/a per1=n/a per8=n/a
     fi
-    info "$stack: 1 stream $one; 8 streams $eight; sing-box CPU $cpu1 / $cpu8 ms; burst $burst; firewall: alpha '${fa}' bravo '${fb}' udp '${fu}'"
-    summary "| $stack | $one | $eight | $cpu1 / $cpu8 ms | $per1 / $per8 | $burst_text | ${fa:-no answer}, ${fb:-no answer}, ${fu:-no answer} |"
+    info "$stack: 1 stream $one; 8 streams $eight; sing-box CPU $cpu1 / $cpu8 ms; burst $burst; firewall: alpha '${fa}' bravo '${fb}' udp '${fu}'; with the TUN trusted: bravo '${ft}'"
+    summary "| $stack | $one | $eight | $cpu1 / $cpu8 ms | $per1 / $per8 | $burst_text | ${fa:-no answer}, ${fb:-no answer}, ${fu:-no answer}; TUN trusted: ${ft:-no answer} |"
     engine_stop
     topo_down
   done
