@@ -381,10 +381,18 @@ if ($taskStart.ExitCode -ne 0) { throw "Running the 0.3.0-style Server task fail
 $server = Wait-TaskServer 'The 0.3.0-style Server task did not bring up the server within 120 seconds.'
 Wait-Until { @(Get-NodeWindows).Count -gt 0 } 'The window check saw no window for the 0.3.0-style start, so it cannot be trusted here.' 30
 Write-Host 'The window check sees the console window of the 0.3.0-style start'
+# The server started that way repairs its own task in the background, for a
+# task the installer missed.
+Wait-Until {
+  $action = Get-ServerTaskAction
+  return $action.Path -eq $helperProgram -and $action.Arguments -eq $expectedArguments
+} 'The server did not update the 0.3.0-style task it was started by.' 60
+Write-Host 'A server started by a 0.3.0-style task updates the task itself'
 Stop-InstalledApp $server
 
 # The installer's update step must point a 0.3.0 task at the helper, keeping
 # its arguments, and leave a current one alone.
+Set-ServerTaskAction $node $legacyArguments
 $update = & $node (Join-Path $app 'tools\update-autostart.mjs')
 if ($LASTEXITCODE -ne 0 -or "$update" -notmatch 'Startup task: updated') { throw "Updating a 0.3.0 startup task failed: $update" }
 $serverAction = Get-ServerTaskAction
