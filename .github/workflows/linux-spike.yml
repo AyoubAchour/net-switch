@@ -1,0 +1,96 @@
+name: Linux spike
+
+# Feasibility checks for a Linux version: sing-box TUN routing in network
+# namespaces on GitHub's Ubuntu runners, and how apps are identified. Only for
+# the spike/linux-feasibility branch; never merged.
+on:
+  push:
+    branches: ['spike/linux-feasibility']
+  workflow_dispatch:
+    inputs:
+      checks:
+        description: 'Routing checks to run (space-separated, empty for all)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  SING_BOX_VERSION: '1.14.3'
+  # SHA-256 of the release tarballs, from the GitHub release assets.
+  SING_BOX_SHA256_AMD64: e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee
+  SING_BOX_SHA256_ARM64: 29dae24d76bea3bc62d07dd3e60cfc12003de7debbd6b768df9be9c68360174e
+
+jobs:
+  routing:
+    name: Routing / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install test tools
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends iperf3 nftables jq
+      - name: Download sing-box and check its SHA-256
+        run: bash spike/linux/fetch-sing-box.sh
+      - name: Checks 1-11 in network namespaces
+        env:
+          CHECKS: ${{ inputs.checks }}
+        run: >-
+          sudo env "PATH=$PATH" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY" "CHECKS=$CHECKS"
+          "APP_UID=$(id -u)" "APP_GID=$(id -g)" "OUT=$RUNNER_TEMP/spike-routing"
+          bash spike/linux/run-checks.sh
+      - name: Upload results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: routing-${{ matrix.runner }}
+          path: ${{ runner.temp }}/spike-routing
+          retention-days: 14
+
+  identity:
+    name: App identity / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install test tools
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends jq
+      - name: Download sing-box and check its SHA-256
+        run: bash spike/linux/fetch-sing-box.sh
+      - name: Check 12 with a local proxy in the runner's namespace
+        run: >-
+          sudo env "PATH=$PATH" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY" DEBIAN_FRONTEND=noninteractive
+          "APP_UID=$(id -u)" "APP_GID=$(id -g)" "OUT=$RUNNER_TEMP/spike-identity"
+          bash spike/linux/identity.sh
+      - name: Upload results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: identity-${{ matrix.runner }}
+          path: ${{ runner.temp }}/spike-identity
+          retention-days: 14

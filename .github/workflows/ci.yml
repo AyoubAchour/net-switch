@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches-ignore: ['spike/**']
   pull_request:
 
 permissions:
