@@ -73,14 +73,19 @@ async function until(check, description, ms = 10_000) {
   throw new Error(`Timed out: ${description}`);
 }
 async function routed(items, line) {
-  return until(async () => {
-    const all = await engine.connections();
+  let all;
+  try { return await until(async () => {
+    all = await engine.connections();
     return items.every(({ port }) => all.some((conn) =>
       Number(conn.metadata.sourcePort) === port &&
       conn.metadata.processPath?.toLowerCase() === clientExe.toLowerCase() &&
-      (conn.metadata.type?.toLowerCase() === 'tun' || conn.metadata.inboundName === 'tun-in') &&
+      conn.metadata.type === 'tun/tun-in' &&
       conn.chains.includes(lineOutbound(line)))) && all;
-  }, `test app's ${items.length} connections through TUN to ${line}`);
+  }, `test app's ${items.length} connections through TUN to ${line}`); }
+  catch (error) {
+    log(`Expected sockets: ${JSON.stringify(items)}; observed engine connections: ${JSON.stringify(all)}`);
+    throw error;
+  }
 }
 async function clean(label) {
   let state;
