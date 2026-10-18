@@ -7,10 +7,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { appKey, appPins, AppTracker, connectionLine, mergeRows, OutsideTracker, parseOutsideId } from './lib/apps.mjs';
-import { AppInfo } from './lib/appinfo.mjs';
-import { canAutostart, disableAutostart, enableAutostart, installedHelper, readAutostart, upgradeAutostart } from './lib/autostart.mjs';
 import { Engine, probeUrls } from './lib/engine.mjs';
-import { InstalledApps } from './lib/installed-apps.mjs';
 import { LaneSwitch } from './lib/lane-switch.mjs';
 import {
   LEGACY_KEYS,
@@ -31,27 +28,40 @@ import { createLog } from './lib/logfile.mjs';
 import { findHelper, LineMonitor } from './lib/monitor.mjs';
 import { NetworkMonitor, NetworkUpdates, quickProbe, readNetworkOnce, readPolicyOnce } from './lib/helper.mjs';
 import {
-  allowSimultaneousConnections,
-  applyCableAsMain,
-  closeTcpConnections,
   describeFailure,
-  detectAdapters,
   effectiveMetric,
   findAdapter,
   hasGlobalIPv6,
-  isElevated,
   MissingAdapter,
   prepareAdapters,
-  readDefaultRoutes,
-  readMetrics,
-  readMinimizeConnectionsPolicy,
   usableAddresses,
 } from './lib/network.mjs';
-import { runFile, runPowerShell, SYSTEM32 } from './lib/ps.mjs';
+import { platformFor } from './lib/platform/index.mjs';
 import { Settings, writeFileAtomic } from './lib/settings.mjs';
 import { UpdateChecker } from './lib/updates.mjs';
 import { Usage } from './lib/usage.mjs';
-import { openUndoRecord, undoWindowsChanges } from './lib/windows-undo.mjs';
+
+const platform = platformFor();
+const {
+  allowSimultaneousConnections,
+  applyCableAsMain,
+  closeTcpConnections,
+  detectAdapters,
+  isElevated,
+  readDefaultRoutes,
+  readMetrics,
+  readMinimizeConnectionsPolicy,
+  canAutostart,
+  disableAutostart,
+  enableAutostart,
+  installedHelper,
+  readAutostart,
+  upgradeAutostart,
+  protectMachineDir,
+  portHolder,
+  openUndoRecord,
+  undoWindowsChanges,
+} = platform;
 
 const mode = process.argv.includes('--dev-proxy') ? 'proxy' : 'tun';
 // Test mode keeps its own files and ports, so it can run beside the real one.
@@ -124,64 +134,10 @@ const STATIC_FILES = {
 
 const serverLog = createLog(SERVER_LOG);
 
-// The machine folder holds the undo record and what the engine runs from, so
-// only administrators and the system may read or change it. Anyone can create
-// folders in %ProgramData%, so the folder may already exist with other owners
-// or permissions: it gets a fresh owner and an exact list of who may use it,
-// its contents inherit that, and the result is checked. Accounts are named by
-// well-known SIDs, which read the same in any Windows language.
-const PROTECT_SCRIPT = `
-$ErrorActionPreference = 'Stop'
-$dir = $env:NETSWITCH_DIR
-$admins = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-32-544'
-$system = New-Object System.Security.Principal.SecurityIdentifier 'S-1-5-18'
-function Assert-NotLink($item) {
-  if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "$($item.FullName) is a link, which Net Switch won't follow" }
-}
-Assert-NotLink (Get-Item -LiteralPath $dir -Force)
-$acl = New-Object System.Security.AccessControl.DirectorySecurity
-$acl.SetOwner($admins)
-$acl.SetAccessRuleProtection($true, $false)
-foreach ($sid in $admins, $system) {
-  $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit, ObjectInherit', 'None', 'Allow')))
-}
-Set-Acl -LiteralPath $dir -AclObject $acl
-foreach ($item in @(Get-ChildItem -LiteralPath $dir -Recurse -Force)) {
-  Assert-NotLink $item
-  $child = Get-Acl -LiteralPath $item.FullName
-  $child.SetOwner($admins)
-  $child.SetAccessRuleProtection($false, $false)
-  foreach ($rule in @($child.Access | Where-Object { -not $_.IsInherited })) { [void]$child.RemoveAccessRuleSpecific($rule) }
-  Set-Acl -LiteralPath $item.FullName -AclObject $child
-}
-$check = Get-Acl -LiteralPath $dir
-if (-not $check.AreAccessRulesProtected) { throw 'the folder still inherits permissions' }
-$allowed = @('S-1-5-32-544', 'S-1-5-18')
-$others = @($check.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } | Where-Object { $allowed -notcontains $_ })
-if ($others.Count -gt 0) { throw "others still have access: $($others -join ', ')" }
-'protected'
-`;
-
-async function protectMachineDir(dir) {
-  try {
-    const output = await runPowerShell(PROTECT_SCRIPT, { timeoutMs: 30_000, args: { DIR: dir } });
-    if (!output.includes('protected')) throw new Error('the permission check did not complete');
-  } catch (error) {
-    // The folder feeds a program that runs as administrator, so Net Switch
-    // doesn't start without it locked down. launch.ps1 points to this log.
-    const reason = describeFailure(error, 30_000);
-    appendFileSync(
-      SERVER_LOG,
-      `${new Date().toISOString()} Net Switch can't start: ${dir} couldn't be limited to administrators (${reason}). Make sure it is a normal folder, not a link, then start Net Switch again. Don't delete it: it holds the record Undo needs to restore your Windows settings.\n`,
-    );
-    process.exit(1);
-  }
-}
-
 await mkdir(USER_DIR, { recursive: true });
 await mkdir(MACHINE_DIR, { recursive: true });
 // Test mode runs without administrator rights, and would lock itself out.
-if (MACHINE_DIR !== USER_DIR && !testMode) await protectMachineDir(MACHINE_DIR);
+if (MACHINE_DIR !== USER_DIR && !testMode) await protectMachineDir(MACHINE_DIR, SERVER_LOG);
 
 function log(line) {
   return serverLog.append(line);
@@ -237,6 +193,7 @@ await migrateLines();
 // Looks for a newer release, unless the person turned that off. Test mode
 // never checks: it runs beside a real copy, which already does.
 const updates = new UpdateChecker({
+  platform,
   currentVersion: APP_VERSION,
   enabled: () => !testMode && settings.values.checkForUpdates,
   log: (line) => log(line),
@@ -251,17 +208,18 @@ function updateOffer() {
 // Test mode may use the engine of another checkout (a git worktree has none).
 // Never the real one: it runs the engine as administrator.
 const ENGINE_DIR = (testMode && argument('--engine-dir')) || path.join(ROOT, 'engine');
-const helperPath = findHelper(ROOT);
-const networkMonitor = helperPath ? new NetworkMonitor({ helperPath, log }) : null;
+const helperPath = findHelper(ROOT, undefined, platform);
+const networkMonitor = helperPath ? new NetworkMonitor({ helperPath, log, platform }) : null;
 const engine = new Engine({
-  singBoxPath: path.join(ENGINE_DIR, 'sing-box.exe'),
+  platform,
+  singBoxPath: path.join(ENGINE_DIR, platform.engineFileName),
   dataDir: MACHINE_DIR,
   mode,
 });
-const tracker = new AppTracker();
-const outside = new OutsideTracker();
-const appInfo = new AppInfo();
-const installedApps = new InstalledApps({ appInfo });
+const tracker = new AppTracker({ platform });
+const outside = new OutsideTracker({ platform });
+const appInfo = platform.createAppInfo();
+const installedApps = platform.createInstalledApps({ appInfo });
 const monitor = new LineMonitor({
   // Measuring connections that go around routing needs administrator rights.
   watchOutside: !testMode,
@@ -476,25 +434,6 @@ async function existingServerIsAlive() {
     return response.ok;
   } catch {
     return false;
-  }
-}
-
-// The program holding a local port, from netstat and tasklist (no WMI, which
-// can hang). Rows are matched by their numbers, so this reads the same in any
-// Windows language. Null when it can't be told.
-async function portHolder(port) {
-  try {
-    const table = await runFile(path.join(SYSTEM32, 'NETSTAT.EXE'), ['-ano', '-p', 'TCP'], { timeoutMs: 10_000 });
-    const row = new RegExp(String.raw`^\s*TCP\s+127\.0\.0\.1:${port}\s+0\.0\.0\.0:0\s+\S+\s+(\d+)\s*$`, 'm').exec(table);
-    if (!row) return null;
-    const pid = Number(row[1]);
-    const list = await runFile(path.join(SYSTEM32, 'tasklist.exe'), ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
-      timeoutMs: 10_000,
-    });
-    const image = /^"([^"]+)"/.exec(list.trim())?.[1];
-    return image ? { pid, image: image.toLowerCase() } : null;
-  } catch {
-    return null;
   }
 }
 
@@ -1026,8 +965,8 @@ function setAppLine(processPath, lineId) {
     }
     if (lineId !== null && !lineById(lineId)) throw clientError('That line isn’t there any more.');
     const previous = settings.values.appLines;
-    const key = appKey(processPath);
-    const appLines = Object.fromEntries(Object.entries(previous).filter(([item]) => appKey(item) !== key));
+    const key = appKey(processPath, platform);
+    const appLines = Object.fromEntries(Object.entries(previous).filter(([item]) => appKey(item, platform) !== key));
     if (lineId !== null) appLines[processPath] = lineId;
     await engine.setAppLines(appLines);
     try {
@@ -1042,7 +981,7 @@ function setAppLine(processPath, lineId) {
 
 // The line an app is pinned to, if it is and that line exists.
 function pinnedLine(key) {
-  const id = appPins(settings.values.appLines).get(key)?.lineId;
+  const id = appPins(settings.values.appLines, platform).get(key)?.lineId;
   return id && lineById(id) ? id : null;
 }
 
@@ -1512,7 +1451,7 @@ function buildState() {
   const wifiPresent = adapters.some((item) => item.kind === 'wifi');
   const undo = windowsUndo.values;
 
-  const apps = mergeRows(tracker.snapshot(appLines), outside, appLines).map((app) => {
+  const apps = mergeRows(tracker.snapshot(appLines), outside, appLines, platform).map((app) => {
     const info = appInfo.describe(app.path);
     return {
       key: app.key,
