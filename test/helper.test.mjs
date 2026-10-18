@@ -6,11 +6,12 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { NetworkMonitor, NetworkUpdates, parseNetworkSnapshot, quickProbe, readPolicyOnce } from '../lib/helper.mjs';
 import { LaneSwitch } from '../lib/lane-switch.mjs';
-import { ADAPTERS_SCRIPT, MissingAdapter, readDefaultRoutes, readMinimizeConnectionsPolicy, usableAddresses } from '../lib/network.mjs';
+import { MissingAdapter, usableAddresses } from '../lib/network.mjs';
+import { ADAPTERS_SCRIPT, readDefaultRoutes, readMinimizeConnectionsPolicy } from '../lib/platform/windows-network.mjs';
 import { runFile, runPowerShellJson } from '../lib/ps.mjs';
 
 const helper = fileURLToPath(new URL('../helper/bin/netswitch-helper.exe', import.meta.url));
-const needsHelper = { skip: existsSync(helper) ? false : 'native helper is not built', timeout: 45_000 };
+const needsHelper = { skip: process.platform !== 'win32' || (existsSync(helper) ? false : 'native helper is not built'), timeout: 45_000 };
 const sample = { readAt: 1000, adapters: [{ alias: 'Cable', index: 3, status: 'Up', ipv4s: ['192.168.1.2'] }], defaultRoutes: [], policy: 'absent' };
 
 test('native adapters match the PowerShell scan field by field', needsHelper, async (t) => {

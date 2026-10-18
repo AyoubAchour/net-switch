@@ -18,7 +18,7 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const TRAY = path.join(ROOT, 'tray', 'bin', 'NetSwitchTray.exe');
 const POWERSHELL = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
 const needsTray = {
-  skip: existsSync(TRAY) ? false : 'tray\\bin\\NetSwitchTray.exe is not built; run npm run build:tray',
+  skip: process.platform !== 'win32' || (existsSync(TRAY) ? false : 'tray\\bin\\NetSwitchTray.exe is not built; run npm run build:tray'),
   timeout: 60_000,
 };
 

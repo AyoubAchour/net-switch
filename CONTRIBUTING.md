@@ -124,7 +124,7 @@ tests both TCP destinations concurrently, bound to that interface's IPv4
 address and Windows `IP_UNICAST_IF`. It is available to callers but is not yet
 used by automatic failover.
 
-Native adapter fields follow `ADAPTERS_SCRIPT` in `lib/network.mjs`. Adapter
+Native adapter fields follow `ADAPTERS_SCRIPT` in `lib/platform/windows-network.mjs`. Adapter
 visibility uses the drivers' `NCF_HIDDEN` registry flag to exclude hidden
 miniports and Wi-Fi Direct devices, alongside the IP interface flags. Address
 ordering can differ between Windows providers, and link speed can change
@@ -181,7 +181,7 @@ must match `package.json` and have a section in `CHANGELOG.md`.
   way unless there's a strong reason.
 - The native helper (`helper\`) is Go, laid out by `gofmt`, with
   `golang.org/x/sys` as its only dependency. Meter and connection output must
-  match `lib\monitor.mjs`; network fields must match `lib\network.mjs`.
+  match `lib\monitor.mjs`; network fields must match `lib\platform\windows-network.mjs`.
 - The tray program's start (`lib\tray-main.cs`) does what `tray.ps1` does
   before it calls `Tray.Run`: the same data folder, log and single-copy rule.
   Change both together.

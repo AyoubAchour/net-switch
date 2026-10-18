@@ -1,0 +1,70 @@
+{
+  "1-tun-ipv6-false": "1d06b80b499e042868114bf0b0cbc9e7b2666e716e5fbbb917be669ff2ea6e5c",
+  "1-tun-ipv6-true": "f7022ee178ee91e4ca667d40f19cacf141df42fe7aabb26aba074c84285c5cb0",
+  "1-proxy-ipv6-false": "d443374234f89f282e21282d3dae4bec20c270062847bdb17a3abe7e94786c74",
+  "1-proxy-ipv6-true": "d443374234f89f282e21282d3dae4bec20c270062847bdb17a3abe7e94786c74",
+  "2-tun-ipv6-false": "e7d0e4c3e18a8c0aa88dd11e87fc71431349fe0a132a06e39020d578642fb9bd",
+  "2-tun-ipv6-true": "4a849d16ae1b8be93d532267adf83960e8efd0c41fef2e41ef445066a0bf3ab7",
+  "2-proxy-ipv6-false": "49560ad4f75fb24b4399778db96d827eaf9077c15df4cba741877497f7cdaaa5",
+  "2-proxy-ipv6-true": "49560ad4f75fb24b4399778db96d827eaf9077c15df4cba741877497f7cdaaa5",
+  "3-tun-ipv6-false": "c26c4b2f916b14bdbabade221167507e3262c876b605b0f3c889c9bbbb3fbd8d",
+  "3-tun-ipv6-true": "18ba301ba20abd7859d4919560afe01b25b9744cb5869cf2bff8bc099a013d4c",
+  "3-proxy-ipv6-false": "a2be1513917266e5dedfe936ae6bdbe2e9f97d6e56c78d1c97eaf257c1c3e81a",
+  "3-proxy-ipv6-true": "a2be1513917266e5dedfe936ae6bdbe2e9f97d6e56c78d1c97eaf257c1c3e81a",
+  "1-lines-pinned": {
+    "apps-aa": "48537641219ee8d9973e47612068b92554c95f047c5daafd82dfc64e487b3563"
+  },
+  "1-lines-combined": {
+    "apps-aa": "48537641219ee8d9973e47612068b92554c95f047c5daafd82dfc64e487b3563"
+  },
+  "2-lines-pinned": {
+    "apps-aa": "48537641219ee8d9973e47612068b92554c95f047c5daafd82dfc64e487b3563",
+    "apps-bb": "19a6b9972528e826d5c396015ba3320f0146500316b66a9a4e3230ba553a280d",
+    "share-bb": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476",
+    "cut-bb": "19a6b9972528e826d5c396015ba3320f0146500316b66a9a4e3230ba553a280d"
+  },
+  "2-lines-combined": {
+    "apps-aa": "48537641219ee8d9973e47612068b92554c95f047c5daafd82dfc64e487b3563",
+    "apps-bb": "19a6b9972528e826d5c396015ba3320f0146500316b66a9a4e3230ba553a280d",
+    "share-bb": "2373b35a835a45b012207417d9ab46dc3966bc2d499d048cea0b716a9e02cdce",
+    "cut-bb": "19a6b9972528e826d5c396015ba3320f0146500316b66a9a4e3230ba553a280d"
+  },
+  "3-lines-pinned": {
+    "apps-aa": "48537641219ee8d9973e47612068b92554c95f047c5daafd82dfc64e487b3563",
+    "apps-bb": "19a6b9972528e826d5c396015ba3320f0146500316b66a9a4e3230ba553a280d",
+    "share-bb": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476",
+    "cut-bb": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+    "apps-cc": "dbcfa4e32f61143a7d6c443148749436c662b2e33bbebecd13a41da06b9872ea",
+    "share-cc": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476",
+    "cut-cc": "dbcfa4e32f61143a7d6c443148749436c662b2e33bbebecd13a41da06b9872ea"
+  },
+  "3-lines-combined": {
+    "apps-aa": "48537641219ee8d9973e47612068b92554c95f047c5daafd82dfc64e487b3563",
+    "apps-bb": "19a6b9972528e826d5c396015ba3320f0146500316b66a9a4e3230ba553a280d",
+    "share-bb": "90fff882f5d8a4c725214c21b4670cbe038ae651a382f1805fe956aee6744e5d",
+    "cut-bb": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+    "apps-cc": "dbcfa4e32f61143a7d6c443148749436c662b2e33bbebecd13a41da06b9872ea",
+    "share-cc": "13aa366938b02d66fb663b6cf4ceabdee6023898c4df63ec2f64cb49ad998cc4",
+    "cut-cc": "dbcfa4e32f61143a7d6c443148749436c662b2e33bbebecd13a41da06b9872ea"
+  },
+  "empty-apps": {
+    "apps-aa": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+    "apps-bb": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+    "share-bb": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476",
+    "cut-bb": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+    "apps-cc": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+    "share-cc": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476",
+    "cut-cc": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee"
+  },
+  "update-x64": {
+    "version": "1.2.3",
+    "page": "https://github.com/AyoubAchour/net-switch/releases/tag/v1.2.3",
+    "installer": "https://github.com/AyoubAchour/net-switch/releases/download/v1.2.3/NetSwitch-Setup-1.2.3-x64.exe"
+  },
+  "update-arm64": {
+    "version": "1.2.3",
+    "page": "https://github.com/AyoubAchour/net-switch/releases/tag/v1.2.3",
+    "installer": "https://github.com/AyoubAchour/net-switch/releases/download/v1.2.3/NetSwitch-Setup-1.2.3-arm64.exe"
+  },
+  "update-ia32": null
+}

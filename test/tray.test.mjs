@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { after, before, test } from 'node:test';
+import { after, before, test as nodeTest } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { cable, down, line, phone, state, STATES, wifi } from './tray-states.mjs';
 
@@ -12,6 +12,7 @@ import { cable, down, line, phone, state, STATES, wifi } from './tray-states.mjs
 // every flyout case is also drawn, so a state that breaks the drawing fails here.
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const POWERSHELL = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const test = (name, fn) => nodeTest(name, { skip: process.platform !== 'win32' }, fn);
 
 const RUNNER = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -176,6 +177,7 @@ const CLEAR = '00000000';
 let results;
 
 before(() => {
+  if (process.platform !== 'win32') return;
   const encoded = Buffer.from(RUNNER, 'utf16le').toString('base64');
   let output;
   try {

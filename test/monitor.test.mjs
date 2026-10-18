@@ -18,7 +18,8 @@ const reading = (...adapters) => JSON.stringify({ adapters: adapters.map(([alias
 // The native helper, when this checkout has built it (npm run build:helper).
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const HELPER = path.join(ROOT, 'helper', 'bin', 'netswitch-helper.exe');
-const needsHelper = { skip: existsSync(HELPER) ? false : 'helper\\bin\\netswitch-helper.exe is not built; run npm run build:helper' };
+const windowsOnly = { skip: process.platform !== 'win32' };
+const needsHelper = { skip: process.platform !== 'win32' || (existsSync(HELPER) ? false : 'helper\\bin\\netswitch-helper.exe is not built; run npm run build:helper') };
 
 test('helper stderr logs each distinct message at most once a minute across restarts', (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: 1000 });
@@ -35,7 +36,7 @@ test('helper stderr logs each distinct message at most once a minute across rest
   assert.equal(logged.length, 3);
 });
 
-test('the line meters read adapter counters through .NET, so the USB Wi-Fi stick is listed', async () => {
+test('the line meters read adapter counters through .NET, so the USB Wi-Fi stick is listed', windowsOnly, async () => {
   // The same Windows PowerShell 5.1 the monitor runs in.
   const list = await runPowerShellJson(`${ADAPTER_STATS}\nConvertTo-Json -InputObject @($adapters) -Compress`);
   assert.ok(Array.isArray(list) && list.length > 0);
@@ -51,7 +52,7 @@ test('the line meters read adapter counters through .NET, so the USB Wi-Fi stick
   for (const name of withAddress) assert.ok(list.some((item) => item.alias === name), `${name} is missing from the counters`);
 });
 
-test('the real meters helper reports a speed for a connected adapter within a few seconds', { timeout: 20_000 }, async () => {
+test('the real meters helper reports a speed for a connected adapter within a few seconds', { ...windowsOnly, timeout: 20_000 }, async () => {
   // Adapter names differ between PCs ("Ethernet" here, something else on a CI
   // machine), so use whichever one has an internet-style address.
   const alias = Object.entries(networkInterfaces())
@@ -386,7 +387,7 @@ test('an error from a helper that is running, such as a failed kill, does not re
   }
 });
 
-test('the meter script gives an empty list, a one-item list and a full list, and skips an adapter whose counters fail', async () => {
+test('the meter script gives an empty list, a one-item list and a full list, and skips an adapter whose counters fail', windowsOnly, async () => {
   const real = '[System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()';
   assert.ok(ADAPTER_STATS.includes(real));
   const fake = (names, failing = []) =>
