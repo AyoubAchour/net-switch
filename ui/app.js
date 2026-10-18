@@ -74,6 +74,8 @@ let confirmingRemove = false;
 // What's typed in the panel and not saved yet; null while nothing is.
 const drafts = { label: null, cap: null, probeTargets: null };
 let advancedOpen = false;
+// What the last Check now found: { result, version }, or null before one.
+let lastUpdateCheck = null;
 // Shares being set by hand, by line id, until the server has them.
 let shareDraft = null;
 let sendingShares = false;
@@ -2280,6 +2282,47 @@ function updateChecksValue() {
   return typeof value === 'boolean' ? value : null;
 }
 
+// Check now, and what it found. A newer release gets its download right here;
+// the notice in the window offers it too.
+function updateCheckRow() {
+  const checking = busyAction === 'update-check';
+  const found = lastUpdateCheck;
+  let text = 'See whether a newer version is out.';
+  if (checking) text = 'Asking GitHub…';
+  else if (found?.result === 'available' && state.update) text = `Net Switch ${state.update.version} is out.`;
+  else if (found?.result === 'latest') text = `You have the latest version${state.version ? ` (${state.version})` : ''}.`;
+  else if (found?.result === 'failed') text = 'Couldn’t reach GitHub. Check your connection and try again.';
+  const download =
+    !checking && found?.result === 'available' && state.update
+      ? h('a', { class: 'button', href: state.update.installer, target: '_blank', rel: 'noopener noreferrer', text: 'Download' })
+      : null;
+  return h(
+    'div',
+    { class: 'setting' },
+    h('div', { class: 'setting-text' }, h('p', { class: 'setting-help', 'aria-live': 'polite', text })),
+    h(
+      'div',
+      { class: 'setting-actions' },
+      download,
+      h('button', {
+        class: download ? 'button button-quiet' : 'button',
+        type: 'button',
+        'data-focus': 'update-check',
+        text: checking ? 'Checking…' : 'Check now',
+        'aria-disabled': busyAction ? 'true' : null,
+        onclick: () => {
+          if (busyAction) return;
+          run('update-check', async () => {
+            const answer = await api('/api/update/check', {});
+            lastUpdateCheck = answer.check ?? null;
+            return answer;
+          });
+        },
+      }),
+    ),
+  );
+}
+
 function buildSettingsPanel() {
   const settings = state.settings ?? {};
   const busy = Boolean(busyAction);
@@ -2310,6 +2353,7 @@ function buildSettingsPanel() {
         disabled: busy,
         onToggle: () => run('update-checks', () => api('/api/settings', { checkForUpdates: !checks })),
       }),
+      updateCheckRow(),
     );
   }
   const sections = rows.length ? [h('section', { class: 'panel-section' }, rows)] : [];
@@ -2421,7 +2465,7 @@ function renderPanel() {
             busyAction,
             actionError,
           ])
-        : JSON.stringify(['settings', state.settings, state.updateChecks, state.mode, state.version, busyAction, actionError, failedAction]);
+        : JSON.stringify(['settings', state.settings, state.updateChecks, state.mode, state.version, state.update?.version ?? null, lastUpdateCheck, busyAction, actionError, failedAction]);
   if (dialog.dataset.signature !== signature) {
     const build = panel.kind === 'line' ? () => buildLinePanel(line) : panel.kind === 'apps' ? buildAppsPanel : buildSettingsPanel;
     rebuildKeepingFocus(dialog, () => [h('div', { class: 'panel' }, ...build())]);

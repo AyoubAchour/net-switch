@@ -1650,6 +1650,16 @@ const actions = {
     return buildState();
   },
   'POST /api/reconnect': async ({ key }) => ({ ...(await reconnectApp(key)), state: buildState() }),
+  // Check now, in Settings. The person asked, so it runs even with the
+  // automatic checks off, and a release they said "not now" to is offered again.
+  'POST /api/update/check': async () => {
+    if (testMode) throw clientError('Test mode doesn’t check for updates.');
+    const result = await updates.check({ force: true });
+    if (result === 'available' && updates.offer?.version === settings.values.skippedUpdate) {
+      await settings.update({ skippedUpdate: null });
+    }
+    return { ...buildState(), check: { result, version: updates.offer?.version ?? null } };
+  },
   // "Not now" for one release: it isn't offered again, a later one is.
   'POST /api/update/dismiss': async ({ version }) => {
     if (typeof version !== 'string' || !version) throw clientError('Choose which update to skip, then try again.');

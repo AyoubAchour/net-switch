@@ -16,6 +16,9 @@ and run it: `x64` for Intel and AMD PCs, `arm64` for ARM64 PCs on Windows 11.
   closing it turned Net Switch off. The service now starts without a window.
   Updating fixes an existing startup setting by itself; there's nothing to
   turn off and on again.
+- **Check now.** Settings has a button to look for a newer version right away,
+  with a download button when one is out. It works even with the automatic
+  checks turned off.
 
 ## [0.3.0] - 2026-10-17
 

@@ -291,6 +291,10 @@ buttons:
 
 The tray icon's right-click menu offers the same download.
 
+To check right away, press **Check now** in the window's **Settings**. It works
+even with the automatic checks turned off, and it also brings back a version
+you said **Not now** to.
+
 Net Switch never downloads or installs anything by itself: its server runs as
 administrator, and installing should always be your decision. To stop the
 checks, turn off **Check for updates** in the window's **Settings**.

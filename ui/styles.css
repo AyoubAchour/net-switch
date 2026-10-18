@@ -1683,6 +1683,13 @@ body[data-stale] .channels {
   min-width: 0;
 }
 
+.setting-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .setting-name,
 .field-label {
   font-weight: 600;
