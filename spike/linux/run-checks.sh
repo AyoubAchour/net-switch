@@ -577,9 +577,9 @@ check13() {
 goroutine_kinds() {
   awk '
     function flush() { if (state != "") print state " | " (fn != "" ? fn : top) }
-    /^goroutine [0-9]+ \[/ {
+    /^goroutine [0-9]+ .*\[.*\]:$/ {
       flush()
-      state = $0; sub(/^goroutine [0-9]+ /, "", state); sub(/:$/, "", state); sub(/, [0-9]+ minutes/, "", state)
+      state = $0; sub(/^[^[]*/, "", state); sub(/:$/, "", state); sub(/, [0-9]+ minutes/, "", state)
       fn = ""; top = ""; next
     }
     state != "" && /^[^\t]/ && !/^created by/ {
@@ -594,7 +594,7 @@ goroutine_kinds() {
 goroutine_stacks() {
   awk '
     function flush() { if (block ~ /Forward|JudgeFlow|PreMatch|FindProcess|findProcess|searcher/ && shown < 4) { print block; shown++ } }
-    /^goroutine [0-9]+ \[/ { flush(); block = $0; next }
+    /^goroutine [0-9]+ .*\[.*\]:$/ { flush(); block = $0; next }
     block != "" { block = block "\n" $0 }
     END { flush() }
   ' "$1" | head -120
@@ -603,7 +603,7 @@ goroutine_stacks() {
 check14() {
   begin check14 "gvisor + process lookup: hunting handshakes that never finish"
   local round
-  for round in 1 2 3; do
+  for round in 1 2 3 4 5; do
     topo_up && servers_up || {
       fail "round $round: topology did not come up"
       continue
@@ -615,8 +615,10 @@ check14() {
     info "round $round: $result"
     note "round $round: ${timeouts:-?} of 2,000 handshakes never finished; the engine logged $(grep -c 'inbound connection from' "$dir/engine.log") inbound connections and $(grep -c 'outbound connection to' "$dir/engine.log") outbound ones"
     if [ "${timeouts:-0}" -gt 0 ]; then
+      block "round $round: client sockets still waiting" "$(in_dut ss -tan state syn-sent | head -12)"
       kill -QUIT "$SB_PID"
       sleep 3
+      info "round $round: dump has $(grep -c '^goroutine ' "$dir/engine.log") goroutines; it starts: $(grep -m3 -E 'SIGQUIT|^goroutine ' "$dir/engine.log" | tr '\n' ' ')"
       block "round $round: goroutines by state and first sing-box frame" "$(goroutine_kinds "$dir/engine.log")"
       block "round $round: stacks through the forwarder or process lookup" "$(goroutine_stacks "$dir/engine.log")"
       SB_PID=
