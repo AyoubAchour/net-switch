@@ -379,7 +379,7 @@ Set-ServerTaskAction $node $legacyArguments
 $taskStart = Start-Process -FilePath $schtasks -ArgumentList '/Run', '/TN', '"\Net Switch\Server"' -WindowStyle Hidden -Wait -PassThru
 if ($taskStart.ExitCode -ne 0) { throw "Running the 0.3.0-style Server task failed (schtasks exit code $($taskStart.ExitCode))." }
 $server = Wait-TaskServer 'The 0.3.0-style Server task did not bring up the server within 120 seconds.'
-Wait-Until { (Get-NodeWindows).Count -gt 0 } 'The window check saw no window for the 0.3.0-style start, so it cannot be trusted here.' 30
+Wait-Until { @(Get-NodeWindows).Count -gt 0 } 'The window check saw no window for the 0.3.0-style start, so it cannot be trusted here.' 30
 Write-Host 'The window check sees the console window of the 0.3.0-style start'
 Stop-InstalledApp $server
 
@@ -410,7 +410,7 @@ if (-not $parent -or $parent.ExecutablePath -ne $helperProgram -or $parent.Comma
 # No window on screen for the server (checked a few seconds in, when the
 # 0.3.0-style start above already showed one).
 Start-Sleep -Seconds 3
-$windows = Get-NodeWindows
+$windows = @(Get-NodeWindows)
 if ($windows.Count) { throw "The server started at sign-in shows a window: $($windows -join ', ')" }
 Write-Host 'The server started at sign-in shows no window'
 Wait-Until { $signIn.HasExited } 'The sign-in start did not finish.' 120
