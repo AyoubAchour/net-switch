@@ -9,6 +9,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Engine } from '../lib/engine.mjs';
 import { lineOutbound } from '../lib/apps.mjs';
+import { testLocalUdp } from './tun-test-udp.mjs';
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
   throw new Error('TUN tests may run only on disposable GitHub-hosted Windows runners.');
@@ -105,11 +106,8 @@ try {
   adapter = await network('inspect');
   log(`Physical adapter: ${JSON.stringify(adapter)}`);
   log(`PORT-REUSE direct baseline: ${JSON.stringify(await client('reuse'))}`);
-  const udpAvailable = new Set();
-  for (const size of [64, 1800]) {
-    try { log(`UDP direct baseline: ${JSON.stringify(await client('udp', { size }))}`); udpAvailable.add(size); }
-    catch (error) { log(`UDP ${size} unavailable before TUN (target/network limitation): ${error.message}`); }
-  }
+  await testLocalUdp({ client, clientExe, adapter, dataDir: dir, log });
+  await clean('after local UDP fixture');
   // Hosted runners have one physical internet adapter. Two independently tagged
   // outbounds on that adapter let the Clash API prove which line was selected.
   const lines = ['aa', 'bb'].map((id) => ({ id, alias: adapter.alias }));
@@ -159,11 +157,6 @@ try {
   log(`ok - selector PUT ${elapsed.toFixed(1)} ms with 100 open connections; all old sockets reused, new connections use bb`);
   await client('close');
 
-  for (const size of udpAvailable) {
-    const result = await client('udp', { size });
-    await routed([result], 'bb');
-    log(`ok - UDP through TUN: ${JSON.stringify(result)}`);
-  }
   const reuse = await client('reuse');
   log(`PORT-REUSE TUN: ${JSON.stringify(reuse)}`);
   alive();
@@ -206,6 +199,12 @@ try {
   log('TUN end-to-end test passed');
 } catch (error) {
   log(`FAIL: ${error.stack}`);
+  // Keep the actual stop state and warnings beside the error. An unlink error
+  // does not prove the engine survived, and warn-level output can be empty.
+  log(`Engine at failure: ${JSON.stringify({ status: engine.status, error: engine.error,
+    childPid: engine.child?.pid ?? null, exitCode: engine.child?.exitCode ?? null })}`);
+  log(`PID file at failure: ${await readFile(engine.pidPath, 'utf8').catch((error) => error.code)}`);
+  log(`Engine log at failure:\n${await readFile(engine.logPath, 'utf8').then((text) => text.slice(-8000) || '(empty)').catch((error) => error.code)}`);
   process.exitCode = 1;
 } finally {
   if (restoreDns) {

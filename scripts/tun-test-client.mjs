@@ -1,9 +1,8 @@
 // Launched by e2e-tun.mjs using a separate copy of Node, so process pins are real.
-import assert from 'node:assert/strict';
-import { createSocket } from 'node:dgram';
 import { Agent, request } from 'node:https';
 import { connect, createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { udpProbe } from './tun-test-dns.mjs';
 
 if (!process.send) throw new Error('Run this client through e2e-tun.mjs');
 const held = new Map();
@@ -79,51 +78,13 @@ async function reuseProbe() {
   }
   return attempts;
 }
-async function udp(size) {
-  const socket = createSocket('udp4');
-  // A real DNS query with RFC 7830 EDNS padding, including a >1500-byte packet.
-  const question = Buffer.from('076578616d706c6503636f6d0000010001', 'hex');
-  const header = Buffer.from('123401000001000000000001', 'hex');
-  const padding = Math.max(0, size - header.length - question.length - 15);
-  const opt = Buffer.alloc(15 + padding);
-  opt.writeUInt16BE(41, 1); opt.writeUInt16BE(4096, 3);
-  opt.writeUInt16BE(4 + padding, 9); opt.writeUInt16BE(12, 11); opt.writeUInt16BE(padding, 13);
-  const packet = Buffer.concat([header, question, opt]);
-  try {
-    return await new Promise((resolve, reject) => {
-      const servers = ['1.1.1.1', '8.8.8.8'];
-      let attempts = 0, done = false;
-      const send = () => {
-        // Five attempts per resolver, one each second. Keep the same socket
-        // and large payload so this still exercises real UDP TUN routing.
-        if (attempts === servers.length * 5) {
-          finish(reject, new Error(`No UDP DNS reply to ${packet.length} bytes after ${attempts} attempts`));
-          return;
-        }
-        socket.send(packet, 53, servers[Math.floor(attempts++ / 5)]);
-      };
-      const timer = setInterval(send, 1000);
-      const finish = (fn, value) => { if (done) return; done = true; clearInterval(timer); fn(value); };
-      socket.on('error', (error) => finish(reject, error));
-      socket.on('message', (reply, peer) => {
-        if (!servers.includes(peer.address) || peer.port !== 53 || reply.length < 12 || reply.readUInt16BE(0) !== 0x1234) return;
-        try {
-          assert(reply[2] & 0x80, 'DNS response flag missing');
-          assert.equal(reply[3] & 15, 0, 'DNS error response');
-          finish(resolve, { sent: packet.length, received: reply.length, port: socket.address().port });
-        } catch (error) { finish(reject, error); }
-      });
-      send();
-    });
-  } finally { socket.close(); }
-}
-process.on('message', async ({ id, command, count, ids, size }) => {
+process.on('message', async ({ id, command, count, ids, size, server, port }) => {
   try {
     let result;
     if (command === 'open') result = await open(count);
     else if (command === 'refresh') result = await Promise.all(ids.map((key) => requestOn(held.get(key))));
     else if (command === 'reuse') result = await reuseProbe();
-    else if (command === 'udp') result = await udp(size);
+    else if (command === 'udp') result = await udpProbe({ size, server, port });
     else if (command === 'close') { for (const item of held.values()) item.agent.destroy(); held.clear(); result = true; }
     else throw new Error(`Unknown command ${command}`);
     process.send({ id, result });
