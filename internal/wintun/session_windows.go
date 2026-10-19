@@ -46,19 +46,22 @@ type Event struct {
 }
 
 type Session struct {
-	adapter                                                            *Adapter
-	mu                                                                 sync.RWMutex // keeps resources alive during native waits and packet copies
-	readMu, writeMu                                                    sync.Mutex
-	rings                                                              *rings
-	wake                                                               windows.Handle
-	changed                                                            chan struct{}
-	err, closeErr                                                      error
-	closed, recovering                                                 atomic.Bool
-	closeOnce                                                          sync.Once
-	stop, stopped                                                      chan struct{}
-	repair                                                             chan error
-	events                                                             chan Event
-	read, written, dropped, corruptions, recoveries, failures, wakeups atomic.Uint64
+	adapter            *Adapter
+	mu                 sync.RWMutex // keeps resources alive during native waits and packet copies
+	readMu, writeMu    sync.Mutex
+	rings              *rings
+	wake, cancelEvent  windows.Handle
+	changed            chan struct{}
+	err, closeErr      error
+	closed, recovering atomic.Bool
+	closeOnce          sync.Once
+	stop, stopped      chan struct{}
+	repair             chan error
+	events             chan Event
+
+	read, written, dropped            atomic.Uint64
+	corruptions, recoveries, failures atomic.Uint64
+	wakeups                           atomic.Uint64
 }
 
 func (a *Adapter) StartSession() (*Session, error) {
@@ -82,7 +85,11 @@ func (a *Adapter) StartSession() (*Session, error) {
 	if err != nil {
 		return nil, errors.Join(err, r.close())
 	}
-	s := &Session{adapter: a, rings: r, wake: wake, changed: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}), repair: make(chan error, 1), events: make(chan Event, 8)}
+	cancelEvent, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return nil, errors.Join(err, windows.CloseHandle(wake), r.close())
+	}
+	s := &Session{adapter: a, rings: r, wake: wake, cancelEvent: cancelEvent, changed: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}), repair: make(chan error, 1), events: make(chan Event, 8)}
 	a.session = s
 	go s.maintain()
 	return s, nil
@@ -122,14 +129,18 @@ func (s *Session) maintain() {
 	for {
 		select {
 		case <-s.stop:
+			// The read mutex also covers cancellation callback completion.
+			// Close has already signalled wake, so an active native wait exits.
+			s.readMu.Lock()
 			s.mu.Lock()
 			if s.rings != nil {
 				s.closeErr = s.rings.close()
 				s.rings = nil
 			}
-			s.closeErr = errors.Join(s.closeErr, windows.CloseHandle(s.wake))
+			s.closeErr = errors.Join(s.closeErr, windows.CloseHandle(s.wake), windows.CloseHandle(s.cancelEvent))
 			close(s.changed)
 			s.mu.Unlock()
+			s.readMu.Unlock()
 			return
 		case cause := <-s.repair:
 			s.mu.Lock()
@@ -213,20 +224,19 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 	}
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
+	if s.closed.Load() {
+		return 0, net.ErrClosed
+	}
 	var cancelEvent windows.Handle
 	if ctx.Done() != nil {
-		var err error
-		cancelEvent, err = windows.CreateEvent(nil, 1, 0, nil)
-		if err != nil {
-			return 0, err
-		}
+		cancelEvent = s.cancelEvent
 		finished := make(chan struct{})
 		stop := context.AfterFunc(ctx, func() { windows.SetEvent(cancelEvent); close(finished) })
 		defer func() {
 			if !stop() {
 				<-finished
+				windows.ResetEvent(cancelEvent)
 			}
-			windows.CloseHandle(cancelEvent)
 		}()
 	}
 	spins := 0

@@ -223,7 +223,7 @@ type dllSession struct {
 	mu                                    sync.RWMutex
 	readMu, writeMu                       sync.Mutex
 	h                                     uintptr
-	event, stop                           windows.Handle
+	event, stop, cancelEvent              windows.Handle
 	receive, release, allocate, send, end uintptr
 	closed                                atomic.Bool
 }
@@ -250,7 +250,16 @@ func startDLL(t *testing.T, a *Adapter) *dllSession {
 	event, _, _ := syscall.SyscallN(get, h)
 	s.event = windows.Handle(event)
 	s.stop, err = windows.CreateEvent(nil, 1, 0, nil)
-	must(t, err)
+	if err != nil {
+		syscall.SyscallN(s.end, s.h)
+		t.Fatal(err)
+	}
+	s.cancelEvent, err = windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		windows.CloseHandle(s.stop)
+		syscall.SyscallN(s.end, s.h)
+		t.Fatal(err)
+	}
 	return s
 }
 
@@ -259,17 +268,17 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 	defer s.readMu.Unlock()
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	cancelEvent, err := windows.CreateEvent(nil, 1, 0, nil)
-	if err != nil {
-		return 0, err
+	if s.closed.Load() {
+		return 0, net.ErrClosed
 	}
+	cancelEvent := s.cancelEvent
 	done := make(chan struct{})
 	stop := context.AfterFunc(ctx, func() { windows.SetEvent(cancelEvent); close(done) })
 	defer func() {
 		if !stop() {
 			<-done
+			windows.ResetEvent(cancelEvent)
 		}
-		windows.CloseHandle(cancelEvent)
 	}()
 	for {
 		if ctx.Err() != nil {
@@ -303,7 +312,7 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 				return len(buffers), nil
 			}
 		}
-		_, err = windows.WaitForMultipleObjects([]windows.Handle{s.stop, s.event, cancelEvent}, false, windows.INFINITE)
+		_, err := windows.WaitForMultipleObjects([]windows.Handle{s.stop, s.event, cancelEvent}, false, windows.INFINITE)
 		if err != nil {
 			return 0, err
 		}
@@ -342,7 +351,7 @@ func (s *dllSession) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	syscall.SyscallN(s.end, s.h)
-	return windows.CloseHandle(s.stop)
+	return errors.Join(windows.CloseHandle(s.stop), windows.CloseHandle(s.cancelEvent))
 }
 
 type latencyResult struct {
