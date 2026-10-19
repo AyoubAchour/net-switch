@@ -97,6 +97,31 @@ milestones 3–4. It is not permission to discard failed applies or early closur
 from replay. Journal writes and settings-before-apply ordering are explicit 1.0
 outputs, separate from the frozen Node writes.
 
+### Milestone-one line-check expectations
+
+The defaults are Cloudflare `1.1.1.1:443`, Google `8.8.8.8:443`, and Quad9
+`9.9.9.9:443`, rotating per check. Quick checks have a 3 s deadline. A failed
+quick check is confirmed by parallel full checks against two different operators
+(the other two defaults); each has a 10 s deadline. Full checks never follow
+redirects and retain normal TLS certificate verification for the address.
+
+- Cloudflare: `/cdn-cgi/trace`, HTTP 200, `text/plain`, and `ip=` in the body.
+- Google: `/resolve?name=example.com&type=A`, HTTP 200, `application/json`, and
+  numeric JSON `Status` equal to zero.
+- Quad9: `/dns-query?dns=<fixed example.com IN A query>`, HTTP/2, HTTP 200,
+  `application/dns-message`, with the same media type in `Accept`.
+
+Two different hosts reached by new connections in the preceding 30 s suppress
+checks while a line is healthy. Recovery of a down line still requires full
+HTTPS checks. Busy-line suppression remains unchanged. `engineUnavailable`
+does not add a failure or a pass. User targets replace the default set.
+
+The named `probeFailover` expectation advances its down transition from 26 s to
+16 s: one failed quick vote plus two failed full votes reaches the existing
+health threshold. Its selector command, reply and down event move together.
+Recovery remains at 41 s. No other trace deadline is relaxed. The original
+Node fixture is never rewritten to encode this difference.
+
 Keep these in separate, explicitly named acceptance expectations. Do not edit
 Node goldens to make new behavior look like parity. The freeze, DNS drop and cap
 hang are `baseline-defect` packet-level gates; this fake-engine suite neither
@@ -117,7 +142,28 @@ recording, so a trace cannot silently freeze an unexercised scenario.
 
 Run `node --test test/traces.test.mjs`. It reports the actual Node executable,
 version and SHA-256. Regeneration prints JSON with `traces.mjs`, using the same VM
-flags as `record.mjs`; it never overwrites fixtures. All current fakes resolve in
-deterministic order. Adversarial delayed/reordered completions and a Go trace
-consumer remain work for the full controller port; these traces do not prove
-those races safe. Windows kernel behavior stays in real-engine CI.
+flags as `record.mjs`; it never overwrites fixtures.
+
+Run `go test -v -run TestRecordedTraceReplay ./internal/control` for the Go
+consumer. All 14 traces, 4,772 entries and 1,793 completion records are checked.
+The real Go controller and sing-box adapter run with an in-memory filesystem,
+fake clock/process and recorded engine replies. Replies are consumed in their
+recorded order; unexpected calls and leftover replies fail the test. Comparison
+covers all 25 API outputs, ordered engine requests, events, control writes,
+config/rule SHA-256 values, removals, spawns, outside-close selectors and logs.
+`appLines` and `shares` retain their ordered-entry comparison.
+
+The two startup diagnostic mappings replace the missing-PowerShell-helper
+messages with the corresponding native-worker messages. Other recorded log
+conditions retain their order and details; none are dropped. Journal writes
+have separate persistence/acknowledgement tests because they do not exist in
+the Node baseline. Node filesystem/platform completion bookkeeping is checked
+for valid kinds, contiguous sequence IDs and matching completion boundaries;
+the equivalent Go filesystem and helper work is injected directly.
+
+Separate adversarial tests cover a late probe, an old connection reply after
+stop, a completed rebind racing the supervisor, concurrent settings/state/
+counter updates, failed file replacement with rollback, failed apply without
+closure, and retrying a closure without admitting newer flows. These tests add
+coverage beyond the original immediate-completion traces. Windows kernel
+behavior remains in the hosted Windows parity and real-engine CI jobs.

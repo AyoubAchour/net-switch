@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
@@ -16,6 +18,7 @@ import (
 func (c *Core) Poll(ctx context.Context) error {
 	s := c.op.Engine.Snapshot()
 	c.mu.Lock()
+	c.pollSequence++
 	c.statusLocked(s)
 	c.syncLanesLocked()
 	now := c.now()
@@ -54,8 +57,12 @@ func (c *Core) Poll(ctx context.Context) error {
 	if s.Status != "on" {
 		return nil
 	}
-	// Capture the set before applying the policy. A retry can only close these
-	// identities; a flow admitted after acknowledgement must never be swept up.
+	// Routing decisions never wait for the statistics endpoint. Closure intents
+	// carry the acknowledged apply point, so reads after it cannot close new flows.
+	policyErr := c.laneQueue.Do(ctx, func() error { return c.closeExhausted(ctx, nil, gen) })
+	if policyErr != nil {
+		c.log("could not apply routing policy or finish closures: %v", policyErr)
+	}
 	connections, err := c.op.Engine.Connections(ctx)
 	if err != nil {
 		c.mu.Lock()
@@ -67,7 +74,8 @@ func (c *Core) Poll(ctx context.Context) error {
 			}
 		}
 		c.mu.Unlock()
-		return err
+		c.scheduleProbes(ctx, nil)
+		return nil
 	}
 	c.mu.Lock()
 	if gen != c.generation {
@@ -92,8 +100,8 @@ func (c *Core) Poll(ctx context.Context) error {
 		}
 	}
 	c.lookupInfo(paths)
-	if err := c.laneQueue.Do(ctx, func() error { return c.closeExhausted(ctx, connections, gen) }); err != nil {
-		return err
+	if err := c.finishClosures(ctx, gen); err != nil {
+		c.log("could not finish closure intents: %v", err)
 	}
 	c.scheduleProbes(ctx, connections)
 	return nil
@@ -128,6 +136,7 @@ func (c *Core) sampleLinesLocked(s engine.Snapshot) {
 		up := l.health.Check(address, now, s.Status == "on" && len(items) > 1)
 		if recoveredBefore != l.health.RecoveredAt {
 			l.probeAt = nil
+			delete(c.evidence, item.ID)
 		}
 		if before != nil && up != nil && *before != *up {
 			if *up {
@@ -166,7 +175,7 @@ func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connecti
 	if !p.Combine {
 		p.Shares = append(lines.Shares{}, s.Policy.Shares...)
 	}
-	intents := []closureIntent{}
+	intents := append([]closureIntent{}, pending...)
 	for _, line := range c.itemsLocked() {
 		if !c.closePending[line.ID] {
 			continue
@@ -177,10 +186,13 @@ func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connecti
 			blocked = blocked || id == line.ID
 		}
 		if moved || blocked {
+			period := float64(0)
+			if used := c.usage.Used(line.ID); used != nil {
+				period = used.PeriodStart
+			}
 			existing := false
 			for _, intent := range pending {
-				if intent.Request.Line == line.ID && intent.Request.Instance == s.Instance {
-					intents = append(intents, intent)
+				if intent.Request.Line == line.ID && intent.Request.Instance == s.Instance && intent.PeriodStart == period {
 					existing = true
 					break
 				}
@@ -188,14 +200,17 @@ func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connecti
 			if existing {
 				continue
 			}
-			ids := []string{}
+			var ids []string
+			if connections != nil {
+				ids = []string{}
+			}
 			for _, v := range connections {
 				if id := apps.ConnectionLine(&v.Connection); id != nil && *id == line.ID {
 					ids = append(ids, v.ID)
 				}
 			}
 			id := c.op.ID()
-			intents = append(intents, closureIntent{ID: id, Request: engine.CloseRequest{OperationID: id, Line: line.ID, Instance: s.Instance, StartedBefore: c.op.Clock.Now(), ConnectionIDs: ids}})
+			intents = append(intents, closureIntent{ID: id, PeriodStart: period, Request: engine.CloseRequest{OperationID: id, Line: line.ID, Instance: s.Instance, ConnectionIDs: ids}})
 		} else if len(p.Lines) < 2 || p.Lines[0].ID == line.ID {
 			delete(c.closePending, line.ID)
 		}
@@ -229,6 +244,33 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 		return
 	}
 	now := c.now()
+	for id, hosts := range c.evidence {
+		for host, at := range hosts {
+			if now-at > 30000 {
+				delete(hosts, host)
+			}
+		}
+		if len(hosts) == 0 {
+			delete(c.evidence, id)
+		}
+	}
+	for _, conn := range conns {
+		line := apps.ConnectionLine(&conn.Connection)
+		if line == nil || conn.Download <= 0 || conn.Host == "" {
+			continue
+		}
+		start, err := time.Parse(time.RFC3339Nano, conn.Start)
+		if err != nil || now-start.UnixMilli() < 0 || now-start.UnixMilli() > 30000 {
+			continue
+		}
+		if l := c.lanes[*line]; l != nil && l.health.RecoveredAt != nil && start.UnixMilli() < *l.health.RecoveredAt {
+			continue
+		}
+		if c.evidence[*line] == nil {
+			c.evidence[*line] = map[string]int64{}
+		}
+		c.evidence[*line][strings.ToLower(strings.TrimSuffix(conn.Host, "."))] = start.UnixMilli()
+	}
 	jobs := []func(){}
 	for _, item := range c.itemsLocked() {
 		l := c.lanes[item.ID]
@@ -253,16 +295,7 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 				index = uint32(js.Number(a["index"]))
 			}
 		}
-		hosts := map[string]bool{}
-		for _, conn := range conns {
-			if line := apps.ConnectionLine(&conn.Connection); line != nil && *line == id && conn.Download > 0 && conn.Host != "" {
-				start, err := time.Parse(time.RFC3339Nano, conn.Start)
-				if err == nil && now-start.UnixMilli() >= 0 && now-start.UnixMilli() <= 30000 {
-					hosts[conn.Host] = true
-				}
-			}
-		}
-		realPassed := len(hosts) >= 2
+		realPassed := len(c.evidence[id]) >= 2 && l.health.Up != nil && *l.health.Up && !l.health.Offline && !l.health.AwaitingPass
 		targets := probeTargets(c.values["probeTargets"])
 		operator := l.operator % len(targets)
 		l.operator = (operator + 1) % len(targets)
@@ -284,16 +317,32 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 					if result.Outcome == engine.LineFailed {
 						failedChecks++
 					}
-					result = probe(targets[operator], false)
-					if result.Outcome == engine.LineFailed {
-						failedChecks++
-						if len(targets) > 1 {
-							other := probe(targets[(operator+1)%len(targets)], false)
-							if other.Outcome == engine.LineFailed {
-								failedChecks++
-							}
-							result = other
+					fullStart := operator
+					if !doubt {
+						fullStart = (operator + 1) % len(targets)
+					}
+					results := make([]engine.ProbeResult, min(2, len(targets)))
+					var checks sync.WaitGroup
+					for i := range results {
+						checks.Add(1)
+						go func() { defer checks.Done(); results[i] = probe(targets[(fullStart+i)%len(targets)], false) }()
+					}
+					checks.Wait()
+					result = engine.ProbeResult{Outcome: engine.LineFailed}
+					unavailable := false
+					for _, answer := range results {
+						if answer.Outcome == engine.LineFailed {
+							failedChecks++
 						}
+						if answer.Outcome == engine.Unavailable {
+							unavailable = true
+						}
+						if answer.Outcome == engine.OK && result.Outcome != engine.OK {
+							result = answer
+						}
+					}
+					if result.Outcome != engine.OK && unavailable {
+						result.Outcome = engine.Unavailable
 					}
 				}
 			}

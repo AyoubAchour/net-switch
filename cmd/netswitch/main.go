@@ -70,7 +70,7 @@ func main() {
 		os.Exit(1)
 	}
 }
-func run() error {
+func run() (runErr error) {
 	flags := flag.NewFlagSet("netswitch", flag.ContinueOnError)
 	version := flags.Bool("version", false, "print build identity")
 	dev := flags.Bool("dev-proxy", false, "CI proxy mode with separate ports and data")
@@ -143,6 +143,11 @@ func run() error {
 		return err
 	}
 	log := &logger{path: filepath.Join(*user, "server.log")}
+	defer func() {
+		if runErr != nil {
+			log.append("control service failed: " + runErr.Error())
+		}
+	}()
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -154,7 +159,7 @@ func run() error {
 	}
 	path := filepath.Join(*engineDir, "sing-box.exe")
 	if *engineExe != "" {
-		if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		if !*dev && (os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted") {
 			return fmt.Errorf("--engine-executable is restricted to disposable hosted CI")
 		}
 		path = *engineExe
@@ -193,12 +198,27 @@ func run() error {
 	if _, err := store.Load(); err != nil {
 		return err
 	}
+	if r := store.Recovery; r != nil {
+		text := "settings were damaged: " + r.Reason
+		if r.SavedAs != nil {
+			text += " (kept as " + filepath.Base(*r.SavedAs) + ")"
+		}
+		if r.UsedBackup {
+			text += "; restored the backup"
+		} else {
+			text += "; started from defaults"
+		}
+		log.append(text)
+	}
 	undoOptions := ioOptions
 	undoOptions.FileName = "windows-undo.json"
 	undoOptions.Defaults = map[string]any{"metrics": map[string]any{}, "policy": map[string]any{}}
 	undo := settings.New(*machine, undoOptions)
 	if _, err := undo.Load(); err != nil {
 		return err
+	}
+	if undo.Recovery != nil {
+		log.append("the Windows undo record was damaged: " + undo.Recovery.Reason)
 	}
 	journalOptions := ioOptions
 	journalOptions.FileName = "control-journal.json"
@@ -207,12 +227,17 @@ func run() error {
 	if _, err := journal.Load(); err != nil {
 		return err
 	}
+	if journal.Recovery != nil {
+		log.append("the control journal was damaged: " + journal.Recovery.Reason)
+	}
 	engineLog := &logger{path: filepath.Join(*machine, "engine.log")}
 	adapter := singbox.New(singbox.Options{Executable: path, DataDir: *machine, Mode: mode, Platform: system, Log: engineLog.append, Files: ioOptions})
 	installed := false
 	if pf := os.Getenv("ProgramFiles"); pf != "" && !*dev {
 		rel, err := filepath.Rel(pf, *root)
 		installed = err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) && *user != defaultDir
+		binaryRel, binaryErr := filepath.Rel(*root, exe)
+		installed = installed && binaryErr == nil && binaryRel != "." && binaryRel != ".." && !strings.HasPrefix(binaryRel, ".."+string(filepath.Separator)) && !filepath.IsAbs(binaryRel)
 	}
 	core, err := control.New(ctx, control.Options{Engine: adapter, Platform: system, Settings: store, Undo: undo, Journal: journal, IO: ioOptions, Mode: mode, Version: assets.AppVersion(), UserDir: *user, Log: log.append, AutostartAllowed: installed, CheckUpdate: func(ctx context.Context) (*updates.Offer, error) { return checkUpdate(ctx, system) }})
 	if err != nil {

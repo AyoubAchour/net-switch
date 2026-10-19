@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
@@ -10,20 +11,22 @@ import (
 
 func (c *Core) lookupInfo(paths []string) {
 	c.mu.Lock()
+	if c.ctx.Err() != nil {
+		c.mu.Unlock()
+		return
+	}
+	c.queueInfoLocked(paths)
 	if c.infoRunning {
 		c.mu.Unlock()
 		return
 	}
-	batch := []string{}
-	for _, path := range paths {
+	count := min(25, len(c.infoPending))
+	batch := append([]string{}, c.infoPending[:count]...)
+	c.infoPending = c.infoPending[count:]
+	for _, path := range batch {
 		key := strings.ToLower(path)
-		if path != "" && !c.infoAttempted[key] {
-			c.infoAttempted[key] = true
-			batch = append(batch, path)
-			if len(batch) == 25 {
-				break
-			}
-		}
+		c.infoAttempted[key] = true
+		delete(c.infoQueued, key)
 	}
 	if len(batch) == 0 {
 		c.mu.Unlock()
@@ -34,10 +37,11 @@ func (c *Core) lookupInfo(paths []string) {
 	c.op.Background(func() {
 		result, err := c.op.Platform.Call(c.ctx, "app-info", map[string]any{"paths": batch})
 		c.mu.Lock()
-		defer c.mu.Unlock()
 		c.infoRunning = false
 		if err != nil {
+			c.mu.Unlock()
 			c.log("could not read app names and icons: %v", err)
+			c.lookupInfo(nil)
 			return
 		}
 		for _, v := range array(result) {
@@ -47,10 +51,43 @@ func (c *Core) lookupInfo(paths []string) {
 				c.info[apps.AppKey(path)] = item
 			}
 		}
+		c.mu.Unlock()
+		c.lookupInfo(nil)
 	})
 }
+func (c *Core) queueInfoLocked(paths []string) {
+	for _, path := range paths {
+		key := strings.ToLower(path)
+		app := apps.AppKey(path)
+		if path == "" || strings.EqualFold(baseName(path), "svchost") || c.infoAttempted[key] || c.infoQueued[key] || js.Truth(c.info[app]["icon"]) {
+			continue
+		}
+		c.infoPending = append(c.infoPending, path)
+		c.infoQueued[key] = true
+	}
+}
 func (c *Core) InstalledApps(ctx context.Context) (any, error) {
-	v, err := c.op.Platform.Call(ctx, "installed-apps", nil)
+	c.installedMu.Lock()
+	if c.installedCached == nil || c.now() >= c.installedExpires {
+		v, err := c.op.Platform.Call(ctx, "installed-apps", nil)
+		if err != nil {
+			c.installedMu.Unlock()
+			return nil, err
+		}
+		list, ok := v.([]any)
+		if !ok {
+			c.installedMu.Unlock()
+			return nil, fmt.Errorf("the installed-app worker returned no list")
+		}
+		c.installedCached = list
+		c.installedExpires = c.now() + 5*60000
+	}
+	b, err := js.Marshal(c.installedCached)
+	c.installedMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	v, err := js.Decode(b)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +97,7 @@ func (c *Core) InstalledApps(ctx context.Context) (any, error) {
 		item := js.Object(v)
 		path := js.Text(item["path"])
 		paths = append(paths, path)
-		item["hasIcon"] = c.info[apps.AppKey(path)]["icon"] != nil
+		item["hasIcon"] = js.Truth(c.info[apps.AppKey(path)]["icon"])
 	}
 	c.mu.Unlock()
 	c.lookupInfo(paths)

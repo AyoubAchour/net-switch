@@ -103,14 +103,15 @@ func (c *Core) describeLocked(path string) map[string]any {
 		reconnectable = false
 	}
 	switch strings.ToLower(baseName(path)) {
-	case "node", "python", "pythonw", "powershell", "pwsh", "cmd", "wscript", "cscript", "java", "javaw", "dotnet":
+	case "svchost", "node", "python", "pythonw", "powershell", "pwsh", "cmd", "wscript", "cscript", "java", "javaw", "dotnet":
 		reconnectable = false
 	}
 	info := c.info[key]
+	c.queueInfoLocked([]string{path})
 	if v := js.Text(info["name"]); v != "" && key != `c:\windows\system32\svchost.exe` {
 		name = v
 	}
-	return map[string]any{"name": name, "hasIcon": info["icon"] != nil, "switchable": switchable, "reconnectable": reconnectable}
+	return map[string]any{"name": name, "hasIcon": js.Truth(info["icon"]), "switchable": switchable, "reconnectable": reconnectable}
 }
 
 // State emits every legacy field, including explicit nulls. It takes one state

@@ -35,6 +35,7 @@ type memoryFiles struct {
 	removes       []string
 	spawns        []map[string]any
 	outsideCloses []any
+	events        []any
 }
 type recordedWrite struct {
 	Path  string
@@ -83,11 +84,19 @@ func (f *memoryFiles) Remove(p string) error {
 }
 
 type fakeClock struct {
-	mu sync.Mutex
-	at time.Time
+	mu        sync.Mutex
+	at        time.Time
+	beforeNow func()
 }
 
-func (f *fakeClock) Now() time.Time                       { f.mu.Lock(); defer f.mu.Unlock(); return f.at }
+func (f *fakeClock) Now() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.beforeNow != nil {
+		f.beforeNow()
+	}
+	return f.at
+}
 func (f *fakeClock) After(time.Duration) <-chan time.Time { return make(chan time.Time) }
 func (f *fakeClock) advance(ms int64) {
 	f.mu.Lock()
@@ -107,6 +116,14 @@ type fakeEngine struct {
 	real            engine.Engine
 	wireConnections json.RawMessage
 	requests        []map[string]any
+	readConnections func(context.Context) ([]engine.Connection, error)
+	replies         []recordedReply
+	resourceIDs     map[string]string
+}
+type recordedReply struct {
+	Route  string
+	Status int
+	Body   any
 }
 
 func (f *fakeEngine) Snapshot() engine.Snapshot {
@@ -194,6 +211,9 @@ func (f *fakeEngine) CloseFlows(ctx context.Context, r engine.CloseRequest) (eng
 	return engine.CloseResult{Closed: len(r.ConnectionIDs)}, nil
 }
 func (f *fakeEngine) Connections(ctx context.Context) ([]engine.Connection, error) {
+	if f.readConnections != nil {
+		return f.readConnections(ctx)
+	}
 	if f.real != nil {
 		return f.real.Connections(ctx)
 	}
@@ -297,12 +317,22 @@ func testCore(t *testing.T, initial map[string]any) (*Core, *fakeEngine, *fakeCl
 		decoded, _ := js.Decode(b)
 		files.outsideCloses = append(files.outsideCloses, decoded)
 	}}
-	c, err := New(context.Background(), Options{Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: time.UTC, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, Background: func(fn func()) { fn() }, Log: func(s string) { files.mu.Lock(); files.logs = append(files.logs, s); files.mu.Unlock() }})
+	c, err := New(context.Background(), Options{Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: time.UTC, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, LineID: func() string { return fmt.Sprintf("%06x", serial.Add(1)) }, Background: func(fn func()) { fn() }, Log: func(s string) { files.mu.Lock(); files.logs = append(files.logs, s); files.mu.Unlock() }, Event: func(v map[string]any) {
+		b, _ := js.Marshal(v)
+		out, _ := js.Decode(b)
+		files.events = append(files.events, out)
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(c.cancel)
 	c.elevated = true
+	for i, line := range c.itemsLocked() {
+		address := fmt.Sprintf("192.0.2.%d", i+1)
+		c.adapters = append(c.adapters, map[string]any{"alias": line.Alias, "ipv4s": []any{address}})
+		c.routes = append(c.routes, map[string]any{"interfaceAddress": address})
+	}
+	c.routesAt = c.now()
 	return c, f, clock, files
 }
 func testLines() []lines.Line {
@@ -353,7 +383,25 @@ func TestCapsPersistBeforeApplyAndCloseOnlyAfterAck(t *testing.T) {
 			if err := c.closeExhausted(context.Background(), connections, c.generation); err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(e.calls, []string{"apply", tc.want}) {
+			if err := c.finishClosures(context.Background(), c.generation); err != nil {
+				t.Fatal(err)
+			}
+			wantCalls := []string{"apply", tc.want}
+			if tc.mainCap {
+				if !reflect.DeepEqual(e.calls, []string{"apply"}) || len(array(c.op.Journal.Values()["closures"])) != 1 {
+					t.Fatal("new block did not retain its deferred closure")
+				}
+				clock.advance(1000)
+				c.pollSequence++
+				if err := c.closeExhausted(context.Background(), connections, c.generation); err != nil {
+					t.Fatal(err)
+				}
+				if err := c.finishClosures(context.Background(), c.generation); err != nil {
+					t.Fatal(err)
+				}
+				wantCalls = []string{"apply", "apply", tc.want}
+			}
+			if !reflect.DeepEqual(e.calls, wantCalls) {
 				t.Fatal(e.calls)
 			}
 			if len(array(c.op.Journal.Values()["closures"])) != 0 {
@@ -391,7 +439,13 @@ func TestStaleProbeCannotChangeReplacementLane(t *testing.T) {
 	pending := []func(){}
 	c.op.Background = func(f func()) { pending = append(pending, f) }
 	e.probe = func(engine.ProbeRequest) engine.ProbeResult { return engine.ProbeResult{Outcome: engine.LineFailed} }
+	for _, l := range c.lanes {
+		l.probeAt = nil
+	}
 	c.scheduleProbes(context.Background(), nil)
+	if len(pending) != 2 {
+		t.Fatalf("expected two delayed probes, got %d", len(pending))
+	}
 	c.lanes["a1"].generation++
 	for _, f := range pending {
 		f()
@@ -496,6 +550,195 @@ func TestConcurrentStateSettingsAndCounters(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+func TestConnectionReplyFromStoppedGenerationIsDiscarded(t *testing.T) {
+	c, e, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	e.readConnections = func(context.Context) ([]engine.Connection, error) {
+		close(entered)
+		<-release
+		return []engine.Connection{{Connection: apps.Connection{ID: "late", Chains: []string{"line-b2"}, Download: 100000}}}, nil
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Poll(context.Background()) }()
+	<-entered
+	if err := c.Routing(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.connections) != 0 || len(c.tracker.Snapshot(nil)) != 0 {
+		t.Fatal("late engine reply repopulated a stopped generation")
+	}
+}
+
+func TestFailedStatisticsReadDoesNotPreventFailover(t *testing.T) {
+	c, e, clock, _ := testCore(t, map[string]any{"lines": testLines()})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.readConnections = func(context.Context) ([]engine.Connection, error) {
+		return nil, errors.New("statistics endpoint stalled")
+	}
+	c.adapters[0]["ipv4s"] = []any{}
+	for i := 0; i < 2; i++ {
+		clock.advance(1000)
+		_ = c.Poll(context.Background())
+	}
+	if got := e.Snapshot().Policy.Lanes["a1"]; got != "b2" {
+		t.Fatalf("statistics failure left dead main lane on %q", got)
+	}
+}
+
+func TestSupervisorDoesNotRepeatACompletedRebind(t *testing.T) {
+	c, e, clock, _ := testCore(t, map[string]any{"lines": testLines()})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.calls = nil
+	items := testLines()
+	items[0].Alias = "Renamed"
+	c.mu.Lock()
+	c.values["lines"] = items
+	c.mu.Unlock()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	clock.beforeNow = func() { once.Do(func() { close(entered); <-release }) }
+	done := make(chan error, 1)
+	go func() { done <- c.Supervise(context.Background()) }()
+	<-entered
+	e.mu.Lock()
+	updated := e.s.Policy
+	updated.Lines = items
+	e.s.Policy = updated
+	e.s.StartedWith = &updated
+	e.mu.Unlock()
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if len(e.calls) != 0 {
+		t.Fatalf("supervisor restarted an already rebound engine: %v", e.calls)
+	}
+}
+
+func TestRealTrafficNeedsTwoDifferentNewHosts(t *testing.T) {
+	c, e, clock, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.adapters = []map[string]any{{"alias": "Ethernet", "ipv4s": []any{"192.0.2.1"}}, {"alias": "Wi-Fi", "ipv4s": []any{"192.0.2.2"}}}
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	e.probe = func(engine.ProbeRequest) engine.ProbeResult { calls++; return engine.ProbeResult{Outcome: engine.OK} }
+	start := clock.Now().Add(-time.Second).Format(time.RFC3339Nano)
+	connections := []engine.Connection{{Connection: apps.Connection{ID: "one", Start: start, Download: 1, Chains: []string{"line-a1"}}, Host: "one.example"}, {Connection: apps.Connection{ID: "two", Start: start, Download: 1, Chains: []string{"line-a1"}}, Host: "two.example"}}
+	c.lanes["a1"].probeAt = nil
+	c.lanes["b2"].probeAt = ptr(c.now())
+	c.scheduleProbes(context.Background(), connections)
+	if calls != 0 {
+		t.Fatal("real traffic did not suppress endpoint probes")
+	}
+	c.lanes["a1"].probeAt = nil
+	c.scheduleProbes(context.Background(), nil)
+	if calls != 0 {
+		t.Fatal("recent closed connections were forgotten")
+	}
+	c.evidence = map[string]map[string]int64{}
+	connections[1].Host = "one.example"
+	c.lanes["a1"].probeAt = nil
+	c.scheduleProbes(context.Background(), connections)
+	if calls == 0 {
+		t.Fatal("one host was counted as two")
+	}
+	connections[1].Host = "two.example"
+	clock.advance(31000)
+	calls = 0
+	c.lanes["a1"].probeAt = nil
+	c.lanes["b2"].probeAt = ptr(c.now())
+	c.scheduleProbes(context.Background(), connections)
+	if calls == 0 {
+		t.Fatal("expired real-traffic evidence suppressed checks")
+	}
+}
+
+func TestFailedQuickCheckUsesTwoOtherOperatorsInParallel(t *testing.T) {
+	c, e, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.adapters[0]["index"] = float64(42)
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c.lanes["a1"].target = ptr("b2")
+	c.lanes["a1"].operator = 0
+	c.lanes["a1"].probeAt = nil
+	c.lanes["b2"].probeAt = ptr(c.now())
+	entered, release := make(chan engine.ProbeRequest, 2), make(chan struct{})
+	e.probe = func(r engine.ProbeRequest) engine.ProbeResult {
+		if r.Quick {
+			if r.Target != "1.1.1.1:443" {
+				t.Error("wrong quick operator")
+			}
+			return engine.ProbeResult{Outcome: engine.LineFailed}
+		}
+		entered <- r
+		<-release
+		return engine.ProbeResult{Outcome: engine.LineFailed}
+	}
+	done := make(chan struct{})
+	go func() { c.scheduleProbes(context.Background(), nil); close(done) }()
+	seen := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-entered:
+			seen[r.Target] = true
+			if r.Index != 42 || r.Line != "a1" {
+				t.Errorf("probe followed a lane instead of its physical line: %+v", r)
+			}
+		case <-time.After(2 * time.Second):
+			close(release)
+			<-done
+			t.Fatal("full checks were serialized")
+		}
+	}
+	close(release)
+	<-done
+	if !seen["8.8.8.8:443"] || !seen["9.9.9.9:443"] {
+		t.Fatal(seen)
+	}
+}
+
+func TestDownLineNeedsHTTPSDespiteRecentTraffic(t *testing.T) {
+	c, e, clock, _ := testCore(t, map[string]any{"lines": testLines()})
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	l := c.lanes["a1"]
+	l.health.Up = ptr(false)
+	l.health.Offline = true
+	l.probeAt = nil
+	c.lanes["b2"].probeAt = ptr(c.now())
+	var full atomic.Int32
+	e.probe = func(r engine.ProbeRequest) engine.ProbeResult {
+		if r.Quick {
+			t.Error("quick check attempted to recover a down line")
+		} else {
+			full.Add(1)
+		}
+		return engine.ProbeResult{Outcome: engine.OK}
+	}
+	start := clock.Now().Format(time.RFC3339Nano)
+	connections := []engine.Connection{{Connection: apps.Connection{ID: "one", Start: start, Download: 1, Chains: []string{"line-a1"}}, Host: "one.example"}, {Connection: apps.Connection{ID: "two", Start: start, Download: 1, Chains: []string{"line-a1"}}, Host: "two.example"}}
+	c.scheduleProbes(context.Background(), connections)
+	if full.Load() != 2 {
+		t.Fatalf("expected two full operator checks, got %d", full.Load())
+	}
 }
 
 type seededTracker struct{ rows []apps.Row }

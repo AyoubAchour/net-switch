@@ -31,6 +31,7 @@ type Snapshot struct {
 	Instance        string
 	AppliedRevision uint64
 	AppliedHash     string
+	AppliedAt       time.Time
 }
 
 type Revision struct {
@@ -49,6 +50,8 @@ type CloseRequest struct {
 	Line          string    `json:"line"`
 	Instance      string    `json:"engineInstanceId"`
 	StartedBefore time.Time `json:"startedBefore"`
+	// BeforeRevision names the apply point while its timestamp is not yet known.
+	BeforeRevision uint64 `json:"startedBeforeRevision,omitempty"`
 	// The temporary adapter also pins IDs because Clash has no revision-based
 	// flow identity. The real engine can enforce the apply-point cutoff itself.
 	ConnectionIDs []string `json:"connectionIds"`

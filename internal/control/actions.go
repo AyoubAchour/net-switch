@@ -190,7 +190,7 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 		if len(items) >= 8 {
 			return bad("Net Switch can use up to 8 lines.")
 		}
-		l := lines.NewLine(adapter, items, c.op.ID)
+		l := lines.NewLine(adapter, items, c.op.LineID)
 		if len(items) > 0 && len(waiting) > 0 {
 			pins = lines.PlaceWaitingApps(waiting, pins, l.ID)
 			clearWaiting = true
@@ -410,11 +410,17 @@ func (c *Core) changeSettings(ctx context.Context, b map[string]any) error {
 			return bad("Starting with Windows needs Net Switch installed from its installer.")
 		}
 		if err := c.setupQueue.Do(ctx, func() error { _, err := c.op.Platform.Call(ctx, "autostart-set", map[string]any{"on": on}); return err }); err != nil {
+			c.log("could not change starting with Windows to %v: %v", on, err)
 			return bad("Windows didn’t accept the change. Try again in a moment.")
 		}
-		c.mu.Lock()
-		c.autostart = on
-		c.mu.Unlock()
+		v, err := c.op.Platform.Call(ctx, "autostart", nil)
+		if err != nil {
+			c.log("could not read whether Net Switch starts with Windows: %v", err)
+		} else {
+			c.mu.Lock()
+			c.autostart = v
+			c.mu.Unlock()
+		}
 	}
 	if v, exists := b["checkForUpdates"]; exists {
 		changes["checkForUpdates"] = v
@@ -459,6 +465,7 @@ func (c *Core) setup(ctx context.Context, action string) error {
 			if len(array(metrics[alias])) == 0 {
 				before, err := c.op.Platform.Call(ctx, "metrics", map[string]any{"alias": alias})
 				if err != nil {
+					c.log("could not read %s's settings before changing them: %v", alias, err)
 					return bad("Windows didn’t say how this connection is set up now, so Net Switch can’t change it safely. Try again in a moment.")
 				}
 				metrics[alias] = before
@@ -474,6 +481,7 @@ func (c *Core) setup(ctx context.Context, action string) error {
 		if _, ok := policy["value"]; !ok {
 			before, err := c.op.Platform.Call(ctx, "policy", nil)
 			if err != nil {
+				c.log("could not read the Wi-Fi policy before changing it: %v", err)
 				return bad("Windows didn’t say how this setting is now, so Net Switch can’t change it safely. Try again in a moment.")
 			}
 			policy["value"] = before
@@ -488,6 +496,7 @@ func (c *Core) setup(ctx context.Context, action string) error {
 		unreachable := []string{}
 		for alias, record := range metrics {
 			if _, err := c.op.Platform.Call(ctx, "metrics-restore", map[string]any{"alias": alias, "metrics": record}); err != nil {
+				c.log("could not restore %s's interface metrics: %v", alias, err)
 				unreachable = append(unreachable, alias)
 				continue
 			}

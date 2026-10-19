@@ -45,6 +45,9 @@ func Validate(e Endpoint, r *http.Response) bool {
 	if e.HTTP2 && r.ProtoMajor != 2 {
 		return false
 	}
+	if e.Operator == "custom" {
+		return true
+	}
 	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil && e.Operator != "custom" {
 		return false
@@ -61,7 +64,7 @@ func Validate(e Endpoint, r *http.Response) bool {
 			return false
 		}
 		var v struct {
-			Status *int `json:"Status"`
+			Status *float64 `json:"Status"`
 		}
 		return json.Unmarshal(b, &v) == nil && v.Status != nil && *v.Status == 0
 	case "quad9":

@@ -50,7 +50,7 @@ type recordedTrace struct {
 // This consumer drives the real control core using the trace's external driver.
 // The completion ledger is validated separately, so malformed or missing records
 // cannot silently shrink the replay. Packet behavior stays in the e2e gates.
-func TestRecordedTraceAPIReplay(t *testing.T) {
+func TestRecordedTraceReplay(t *testing.T) {
 	files, err := filepath.Glob("../../tests/oracle/fixtures/*.trace.json")
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,6 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 				initial[k] = v
 			}
 			c, e, clock, fs := testCore(t, initial)
-			installReplayAdapter(t, c, e, clock, fs)
 			if trace.Scenario.Now != nil {
 				clock.at = time.UnixMilli(*trace.Scenario.Now)
 			}
@@ -96,6 +95,7 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			c.usage = usage.New(location)
 			var expected []map[string]any
 			var expectedCommands []map[string]any
+			var expectedRequests []map[string]any
 			var expectedReads []string
 			var expectedWrites []map[string]any
 			var expectedEngineWrites []map[string]any
@@ -104,11 +104,16 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			var expectedSpawns []any
 			var expectedOutside []any
 			var expectedConsole string
+			var expectedEvents []any
 			var adapters []map[string]any
 			completion := 0
+			e.replies = []recordedReply{}
 			for i, entry := range trace.Entries {
 				if entry.Seq != i {
 					t.Fatalf("noncontiguous entry %d", i)
+				}
+				if err := knownTraceEntry(entry); err != nil {
+					t.Fatal(err)
 				}
 				v, err := js.Decode(entry.Value)
 				if err != nil {
@@ -120,6 +125,12 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 					if int(js.Number(m["id"])) != completion {
 						t.Fatal("noncontiguous completion ledger")
 					}
+					if i == 0 || trace.Entries[i-1].Direction != "input" || trace.Entries[i-1].Kind != js.Text(m["kind"]) {
+						t.Fatalf("completion %d is detached from its boundary", completion)
+					}
+				}
+				if entry.Direction == "input" && entry.Kind == "engine-reply" {
+					e.replies = append(e.replies, recordedReply{Route: js.Text(m["route"]), Status: int(js.Number(m["status"])), Body: m["body"]})
 				}
 				if entry.Kind == "adapter-snapshot" && adapters == nil {
 					for _, item := range array(v) {
@@ -128,6 +139,9 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 				}
 				if entry.Direction == "output" && entry.Kind == "api" {
 					expected = append(expected, m)
+				}
+				if entry.Direction == "output" && entry.Kind == "event" {
+					expectedEvents = append(expectedEvents, m)
 				}
 				if entry.Direction == "output" {
 					switch entry.Kind {
@@ -163,7 +177,44 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 				if entry.Direction == "output" && entry.Kind == "engine" && m["method"] == "GET" && !strings.HasSuffix(js.Text(m["route"]), "/delay") {
 					expectedReads = append(expectedReads, js.Text(m["route"]))
 				}
+				if entry.Direction == "output" && entry.Kind == "engine" && !strings.HasSuffix(js.Text(m["route"]), "/delay") {
+					expectedRequests = append(expectedRequests, m)
+				}
 			}
+			if trace.Name == "probeFailover" {
+				// Three-operator checks advance the failure from tick 26 to 16.
+				// This named expectation moves only its transition and reply.
+				const from, to = 28, 18
+				if len(expectedRequests) <= from || expectedRequests[from]["route"] != "/proxies/lane-a1" || js.Object(expectedRequests[from]["body"])["name"] != "line-b2" {
+					t.Fatal("probe timing expectation no longer matches frozen trace")
+				}
+				request := expectedRequests[from]
+				copy(expectedRequests[to+1:from+1], expectedRequests[to:from])
+				expectedRequests[to] = request
+				reply := e.replies[from]
+				copy(e.replies[to+1:from+1], e.replies[to:from])
+				e.replies[to] = reply
+			}
+			e.resourceIDs = map[string]string{}
+			for _, response := range expected {
+				state := js.Object(response["body"])
+				if state["state"] != nil {
+					state = js.Object(state["state"])
+				}
+				if list := array(state["lines"]); len(list) > 0 {
+					for _, line := range c.itemsLocked() {
+						for _, raw := range list {
+							item := js.Object(raw)
+							if item["alias"] == line.Alias {
+								e.resourceIDs[line.ID] = js.Text(item["id"])
+								break
+							}
+						}
+					}
+					break
+				}
+			}
+			installReplayAdapter(t, c, e, clock, fs)
 			c.adapters = adapters
 			c.routes = []map[string]any{}
 			for _, a := range adapters {
@@ -379,6 +430,20 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			if !reflect.DeepEqual(actualCommands, expectedCommands) {
 				t.Fatalf("engine mutation sequence differs\ngot %v\nwant %v", actualCommands, expectedCommands)
 			}
+			if len(e.requests) != len(expectedRequests) {
+				t.Fatalf("engine request count differs")
+			}
+			for i, r := range e.requests {
+				b, _ := js.Marshal(r)
+				normalized, err := rewriteTraceStrings(b, func(s string) string { return normalizeResourceString(s, mapping) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				v, _ := js.Decode(normalized)
+				if !reflect.DeepEqual(v, expectedRequests[i]) {
+					t.Fatalf("engine request %d differs: %s", i, firstDifference(v, expectedRequests[i], "$"))
+				}
+			}
 			reads := []string{}
 			for _, r := range e.requests {
 				if r["method"] == "GET" {
@@ -390,6 +455,9 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			}
 			if completion == 0 {
 				t.Fatal("no asynchronous completions replayed")
+			}
+			if len(e.replies) != 0 {
+				t.Fatalf("%d unconsumed engine completions", len(e.replies))
 			}
 			actualWrites := []recordedWrite{}
 			for _, w := range fs.writes {
@@ -420,6 +488,22 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			}
 			if !reflect.DeepEqual(fs.logs, expectedLogs) {
 				t.Fatalf("log condition sequence differs\ngot: %q\nwant: %q", fs.logs, expectedLogs)
+			}
+			if len(fs.events) != len(expectedEvents) {
+				t.Fatalf("event count differs: %d != %d", len(fs.events), len(expectedEvents))
+			}
+			for i, event := range fs.events {
+				mapID(js.Text(js.Object(event)["id"]), js.Text(js.Object(expectedEvents[i])["id"]))
+				v := remapTrace(event, mapping)
+				if trace.Name == "probeFailover" && js.Object(v)["kind"] == "down" {
+					if js.Object(v)["at"] != float64(1792411216000) {
+						t.Fatal("unexpected full-check failure deadline")
+					}
+					js.Object(v)["at"] = float64(1792411226000)
+				}
+				if !reflect.DeepEqual(v, expectedEvents[i]) {
+					t.Fatalf("event %d differs: %s", i, firstDifference(v, expectedEvents[i], "$"))
+				}
 			}
 			removes := []string{}
 			for _, p := range fs.removes {
@@ -493,6 +577,22 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 	}
 }
 
+func knownTraceEntry(e traceEntry) error {
+	allowed := ""
+	switch e.Direction {
+	case "input":
+		allowed = " initial-files http helper-line interfaces connections probes adapter-snapshot counter-sample engine-reply probe-result clock-tick file-completion completion async-result socket-completion process-exit timer-completion "
+	case "output":
+		allowed = " api event engine spawn write remove outside-close log console exit "
+	default:
+		return fmt.Errorf("unknown trace direction %q", e.Direction)
+	}
+	if !strings.Contains(allowed, " "+e.Kind+" ") {
+		return fmt.Errorf("unhandled %s trace kind %q", e.Direction, e.Kind)
+	}
+	return nil
+}
+
 type replayChild struct {
 	closed chan struct{}
 	once   sync.Once
@@ -530,17 +630,31 @@ func installReplayAdapter(t *testing.T, c *Core, e *fakeEngine, clock *fakeClock
 			}
 			e.commands = append(e.commands, command)
 		}
-		e.requests = append(e.requests, map[string]any{"route": r.URL.Path, "method": r.Method})
-		response := []byte(`{}`)
-		if r.URL.Path == "/connections" {
-			connections := e.wireConnections
-			if len(connections) == 0 {
-				connections = []byte(`[]`)
-			}
-			response = append([]byte(`{"connections":`), connections...)
-			response = append(response, '}')
+		request := map[string]any{"route": r.URL.Path, "method": r.Method}
+		if body != nil {
+			request["body"] = body
 		}
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(response)), Header: http.Header{}, Request: r}, nil
+		e.requests = append(e.requests, request)
+		route := r.URL.Path
+		if strings.HasPrefix(route, "/proxies/lane-") {
+			id := strings.TrimPrefix(route, "/proxies/lane-")
+			if mapped, ok := e.resourceIDs[id]; ok {
+				route = "/proxies/lane-" + mapped
+			}
+		}
+		if len(e.replies) == 0 {
+			return nil, fmt.Errorf("unrecorded engine request %s %s", r.Method, r.URL.Path)
+		}
+		reply := e.replies[0]
+		if reply.Route != route {
+			return nil, fmt.Errorf("completion order: got %s, recorded %s", route, reply.Route)
+		}
+		e.replies = e.replies[1:]
+		response, err := js.Marshal(reply.Body)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{StatusCode: reply.Status, Body: io.NopCloser(bytes.NewReader(response)), Header: http.Header{}, Request: r}, nil
 	})}
 	c.op.Platform.(*fakePlatform).probe = func(a map[string]any) (any, error) {
 		return e.probe(engine.ProbeRequest{OperationID: js.Text(a["opId"]), Line: js.Text(a["line"]), Index: uint32(js.Number(a["index"])), Target: js.Text(a["target"]), Quick: a["quick"] == true}), nil
@@ -645,6 +759,12 @@ func engineFile(path string) bool {
 	return base == "engine-config.json" || base == "engine.pid" || strings.HasPrefix(base, "apps-") || strings.HasPrefix(base, "share-") || strings.HasPrefix(base, "cut-")
 }
 func normalizeResourceString(s string, mapping map[string]string) string {
+	if strings.HasPrefix(s, "/proxies/lane-") {
+		id := strings.TrimPrefix(s, "/proxies/lane-")
+		if v, ok := mapping[id]; ok {
+			return "/proxies/lane-" + v
+		}
+	}
 	if v, ok := mapping[s]; ok {
 		return v
 	}

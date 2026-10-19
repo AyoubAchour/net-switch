@@ -104,6 +104,7 @@ type Adapter struct {
 	verified         map[string]verifiedFile
 	probeContext     context.Context
 	stopProbes       context.CancelFunc
+	appliedTimes     map[uint64]time.Time
 }
 type verifiedFile struct {
 	Size     int64
@@ -149,7 +150,7 @@ func New(o Options) *Adapter {
 			return names, nil
 		}
 	}
-	return &Adapter{o: o, s: engine.Snapshot{Status: "off", Policy: engine.Policy{Lines: []lines.Line{}, AppLines: apps.Pins{}, Shares: lines.Shares{}, Blocked: []string{}, Lanes: map[string]string{}}}, closeResults: map[string]engine.CloseResult{}, verified: map[string]verifiedFile{}}
+	return &Adapter{o: o, s: engine.Snapshot{Status: "off", Policy: engine.Policy{Lines: []lines.Line{}, AppLines: apps.Pins{}, Shares: lines.Shares{}, Blocked: []string{}, Lanes: map[string]string{}}}, closeResults: map[string]engine.CloseResult{}, verified: map[string]verifiedFile{}, appliedTimes: map[uint64]time.Time{}}
 }
 func clonePolicy(p engine.Policy) engine.Policy {
 	p.Lines = append([]lines.Line{}, p.Lines...)
@@ -296,12 +297,26 @@ func (a *Adapter) CloseFlows(ctx context.Context, r engine.CloseRequest) (engine
 		return engine.CloseResult{}, fmt.Errorf("closure intent belongs to another engine instance")
 	}
 	previous, done := a.closeResults[r.OperationID]
+	if r.StartedBefore.IsZero() {
+		r.StartedBefore = a.appliedTimes[r.BeforeRevision]
+	}
+	lifetime := a.probeContext
 	a.mu.Unlock()
 	if done {
 		return previous, nil
 	}
-	if len(r.ConnectionIDs) == 0 {
+	if r.ConnectionIDs != nil && len(r.ConnectionIDs) == 0 {
 		return engine.CloseResult{}, nil
+	}
+	if r.StartedBefore.IsZero() {
+		return engine.CloseResult{}, fmt.Errorf("closure intent has no acknowledged apply point")
+	}
+	if lifetime != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		stop := context.AfterFunc(lifetime, cancel)
+		defer stop()
+		defer cancel()
 	}
 	connections, err := a.Connections(ctx)
 	if err != nil {
@@ -310,6 +325,13 @@ func (a *Adapter) CloseFlows(ctx context.Context, r engine.CloseRequest) (engine
 	live := map[string]engine.Connection{}
 	for _, c := range connections {
 		live[c.ID] = c
+	}
+	if r.ConnectionIDs == nil {
+		for _, c := range connections {
+			if line := apps.ConnectionLine(&c.Connection); line != nil && *line == r.Line {
+				r.ConnectionIDs = append(r.ConnectionIDs, c.ID)
+			}
+		}
 	}
 	result := engine.CloseResult{}
 	for _, id := range r.ConnectionIDs {
@@ -379,12 +401,16 @@ func (a *Adapter) Probe(ctx context.Context, r engine.ProbeRequest) engine.Probe
 func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowledgement, error) {
 	a.apply.Lock()
 	defer a.apply.Unlock()
-	encoded,err:=js.Marshal(r.Policy);if err!=nil{return engine.Acknowledgement{},err};digest:=sha256.Sum256(encoded)
-	if r.Hash!=hex.EncodeToString(digest[:]){return engine.Acknowledgement{},fmt.Errorf("policy revision payload does not match its hash")}
-	before := a.Snapshot()
-	ack := func() engine.Acknowledgement {
-		return engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: before.Instance, AppliedAt: a.o.Now()}
+	encoded, err := js.Marshal(r.Policy)
+	if err != nil {
+		return engine.Acknowledgement{}, err
 	}
+	digest := sha256.Sum256(encoded)
+	if r.Hash != hex.EncodeToString(digest[:]) {
+		return engine.Acknowledgement{}, fmt.Errorf("policy revision payload does not match its hash")
+	}
+	before := a.Snapshot()
+	ack := engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: before.Instance, AppliedAt: before.AppliedAt}
 	if r.Number < before.AppliedRevision {
 		return engine.Acknowledgement{}, fmt.Errorf("stale policy revision")
 	}
@@ -392,7 +418,7 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 		if r.Hash != before.AppliedHash {
 			return engine.Acknowledgement{}, fmt.Errorf("policy revision hash conflict")
 		}
-		return ack(), nil
+		return ack, nil
 	}
 	files, err := RuleFiles(r.Policy)
 	if err != nil {
@@ -489,8 +515,11 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 	a.s.Policy = clonePolicy(r.Policy)
 	a.s.AppliedRevision = r.Number
 	a.s.AppliedHash = r.Hash
+	ack.AppliedAt = a.o.Now()
+	a.s.AppliedAt = ack.AppliedAt
+	a.appliedTimes[r.Number] = ack.AppliedAt
 	a.mu.Unlock()
-	return ack(), nil
+	return ack, nil
 }
 func (a *Adapter) verify() error {
 	dir := filepath.Dir(a.o.Executable)
@@ -685,6 +714,7 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 	a.probeContext, a.stopProbes = context.WithCancel(context.Background())
 	a.s.AppliedRevision = 0
 	a.s.AppliedHash = ""
+	a.appliedTimes = map[uint64]time.Time{}
 	a.s.ProxyPort = nil
 	if proxyPort > 0 {
 		a.s.ProxyPort = &proxyPort

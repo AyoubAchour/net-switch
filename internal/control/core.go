@@ -37,6 +37,7 @@ func (realClock) Now() time.Time                         { return time.Now() }
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
 type Options struct {
+	LineID                 func() string
 	Engine                 engine.Engine
 	Platform               platform.System
 	Settings               *settings.Store
@@ -95,13 +96,21 @@ type Core struct {
 	tracker                                      AppTracker
 	outside                                      *apps.OutsideTracker
 	outsideStarts                                map[string]string
+	evidence                                     map[string]map[string]int64
 	usage                                        *usage.Usage
 	exhausted                                    map[string]bool
 	closePending                                 map[string]bool
+	deferClosures                                map[string]uint64
+	pollSequence                                 uint64
 	connections                                  map[string]int
 	info                                         map[string]map[string]any
 	infoAttempted                                map[string]bool
+	infoPending                                  []string
+	infoQueued                                   map[string]bool
 	infoRunning                                  bool
+	installedMu                                  sync.Mutex
+	installedCached                              []any
+	installedExpires                             int64
 	events                                       []map[string]any
 	generation                                   uint64
 	wanted, quitting, elevated                   bool
@@ -136,6 +145,9 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	if o.Log == nil {
 		o.Log = func(string) {}
 	}
+	if o.LineID == nil {
+		o.LineID = lines.RandomID
+	}
 	if o.Background == nil {
 		o.Background = func(f func()) { go f() }
 	}
@@ -155,7 +167,10 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		c.tracker = o.Tracker
 	}
 	c.infoAttempted = map[string]bool{}
+	c.infoQueued = map[string]bool{}
 	c.outsideStarts = map[string]string{}
+	c.evidence = map[string]map[string]int64{}
+	c.deferClosures = map[string]uint64{}
 	c.laneQueue = newQueue(ctx)
 	c.startQueue = newQueue(ctx)
 	c.setupQueue = newQueue(ctx)
@@ -169,7 +184,11 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		if b, err := o.IO.Files.ReadFile(filepath.Join(o.UserDir, "usage.json")); err == nil {
 			if v, err := js.Decode(b); err == nil {
 				c.usage.Load(js.Object(v))
+			} else {
+				c.log("could not read the data use record, starting it over: %v", err)
 			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			c.log("could not read the data use record, starting it over: %v", err)
 		}
 	}
 	if o.Journal != nil {
@@ -241,7 +260,7 @@ func (c *Core) migrate() error {
 			return err
 		}
 	}
-	if m := lines.MigrateSettings(v, c.op.ID); m != nil {
+	if m := lines.MigrateSettings(v, c.op.LineID); m != nil {
 		b, err := js.Marshal(m.Lines)
 		if err != nil {
 			return err
@@ -316,6 +335,7 @@ func (c *Core) syncLanesLocked() {
 			c.lanes[l.ID] = a
 		}
 		if a.alias != l.Alias {
+			delete(c.evidence, l.ID)
 			a.alias = l.Alias
 			a.generation++
 			a.health.Reset()
@@ -337,6 +357,7 @@ func (c *Core) resetLocked() {
 	c.tracker.Reset()
 	c.outside.Reset()
 	c.outsideStarts = map[string]string{}
+	c.evidence = map[string]map[string]int64{}
 	c.connections = map[string]int{}
 	c.monitorFailures = 0
 	for _, l := range c.lanes {
@@ -546,7 +567,15 @@ func (c *Core) applyPolicy(ctx context.Context, auto bool) error {
 	if reflect.DeepEqual(p, s.Policy) && s.AppliedRevision != 0 {
 		return nil
 	}
-	revision, err := c.persistRevision(p, nil)
+	intents, err := c.pendingClosures()
+	if err != nil {
+		return err
+	}
+	intents, err = c.reconcileIntents(intents, p)
+	if err != nil {
+		return err
+	}
+	revision, err := c.persistRevision(p, intents)
 	if err != nil {
 		return err
 	}
@@ -556,6 +585,9 @@ func (c *Core) applyPolicy(ctx context.Context, auto bool) error {
 	}
 	if ack.Number != revision.Number || ack.Hash != revision.Hash {
 		return fmt.Errorf("engine acknowledged a different revision")
+	}
+	if err := c.recordIntentAcks(intents, ack); err != nil {
+		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -630,6 +662,7 @@ func (c *Core) Supervise(ctx context.Context) error {
 			c.retryAttempts = 0
 		}
 		restart := c.monitorFailures >= 20
+		settledIPv6 := false
 		if s.StartedWith != nil {
 			a := []string{}
 			b := []string{}
@@ -646,17 +679,40 @@ func (c *Core) Supervise(ctx context.Context) error {
 				c.ipv6Since = ptr(now)
 			} else if now-*c.ipv6Since >= 30000 {
 				restart = true
+				settledIPv6 = true
 				c.ipv6Since = nil
-				if c.ipv6Locked() {
-					c.log("every line has IPv6 now: routing restarts to carry it too")
-				} else {
-					c.log("a line lost IPv6: routing restarts to keep apps on IPv4")
-				}
 			}
 		}
 		c.mu.Unlock()
 		if restart {
-			return c.laneQueue.Do(ctx, func() error { return c.restart(ctx) })
+			return c.laneQueue.Do(ctx, func() error {
+				c.mu.Lock()
+				fresh := c.op.Engine.Snapshot()
+				needed := c.monitorFailures >= 20
+				if fresh.StartedWith != nil {
+					a, b := []string{}, []string{}
+					for _, l := range c.itemsLocked() {
+						a = append(a, l.ID, l.Alias)
+					}
+					for _, l := range fresh.StartedWith.Lines {
+						b = append(b, l.ID, l.Alias)
+					}
+					needed = needed || !reflect.DeepEqual(a, b) || (settledIPv6 && c.ipv6Locked() != fresh.StartedWith.IPv6)
+				}
+				needed = needed && c.wanted && !c.quitting && fresh.Status == "on"
+				if needed && settledIPv6 {
+					if c.ipv6Locked() {
+						c.log("every line has IPv6 now: routing restarts to carry it too")
+					} else {
+						c.log("a line lost IPv6: routing restarts to keep apps on IPv4")
+					}
+				}
+				c.mu.Unlock()
+				if !needed {
+					return nil
+				}
+				return c.restart(ctx)
+			})
 		}
 		return nil
 	}
@@ -792,13 +848,16 @@ func (c *Core) followAdapters() error {
 	adapters := c.adapters
 	now := c.now()
 	changed := false
+	notes := []string{}
+	renamed := [][2]string{}
 	if len(items) == 0 {
 		if a := lines.PickFirstAdapter(adapters); a != nil {
-			items = append(items, lines.NewLine(a, nil, c.op.ID))
+			items = append(items, lines.NewLine(a, nil, c.op.LineID))
 			changed = true
+			notes = append(notes, js.Text(a["alias"])+" is the main line")
 		}
 	}
-	normalize := func(s string) string { return strings.ToLower(strings.Trim(s, "{}")) }
+	normalize := func(s string) string { return strings.ToLower(strings.NewReplacer("{", "", "}", "").Replace(s)) }
 	for i, l := range items {
 		var found map[string]any
 		for _, a := range adapters {
@@ -824,6 +883,10 @@ func (c *Core) followAdapters() error {
 			ln.missingReads = 0
 			alias := js.Text(found["alias"])
 			guid := js.Text(found["guid"])
+			if alias != l.Alias {
+				notes = append(notes, fmt.Sprintf("%s's adapter was renamed from %s to %s", l.Label, l.Alias, alias))
+				renamed = append(renamed, [2]string{l.Alias, alias})
+			}
 			if alias != l.Alias || (guid != "" && (l.GUID == nil || *l.GUID != guid)) {
 				items[i].Alias = alias
 				if guid != "" {
@@ -853,6 +916,7 @@ func (c *Core) followAdapters() error {
 			}
 		}
 		if a := lines.PickFirstAdapter(candidates); a != nil {
+			notes = append(notes, fmt.Sprintf("%s's adapter %s is gone; using %s instead", l.Label, l.Alias, js.Text(a["alias"])))
 			items[i].Alias = js.Text(a["alias"])
 			g := js.Text(a["guid"])
 			items[i].GUID = &g
@@ -865,6 +929,28 @@ func (c *Core) followAdapters() error {
 	}
 	if err := c.save(map[string]any{"lines": items}); err != nil {
 		return err
+	}
+	for _, note := range notes {
+		c.log("%s", note)
+	}
+	if c.op.Undo != nil && len(renamed) > 0 {
+		metrics := js.Object(c.op.Undo.Values()["metrics"])
+		moved := false
+		for _, pair := range renamed {
+			if len(array(metrics[pair[0]])) == 0 {
+				continue
+			}
+			if len(array(metrics[pair[1]])) == 0 {
+				metrics[pair[1]] = metrics[pair[0]]
+			}
+			delete(metrics, pair[0])
+			moved = true
+		}
+		if moved {
+			if _, err := c.op.Undo.Update(map[string]any{"metrics": metrics}); err != nil {
+				return err
+			}
+		}
 	}
 	c.mu.Lock()
 	c.syncLanesLocked()
