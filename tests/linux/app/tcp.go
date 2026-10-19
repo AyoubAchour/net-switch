@@ -305,10 +305,17 @@ type BulkHoldResult struct {
 	Bytes      int64   `json:"bytes"`      // everything received
 	BurstBytes int64   `json:"burstBytes"` // received during the full-speed part
 	BurstMS    float64 `json:"burstMs"`
-	Intact     bool    `json:"intact"` // every byte matched the pattern
-	Open       bool    `json:"open"`   // still open when released
-	Err        string  `json:"err,omitempty"`
+	// Bins are the bytes received in each BinMS of the full-speed part, from
+	// the request on: how steady the demand was, not just its average.
+	BinMS  int     `json:"binMs"`
+	Bins   []int64 `json:"bins"`
+	Intact bool    `json:"intact"` // every byte matched the pattern
+	Open   bool    `json:"open"`   // still open when released
+	Err    string  `json:"err,omitempty"`
 }
+
+// HoldBinMS is the bulkhold mode's bin width.
+const HoldBinMS = 50
 
 // runBulkHold asks the bulk server for a flood: the pattern at full speed for
 // --flood ms, then a byte every 100 ms. It checks every byte, and keeps the
@@ -330,7 +337,7 @@ func runBulkHold(args []string) (any, error) {
 		return nil, usageError{fmt.Errorf("--release-file is required")}
 	}
 	time.Sleep(time.Duration(*delay) * time.Millisecond)
-	r := BulkHoldResult{Intact: true}
+	r := BulkHoldResult{Intact: true, BinMS: HoldBinMS, Bins: make([]int64, (*floodMS+HoldBinMS-1)/HoldBinMS)}
 	conn, err := net.DialTimeout("tcp", list[0].String(), 10*time.Second)
 	if err != nil {
 		r.Err, r.Intact = Code(err), false
@@ -353,10 +360,14 @@ func runBulkHold(args []string) (any, error) {
 			n, err := conn.Read(buf)
 			if n > 0 {
 				_, _ = io.ReadFull(want, exp[:n])
+				now := time.Now()
 				mu.Lock()
 				r.Bytes += int64(n)
-				if time.Now().Before(burstEnd) {
+				if now.Before(burstEnd) {
 					r.BurstBytes += int64(n)
+					if bin := int(now.Sub(start) / (HoldBinMS * time.Millisecond)); bin < len(r.Bins) {
+						r.Bins[bin] += int64(n)
+					}
 				}
 				if !bytes.Equal(buf[:n], exp[:n]) {
 					r.Intact = false

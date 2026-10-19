@@ -433,11 +433,11 @@ func tcpBufferBudgetCase(e *Env) {
 	// A download's send buffer toward the app grows from the 64 KiB floor to
 	// at most 6 MiB, doubling only in a 250 ms tick in which the flow moved at
 	// least its current buffer, and the grant stays while bytes keep moving
-	// (internal/engine/tcp/buffers.go). So each flow gets 2.5 s at full speed,
+	// (internal/engine/tcp/buffers.go). So each flow gets 3.5 s at full speed,
 	// four flows at a time, then a byte every 100 ms: 64 flows that each earn
 	// the full 5.94 MiB of growth want 380 MiB at once, half again the 256 MiB
 	// budget (5.9), and keep wanting it. Only the budget can refuse them.
-	const flows, perWave, burstMS = 64, 4, 2500
+	const flows, perWave, burstMS = 64, 4, 3500
 	const maxGrowth = int64(6<<20 - 64<<10)
 	release := e.NewRelease("buffers")
 	var bgs []*Bg
@@ -470,8 +470,7 @@ func tcpBufferBudgetCase(e *Env) {
 		if r.Open {
 			open++
 		}
-		// 24 MiB/s sustained: enough to double up to the 6 MiB cap.
-		if r.BurstBytes >= int64(burstMS)*24<<20/1000 {
+		if steadyMS(r.Bins, r.BinMS, earnWindowBins, earnPerWindow) >= earnSteadyMS {
 			earned++
 		}
 	}
@@ -480,12 +479,50 @@ func tcpBufferBudgetCase(e *Env) {
 		least = min(least, b)
 	}
 	e.T.Check(intact == flows && open == flows, "all %d downloads arrived intact, every byte checked, and were open until released (%d intact, %d open)", flows, intact, open)
-	e.T.Check(earned == flows, "every download ran fast enough in its burst to earn the full 6 MiB buffer, so together they wanted %.0f MiB (%d of %d did)",
+	// A prerequisite: without the demand, a budget that's never reached
+	// proves nothing about the budget.
+	e.T.Require(earned == flows, "every download kept up 5 MiB in every 200 ms for 2 s of its burst, enough to earn the full 6 MiB buffer, so together they wanted %.0f MiB (%d of %d did)",
 		float64(flows*maxGrowth)/(1<<20), earned, flows)
 	e.T.Check(most <= tcpBufferBudget, "buffer growth never went over the %d MiB budget (most %.1f MiB over %d samples)", tcpBufferBudget>>20, float64(most)/(1<<20), samples)
 	e.T.Check(len(held) > 0 && least >= tcpBufferBudget-maxGrowth,
 		"once every flow had asked, growth filled the budget to within one flow's grant and stayed there, so the rest was refused (least %.1f MiB over %d samples, most %.1f MiB)",
 		float64(least)/(1<<20), len(held), float64(most)/(1<<20))
+}
+
+// Steady demand that earns a flow the full send buffer. The engine doubles a
+// flow's buffer in a 250 ms tick only if the flow moved at least the current
+// buffer in it, and the last doubling (4 MiB to the 6 MiB cap) needs 4 MiB in
+// one tick. Any 250 ms tick holds four whole 50 ms bins, so when every four
+// bins in a row carry 5 MiB (4 MiB and a margin for the bytes in flight),
+// every tick inside that stretch qualifies, whatever the two clocks'
+// alignment; 2 s of it holds at least seven whole ticks, the seven doublings
+// from 64 KiB to the cap.
+const (
+	earnWindowBins = 4
+	earnPerWindow  = 5 << 20
+	earnSteadyMS   = 2000
+)
+
+// steadyMS is the longest stretch, in ms, over which every run of window
+// bins in a row carried at least least bytes.
+func steadyMS(bins []int64, binMS, window int, least int64) int {
+	best, run := 0, 0
+	for j := 0; j+window <= len(bins); j++ {
+		sum := int64(0)
+		for _, b := range bins[j : j+window] {
+			sum += b
+		}
+		if sum >= least {
+			run++
+		} else {
+			run = 0
+		}
+		best = max(best, run)
+	}
+	if best == 0 {
+		return 0
+	}
+	return (best + window - 1) * binMS
 }
 
 // cappedFloods runs apps pinned to a blocked line, each opening sockets new
@@ -514,11 +551,19 @@ func (e *Env) cappedFloods(names []string, sockets, rate int) (refusals, sends m
 			"--rate", strconv.Itoa(rate), "--timeout", "2000", "--times"}})
 	}
 	refusals, sends = map[string]map[int64]int{}, map[string]map[int64]int{}
-	firstWhole, lastWhole := int64(0), int64(1<<62)
+	var firstWhole, lastWhole int64 // the whole seconds every app sent through
 	sent, refused := 0, 0
-	for _, name := range names {
+	for i, name := range names {
 		var r app.FloodResult
 		bgs[name].WaitJSON(e, 2*time.Minute, &r)
+		// A flood that didn't open, send or keep its rate measures nothing:
+		// that stops the case as a failed prerequisite.
+		e.T.Require(r.Opened == sockets && r.Sent == sockets && len(r.OpenErrors) == 0 && len(r.SendErrors) == 0 && len(r.SentAt) == sockets,
+			"capped %s opened %d sockets and sent on each (%d opened, %d sent, %d send times, errors %v %v)", name, sockets, r.Opened, r.Sent, len(r.SentAt), r.OpenErrors, r.SendErrors)
+		first, last := r.SentAt[0], r.SentAt[len(r.SentAt)-1]
+		span := float64(last-first) / 1000
+		e.T.Require(span > 0 && float64(sockets)/span >= float64(rate)*9/10,
+			"capped %s sent at %d a second or more (%d over %.2f s)", name, rate*9/10, sockets, span)
 		refusals[name], sends[name] = map[int64]int{}, map[int64]int{}
 		for _, t := range r.RefusedAt {
 			refusals[name][t/1000]++
@@ -526,23 +571,22 @@ func (e *Env) cappedFloods(names []string, sockets, rate int) (refusals, sends m
 		for _, t := range r.SentAt {
 			sends[name][t/1000]++
 		}
-		ok := r.Opened == sockets && r.Sent == sockets && len(r.OpenErrors) == 0 && len(r.SendErrors) == 0 && len(r.SentAt) == sockets
-		span := 0.0
-		if ok {
-			first, last := r.SentAt[0], r.SentAt[len(r.SentAt)-1]
-			span = float64(last-first) / 1000
+		if i == 0 {
+			firstWhole, lastWhole = first/1000+1, last/1000-1
+		} else {
 			firstWhole, lastWhole = max(firstWhole, first/1000+1), min(lastWhole, last/1000-1)
 		}
-		e.T.Check(ok && span > 0 && float64(sockets)/span >= float64(rate)*9/10,
-			"capped %s opened %d sockets and sent on each at %d a second or more (%d opened, %d sent over %.2f s, errors %v %v)", name, sockets, rate*9/10, r.Opened, r.Sent, span, r.OpenErrors, r.SendErrors)
 		e.T.Check(r.Answered == 0, "none of capped %s's datagrams was answered (%d)", name, r.Answered)
 		sent += r.Sent
 		refused += r.Refused
 	}
+	// The window comes from send times the apps really recorded; check it
+	// before walking it.
+	e.T.Require(lastWhole-firstWhole >= 1 && lastWhole-firstWhole < 60,
+		"the apps were all sending through at least two whole seconds, and fewer than 60 (seconds %d to %d)", firstWhole, lastWhole)
 	for sec := firstWhole; sec <= lastWhole; sec++ {
 		whole = append(whole, sec)
 	}
-	e.T.Require(len(whole) >= 2, "the apps were all sending through at least two whole seconds (%v)", whole)
 	e.Sleep(500 * time.Millisecond)
 	escaped := Select(e.Records(), func(r inet.Record) bool { return r.Kind == "udp" && r.T >= from })
 	e.T.Check(len(escaped) == 0, "nothing the capped apps sent got out (%d datagrams reached the servers)", len(escaped))
