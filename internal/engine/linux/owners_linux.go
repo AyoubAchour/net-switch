@@ -35,10 +35,12 @@ type cachedHolders struct {
 	observed time.Time
 }
 type fdWindow struct {
-	start    uint64
-	next     int64
-	high     int64
-	observed time.Time
+	start      uint64
+	next       int64
+	high       int64
+	lastFD     int64
+	tailProbed bool
+	observed   time.Time
 }
 type Owners struct {
 	warmed          bool
@@ -394,6 +396,16 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 		found = append(found, h)
 		seen[h.pid] = true
+		if fd, err := strconv.ParseInt(h.fd, 10, 64); err == nil {
+			o.mu.Lock()
+			window := o.windows[h.pid]
+			if window.start != h.start {
+				window = fdWindow{start: h.start}
+			}
+			window.lastFD = fd
+			o.windows[h.pid] = window
+			o.mu.Unlock()
+		}
 		return nil
 	}
 	o.mu.Lock()
@@ -504,6 +516,40 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				}
 			}
 		}()
+		if !complete {
+			// New sockets tend to be near this process's last verified socket,
+			// including high descriptors in a large pre-opened socket pool.
+			if _, err := f.Seek(max(0, window.lastFD-64)+2, 0); err == nil {
+				names, _ := f.Readdirnames(256)
+				if err := visit(names); err != nil {
+					return err
+				}
+				if len(found) > 0 && found[len(found)-1].pid == pid {
+					return nil
+				}
+			}
+			if !window.tailProbed && result.AppID == "" && !expired() {
+				if tail, err := descriptorTail(f, pid, expired); err == nil {
+					o.mu.Lock()
+					current := o.windows[pid]
+					if current.start == start {
+						current.tailProbed = true
+						current.high = max(current.high, tail)
+						o.windows[pid] = current
+					}
+					o.mu.Unlock()
+					if _, err := f.Seek(max(0, tail-255)+2, 0); err == nil {
+						names, _ := f.Readdirnames(256)
+						if err := visit(names); err != nil {
+							return err
+						}
+						if len(found) > 0 && found[len(found)-1].pid == pid {
+							return nil
+						}
+					}
+				}
+			}
+		}
 		if !complete && position > 0 {
 			// Closing and reopening a socket normally reuses a low descriptor.
 			// Inspect that prefix even when the rotating window is already past
@@ -518,6 +564,11 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				}
 			}
 			if _, err := f.Seek(position, 0); err != nil {
+				return nil
+			}
+		}
+		if !complete && position == 0 {
+			if _, err := f.Seek(0, 0); err != nil {
 				return nil
 			}
 		}
@@ -592,6 +643,29 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	if result.AppID != "" {
 		return finish()
 	}
+	// Finish the hinted cgroup before spending the remaining budget on
+	// unrelated UIDs and processes. Recheck neighbours' newly indexed rows.
+	o.mu.Lock()
+	groupHints := append([]holder(nil), o.inodes[r.inode]...)
+	o.mu.Unlock()
+	for _, h := range groupHints {
+		if err := accept(h); err != nil {
+			return platform.Owner{}, err
+		}
+	}
+	if result.AppID != "" {
+		return finish()
+	}
+	groupHeavy := append([]uint32(nil), heavy...)
+	for _, pid := range groupHeavy {
+		delete(seen, pid)
+		if err := scan(pid, true); err != nil {
+			return platform.Owner{}, err
+		}
+		if result.AppID != "" {
+			return finish()
+		}
+	}
 
 	entries, _ := os.ReadDir("/proc")
 	var sameUID, other []uint32
@@ -665,6 +739,57 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 	}
 	return finish()
+}
+
+// FDSize bounds the allocated descriptor table. proc's fd+2 directory offsets
+// let us locate its occupied tail without reading thousands of regular-file
+// symlinks. This is a search hint only; socket inode and process identity are
+// still checked by holders. The tiny getdents buffer asks for one entry.
+func descriptorTail(f *os.File, pid uint32, expired func() bool) (int64, error) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0, err
+	}
+	var size int64
+	for _, line := range strings.Split(string(b), "\n") {
+		if strings.HasPrefix(line, "FDSize:") {
+			size, err = strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "FDSize:")), 10, 64)
+			break
+		}
+	}
+	if err != nil || size <= 0 {
+		return 0, os.ErrNotExist
+	}
+	lo, hi, last := int64(0), size-1, int64(0)
+	var data [32]byte
+	for lo <= hi {
+		if expired() {
+			return 0, context.DeadlineExceeded
+		}
+		mid := lo + (hi-lo)/2
+		if _, err := f.Seek(mid+2, 0); err != nil {
+			return 0, err
+		}
+		n, err := unix.ReadDirent(int(f.Fd()), data[:])
+		if err != nil {
+			return 0, err
+		}
+		if n == 0 {
+			hi = mid - 1
+			continue
+		}
+		_, _, names := unix.ParseDirent(data[:n], 1, nil)
+		if len(names) == 0 {
+			return 0, os.ErrNotExist
+		}
+		fd, err := strconv.ParseInt(names[0], 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		last = max(last, fd)
+		lo = fd + 1
+	}
+	return last, nil
 }
 
 func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip.AddrPort]platform.Owner, error) {
