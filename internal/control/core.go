@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
+	"github.com/AyoubAchour/net-switch/internal/crashnet"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/linehealth"
 	"github.com/AyoubAchour/net-switch/internal/lines"
@@ -51,9 +51,11 @@ type Options struct {
 	Log                    func(string)
 	Event                  func(map[string]any)
 	Background             func(func())
+	ProbeBackground        func(string, func())
 	AutostartAllowed       bool
 	CheckUpdate            func(context.Context) (*updates.Offer, error)
 	Tracker                AppTracker
+	Crash                  *crashnet.Net
 }
 type AppTracker interface {
 	Reset()
@@ -63,17 +65,21 @@ type AppTracker interface {
 	ConnectionIDsOffLine(string, string) []string
 }
 type lane struct {
-	alias        string
-	health       linehealth.Health
-	generation   uint64
-	target       *string
-	delay        *float64
-	probeAt      *int64
-	probing      bool
-	operator     int
-	missingAt    *int64
-	missingReads int
-	logged       map[string]int64
+	alias           string
+	health          linehealth.Health
+	generation      uint64
+	target          *string
+	delay           *float64
+	probeAt         *int64
+	routeReadAt     *int64
+	routeSnapshotAt *int64
+	probing         bool
+	operator        int
+	missingAt       *int64
+	missingReads    int
+	logged          map[string]int64
+	sampled         bool
+	ignoreAck       bool
 }
 type meter struct {
 	counter usage.Counter
@@ -91,6 +97,7 @@ type Core struct {
 	adapters                                     []map[string]any
 	routes                                       []map[string]any
 	routesAt                                     int64
+	networkReadAt                                int64
 	meters                                       map[string]meter
 	outsideAt                                    int64
 	tracker                                      AppTracker
@@ -124,6 +131,8 @@ type Core struct {
 	lastUpdateFailure                            string
 	lastStatus                                   string
 	revision                                     uint64
+	closures                                     []closureIntent
+	closureRetries                               map[string]closureRetry
 	applyMu                                      sync.Mutex
 	saveMu                                       sync.Mutex
 }
@@ -173,9 +182,20 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	c.outsideStarts = map[string]string{}
 	c.evidence = map[string]map[string]int64{}
 	c.deferClosures = map[string]uint64{}
-	c.laneQueue = newQueue(ctx)
-	c.startQueue = newQueue(ctx)
-	c.setupQueue = newQueue(ctx)
+	c.closureRetries = map[string]closureRetry{}
+	if c.op.Crash == nil {
+		c.op.Crash = crashnet.New(o.Log, func(ctx context.Context) error {
+			defer c.cancel()
+			return o.Engine.Stop(ctx)
+		})
+	}
+	background := c.op.Background
+	c.op.Background = func(f func()) {
+		background(func() { defer c.op.Crash.Recover("control background task"); f() })
+	}
+	c.laneQueue = newQueue(ctx, c.op.Crash)
+	c.startQueue = newQueue(ctx, c.op.Crash)
+	c.setupQueue = newQueue(ctx, c.op.Crash)
 	if err := c.migrate(); err != nil {
 		cancel()
 		return nil, err
@@ -195,6 +215,12 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	}
 	if o.Journal != nil {
 		c.revision = uint64(js.Number(o.Journal.Values()["revision"]))
+		var err error
+		c.closures, err = readClosures(o.Journal.Values()["closures"])
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("read pending closures: %w", err)
+		}
 	}
 	c.syncLanesLocked()
 	return c, nil
@@ -337,6 +363,7 @@ func (c *Core) syncLanesLocked() {
 			c.lanes[l.ID] = a
 		}
 		if a.alias != l.Alias {
+			c.forgetLane(l.ID)
 			delete(c.evidence, l.ID)
 			a.alias = l.Alias
 			a.generation++
@@ -344,6 +371,8 @@ func (c *Core) syncLanesLocked() {
 			a.target = nil
 			a.delay = nil
 			a.probeAt = nil
+			a.routeReadAt = nil
+			a.routeSnapshotAt = nil
 			a.probing = false
 		}
 	}
@@ -366,6 +395,8 @@ func (c *Core) resetLocked() {
 		l.generation++
 		l.target = nil
 		l.probeAt = nil
+		l.routeReadAt = nil
+		l.routeSnapshotAt = nil
 		l.probing = false
 		l.delay = nil
 		l.health.RestartKeeping(l.health.Offline, l.health.AwaitingPass, c.now())
@@ -474,6 +505,7 @@ func (c *Core) CheckElevation(ctx context.Context) {
 	}
 }
 func (c *Core) Start(ctx context.Context) error {
+	ctx = c.ctx
 	return c.startQueue.Do(ctx, func() error {
 		c.mu.Lock()
 		if !c.wanted || c.quitting {
@@ -500,6 +532,9 @@ func (c *Core) Start(ctx context.Context) error {
 		}
 		c.mu.Lock()
 		c.statusLocked(c.op.Engine.Snapshot())
+		for _, lane := range c.lanes {
+			lane.ignoreAck = !lane.sampled
+		}
 		c.sampleLinesLocked(c.op.Engine.Snapshot())
 		c.mu.Unlock()
 		if c.op.Engine.Snapshot().Status != "on" {
@@ -513,6 +548,7 @@ func (c *Core) Start(ctx context.Context) error {
 	})
 }
 func (c *Core) Routing(ctx context.Context, on bool) error {
+	ctx = c.ctx
 	c.mu.Lock()
 	c.wanted = on
 	if on {
@@ -537,6 +573,7 @@ func (c *Core) Routing(ctx context.Context, on bool) error {
 	})
 }
 func (c *Core) restart(ctx context.Context) error {
+	ctx = c.ctx
 	c.mu.Lock()
 	if c.op.Engine.Snapshot().Status == "on" {
 		c.statusLocked(engine.Snapshot{Status: "stopping"})
@@ -596,23 +633,37 @@ func (c *Core) applyPolicy(ctx context.Context, auto bool) error {
 	if gen != c.generation {
 		return nil
 	}
-	active := c.op.Engine.Snapshot()
-	if active.Status == "on" && active.StartedWith != nil && len(active.StartedWith.Lines) > 1 {
-		for _, line := range p.Lines {
-			id, target := line.ID, p.Lanes[line.ID]
-			if l := c.lanes[id]; l != nil {
-				if l.target == nil || *l.target != target {
-					l.target = ptr(target)
-					c.log("%s's apps now use %s", c.labelLocked(id), c.labelLocked(target))
-				}
-			}
-		}
-	}
+	c.recordLanesLocked(p)
 	if !reflect.DeepEqual(s.Policy.Shares, p.Shares) {
 		c.sharesAt = c.now()
 	}
 	c.logPolicyRulesLocked(s.Policy, p, auto)
 	return nil
+}
+
+func (c *Core) recordLanesLocked(p engine.Policy) {
+	active := c.op.Engine.Snapshot()
+	if active.Status != "on" || active.StartedWith == nil || len(active.StartedWith.Lines) < 2 {
+		return
+	}
+	for _, line := range p.Lines {
+		id, target := line.ID, p.Lanes[line.ID]
+		if l := c.lanes[id]; l != nil && (l.target == nil || *l.target != target) {
+			if l.ignoreAck {
+				l.ignoreAck = false
+				c.forgetLane(id)
+				continue
+			}
+			l.target = ptr(target)
+			c.log("%s's apps now use %s", c.labelLocked(id), c.labelLocked(target))
+		}
+	}
+}
+
+func (c *Core) forgetLane(id string) {
+	if adapter, ok := c.op.Engine.(interface{ ForgetLane(string) }); ok {
+		adapter.ForgetLane(id)
+	}
 }
 
 func (c *Core) logPolicyRulesLocked(before, after engine.Policy, auto bool) {
@@ -666,15 +717,7 @@ func (c *Core) Supervise(ctx context.Context) error {
 		restart := c.monitorFailures >= 20
 		settledIPv6 := false
 		if s.StartedWith != nil {
-			a := []string{}
-			b := []string{}
-			for _, l := range c.itemsLocked() {
-				a = append(a, l.ID, l.Alias)
-			}
-			for _, l := range s.StartedWith.Lines {
-				b = append(b, l.ID, l.Alias)
-			}
-			restart = restart || !reflect.DeepEqual(a, b)
+			restart = restart || c.bindingChangedLocked(s)
 			if c.ipv6Locked() == s.StartedWith.IPv6 {
 				c.ipv6Since = nil
 			} else if c.ipv6Since == nil {
@@ -690,19 +733,22 @@ func (c *Core) Supervise(ctx context.Context) error {
 			return c.laneQueue.Do(ctx, func() error {
 				c.mu.Lock()
 				fresh := c.op.Engine.Snapshot()
-				needed := c.monitorFailures >= 20
+				hung := c.monitorFailures >= 20
+				rebound := c.bindingChangedLocked(fresh)
+				needed := hung || rebound
 				if fresh.StartedWith != nil {
-					a, b := []string{}, []string{}
-					for _, l := range c.itemsLocked() {
-						a = append(a, l.ID, l.Alias)
-					}
-					for _, l := range fresh.StartedWith.Lines {
-						b = append(b, l.ID, l.Alias)
-					}
-					needed = needed || !reflect.DeepEqual(a, b) || (settledIPv6 && c.ipv6Locked() != fresh.StartedWith.IPv6)
+					needed = needed || (settledIPv6 && c.ipv6Locked() != fresh.StartedWith.IPv6)
 				}
 				needed = needed && c.wanted && !c.quitting && fresh.Status == "on"
-				if needed && settledIPv6 {
+				if needed && hung {
+					c.log("the routing engine hasn't answered for %d polls; restarting it", c.monitorFailures)
+				} else if needed && rebound {
+					aliases := []string{}
+					for _, line := range c.itemsLocked() {
+						aliases = append(aliases, line.Alias)
+					}
+					c.log("routing restarts to use %s", strings.Join(aliases, ", "))
+				} else if needed && settledIPv6 {
 					if c.ipv6Locked() {
 						c.log("every line has IPv6 now: routing restarts to carry it too")
 					} else {
@@ -725,6 +771,21 @@ func (c *Core) Supervise(ctx context.Context) error {
 	}
 	return nil
 }
+func (c *Core) bindingChangedLocked(s engine.Snapshot) bool {
+	if s.StartedWith == nil {
+		return false
+	}
+	items := c.itemsLocked()
+	if len(items) != len(s.StartedWith.Lines) {
+		return true
+	}
+	for i, line := range items {
+		if line.ID != s.StartedWith.Lines[i].ID || line.Alias != s.StartedWith.Lines[i].Alias {
+			return true
+		}
+	}
+	return false
+}
 func (c *Core) SaveUsage() error {
 	c.mu.Lock()
 	b, err := js.Marshal(c.usage.Saved)
@@ -740,7 +801,7 @@ func (c *Core) Shutdown(ctx context.Context) error {
 	c.mu.Unlock()
 	err := c.startQueue.Do(ctx, func() error {
 		c.mu.Lock()
-		if c.op.Engine.Snapshot().Status == "on" {
+		if s := c.op.Engine.Snapshot(); s.Status == "on" || s.PID != 0 {
 			c.statusLocked(engine.Snapshot{Status: "stopping"})
 		}
 		c.mu.Unlock()
@@ -754,6 +815,7 @@ func (c *Core) Shutdown(ctx context.Context) error {
 		c.mu.Lock()
 		c.quitting = false
 		c.mu.Unlock()
+		c.log("quit failed: %v", err)
 		return err
 	}
 	if err := c.SaveUsage(); err != nil {
@@ -822,10 +884,12 @@ func (c *Core) ApplyNetwork(ctx context.Context, v map[string]any, gen uint64) e
 		return err
 	}
 	c.mu.Lock()
-	if gen != c.generation {
+	readAt := int64(js.Number(v["readAt"]))
+	if gen != c.generation || readAt <= c.networkReadAt {
 		c.mu.Unlock()
 		return nil
 	}
+	c.networkReadAt = readAt
 	c.adapters = a
 	c.scanFailures = 0
 	if v["policy"] != "unknown" {
@@ -834,12 +898,12 @@ func (c *Core) ApplyNetwork(ctx context.Context, v map[string]any, gen uint64) e
 			c.policy = nil
 		}
 	}
-	c.routes = []map[string]any{}
 	if rr, ok := v["defaultRoutes"].([]any); ok {
+		c.routes = []map[string]any{}
 		for _, r := range rr {
 			c.routes = append(c.routes, js.Object(r))
 		}
-		c.routesAt = c.now()
+		c.routesAt = readAt
 	}
 	c.mu.Unlock()
 	return c.laneQueue.Do(ctx, func() error { return c.followAdapters() })
@@ -1030,5 +1094,4 @@ func (c *Core) HelperLine(data []byte) bool {
 	return true
 }
 
-func decodeJSON(b []byte, out any) error { return json.Unmarshal(b, out) }
-func array(v any) []any                  { a, _ := v.([]any); return a }
+func array(v any) []any { a, _ := v.([]any); return a }

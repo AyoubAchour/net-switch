@@ -26,6 +26,7 @@ import (
 	assets "github.com/AyoubAchour/net-switch"
 	"github.com/AyoubAchour/net-switch/internal/buildinfo"
 	"github.com/AyoubAchour/net-switch/internal/control"
+	"github.com/AyoubAchour/net-switch/internal/crashnet"
 	"github.com/AyoubAchour/net-switch/internal/engine/singbox"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	win "github.com/AyoubAchour/net-switch/internal/platform/windows"
@@ -74,7 +75,7 @@ func run() (runErr error) {
 	flags := flag.NewFlagSet("netswitch", flag.ContinueOnError)
 	version := flags.Bool("version", false, "print build identity")
 	dev := flags.Bool("dev-proxy", false, "CI proxy mode with separate ports and data")
-	root := flags.String("root", "", "application root (defaults to the working directory)")
+	root := flags.String("root", "", "application root (defaults to the executable folder)")
 	user := flags.String("user-data", "", "settings and session folder")
 	machine := flags.String("machine-data", "", "engine and undo folder")
 	engineDir := flags.String("engine-dir", "", "verified sing-box folder (test mode only)")
@@ -90,15 +91,11 @@ func run() (runErr error) {
 	if runtime.GOOS != "windows" {
 		return fmt.Errorf("Linux control-service platform support is not implemented yet")
 	}
-	if *root == "" {
-		var err error
-		*root, err = os.Getwd()
-		if err != nil {
-			return err
-		}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
 	}
-	var err error
-	*root, err = filepath.Abs(*root)
+	*root, err = applicationRoot(*root, exe)
 	if err != nil {
 		return err
 	}
@@ -148,10 +145,6 @@ func run() (runErr error) {
 			log.append("control service failed: " + runErr.Error())
 		}
 	}()
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
 	if *engineDir == "" {
 		*engineDir = filepath.Join(*root, "engine")
 	} else if !*dev {
@@ -168,9 +161,23 @@ func run() (runErr error) {
 	if err != nil {
 		return err
 	}
-	system := &win.System{Workers: worker.Supervisor{Executable: exe, Log: func(err error) { log.append("worker: " + err.Error()) }}, EnginePath: path, Root: *root, UserDir: *user, MachineDir: *machine}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var adapter *singbox.Adapter
+	crash := crashnet.New(log.append, func(ctx context.Context) error {
+		defer cancel()
+		if adapter != nil {
+			return adapter.Stop(ctx)
+		}
+		return nil
+	})
+	defer func() {
+		if p := recover(); p != nil {
+			crash.Report("control main", p)
+			runErr = <-crash.Failures()
+		}
+	}()
+	system := &win.System{Workers: worker.Supervisor{Executable: exe, Log: func(err error) { log.append("worker: " + err.Error()) }, Crash: crash}, EnginePath: path, Root: *root, UserDir: *user, MachineDir: *machine}
 	if *machine != *user && !*dev {
 		if _, err := system.Call(ctx, "protect-directory", map[string]any{"path": *machine}); err != nil {
 			log.append("Net Switch cannot start: machine folder protection failed: " + err.Error())
@@ -185,6 +192,7 @@ func run() (runErr error) {
 	}
 	defer lock.Close()
 	go func() {
+		defer crash.Recover("single-instance listener")
 		for {
 			conn, err := lock.Accept()
 			if err != nil {
@@ -222,7 +230,15 @@ func run() (runErr error) {
 	}
 	journalOptions := ioOptions
 	journalOptions.FileName = "control-journal.json"
-	journalOptions.Defaults = map[string]any{"revision": float64(0), "desired": map[string]any{}, "settings": map[string]any{}, "closures": []any{}}
+	journalOptions.Defaults = map[string]any{"revision": float64(0), "closures": []any{}}
+	journalOptions.SyncFile = func(path string) error {
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		return f.Sync()
+	}
 	journal := settings.New(*machine, journalOptions)
 	if _, err := journal.Load(); err != nil {
 		return err
@@ -231,15 +247,19 @@ func run() (runErr error) {
 		log.append("the control journal was damaged: " + journal.Recovery.Reason)
 	}
 	engineLog := &logger{path: filepath.Join(*machine, "engine.log")}
-	adapter := singbox.New(singbox.Options{Executable: path, DataDir: *machine, Mode: mode, Platform: system, Log: engineLog.append, Files: ioOptions})
+	adapter = singbox.New(singbox.Options{Executable: path, DataDir: *machine, Mode: mode, Platform: system, Log: engineLog.append, Files: ioOptions, Crash: crash})
 	installed := false
-	if pf := os.Getenv("ProgramFiles"); pf != "" && !*dev {
+	pf, err := win.ProgramFiles()
+	if err != nil {
+		return fmt.Errorf("read Program Files location: %w", err)
+	}
+	if pf != "" && !*dev {
 		rel, err := filepath.Rel(pf, *root)
 		installed = err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) && *user != defaultDir
 		binaryRel, binaryErr := filepath.Rel(*root, exe)
 		installed = installed && binaryErr == nil && binaryRel != "." && binaryRel != ".." && !strings.HasPrefix(binaryRel, ".."+string(filepath.Separator)) && !filepath.IsAbs(binaryRel)
 	}
-	core, err := control.New(ctx, control.Options{Engine: adapter, Platform: system, Settings: store, Undo: undo, Journal: journal, IO: ioOptions, Mode: mode, Version: assets.AppVersion(), UserDir: *user, Log: log.append, AutostartAllowed: installed, CheckUpdate: func(ctx context.Context) (*updates.Offer, error) { return checkUpdate(ctx, system) }})
+	core, err := control.New(ctx, control.Options{Engine: adapter, Platform: system, Settings: store, Undo: undo, Journal: journal, IO: ioOptions, Mode: mode, Version: assets.AppVersion(), UserDir: *user, Log: log.append, AutostartAllowed: installed, Crash: crash, CheckUpdate: func(ctx context.Context) (*updates.Offer, error) { return checkUpdate(ctx, system) }})
 	if err != nil {
 		return err
 	}
@@ -262,7 +282,7 @@ func run() (runErr error) {
 	handler := &control.HTTP{Core: core, Port: port, Token: token, Quit: func() { once.Do(func() { close(quit) }) }}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- server.Serve(listener) }()
+	go func() { defer crash.Recover("HTTP listener"); serveErr <- server.Serve(listener) }()
 	core.CheckElevation(ctx)
 	if err := core.RefreshAdapters(ctx); err != nil {
 		log.append("initial adapter scan failed: " + err.Error())
@@ -281,6 +301,9 @@ func run() (runErr error) {
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)
 	select {
+	case err := <-crash.Failures():
+		_ = server.Close()
+		return err
 	case <-quit:
 	case <-signals:
 		stopCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -295,6 +318,13 @@ func run() (runErr error) {
 	defer cancel()
 	return server.Shutdown(shutdown)
 }
+func applicationRoot(override, executable string) (string, error) {
+	if override == "" {
+		return filepath.Dir(executable), nil
+	}
+	return filepath.Abs(override)
+}
+
 func checkUpdate(ctx context.Context, system *win.System) (*updates.Offer, error) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()

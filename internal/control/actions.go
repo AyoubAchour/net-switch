@@ -99,7 +99,7 @@ func (c *Core) Action(ctx context.Context, method, path string, b map[string]any
 	case "/api/setup/cable-default", "/api/setup/keep-both", "/api/setup/undo":
 		err = c.setupQueue.Do(ctx, func() error { return c.setup(ctx, path) })
 	case "/api/quit":
-		if err := c.Shutdown(ctx); err != nil {
+		if err := c.Shutdown(c.ctx); err != nil {
 			return nil, bad(err.Error())
 		}
 		return map[string]any{"ok": true}, nil
@@ -171,6 +171,7 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 		return bad("That line isn’t there any more.")
 	}
 	clearWaiting := false
+	note := ""
 	switch action {
 	case "/api/lines/add":
 		alias := js.Text(b["alias"])
@@ -192,12 +193,14 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 			return bad("Net Switch can use up to 8 lines.")
 		}
 		l := lines.NewLine(adapter, items, c.op.LineID)
+		note = fmt.Sprintf("added %s (%s)", l.Label, l.Alias)
 		if len(items) > 0 && len(waiting) > 0 {
 			pins = lines.PlaceWaitingApps(waiting, pins, l.ID)
 			clearWaiting = true
 		}
 		items = append(items, l)
 	case "/api/lines/remove":
+		note = fmt.Sprintf("removed %s (%s)", items[index].Label, items[index].Alias)
 		if len(items) == 1 {
 			return bad("Net Switch needs at least one line.")
 		}
@@ -234,6 +237,11 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 			seen[key] = true
 		}
 		items = next
+		names := make([]string, len(items))
+		for i, line := range items {
+			names[i] = line.Label
+		}
+		note = "line order: " + strings.Join(names, ", ")
 	case "/api/lines/update":
 		next := items[index]
 		if v, ok := b["label"]; ok {
@@ -284,6 +292,9 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 	c.mu.Unlock()
 	if err := c.ApplyPolicy(ctx); err != nil {
 		return err
+	}
+	if note != "" {
+		c.log("%s", note)
 	}
 	if action != "/api/lines/update" && c.op.Engine.Snapshot().Status != "off" {
 		return c.restart(ctx)
@@ -360,28 +371,27 @@ func (c *Core) reconnect(ctx context.Context, key string) (map[string]any, error
 	if len(routed) > 0 {
 		// Reconnect selects only the old flows the user saw. Retrying this
 		// operation must never select the app's subsequently opened flows.
-		intent := closureIntent{ID: c.op.ID(), Revision: s.AppliedRevision, Purpose: "reconnect", Request: engine.CloseRequest{Instance: s.Instance, StartedBefore: c.op.Clock.Now(), ConnectionIDs: routed}}
+		intent := closureIntent{ID: c.op.ID(), Revision: s.AppliedRevision, Purpose: "reconnect", Label: key, Request: engine.CloseRequest{Instance: s.Instance, StartedBefore: c.op.Clock.Now(), ConnectionIDs: routed}}
 		intent.Request.OperationID = intent.ID
-		if c.op.Journal != nil {
-			if _, err := c.op.Journal.Change(func(v map[string]any) map[string]any {
-				return map[string]any{"closures": append(array(v["closures"]), intent)}
-			}); err != nil {
-				return nil, err
+		func() {
+			c.applyMu.Lock()
+			defer c.applyMu.Unlock()
+			_ = c.saveIntent(intent)
+			result, err := c.op.Engine.CloseFlows(ctx, intent.Request)
+			if err != nil {
+				failed += len(routed)
+				c.log("could not finish closure: %v", c.retryClosure(intent, err))
+				return
 			}
-		}
-		result, err := c.op.Engine.CloseFlows(ctx, intent.Request)
-		if err != nil {
-			failed += len(routed)
-		} else {
 			closed += result.Closed
 			failed += result.Failed
 			gone += result.Gone
 			if result.Failed == 0 {
-				if err := c.completeIntent(intent.ID); err != nil {
-					return nil, err
-				}
+				_ = c.completeIntent(intent.ID)
+			} else {
+				c.log("could not finish closure: %v", c.retryClosure(intent, fmt.Errorf("%d connections could not be closed", result.Failed)))
 			}
-		}
+		}()
 	}
 	v, err := c.op.Platform.Call(ctx, "close-tcp", map[string]any{"connections": tuples})
 	if err != nil {
@@ -450,6 +460,11 @@ func (c *Core) changeSettings(ctx context.Context, b map[string]any) error {
 			c.autostart = v
 			c.mu.Unlock()
 		}
+		word := "off"
+		if on == true {
+			word = "on"
+		}
+		c.log("starting with Windows is %s", word)
 	}
 	if v, exists := b["checkForUpdates"]; exists {
 		changes["checkForUpdates"] = v
@@ -521,8 +536,18 @@ func (c *Core) setup(ctx context.Context, action string) error {
 		if _, err := c.op.Platform.Call(ctx, "policy-set", map[string]any{"value": float64(0)}); err != nil {
 			return err
 		}
+		c.refreshPolicy(ctx)
+		return nil
 	case "/api/setup/undo":
 		unreachable := []string{}
+		if v, ok := policy["value"]; ok {
+			if _, err := c.op.Platform.Call(ctx, "policy-set", map[string]any{"value": v}); err != nil {
+				return err
+			}
+			if _, err := c.op.Undo.Update(map[string]any{"policy": map[string]any{}}); err != nil {
+				return err
+			}
+		}
 		for alias, record := range metrics {
 			if _, err := c.op.Platform.Call(ctx, "metrics-restore", map[string]any{"alias": alias, "metrics": record}); err != nil {
 				c.log("could not restore %s's interface metrics: %v", alias, err)
@@ -534,17 +559,18 @@ func (c *Core) setup(ctx context.Context, action string) error {
 				return err
 			}
 		}
-		if v, ok := policy["value"]; ok {
-			if _, err := c.op.Platform.Call(ctx, "policy-set", map[string]any{"value": v}); err != nil {
-				return err
-			}
-			if _, err := c.op.Undo.Update(map[string]any{"policy": map[string]any{}}); err != nil {
-				return err
-			}
-		}
 		if len(unreachable) > 0 {
 			return bad("Connect " + strings.Join(unreachable, " and ") + " again to finish undoing, then press Undo again.")
 		}
+		c.refreshPolicy(ctx)
 	}
 	return c.RefreshAdapters(ctx)
+}
+
+func (c *Core) refreshPolicy(ctx context.Context) {
+	if value, err := c.op.Platform.Call(ctx, "policy", nil); err == nil {
+		c.mu.Lock()
+		c.policy = value
+		c.mu.Unlock()
+	}
 }

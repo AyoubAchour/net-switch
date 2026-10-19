@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -20,11 +19,9 @@ import (
 func Execute(operation string, a map[string]any) (any, error) {
 	switch operation {
 	case "line-check":
-		return checkLine(uint32(js.Number(a["index"])), js.Text(a["target"]), a["quick"] == true), nil
+		return checkLine(uint32(js.Number(a["index"])), js.Text(a["target"]), a["quick"] == true, a["custom"] == true), nil
 	case "network":
 		return readNetwork()
-	case "elevated":
-		return windows.GetCurrentProcessToken().IsElevated(), nil
 	case "architecture":
 		return Architecture()
 	case "policy":
@@ -104,6 +101,12 @@ func Execute(operation string, a map[string]any) (any, error) {
 	default:
 		return nil, fmt.Errorf("unknown Windows operation %q", operation)
 	}
+}
+func ControlElevated() (bool, error) {
+	return windows.GetCurrentProcessToken().IsElevated(), nil
+}
+func ProgramFiles() (string, error) {
+	return windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, 0)
 }
 func arrayValue(v any) []any { a, _ := v.([]any); return a }
 func Architecture() (string, error) {
@@ -235,92 +238,28 @@ func writePolicy(value any) error {
 	return k.SetDWordValue("fMinimizeConnections", uint32(js.Number(value)))
 }
 
-// Hold every component without FILE_SHARE_DELETE while inspecting and changing
-// the ACL. This prevents a directory being swapped for a junction between the
-// reparse-point check and SetNamedSecurityInfo.
-func ProtectDirectory(path string) error {
-	path, err := filepath.Abs(path)
-	if err != nil {
-		return err
-	}
-	handles := []windows.Handle{}
-	defer func() {
-		for _, h := range handles {
-			windows.CloseHandle(h)
-		}
-	}()
-	hold := func(p string) error {
-		v, err := windows.UTF16PtrFromString(p)
-		if err != nil {
-			return err
-		}
-		h, err := windows.CreateFile(v, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
-		if err != nil {
-			return err
-		}
-		handles = append(handles, h)
-		var info windows.ByHandleFileInformation
-		if err := windows.GetFileInformationByHandle(h, &info); err != nil {
-			return err
-		}
-		if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return fmt.Errorf("%s is a reparse point, which Net Switch will not follow", p)
-		}
-		return nil
-	}
-	parents := []string{}
-	for p := path; ; p = filepath.Dir(p) {
-		parents = append(parents, p)
-		if filepath.Dir(p) == p {
-			break
-		}
-	}
-	for i := len(parents) - 1; i >= 0; i-- {
-		if err := hold(parents[i]); err != nil {
-			return err
-		}
-	}
-	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
-	if err != nil {
-		return err
-	}
-	owner, _, err := sd.Owner()
-	if err != nil {
-		return err
-	}
-	acl, _, err := sd.DACL()
-	if err != nil {
-		return err
-	}
-	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, owner, nil, acl, nil); err != nil {
-		return err
-	}
-	return filepath.WalkDir(path, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if p == path {
-			return nil
-		}
-		if err := hold(p); err != nil {
-			return err
-		}
-		empty, err := windows.SecurityDescriptorFromString("D:")
-		if err != nil {
-			return err
-		}
-		dacl, _, err := empty.DACL()
-		if err != nil {
-			return err
-		}
-		return windows.SetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION, owner, nil, dacl, nil)
-	})
-}
 func StopProcess(pid uint32, path string) error {
 	if pid == 0 || !filepath.IsAbs(path) {
 		return fmt.Errorf("stop requires a PID and absolute executable path")
 	}
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, pid)
+	// A reused PID may now be a protected SYSTEM process. Identify with only
+	// query rights first; an unreadable identity is not evidence of our engine.
+	query, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return nil
+	}
+	defer windows.CloseHandle(query)
+	buf := make([]uint16, windows.MAX_LONG_PATH)
+	size := uint32(len(buf))
+	if err := windows.QueryFullProcessImageName(query, 0, &buf[0], &size); err != nil {
+		return nil
+	}
+	if !strings.EqualFold(windows.UTF16ToString(buf[:size]), path) {
+		return nil
+	}
+	// Keep the query handle open so this process object (and PID) cannot be
+	// recycled between identity verification and opening terminate rights.
+	h, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.SYNCHRONIZE, false, pid)
 	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 		return nil
 	}
@@ -328,14 +267,6 @@ func StopProcess(pid uint32, path string) error {
 		return err
 	}
 	defer windows.CloseHandle(h)
-	buf := make([]uint16, windows.MAX_LONG_PATH)
-	size := uint32(len(buf))
-	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &size); err != nil {
-		return err
-	}
-	if !strings.EqualFold(windows.UTF16ToString(buf[:size]), path) {
-		return nil
-	}
 	if err := windows.TerminateProcess(h, 1); err != nil {
 		return err
 	}
@@ -406,4 +337,3 @@ func closeTCP(tuples []platform.TCPSelector) (map[string]any, error) {
 	}
 	return map[string]any{"closed": closed, "failed": failed, "gone": gone, "codes": codes}, nil
 }
-

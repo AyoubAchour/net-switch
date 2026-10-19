@@ -102,10 +102,6 @@ func (c *Core) describeLocked(path string) map[string]any {
 		name = "Windows services"
 		reconnectable = false
 	}
-	switch strings.ToLower(baseName(path)) {
-	case "svchost", "node", "python", "pythonw", "powershell", "pwsh", "cmd", "wscript", "cscript", "java", "javaw", "dotnet":
-		reconnectable = false
-	}
 	info := c.info[key]
 	c.queueInfoLocked([]string{path})
 	if v := js.Text(info["name"]); v != "" && key != `c:\windows\system32\svchost.exe` {
@@ -120,6 +116,12 @@ func (c *Core) State() map[string]any {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	s := c.op.Engine.Snapshot()
+	for _, line := range c.itemsLocked() {
+		if lane := c.lanes[line.ID]; lane != nil && lane.health.Up == nil {
+			c.sampleLinesLocked(s)
+			break
+		}
+	}
 	items := c.itemsLocked()
 	routing := s.Status == "on"
 	ll := []any{}
@@ -182,7 +184,14 @@ func (c *Core) State() map[string]any {
 				}
 			}
 		}
-		ll = append(ll, map[string]any{"id": line.ID, "alias": line.Alias, "label": json.RawMessage(js.MarshalString(line.Label)), "kind": kind, "main": i == 0, "connected": connected, "problem": problem, "ping": ping, "connections": c.connections[line.ID], "carrying": carrying, "target": target, "rate": rate, "ssid": ssid, "metered": line.Metered, "strict": line.Strict, "cap": line.Cap, "usage": c.usage.Used(line.ID), "exhausted": c.exhausted[line.ID], "blocked": blocked, "weight": line.Weight, "share": share})
+		ll = append(ll, map[string]any{
+			"id": line.ID, "alias": line.Alias, "label": json.RawMessage(js.MarshalString(line.Label)),
+			"kind": kind, "main": i == 0, "connected": connected, "problem": problem, "ping": ping,
+			"connections": c.connections[line.ID], "carrying": carrying, "target": target,
+			"rate": rate, "ssid": ssid, "metered": line.Metered, "strict": line.Strict,
+			"cap": line.Cap, "usage": c.usage.Used(line.ID), "exhausted": c.exhausted[line.ID],
+			"blocked": blocked, "weight": line.Weight, "share": share,
+		})
 	}
 	for _, a := range c.adapters {
 		if a["kind"] == "wifi" {
@@ -236,6 +245,26 @@ func (c *Core) State() map[string]any {
 	_, policyChanged := js.Object(undo["policy"])["value"]
 	_, others := c.outrankingLocked()
 	updates := c.op.Mode != "proxy" && c.values["checkForUpdates"] == true
-	return map[string]any{"mode": c.op.Mode, "elevated": c.elevated, "version": c.op.Version, "update": offer, "updateChecks": updates, "features": map[string]any{"reconnect": true, "combine": true, "lines": true, "installedApps": true}, "combine": map[string]any{"on": s.Policy.Combine, "active": c.combineActiveLocked(s), "mode": c.values["combineMode"]}, "routing": map[string]any{"status": s.Status, "wanted": c.wanted, "error": s.Error, "measuring": routing && c.monitorFailures < 3, "proxyPort": s.ProxyPort, "ipv6": ipv6, "retryAt": retryAt}, "lines": ll, "candidates": candidates, "apps": appRows, "events": append([]map[string]any{}, c.events...), "settings": map[string]any{"autostart": autostart, "checkForUpdates": updates, "probeTargets": c.values["probeTargets"]}, "setup": map[string]any{"cableNotDefault": len(others) > 0, "wifiBlocked": c.policy == float64(3) && wifi, "keepBothConnected": len(items) > 1 && hasWifiLine && c.policy != float64(0) && c.policy != float64(3), "changed": map[string]any{"cableDefault": metricChanged, "keepBoth": policyChanged}}}
+	return map[string]any{
+		"mode": c.op.Mode, "elevated": c.elevated, "version": c.op.Version,
+		"update": offer, "updateChecks": updates,
+		"features": map[string]any{"reconnect": true, "combine": true, "lines": true, "installedApps": true},
+		"combine":  map[string]any{"on": s.Policy.Combine, "active": c.combineActiveLocked(s), "mode": c.values["combineMode"]},
+		"routing": map[string]any{
+			"status": s.Status, "wanted": c.wanted, "error": s.Error,
+			"measuring": routing && c.monitorFailures < 3,
+			"proxyPort": s.ProxyPort, "ipv6": ipv6, "retryAt": retryAt,
+		},
+		"lines": ll, "candidates": candidates, "apps": appRows,
+		"events": append([]map[string]any{}, c.events...),
+		"settings": map[string]any{
+			"autostart": autostart, "checkForUpdates": updates,
+			"probeTargets": probeTargets(c.values["probeTargets"], c.values["probeTargetsCustom"] == true),
+		},
+		"setup": map[string]any{
+			"cableNotDefault": len(others) > 0, "wifiBlocked": c.policy == float64(3) && wifi,
+			"keepBothConnected": len(items) > 1 && hasWifiLine && c.policy != float64(0) && c.policy != float64(3),
+			"changed":           map[string]any{"cableDefault": metricChanged, "keepBoth": policyChanged},
+		},
+	}
 }
-

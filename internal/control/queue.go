@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"fmt"
+	"github.com/AyoubAchour/net-switch/internal/crashnet"
 )
 
 type work struct {
@@ -18,7 +19,7 @@ type Queue struct {
 	stop chan struct{}
 }
 
-func newQueue(ctx context.Context) *Queue {
+func newQueue(ctx context.Context, net ...*crashnet.Net) *Queue {
 	q := &Queue{make(chan work), make(chan struct{})}
 	go func() {
 		defer close(q.stop)
@@ -34,6 +35,9 @@ func newQueue(ctx context.Context) *Queue {
 				func() {
 					defer func() {
 						if p := recover(); p != nil {
+							if len(net) != 0 && net[0] != nil {
+								net[0].Report("control queue", p)
+							}
 							w.done <- fmt.Errorf("queued operation panicked: %v", p)
 						}
 					}()

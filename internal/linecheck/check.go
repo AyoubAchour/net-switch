@@ -26,7 +26,10 @@ type Endpoint struct {
 // makes the DoH request independent of the machine's DNS configuration.
 var dnsQuery = []byte{0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}
 
-func ForTarget(target string) Endpoint {
+func ForTarget(target string, custom ...bool) Endpoint {
+	if len(custom) > 0 && custom[0] {
+		return Endpoint{"https://" + strings.TrimSuffix(target, ":443") + "/", "", "custom", false}
+	}
 	switch target {
 	case "1.1.1.1:443":
 		return Endpoint{"https://1.1.1.1/cdn-cgi/trace", "", "cloudflare", false}
@@ -39,14 +42,16 @@ func ForTarget(target string) Endpoint {
 	}
 }
 func Validate(e Endpoint, r *http.Response) bool {
+	// The legacy URL test uses HEAD and accepts every HTTP response for a
+	// custom target. Only the three product operators have content criteria.
+	if e.Operator == "custom" {
+		return true
+	}
 	if r.StatusCode != http.StatusOK {
 		return false
 	}
 	if e.HTTP2 && r.ProtoMajor != 2 {
 		return false
-	}
-	if e.Operator == "custom" {
-		return true
 	}
 	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil && e.Operator != "custom" {
@@ -69,17 +74,19 @@ func Validate(e Endpoint, r *http.Response) bool {
 		return json.Unmarshal(b, &v) == nil && v.Status != nil && *v.Status == 0
 	case "quad9":
 		return media == "application/dns-message"
-	case "custom":
-		return true
 	}
 	return false
 }
-func HTTPS(ctx context.Context, target string, transport http.RoundTripper) engine.ProbeResult {
+func HTTPS(ctx context.Context, target string, transport http.RoundTripper, custom ...bool) engine.ProbeResult {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	e := ForTarget(target)
+	e := ForTarget(target, custom...)
 	client := http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	r, err := http.NewRequestWithContext(ctx, "GET", e.URL, nil)
+	method := http.MethodGet
+	if e.Operator == "custom" {
+		method = http.MethodHead
+	}
+	r, err := http.NewRequestWithContext(ctx, method, e.URL, nil)
 	if err != nil {
 		return engine.ProbeResult{Outcome: engine.Unavailable}
 	}

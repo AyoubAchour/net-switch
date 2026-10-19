@@ -32,6 +32,10 @@ external driver, and entries also freeze all resulting internal I/O completions.
   engine response bodies, installed-app lookup, log writes and update checks.
 - `socket-completion`, `process-exit`, `timer-completion`: fake listener/close
   callbacks, child exit and resolved delays. Pending operations have no completion.
+- New scenarios also record `directory-list`, `probe-vote`, and `state-snapshot`.
+  The snapshot boundary is when the response is built, not when its bytes are
+  sent: a probe can finish between those two points. Replay dispatches that
+  round on the recorded side of the snapshot and checks the next response too.
 
 The initial harness clock, entropy, paths, PID, socket ports and platform are
 deterministic. No live adapter, clock, helper, HTTP service or engine contributes
@@ -97,6 +101,14 @@ milestones 3–4. It is not permission to discard failed applies or early closur
 from replay. Journal writes and settings-before-apply ordering are explicit 1.0
 outputs, separate from the frozen Node writes.
 
+The milestone-one journal retains revision numbers and closure intents, with
+fsync before replacement under the apply mutex. The unused desired/settings
+copies are removed; settings remain the authoritative desired state. A failed
+journal write is logged prominently and cannot prevent a lane switch. Pending
+closures retain their original cutoff in memory, retry independently at 2, 5,
+15, 30, then at most every 60 seconds, and do not cause new revisions while
+waiting. This is recovery metadata, not a prerequisite for live failover.
+
 The replay names the ordering changes imposed by that revision boundary:
 settings and their backup move ahead of the immediately preceding rule batch;
 lane and share-change diagnostics wait for the whole batch acknowledgement;
@@ -128,11 +140,19 @@ target edit atomically stores `probeTargetsCustom` alongside the list, so even
 an explicit choice of that old pair remains a two-target override after restart.
 That internal settings marker does not add a field to the HTTP state contract.
 
-The named `probeFailover` expectation advances its down transition from 26 s to
-16 s: one failed quick vote plus two failed full votes reaches the existing
-health threshold. Its selector command, reply and down event move together.
-Recovery remains at 41 s. No other trace deadline is relaxed. The original
-Node fixture is never rewritten to encode this difference.
+Each complete failed round contributes one vote. `probeFailover` goes down at
+26 s and recovers at 41 s, exactly as recorded, with no timestamp or ordering
+remapping. Each route snapshot counts once, at five-second spacing, after the
+current health sample. `lostDefaultRoute` proves the second missing route read
+at 10 s takes effect on the 11 s poll; recovery follows the 15 s read.
+
+Custom targets use HEAD, do not follow redirects, and accept every HTTP status,
+as the v1.14.2 URL test does. An explicit list replaces the operators, even when
+it contains an operator's address. The three product defaults retain their
+exact content criteria. The only state-field mapping adds Quad9 to the
+inherited default pair so the window shows the sites actually used. Explicit
+target lists are compared unchanged; their internal persistence marker is
+checked separately and omitted only from the Node settings-file comparison.
 
 Keep these in separate, explicitly named acceptance expectations. Do not edit
 Node goldens to make new behavior look like parity. The freeze, DNS drop and cap
@@ -141,7 +161,7 @@ reproduces nor declares those defects fixed. Main-line cap exemption, blocked
 secondary lines, failback without automatic close, and shared Reconnect keeping
 routed flows remain required parity.
 
-## Starter coverage and limits
+## Coverage and limits
 
 Traces cover physical and probe failure/recovery; a busy line ignoring failed
 checks; Santiago's nonexistent midnight on 6 September 2026; saved-version and
@@ -157,16 +177,16 @@ version and SHA-256. Regeneration prints JSON with `traces.mjs`, using the same 
 flags as `record.mjs`; it never overwrites fixtures.
 
 Run `go test -v -run TestRecordedTraceReplay ./internal/control` for the Go
-consumer. All 14 traces, 4,772 entries and 1,793 completion records are checked.
+consumer. All 25 traces, 7,894 entries and 3,003 completion records are checked.
 The real Go controller and sing-box adapter run with an in-memory filesystem,
 fake clock/process and recorded engine replies. Replies are consumed in their
 recorded order; unexpected calls and leftover replies fail the test. Comparison
-covers all 25 API outputs through the real HTTP handler (status, headers and
+covers all 64 API outputs through the real HTTP handler (status, headers and
 body), ordered engine requests, events, control writes,
 config/rule SHA-256 values, removals, spawns, outside-close selectors and logs.
 `appLines` and `shares` retain their ordered-entry comparison. A combined output
 ledger also compares ordering across these kinds, with only the explicit
-revision-boundary and named line-check mappings above. Initial usage saving and
+revision-boundary and default-site mappings above. Initial usage saving and
 the minute timer complete at the recorded startup and same-deadline boundaries.
 
 The two startup diagnostic mappings replace the missing-PowerShell-helper
@@ -176,6 +196,40 @@ have separate persistence/acknowledgement tests because they do not exist in
 the Node baseline. Node filesystem/platform completion bookkeeping is checked
 for valid kinds, contiguous sequence IDs and matching completion boundaries;
 the equivalent Go filesystem and helper work is injected directly.
+
+The original 14 traces are unchanged. Eleven new traces cover line add/remove/
+order, app choices, routing off/on, settings and autostart, all setup and update
+actions, cap reset, a hung engine, lost default routes, adapter rename and a
+failed Quit. Their directory stub returns actual names (the old recorder's
+callback error remains frozen as a failed directory read in the old traces).
+The new installed-app fixture includes the real provider's `hasIcon` field.
+
+Every HTTP endpoint is exercised (the 17 control routes, plus ping and icon):
+
+| Routes | Traces |
+| --- | --- |
+| GET state | All state scenarios |
+| GET ping, installed-apps, icon (missing icon) | routingAndReads |
+| POST lines/add, lines/remove, lines/order | lineAdd, lineRemove, lineOrder |
+| POST lines/update | combining, capMoved, capBlockedAndMainException |
+| POST app-line | appLine |
+| POST routing | routingAndReads |
+| POST combine | combining |
+| POST reconnect | reconnectPinned, reconnectShared |
+| POST settings | settingsSetupUpdate |
+| POST setup/cable-default, setup/keep-both, setup/undo | settingsSetupUpdate |
+| POST update/check, update/dismiss | settingsSetupUpdate |
+| POST quit | migration, quitFailure |
+
+Log conditions compared include startup/status/retry transitions, added and
+removed lines, line ordering, rebind and IPv6 restarts, hung-engine restart,
+speed-read failure, physical/probe/default-route failure and recovery, busy-line
+suppression, cap exhaustion/reset/blocking/closure, combining shares,
+Reconnect counts, autostart on/off, available/failed updates, migration, and
+successful/failed Quit. `Run()` tests additionally execute concurrent native
+worker streams, polls, supervision and API work through the real adapter under
+the CI race detector. Fatal poll/supervisor/probe/stream tests require cleanup
+and a logged failure, rather than merely recovering a panic.
 
 Separate adversarial tests cover a late probe, an old connection reply after
 stop, a completed rebind racing the supervisor, concurrent settings/state/

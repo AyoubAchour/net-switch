@@ -48,6 +48,7 @@ func (c *Core) Poll(ctx context.Context) error {
 		} else if !next[l.ID] && c.exhausted[l.ID] {
 			c.noteLocked("cap-reset", l.ID, l.Label+" can be used again: its data cap has reset.")
 			delete(c.closePending, l.ID)
+			c.log("%s's data cap reset", l.Label)
 		}
 	}
 	c.exhausted = next
@@ -114,6 +115,7 @@ func (c *Core) sampleLinesLocked(s engine.Snapshot) {
 	items := c.itemsLocked()
 	for _, item := range items {
 		l := c.lanes[item.ID]
+		l.sampled = true
 		address := false
 		route := false
 		for _, a := range c.adapters {
@@ -130,15 +132,22 @@ func (c *Core) sampleLinesLocked(s engine.Snapshot) {
 				}
 			}
 		}
-		if address && now-c.routesAt <= 30000 {
-			l.health.NoteRoute(ptr(route), now)
-		}
 		before := l.health.Up
 		recoveredBefore := l.health.RecoveredAt
-		up := l.health.Check(address, now, s.Status == "on" && len(items) > 1)
+		up := l.health.Check(address, now, c.canTestLocked(item.ID, s))
 		if recoveredBefore != l.health.RecoveredAt {
 			l.probeAt = nil
+			l.routeReadAt = nil
 			delete(c.evidence, item.ID)
+		}
+		// Node samples health before its background route read completes. Count
+		// each native snapshot once, with the same five-second read spacing.
+		if address && now-c.routesAt <= 30000 &&
+			(l.routeSnapshotAt == nil || c.routesAt > *l.routeSnapshotAt) &&
+			(l.routeReadAt == nil || now-*l.routeReadAt >= 5000) {
+			l.health.NoteRoute(ptr(route), c.routesAt)
+			l.routeReadAt = ptr(now)
+			l.routeSnapshotAt = ptr(c.routesAt)
 		}
 		if before != nil && up != nil && *before != *up {
 			if *up {
@@ -182,12 +191,7 @@ func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connecti
 		if !c.closePending[line.ID] {
 			continue
 		}
-		moved := p.Lanes[line.ID] != "" && p.Lanes[line.ID] != line.ID
-		blocked := false
-		for _, id := range p.Blocked {
-			blocked = blocked || id == line.ID
-		}
-		if moved || blocked {
+		if closureNeeded(p, line.ID) {
 			period := float64(0)
 			if used := c.usage.Used(line.ID); used != nil {
 				period = used.PeriodStart
@@ -225,6 +229,11 @@ func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connecti
 }
 
 var defaultTargets = []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}
+
+func customTargets(v any, explicit bool) bool {
+	list := array(v)
+	return explicit || (len(list) > 0 && !(len(list) == 2 && list[0] == defaultTargets[0] && list[1] == defaultTargets[1]))
+}
 
 func probeTargets(v any, custom bool) []string {
 	out := []string{}
@@ -276,13 +285,17 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 		}
 		c.evidence[*line][strings.ToLower(strings.TrimSuffix(conn.Host, "."))] = start.UnixMilli()
 	}
-	jobs := []func(){}
+	type probeJob struct {
+		line string
+		run  func()
+	}
+	jobs := []probeJob{}
 	for _, item := range c.itemsLocked() {
 		l := c.lanes[item.ID]
-		if l.probing || c.exhausted[item.ID] || l.health.HadAddress == nil || !*l.health.HadAddress {
+		if l.probing || !c.canTestLocked(item.ID, s) || l.health.HadAddress == nil || !*l.health.HadAddress {
 			continue
 		}
-		doubt := l.health.InDoubt() || l.health.Up == nil || !*l.health.Up
+		doubt := l.health.InDoubt()
 		wait := int64(15000)
 		if doubt {
 			wait = 5000
@@ -302,13 +315,13 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 		}
 		realPassed := len(c.evidence[id]) >= 2 && l.health.Up != nil && *l.health.Up && !l.health.Offline && !l.health.AwaitingPass
 		targets := probeTargets(c.values["probeTargets"], c.values["probeTargetsCustom"] == true)
+		custom := customTargets(c.values["probeTargets"], c.values["probeTargetsCustom"] == true)
 		operator := l.operator % len(targets)
 		l.operator = (operator + 1) % len(targets)
-		jobs = append(jobs, func() {
+		jobs = append(jobs, probeJob{id, func() {
 			result := engine.ProbeResult{Outcome: engine.Unavailable}
-			failedChecks := 0
 			probe := func(target string, quick bool) engine.ProbeResult {
-				return c.op.Engine.Probe(ctx, engine.ProbeRequest{OperationID: c.op.ID(), Line: id, Index: index, Target: target, Quick: quick})
+				return c.op.Engine.Probe(ctx, engine.ProbeRequest{OperationID: c.op.ID(), Line: id, Index: index, Target: target, Quick: quick, Custom: custom})
 			}
 			if realPassed {
 				result.Outcome = engine.OK
@@ -317,11 +330,6 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 					result = probe(targets[operator], true)
 				}
 				if doubt || result.Outcome != engine.OK {
-					// A quick failure is the first vote; two distinct full operator
-					// checks supply the remaining votes in today's health machine.
-					if result.Outcome == engine.LineFailed {
-						failedChecks++
-					}
 					fullStart := operator
 					if !doubt {
 						fullStart = (operator + 1) % len(targets)
@@ -330,15 +338,16 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 					var checks sync.WaitGroup
 					for i := range results {
 						checks.Add(1)
-						go func() { defer checks.Done(); results[i] = probe(targets[(fullStart+i)%len(targets)], false) }()
+						go func() {
+							defer checks.Done()
+							defer c.op.Crash.Recover("line probe")
+							results[i] = probe(targets[(fullStart+i)%len(targets)], false)
+						}()
 					}
 					checks.Wait()
 					result = engine.ProbeResult{Outcome: engine.LineFailed}
 					unavailable := false
 					for _, answer := range results {
-						if answer.Outcome == engine.LineFailed {
-							failedChecks++
-						}
 						if answer.Outcome == engine.Unavailable {
 							unavailable = true
 						}
@@ -363,7 +372,7 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 			}
 			if result.Delay != nil {
 				l.delay = ptr(math.Round(*result.Delay))
-			} else {
+			} else if !realPassed {
 				l.delay = nil
 			}
 			if result.Outcome == engine.LineFailed {
@@ -375,18 +384,34 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 				if !l.health.Offline {
 					c.laneLogLocked(l, "probe", fmt.Sprintf("%s didn't reach the internet in a test", c.labelLocked(id)))
 				}
-				for i := 0; i < max(1, failedChecks); i++ {
-					l.health.NoteProbe(ptr(false), now)
-				}
+				// Parallel operator checks confirm one round, not three votes.
+				l.health.NoteProbe(ptr(false), now)
 			} else {
 				l.health.NoteProbe(ptr(true), now)
 			}
-		})
+		}})
 	}
 	c.mu.Unlock()
 	for _, job := range jobs {
-		c.op.Background(job)
+		run := func() { defer c.op.Crash.Recover("line probe"); job.run() }
+		if c.op.ProbeBackground != nil {
+			c.op.ProbeBackground(job.line, run)
+		} else {
+			c.op.Background(run)
+		}
 	}
+}
+
+func (c *Core) canTestLocked(id string, s engine.Snapshot) bool {
+	if s.Status != "on" || s.StartedWith == nil || len(s.StartedWith.Lines) < 2 || c.exhausted[id] {
+		return false
+	}
+	for _, line := range s.StartedWith.Lines {
+		if line.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Core) laneLogLocked(l *lane, key, text string) {

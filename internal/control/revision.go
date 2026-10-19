@@ -5,10 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	"github.com/AyoubAchour/net-switch/internal/settings"
 )
 
 type closureIntent struct {
@@ -16,7 +19,33 @@ type closureIntent struct {
 	Revision    uint64              `json:"revision"`
 	PeriodStart float64             `json:"periodStart"`
 	Purpose     string              `json:"purpose,omitempty"`
+	Label       string              `json:"label,omitempty"`
 	Request     engine.CloseRequest `json:"request"`
+}
+
+type closureRetry struct {
+	attempts int
+	nextAt   int64
+}
+
+// All journal writes happen under applyMu, only when a revision or intent
+// changes. Memory remains authoritative if the recovery disk is unavailable;
+// stopping a lane switch would leave traffic on a dead or exhausted line.
+func (c *Core) persistJournal() {
+	if c.op.Journal == nil {
+		return
+	}
+	c.mu.Lock()
+	number := c.revision
+	intents := append([]closureIntent{}, c.closures...)
+	c.mu.Unlock()
+	_, err := c.op.Journal.Update(map[string]any{
+		"revision": number, "closures": intents,
+		"desired": settings.Delete, "settings": settings.Delete,
+	})
+	if err != nil {
+		c.log("CONTROL JOURNAL WRITE FAILED: %v; routing continues, crash recovery is incomplete", err)
+	}
 }
 
 func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine.Revision, error) {
@@ -36,41 +65,17 @@ func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine
 			intents[i].Request.BeforeRevision = number
 		}
 	}
-	if c.op.Journal != nil {
-		_, err = c.op.Journal.Change(func(v map[string]any) map[string]any {
-			pending := array(v["closures"])
-			existing := map[string]int{}
-			for i, raw := range pending {
-				existing[js.Text(js.Object(raw)["intentId"])] = i
-			}
-			for _, intent := range intents {
-				if index, ok := existing[intent.ID]; ok {
-					pending[index] = intent
-					continue
-				}
-				pending = append(pending, intent)
-			}
-			// The journal atomically records the complete desired settings and
-			// revision alongside its closure intents. settings.json remains the
-			// backwards-compatible mirror consumed by the Node installation.
-			return map[string]any{"revision": number, "desired": revision, "settings": c.op.Settings.RawValues(), "closures": pending}
-		})
-		if err != nil {
-			return engine.Revision{}, err
-		}
-	}
 	c.mu.Lock()
 	c.revision = number
+	c.closures = append([]closureIntent{}, intents...)
 	c.mu.Unlock()
+	c.persistJournal()
 	return revision, nil
 }
 
-func (c *Core) pendingClosures() ([]closureIntent, error) {
+func readClosures(value any) ([]closureIntent, error) {
 	result := []closureIntent{}
-	if c.op.Journal == nil {
-		return result, nil
-	}
-	for _, v := range array(c.op.Journal.Values()["closures"]) {
+	for _, v := range array(value) {
 		b, err := json.Marshal(v)
 		if err != nil {
 			return nil, err
@@ -83,35 +88,54 @@ func (c *Core) pendingClosures() ([]closureIntent, error) {
 	}
 	return result, nil
 }
+func (c *Core) pendingClosures() ([]closureIntent, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]closureIntent{}, c.closures...), nil
+}
 func (c *Core) completeIntent(id string) error {
-	if c.op.Journal == nil {
-		return nil
-	}
-	_, err := c.op.Journal.Change(func(v map[string]any) map[string]any {
-		pending := []any{}
-		for _, raw := range array(v["closures"]) {
-			if js.Object(raw)["intentId"] != id {
-				pending = append(pending, raw)
-			}
+	c.mu.Lock()
+	pending := []closureIntent{}
+	for _, intent := range c.closures {
+		if intent.ID != id {
+			pending = append(pending, intent)
 		}
-		return map[string]any{"closures": pending}
-	})
-	return err
+	}
+	c.closures = pending
+	delete(c.closureRetries, id)
+	delete(c.deferClosures, id)
+	c.mu.Unlock()
+	c.persistJournal()
+	return nil
 }
 func (c *Core) saveIntent(intent closureIntent) error {
-	if c.op.Journal == nil {
-		return nil
-	}
-	_, err := c.op.Journal.Change(func(v map[string]any) map[string]any {
-		pending := array(v["closures"])
-		for i, raw := range pending {
-			if js.Object(raw)["intentId"] == intent.ID {
-				pending[i] = intent
-			}
+	c.mu.Lock()
+	found := false
+	for i := range c.closures {
+		if c.closures[i].ID == intent.ID {
+			c.closures[i] = intent
+			found = true
+			break
 		}
-		return map[string]any{"closures": pending}
-	})
-	return err
+	}
+	if !found {
+		c.closures = append(c.closures, intent)
+	}
+	c.mu.Unlock()
+	c.persistJournal()
+	return nil
+}
+
+func closureNeeded(p engine.Policy, line string) bool {
+	if target := p.Lanes[line]; target != "" && target != line {
+		return true
+	}
+	for _, id := range p.Blocked {
+		if id == line {
+			return true
+		}
+	}
+	return false
 }
 
 // Before advancing the revision, recover any acknowledgement whose journal
@@ -137,11 +161,7 @@ func (c *Core) reconcileIntents(intents []closureIntent, p engine.Policy) ([]clo
 				return nil, fmt.Errorf("closure %s has an unconfirmed cutoff for revision %d; refusing to broaden it", intent.ID, intent.Revision)
 			}
 			if intent.Revision > s.AppliedRevision {
-				needed := p.Lanes[intent.Request.Line] != "" && p.Lanes[intent.Request.Line] != intent.Request.Line
-				for _, id := range p.Blocked {
-					needed = needed || id == intent.Request.Line
-				}
-				if !needed {
+				if !closureNeeded(p, intent.Request.Line) {
 					if err := c.completeIntent(intent.ID); err != nil {
 						return nil, err
 					}
@@ -175,11 +195,19 @@ func (c *Core) applyWithClosures(ctx context.Context, p engine.Policy, intents [
 	if stale {
 		return nil
 	}
-	before := c.op.Engine.Snapshot().Policy
+	snapshot := c.op.Engine.Snapshot()
+	before := snapshot.Policy
 	var err error
 	intents, err = c.reconcileIntents(intents, p)
 	if err != nil {
 		return err
+	}
+	needsRevision := snapshot.AppliedRevision == 0 || !reflect.DeepEqual(before, p)
+	for _, intent := range intents {
+		needsRevision = needsRevision || intent.Revision == 0 || intent.Revision > snapshot.AppliedRevision
+	}
+	if !needsRevision {
+		return nil
 	}
 	r, err := c.persistRevision(p, intents)
 	if err != nil {
@@ -200,15 +228,7 @@ func (c *Core) applyWithClosures(ctx context.Context, p engine.Policy, intents [
 		c.mu.Unlock()
 		return nil
 	}
-	for _, line := range p.Lines {
-		id, target := line.ID, p.Lanes[line.ID]
-		if l := c.lanes[id]; l != nil {
-			if l.target == nil || *l.target != target {
-				c.log("%s's apps now use %s", c.labelLocked(id), c.labelLocked(target))
-			}
-			l.target = ptr(target)
-		}
-	}
+	c.recordLanesLocked(p)
 	c.logPolicyRulesLocked(before, p, true)
 	for _, intent := range intents {
 		newBlock, wasBlocked := false, false
@@ -227,11 +247,14 @@ func (c *Core) applyWithClosures(ctx context.Context, p engine.Policy, intents [
 }
 
 func (c *Core) finishClosures(ctx context.Context, gen uint64) error {
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
 	intents, err := c.pendingClosures()
 	if err != nil {
 		return err
 	}
 	s := c.op.Engine.Snapshot()
+	var failures []error
 	for _, intent := range intents {
 		c.mu.Lock()
 		deferred := false
@@ -239,11 +262,12 @@ func (c *Core) finishClosures(ctx context.Context, gen uint64) error {
 			deferred = at == c.pollSequence
 		}
 		stale := gen != c.generation
+		waiting := c.now() < c.closureRetries[intent.ID].nextAt
 		c.mu.Unlock()
 		if stale {
 			return nil
 		}
-		if deferred {
+		if deferred || waiting {
 			continue
 		}
 		request := intent.Request
@@ -257,11 +281,12 @@ func (c *Core) finishClosures(ctx context.Context, gen uint64) error {
 			continue
 		}
 		result, err := c.op.Engine.CloseFlows(ctx, request)
-		if err != nil {
-			return err
-		}
 		if result.Failed > 0 {
-			return fmt.Errorf("%d connections on %s could not be closed", result.Failed, request.Line)
+			err = fmt.Errorf("%d connections could not be closed", result.Failed)
+		}
+		if err != nil {
+			failures = append(failures, c.retryClosure(intent, err))
+			continue
 		}
 		if result.Closed > 0 && intent.Purpose != "reconnect" {
 			plural := ""
@@ -292,7 +317,23 @@ func (c *Core) finishClosures(ctx context.Context, gen uint64) error {
 		}
 		c.mu.Unlock()
 	}
-	return nil
+	return errors.Join(failures...)
+}
+
+func (c *Core) retryClosure(intent closureIntent, err error) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	retry := c.closureRetries[intent.ID]
+	delays := [...]int64{2000, 5000, 15000, 30000, 60000}
+	delay := delays[min(retry.attempts, len(delays)-1)]
+	retry.attempts++
+	retry.nextAt = c.now() + delay
+	c.closureRetries[intent.ID] = retry
+	label := c.labelLocked(intent.Request.Line)
+	if intent.Purpose == "reconnect" {
+		label = "Reconnect " + intent.Label
+	}
+	return fmt.Errorf("%s: %w; retrying in %d seconds", label, err, delay/1000)
 }
 
 // ReplayClosures runs after restoring the desired policy. Old-instance intents

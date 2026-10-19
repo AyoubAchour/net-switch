@@ -51,8 +51,9 @@ func (p *process) Close() error {
 	return nil
 }
 
-// Start creates a restricted process suspended, assigns it to a worker-only
-// kill-on-close job, then resumes it. Control and the engine never enter the job.
+// Reads use a Medium-integrity token with Administrators deny-only. Writes and
+// outside (which enables TCP counters) retain admin access with privileges
+// stripped. Both enter a bounded worker-only job before they can execute.
 func Start(executable string, args []string) (Process, error) {
 	if !filepath.IsAbs(executable) || len(args) < 2 || args[0] != "worker" {
 		return nil, fmt.Errorf("worker launcher requires its absolute executable and a worker mode")
@@ -67,22 +68,57 @@ func Start(executable string, args []string) (Process, error) {
 			windows.CloseHandle(job)
 		}
 	}()
-	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS, ActiveProcessLimit: 1}}
+	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
+		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
+			LimitFlags:         windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS | windows.JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+			ActiveProcessLimit: 1,
+		},
+		ProcessMemoryLimit: 256 * 1024 * 1024,
+	}
 	if _, err = windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
 		return nil, err
 	}
+	ui := windows.JOBOBJECT_BASIC_UI_RESTRICTIONS{UIRestrictionsClass: windows.JOB_OBJECT_UILIMIT_DESKTOP | windows.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
+		windows.JOB_OBJECT_UILIMIT_EXITWINDOWS | windows.JOB_OBJECT_UILIMIT_GLOBALATOMS |
+		windows.JOB_OBJECT_UILIMIT_HANDLES | windows.JOB_OBJECT_UILIMIT_READCLIPBOARD |
+		windows.JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | windows.JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+	}
+	if _, err := windows.SetInformationJobObject(job, windows.JobObjectBasicUIRestrictions, uintptr(unsafe.Pointer(&ui)), uint32(unsafe.Sizeof(ui))); err != nil {
+		return nil, fmt.Errorf("limit worker UI access: %w", err)
+	}
 	var token windows.Token
-	if err = windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_ASSIGN_PRIMARY|windows.TOKEN_QUERY, &token); err != nil {
+	if err = windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_ASSIGN_PRIMARY|windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT, &token); err != nil {
 		return nil, err
 	}
 	defer token.Close()
 	var restricted windows.Token
+	var disabled windows.SIDAndAttributes
+	var count uintptr
+	var disabledSIDs *windows.SIDAndAttributes
+	if !adminWorker(args) {
+		admin, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+		if err != nil {
+			return nil, err
+		}
+		disabled.Sid = admin
+		count, disabledSIDs = 1, &disabled
+	}
 	proc := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
-	result, _, callErr := proc.Call(uintptr(token), 1, 0, 0, 0, 0, 0, 0, uintptr(unsafe.Pointer(&restricted)))
+	result, _, callErr := proc.Call(uintptr(token), 1, count, uintptr(unsafe.Pointer(disabledSIDs)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&restricted)))
 	if result == 0 {
 		return nil, fmt.Errorf("restrict worker token: %w", callErr)
 	}
 	defer restricted.Close()
+	if !adminWorker(args) {
+		medium, err := windows.CreateWellKnownSid(windows.WinMediumLabelSid)
+		if err != nil {
+			return nil, err
+		}
+		label := windows.Tokenmandatorylabel{Label: windows.SIDAndAttributes{Sid: medium, Attributes: windows.SE_GROUP_INTEGRITY}}
+		if err := windows.SetTokenInformation(restricted, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), label.Size()); err != nil {
+			return nil, fmt.Errorf("lower worker integrity: %w", err)
+		}
+	}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -170,4 +206,17 @@ func Start(executable string, args []string) (Process, error) {
 	}
 	ok = true
 	return &process{handle: pi.Process, job: job, output: reader, input: hold, errors: errorReader}, nil
+}
+
+func adminWorker(args []string) bool {
+	mode := args[1]
+	if mode == "query" && len(args) > 2 {
+		mode = args[2]
+	}
+	switch mode {
+	case "outside", "policy-set", "metrics-set", "metrics-restore", "protect-directory",
+		"stop-process", "close-tcp", "autostart-set", "autostart-upgrade":
+		return true
+	}
+	return false
 }

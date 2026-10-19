@@ -37,6 +37,7 @@ type memoryFiles struct {
 	outsideCloses []any
 	events        []any
 	order         []string
+	syncs         []string
 }
 
 func (f *memoryFiles) recordOrder(kind string) {
@@ -138,6 +139,8 @@ type fakeEngine struct {
 	resourceIDs     map[string]string
 	beforeStart     func()
 	beforeClose     func(engine.CloseRequest) error
+	killFailure     string
+	directoryLists  [][]string
 }
 type recordedReply struct {
 	Route  string
@@ -163,6 +166,15 @@ func (f *fakeEngine) Fail(err error) {
 	f.s.Status = "error"
 	text := err.Error()
 	f.s.Error = &text
+}
+func (f *fakeEngine) ForgetLane(id string) {
+	if e, ok := f.real.(interface{ ForgetLane(string) }); ok {
+		e.ForgetLane(id)
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.s.Policy.Lanes, id)
 }
 func (f *fakeEngine) Start(ctx context.Context, p engine.Policy) error {
 	if f.beforeStart != nil {
@@ -264,12 +276,18 @@ type fakePlatform struct {
 	mu          sync.Mutex
 	recordClose func(any)
 	probe       func(map[string]any) (any, error)
+	override    func(string, map[string]any) (any, error, bool)
 }
 
 func (f *fakePlatform) Call(_ context.Context, name string, a map[string]any) (any, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, name)
+	if f.override != nil {
+		if v, err, ok := f.override(name, a); ok {
+			return v, err
+		}
+	}
 	switch name {
 	case "line-check":
 		if f.probe != nil {
@@ -322,6 +340,12 @@ func testCore(t *testing.T, initial map[string]any) (*Core, *fakeEngine, *fakeCl
 		t.Fatal(err)
 	}
 	journal := io
+	journal.SyncFile = func(path string) error {
+		files.mu.Lock()
+		defer files.mu.Unlock()
+		files.syncs = append(files.syncs, path)
+		return nil
+	}
 	journal.FileName = "control-journal.json"
 	journal.Defaults = map[string]any{"revision": float64(0), "closures": []any{}, "desired": map[string]any{}, "settings": map[string]any{}}
 	j := settings.New("/test", journal)
@@ -423,7 +447,7 @@ func TestCapsPersistBeforeApplyAndCloseOnlyAfterAck(t *testing.T) {
 				if err := c.finishClosures(context.Background(), c.generation); err != nil {
 					t.Fatal(err)
 				}
-				wantCalls = []string{"apply", "apply", tc.want}
+				wantCalls = []string{"apply", tc.want}
 			}
 			if !reflect.DeepEqual(e.calls, wantCalls) {
 				t.Fatal(e.calls)
@@ -884,6 +908,7 @@ func TestStateMatchesEveryFrozenTrayScenario(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			operatorStateExpectation(js.Object(want), false)
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("state contract differs\ngot: %s\nwant: %s", actual, frozen.States[name].Body)
 			}

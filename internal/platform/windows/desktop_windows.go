@@ -3,6 +3,7 @@ package winplatform
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"image"
 	"image/png"
@@ -51,7 +52,7 @@ func versionName(path string) string {
 	translation, translationSize := query(`\VarFileInfo\Translation`)
 	pairs := [][2]uint16{}
 	if translation != nil && translationSize >= 4 {
-		words := unsafe.Slice((*uint16)(translation), int(translationSize/2))
+		words := versionWords(b, translation, translationSize/2)
 		for i := 0; i+1 < len(words); i += 2 {
 			pairs = append(pairs, [2]uint16{words[i], words[i+1]})
 		}
@@ -63,13 +64,35 @@ func versionName(path string) string {
 			if p == nil || n == 0 {
 				continue
 			}
-			text := strings.TrimSpace(windows.UTF16ToString(unsafe.Slice((*uint16)(p), int(n))))
+			text := strings.TrimSpace(windows.UTF16ToString(versionWords(b, p, n)))
 			if text != "" && len([]rune(text)) <= 60 {
 				return text
 			}
 		}
 	}
 	return ""
+}
+
+// VerQueryValue returns a pointer into the caller's version buffer. Check the
+// entire range before decoding; a malformed resource must never create an
+// unsafe slice into unrelated memory. Strings count UTF-16 units, not bytes.
+func versionWords(b []byte, p unsafe.Pointer, units uint32) []uint16 {
+	if len(b) == 0 || p == nil || units == 0 {
+		return nil
+	}
+	base, address := uintptr(unsafe.Pointer(&b[0])), uintptr(p)
+	if address < base || address%2 != 0 {
+		return nil
+	}
+	offset := address - base
+	if offset >= uintptr(len(b)) || uint64(units) > uint64(uintptr(len(b))-offset)/2 {
+		return nil
+	}
+	words := make([]uint16, int(units))
+	for i := range words {
+		words[i] = binary.LittleEndian.Uint16(b[int(offset)+i*2:])
+	}
+	return words
 }
 
 type shellFileInfo struct {

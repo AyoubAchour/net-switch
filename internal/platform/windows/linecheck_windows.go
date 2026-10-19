@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func checkLine(index uint32, target string, quick bool) engine.ProbeResult {
+func checkLine(index uint32, target string, quick, custom bool) engine.ProbeResult {
 	adapter, err := net.InterfaceByIndex(int(index))
 	if err != nil {
 		return engine.ProbeResult{Outcome: engine.Unavailable}
@@ -47,5 +47,5 @@ func checkLine(index uint32, target string, quick bool) engine.ProbeResult {
 	}
 	transport := &http.Transport{DialContext: dialer.DialContext, ForceAttemptHTTP2: true, DisableKeepAlives: true}
 	defer transport.CloseIdleConnections()
-	return linecheck.HTTPS(context.Background(), target, transport)
+	return linecheck.HTTPS(context.Background(), target, transport, custom)
 }

@@ -1,0 +1,187 @@
+package worker
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
+)
+
+type isolationRequest struct {
+	Parent uint32
+	Key    string
+	TCP    [5]uint32
+}
+type isolationResult struct {
+	AdminDenyOnly                            bool
+	Integrity                                string
+	ProcessDenied, RegistryDenied, TCPDenied bool
+	ProcessCode, RegistryCode, TCPCode       string
+	Memory                                   uintptr
+	UI                                       uint32
+	Error                                    string
+}
+
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "worker" {
+		// Only this test executable handles these inputs. Product workers retain
+		// their normal operation allowlist and never gain a diagnostic write API.
+		if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+			os.Exit(2)
+		}
+		var input isolationRequest
+		if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
+			os.Exit(2)
+		}
+		result, err := isolationProbe(input)
+		if err != nil {
+			result.Error = err.Error()
+		}
+		_ = json.NewEncoder(os.Stdout).Encode(result)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func isolationProbe(input isolationRequest) (isolationResult, error) {
+	result := isolationResult{}
+	token := windows.GetCurrentProcessToken()
+	groups, err := token.GetTokenGroups()
+	if err != nil {
+		return result, err
+	}
+	for _, g := range groups.AllGroups() {
+		if g.Sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+			result.AdminDenyOnly = g.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY != 0 && g.Attributes&windows.SE_GROUP_ENABLED == 0
+		}
+	}
+	var size uint32
+	_ = windows.GetTokenInformation(token, windows.TokenIntegrityLevel, nil, 0, &size)
+	buffer := make([]byte, size)
+	if err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel, &buffer[0], size, &size); err != nil {
+		return result, err
+	}
+	result.Integrity = (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buffer[0])).Label.Sid.String()
+	h, err := windows.OpenProcess(windows.PROCESS_VM_WRITE|windows.PROCESS_VM_OPERATION|windows.PROCESS_CREATE_THREAD, false, input.Parent)
+	result.ProcessDenied = err == windows.ERROR_ACCESS_DENIED
+	result.ProcessCode = fmt.Sprint(err)
+	if err == nil {
+		windows.CloseHandle(h)
+	}
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, input.Key, registry.SET_VALUE)
+	result.RegistryDenied = err == windows.ERROR_ACCESS_DENIED
+	result.RegistryCode = fmt.Sprint(err)
+	if err == nil {
+		_ = k.SetStringValue("worker-write", "permitted")
+		k.Close()
+	}
+	code, _, _ := windows.NewLazySystemDLL("iphlpapi.dll").NewProc("SetTcpEntry").Call(uintptr(unsafe.Pointer(&input.TCP[0])))
+	result.TCPDenied = code == uintptr(windows.ERROR_ACCESS_DENIED)
+	result.TCPCode = strconv.FormatUint(uint64(code), 10)
+	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	if err := windows.QueryInformationJobObject(0, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits)), nil); err != nil {
+		return result, err
+	}
+	result.Memory = limits.ProcessMemoryLimit
+	var ui windows.JOBOBJECT_BASIC_UI_RESTRICTIONS
+	if err := windows.QueryInformationJobObject(0, windows.JobObjectBasicUIRestrictions, uintptr(unsafe.Pointer(&ui)), uint32(unsafe.Sizeof(ui)), nil); err != nil {
+		return result, err
+	}
+	result.UI = ui.UIRestrictionsClass
+	return result, nil
+}
+
+func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
+	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Skip("requires disposable hosted Windows")
+	}
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Fatal("the parent must be elevated")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := uint32(os.Getpid())
+	if value := os.Getenv("NETSWITCH_CONTROL_PID"); value != "" {
+		pid, err := strconv.ParseUint(value, 10, 32)
+		if err != nil || pid == 0 {
+			t.Fatalf("invalid Control PID %q", value)
+		}
+		parent = uint32(pid)
+	}
+	t.Logf("protected parent PID %d; live Control supplied: %t", parent, os.Getenv("NETSWITCH_CONTROL_PID") != "")
+	key := `SOFTWARE\NetSwitchWorkerProof-` + strconv.Itoa(os.Getpid())
+	k, _, err := registry.CreateKey(registry.LOCAL_MACHINE, key, registry.ALL_ACCESS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k.Close()
+	t.Cleanup(func() { _ = registry.DeleteKey(registry.LOCAL_MACHINE, key) })
+	for _, mode := range []string{"app-info", "installed-apps", "line-check", "probe", "meters", "network", "outside"} {
+		t.Run(mode, func(t *testing.T) {
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			client, err := net.Dial("tcp4", listener.Addr().String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			accepted, err := listener.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer accepted.Close()
+			local, remote := client.LocalAddr().(*net.TCPAddr), client.RemoteAddr().(*net.TCPAddr)
+			port := func(p int) uint32 { return uint32((p&255)<<8 | p>>8) }
+			input := isolationRequest{Parent: parent, Key: key, TCP: [5]uint32{12, binary.LittleEndian.Uint32(local.IP.To4()), port(local.Port), binary.LittleEndian.Uint32(remote.IP.To4()), port(remote.Port)}}
+			args := []string{"worker", mode}
+			if strings.Contains(mode, "-") {
+				args = []string{"worker", "query", mode}
+			}
+			p, err := Start(exe, args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if err := json.NewEncoder(p.Input()).Encode(input); err != nil {
+				t.Fatal(err)
+			}
+			p.Input().Close()
+			b, err := io.ReadAll(io.LimitReader(p.Output(), 65536))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			var got isolationResult
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatal(string(b), err)
+			}
+			t.Logf("%s: %+v", mode, got)
+			if got.Error != "" || got.Memory != 256*1024*1024 || got.UI != 255 {
+				t.Fatalf("worker limits: %+v", got)
+			}
+			if mode == "outside" {
+				if got.AdminDenyOnly || got.Integrity != "S-1-16-12288" || got.ProcessCode != "<nil>" || got.RegistryCode != "<nil>" || got.TCPCode != "0" {
+					t.Fatalf("admin worker lost required writes: %+v", got)
+				}
+			} else if !got.AdminDenyOnly || got.Integrity != "S-1-16-8192" || !got.ProcessDenied || !got.RegistryDenied || !got.TCPDenied {
+				t.Fatalf("read worker retained authority: %+v", got)
+			}
+		})
+	}
+}

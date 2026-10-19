@@ -72,6 +72,7 @@ type ProbeRequest struct {
 	Index       uint32
 	Target      string
 	Quick       bool
+	Custom      bool
 }
 type ProbeResult struct {
 	Outcome Outcome  `json:"outcome"`

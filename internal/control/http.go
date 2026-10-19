@@ -42,6 +42,7 @@ func sendJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(b)
 }
 func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	defer h.Core.op.Crash.Recover("HTTP request")
 	allowed := func(host string) bool {
 		return host == "127.0.0.1:"+strconv.Itoa(h.Port) || host == "localhost:"+strconv.Itoa(h.Port)
 	}

@@ -27,6 +27,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
+	"github.com/AyoubAchour/net-switch/internal/crashnet"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/lines"
 	"github.com/AyoubAchour/net-switch/internal/platform"
@@ -46,6 +47,7 @@ type Options struct {
 	ListFiles                 func(string) ([]string, error)
 	Verify                    func() error
 	StartProcess              func(string, string, string) (Child, error)
+	Crash                     *crashnet.Net
 }
 type Child interface {
 	PID() int
@@ -106,6 +108,8 @@ type Adapter struct {
 	stopProbes       context.CancelFunc
 	appliedTimes     map[uint64]time.Time
 	observed         map[string]engine.Connection
+	laneKnown        map[string]bool
+	probeFailures    map[string]time.Time
 }
 type verifiedFile struct {
 	Size     int64
@@ -187,6 +191,12 @@ func (a *Adapter) status(status string, err error) {
 	}
 }
 func (a *Adapter) Fail(err error) { a.status("error", err) }
+func (a *Adapter) ForgetLane(id string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.s.Policy.Lanes, id)
+	delete(a.laneKnown, id)
+}
 func randomID() string {
 	var b [24]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -244,7 +254,7 @@ func (a *Adapter) request(ctx context.Context, method, path string, body any) ([
 		return nil, response.StatusCode, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return b, response.StatusCode, fmt.Errorf("engine answered %d", response.StatusCode)
+		return b, response.StatusCode, fmt.Errorf("engine %s %s answered %d", method, path, response.StatusCode)
 	}
 	return b, response.StatusCode, nil
 }
@@ -406,19 +416,45 @@ func (a *Adapter) Probe(ctx context.Context, r engine.ProbeRequest) engine.Probe
 		defer stop()
 		defer cancel()
 	}
-	v, err := a.o.Platform.Call(ctx, "line-check", map[string]any{"line": r.Line, "index": r.Index, "target": r.Target, "quick": r.Quick, "opId": r.OperationID})
+	v, err := a.o.Platform.Call(ctx, "line-check", map[string]any{"line": r.Line, "index": r.Index, "target": r.Target, "quick": r.Quick, "custom": r.Custom, "opId": r.OperationID})
+	if err != nil && ctx.Err() == nil {
+		a.logProbeFailure(r.Line, err)
+	}
 	if err != nil || a.Snapshot().Instance != s.Instance || a.Snapshot().Status != "on" {
 		return engine.ProbeResult{Outcome: engine.Unavailable}
 	}
 	b, err := json.Marshal(v)
 	if err != nil {
+		a.logProbeFailure(r.Line, err)
 		return engine.ProbeResult{Outcome: engine.Unavailable}
 	}
 	var result engine.ProbeResult
 	if err = json.Unmarshal(b, &result); err != nil {
+		a.logProbeFailure(r.Line, err)
+		return engine.ProbeResult{Outcome: engine.Unavailable}
+	}
+	if result.Outcome != engine.OK && result.Outcome != engine.LineFailed && result.Outcome != engine.Unavailable {
+		a.logProbeFailure(r.Line, fmt.Errorf("worker returned invalid outcome %q", result.Outcome))
 		return engine.ProbeResult{Outcome: engine.Unavailable}
 	}
 	return result
+}
+
+func (a *Adapter) logProbeFailure(line string, err error) {
+	a.mu.Lock()
+	if a.probeFailures == nil {
+		a.probeFailures = map[string]time.Time{}
+	}
+	now := a.o.Now()
+	last, seen := a.probeFailures[line]
+	log := !seen || now.Sub(last) >= 30*time.Second
+	if log {
+		a.probeFailures[line] = now
+	}
+	a.mu.Unlock()
+	if log {
+		a.o.Log(fmt.Sprintf("line-check worker for %s failed: %v; no health vote recorded", line, err))
+	}
 }
 
 // Apply is serialized and acknowledged after file replacement, the legacy
@@ -447,11 +483,22 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 		}
 		return ack, nil
 	}
-	files, err := RuleFiles(r.Policy)
+	rulePolicy := clonePolicy(r.Policy)
+	if before.Status == "on" && before.StartedWith != nil {
+		// Today's selectors/rule tags use the bound line order until restart.
+		rulePolicy.Lines = before.StartedWith.Lines
+	}
+	files, err := RuleFiles(rulePolicy)
 	if err != nil {
 		return engine.Acknowledgement{}, err
 	}
-	beforeRules, nextRules := before.Policy, r.Policy
+	beforeRules, nextRules := clonePolicy(before.Policy), clonePolicy(r.Policy)
+	for _, policy := range []*engine.Policy{&beforeRules, &nextRules} {
+		for i := range policy.Lines {
+			// Rebinding an adapter changes config on restart, not rule bytes.
+			policy.Lines[i].Alias, policy.Lines[i].GUID = "", nil
+		}
+	}
 	beforeRules.Lanes = nil
 	nextRules.Lanes = nil
 	beforeRules.IPv6 = false
@@ -465,7 +512,7 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 	// Node queues a share rewrite before its blocked-set rewrite. Retain both
 	// batches in this temporary adapter, including the intermediate file bytes.
 	if r.Policy.Combine && !reflect.DeepEqual(before.Policy.Shares, r.Policy.Shares) && !reflect.DeepEqual(before.Policy.Blocked, r.Policy.Blocked) {
-		intermediate := r.Policy
+		intermediate := rulePolicy
 		intermediate.Blocked = before.Policy.Blocked
 		first, err := RuleFiles(intermediate)
 		if err != nil {
@@ -473,7 +520,11 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 		}
 		files = append(first, files...)
 	}
-	old, err := RuleFiles(before.Policy)
+	previousRules := clonePolicy(before.Policy)
+	if before.Status == "on" && before.StartedWith != nil {
+		previousRules.Lines = before.StartedWith.Lines
+	}
+	old, err := RuleFiles(previousRules)
 	if err != nil {
 		return engine.Acknowledgement{}, err
 	}
@@ -482,7 +533,6 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 		oldBytes[f.Tag] = f.Bytes
 	}
 	written := []string{}
-	moved := []string{}
 	rollback := func(cause error) error {
 		var failures []string
 		for _, tag := range written {
@@ -490,15 +540,6 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 				if err := settings.AtomicWrite(filepath.Join(a.o.DataDir, tag+".json"), b, a.o.Files); err != nil {
 					failures = append(failures, err.Error())
 				}
-			}
-		}
-		for _, id := range moved {
-			target := before.Policy.Lanes[id]
-			if target == "" {
-				target = id
-			}
-			if _, _, err := a.request(ctx, "PUT", "/proxies/"+url.PathEscape(apps.LaneSelector(id)), map[string]any{"name": apps.LineOutbound(target)}); err != nil {
-				failures = append(failures, err.Error())
 			}
 		}
 		if len(failures) > 0 {
@@ -521,6 +562,15 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 		if a.Snapshot().Status != "on" {
 			return engine.Acknowledgement{}, rollback(fmt.Errorf("routing engine stopped while reloading rules"))
 		}
+		// Rule writes have finished. A failed selector must not revert those
+		// rules (or other successful selectors), nor reload them on every poll.
+		a.mu.Lock()
+		a.s.Policy = clonePolicy(r.Policy)
+		a.s.Policy.Lanes = clonePolicy(before.Policy).Lanes
+		if a.laneKnown == nil {
+			a.laneKnown = map[string]bool{}
+		}
+		a.mu.Unlock()
 		if before.StartedWith != nil && len(before.StartedWith.Lines) > 1 {
 			existing := map[string]bool{}
 			for _, l := range before.StartedWith.Lines {
@@ -528,13 +578,19 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 			}
 			for _, l := range r.Policy.Lines {
 				target := r.Policy.Lanes[l.ID]
-				if !existing[l.ID] || !existing[target] || target == "" || (before.AppliedRevision != 0 && before.Policy.Lanes[l.ID] == target) {
+				a.mu.Lock()
+				known := a.laneKnown[l.ID]
+				a.mu.Unlock()
+				if !existing[l.ID] || !existing[target] || target == "" || (known && before.Policy.Lanes[l.ID] == target) {
 					continue
 				}
 				if _, _, err := a.request(ctx, "PUT", "/proxies/"+url.PathEscape(apps.LaneSelector(l.ID)), map[string]any{"name": apps.LineOutbound(target)}); err != nil {
-					return engine.Acknowledgement{}, rollback(err)
+					return engine.Acknowledgement{}, err
 				}
-				moved = append(moved, l.ID)
+				a.mu.Lock()
+				a.s.Policy.Lanes[l.ID] = target
+				a.laneKnown[l.ID] = true
+				a.mu.Unlock()
 			}
 		}
 	}
@@ -703,15 +759,10 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 		}
 	}
 	stale := regexp.MustCompile(`^(apps|share|cut)-[0-9a-f]+\.json$`)
-	entries, err := a.o.ListFiles(a.o.DataDir)
-	if err != nil {
-		return err
-	}
+	entries, _ := a.o.ListFiles(a.o.DataDir)
 	for _, e := range entries {
 		if (stale.MatchString(e) && !keep[e]) || e == "second-apps.json" {
-			if err := a.o.Files.Files.Remove(filepath.Join(a.o.DataDir, e)); err != nil {
-				return err
-			}
+			_ = a.o.Files.Files.Remove(filepath.Join(a.o.DataDir, e))
 		}
 	}
 	b, err := ConfigBytes(ConfigOptions{a.o.Mode, p.Lines, apiPort, secret, proxyPort, a.o.DataDir, p.IPv6})
@@ -743,6 +794,8 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 	a.s.AppliedHash = ""
 	a.appliedTimes = map[uint64]time.Time{}
 	a.observed = nil
+	a.laneKnown = map[string]bool{}
+	a.probeFailures = map[string]time.Time{}
 	a.closeResults = map[string]engine.CloseResult{}
 	a.closeOrder = nil
 	a.s.ProxyPort = nil
@@ -767,9 +820,11 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 	}
 	var readers sync.WaitGroup
 	readers.Add(2)
-	go func() { defer readers.Done(); collect(out) }()
-	go func() { defer readers.Done(); collect(stderr) }()
+	go func() { defer readers.Done(); defer a.o.Crash.Recover("engine stdout"); collect(out) }()
+	go func() { defer readers.Done(); defer a.o.Crash.Recover("engine stderr"); collect(stderr) }()
 	go func() {
+		defer close(exited)
+		defer a.o.Crash.Recover("engine supervisor")
 		readers.Wait()
 		err := cmd.Wait()
 		a.mu.Lock()
@@ -780,7 +835,18 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 				a.stopProbes()
 			}
 			if a.s.Status != "stopping" && a.s.Status != "starting" {
-				message := fmt.Sprintf("Routing stopped unexpectedly: %v", err)
+				code := "0"
+				if err != nil {
+					code = "null"
+					var exit interface{ ExitCode() int }
+					if errors.As(err, &exit) && exit.ExitCode() >= 0 {
+						code = strconv.Itoa(exit.ExitCode())
+					}
+				}
+				message := fmt.Sprintf("Routing stopped unexpectedly (exit code %s).", code)
+				if len(a.lastOutput) > 0 {
+					message += "\n" + strings.Join(a.lastOutput[max(0, len(a.lastOutput)-6):], "\n")
+				}
 				a.s.Status = "error"
 				a.s.Error = &message
 			}
@@ -789,7 +855,6 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 		if own {
 			_ = a.o.Files.Files.Remove(filepath.Join(a.o.DataDir, "engine.pid"))
 		}
-		close(exited)
 	}()
 	if err := a.o.Files.Files.WriteFile(filepath.Join(a.o.DataDir, "engine.pid"), []byte(strconv.Itoa(cmd.PID())), 0600); err != nil {
 		return err
@@ -798,14 +863,14 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 	for a.o.Now().Before(deadline) {
 		select {
 		case <-exited:
-			return fmt.Errorf("the routing engine closed while starting")
+			return fmt.Errorf("The routing engine closed while starting.")
 		default:
 		}
 		if _, _, err := a.request(ctx, "GET", "/version", nil); err == nil {
 			a.mu.Lock()
 			if a.child != cmd {
 				a.mu.Unlock()
-				return fmt.Errorf("the routing engine closed while starting")
+				return fmt.Errorf("The routing engine closed while starting.")
 			}
 			copy := clonePolicy(p)
 			a.s.StartedWith = &copy
@@ -823,7 +888,7 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 			return err
 		}
 	}
-	return fmt.Errorf("the routing engine did not respond within 15 seconds")
+	return fmt.Errorf("The routing engine did not respond within 15 seconds.")
 }
 func (a *Adapter) stopChild(ctx context.Context) error {
 	a.mu.Lock()

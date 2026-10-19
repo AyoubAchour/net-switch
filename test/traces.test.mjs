@@ -24,6 +24,19 @@ test('recorded controller traces replay in the same input and completion order',
       assert.deepEqual(orderedPolicy(trace.entries[index]), orderedPolicy(expected.entries[index]), `${name}: first mismatch at sequence ${index}`);
     }
   }
+  t.diagnostic(`Compared ${names.length} traces, ${Object.values(actual).reduce((count, trace) => count + trace.entries.length, 0)} entries.`);
+});
+
+test('the recorded scenarios exercise every HTTP route and restored log condition', async (t) => {
+  const directory = new URL('../tests/oracle/fixtures/', import.meta.url);
+  const traces = await Promise.all((await readdir(directory)).filter((name) => name.endsWith('.trace.json')).map(async (name) => JSON.parse(await readFile(new URL(name, directory), 'utf8'))));
+  const httpSource = await readFile(new URL('../internal/control/http.go', import.meta.url), 'utf8');
+  const registered = [...new Set([...httpSource.matchAll(/"(\/api\/[a-z][a-z/-]*)"/g)].map((match) => match[1]))].sort();
+  const exercised = [...new Set(traces.flatMap((trace) => trace.scenario.steps.filter((step) => step.kind === 'http').map((step) => step.route.split('?')[0])))].sort();
+  assert.deepEqual(exercised, registered);
+  const logs = traces.flatMap((trace) => trace.entries.filter((entry) => entry.kind === 'log').map((entry) => entry.value.text));
+  for (const condition of [/hasn't answered for 20 polls; restarting it/, /^routing restarts to use /, /'s data cap reset$/, /^added /, /^removed /, /^line order: /, /^starting with Windows is on$/, /^starting with Windows is off$/, /^quit failed:/]) assert(logs.some((line) => condition.test(line)), `unexercised log: ${condition}`);
+  t.diagnostic(`${registered.length} HTTP endpoints and all nine requested log conditions exercised.`);
 });
 
 test('policy comparison rejects reordered pins and shares', () => {

@@ -34,3 +34,31 @@ func TestExactPassCriteria(t *testing.T) {
 		})
 	}
 }
+
+func TestCustomTargetsUseHeadAndAcceptEveryStatusWithoutRedirecting(t *testing.T) {
+	for _, code := range []int{200, 204, 301, 302, 404, 500} {
+		calls := 0
+		result := HTTPS(context.Background(), "1.0.0.1:443", transport(func(r *http.Request) (*http.Response, error) {
+			calls++
+			if r.Method != http.MethodHead || r.URL.String() != "https://1.0.0.1/" {
+				t.Fatalf("unexpected custom request: %s %s", r.Method, r.URL)
+			}
+			return &http.Response{StatusCode: code, Header: http.Header{"Location": []string{"https://portal.invalid/"}}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+		}))
+		if result.Outcome != engine.OK || calls != 1 {
+			t.Fatalf("HTTP %d: %+v, requests=%d", code, result, calls)
+		}
+	}
+}
+
+func TestExplicitOperatorAddressUsesCustomTargetContract(t *testing.T) {
+	result := HTTPS(context.Background(), "1.1.1.1:443", transport(func(r *http.Request) (*http.Response, error) {
+		if r.Method != "HEAD" || r.URL.Path != "/" {
+			t.Fatalf("custom override became a default operator: %s %s", r.Method, r.URL)
+		}
+		return &http.Response{StatusCode: 302, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	}), true)
+	if result.Outcome != engine.OK {
+		t.Fatal(result)
+	}
+}

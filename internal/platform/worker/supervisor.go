@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/AyoubAchour/net-switch/internal/crashnet"
 	"io"
 	"strings"
 	"time"
@@ -25,6 +26,7 @@ type Supervisor struct {
 	Launch     Launch
 	Silent     time.Duration
 	Log        func(error)
+	Crash      *crashnet.Net
 }
 
 func (s Supervisor) launch(args []string) (Process, error) {
@@ -45,13 +47,15 @@ func (s Supervisor) Once(ctx context.Context, operation string, args map[string]
 		return nil, err
 	}
 	defer p.Close()
-	diagnostics := drainErrors(p, s.Log)
+	diagnostics := drainErrors(p, s.Log, s.Crash)
 	type result struct {
 		b   []byte
 		err error
 	}
 	done := make(chan result, 1)
 	go func() {
+		defer close(done)
+		defer s.Crash.Recover("worker query reader")
 		if _, err := p.Input().Write(b); err != nil {
 			_ = p.Kill()
 			done <- result{err: err}
@@ -112,10 +116,12 @@ func (s Supervisor) Stream(ctx context.Context, mode string, args []string, emit
 		p, err := s.launch(append([]string{"worker", mode}, args...))
 		if err == nil {
 			runCtx, stopReader := context.WithCancel(ctx)
-			diagnostics := drainErrors(p, report)
+			diagnostics := drainErrors(p, report, s.Crash)
 			lines := make(chan []byte, 1)
 			done := make(chan error, 1)
 			go func() {
+				defer close(done)
+				defer s.Crash.Recover("worker stream reader")
 				scanner := bufio.NewScanner(p.Output())
 				scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 				for scanner.Scan() {
@@ -181,9 +187,11 @@ func (s Supervisor) Stream(ctx context.Context, mode string, args []string, emit
 	}
 }
 
-func drainErrors(p Process, report func(error)) <-chan string {
+func drainErrors(p Process, report func(error), net *crashnet.Net) <-chan string {
 	done := make(chan string, 1)
 	go func() {
+		defer close(done)
+		defer net.Recover("worker stderr reader")
 		reader := p.Errors()
 		defer reader.Close()
 		scanner := bufio.NewScanner(reader)

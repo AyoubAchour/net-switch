@@ -17,6 +17,9 @@ type System struct {
 }
 
 func (s *System) Call(ctx context.Context, operation string, args map[string]any) (any, error) {
+	if operation == "elevated" {
+		return ControlElevated()
+	}
 	if operation == "autostart-set" || operation == "autostart-upgrade" {
 		copy := map[string]any{}
 		for k, v := range args {
@@ -62,7 +65,11 @@ func query(args []string, supervised bool) int {
 			var executable string
 			executable, err = os.Executable()
 			if err == nil {
-				value, err = (worker.Supervisor{Executable: executable}).Once(context.Background(), args[0], input)
+				if args[0] == "elevated" {
+					value, err = ControlElevated()
+				} else {
+					value, err = (worker.Supervisor{Executable: executable}).Once(context.Background(), args[0], input)
+				}
 			}
 		} else {
 			value, err = Execute(args[0], input)
