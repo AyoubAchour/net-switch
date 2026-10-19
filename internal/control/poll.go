@@ -163,6 +163,9 @@ func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connecti
 	}
 	s := c.op.Engine.Snapshot()
 	p := c.policyLocked()
+	if !p.Combine {
+		p.Shares = append(lines.Shares{}, s.Policy.Shares...)
+	}
 	intents := []closureIntent{}
 	for _, line := range c.itemsLocked() {
 		if !c.closePending[line.ID] {

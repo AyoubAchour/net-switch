@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -38,19 +39,76 @@ type Options struct {
 	HTTP                      *http.Client
 	Log                       func(string)
 	Files                     settings.Options
+	Now                       func() time.Time
+	Sleep                     func(context.Context, time.Duration) error
+	FreePort                  func() (int, error)
+	ID                        func() string
+	ListFiles                 func(string) ([]string, error)
+	Verify                    func() error
+	StartProcess              func(string, string, string) (Child, error)
 }
+type Child interface {
+	PID() int
+	Stdout() io.Reader
+	Stderr() io.Reader
+	Wait() error
+	Kill() error
+}
+type commandChild struct {
+	cmd      *exec.Cmd
+	out, err io.ReadCloser
+}
+
+func (p *commandChild) PID() int          { return p.cmd.Process.Pid }
+func (p *commandChild) Stdout() io.Reader { return p.out }
+func (p *commandChild) Stderr() io.Reader { return p.err }
+func (p *commandChild) Wait() error       { return p.cmd.Wait() }
+func (p *commandChild) Kill() error       { return p.cmd.Process.Kill() }
+func startProcess(exe, config, dir string) (Child, error) {
+	cmd := exec.Command(exe, "run", "-c", config, "--disable-color")
+	cmd.Dir = dir
+	hide(cmd)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &commandChild{cmd: cmd, out: out, err: stderr}, nil
+}
+
+type diskFiles struct{}
+
+func (diskFiles) ReadFile(p string) ([]byte, error)                 { return os.ReadFile(p) }
+func (diskFiles) WriteFile(p string, b []byte, m os.FileMode) error { return os.WriteFile(p, b, m) }
+func (diskFiles) Rename(a, b string) error                          { return os.Rename(a, b) }
+func (diskFiles) Remove(p string) error                             { return os.Remove(p) }
+
 type Adapter struct {
 	mu               sync.Mutex
 	lifecycle, apply sync.Mutex
 	o                Options
 	s                engine.Snapshot
-	child            *exec.Cmd
+	child            Child
 	exited           chan struct{}
 	apiPort          int
 	secret           string
 	lastOutput       []string
 	closeResults     map[string]engine.CloseResult
 	closeOrder       []string
+	verified         map[string]verifiedFile
+	probeContext     context.Context
+	stopProbes       context.CancelFunc
+}
+type verifiedFile struct {
+	Size     int64
+	Modified time.Time
+	Hash     string
 }
 
 func New(o Options) *Adapter {
@@ -60,7 +118,38 @@ func New(o Options) *Adapter {
 	if o.Log == nil {
 		o.Log = func(string) {}
 	}
-	return &Adapter{o: o, s: engine.Snapshot{Status: "off", Policy: engine.Policy{Lines: []lines.Line{}, AppLines: apps.Pins{}, Shares: lines.Shares{}, Blocked: []string{}, Lanes: map[string]string{}}}, closeResults: map[string]engine.CloseResult{}}
+	if o.Files.Files == nil {
+		o.Files.Files = diskFiles{}
+	}
+	if o.Now == nil {
+		o.Now = time.Now
+	}
+	if o.Sleep == nil {
+		o.Sleep = sleep
+	}
+	if o.ID == nil {
+		o.ID = randomID
+	}
+	if o.FreePort == nil {
+		o.FreePort = freePort
+	}
+	if o.StartProcess == nil {
+		o.StartProcess = startProcess
+	}
+	if o.ListFiles == nil {
+		o.ListFiles = func(dir string) ([]string, error) {
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				return nil, err
+			}
+			names := []string{}
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			return names, nil
+		}
+	}
+	return &Adapter{o: o, s: engine.Snapshot{Status: "off", Policy: engine.Policy{Lines: []lines.Line{}, AppLines: apps.Pins{}, Shares: lines.Shares{}, Blocked: []string{}, Lanes: map[string]string{}}}, closeResults: map[string]engine.CloseResult{}, verified: map[string]verifiedFile{}}
 }
 func clonePolicy(p engine.Policy) engine.Policy {
 	p.Lines = append([]lines.Line{}, p.Lines...)
@@ -211,6 +300,9 @@ func (a *Adapter) CloseFlows(ctx context.Context, r engine.CloseRequest) (engine
 	if done {
 		return previous, nil
 	}
+	if len(r.ConnectionIDs) == 0 {
+		return engine.CloseResult{}, nil
+	}
 	connections, err := a.Connections(ctx)
 	if err != nil {
 		return engine.CloseResult{}, err
@@ -255,7 +347,17 @@ func (a *Adapter) Probe(ctx context.Context, r engine.ProbeRequest) engine.Probe
 	if s.Status != "on" || a.o.Platform == nil {
 		return engine.ProbeResult{Outcome: engine.Unavailable}
 	}
-	v, err := a.o.Platform.Call(ctx, "line-check", map[string]any{"index": r.Index, "target": r.Target, "quick": r.Quick, "opId": r.OperationID})
+	a.mu.Lock()
+	instanceContext := a.probeContext
+	a.mu.Unlock()
+	if instanceContext != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		stop := context.AfterFunc(instanceContext, cancel)
+		defer stop()
+		defer cancel()
+	}
+	v, err := a.o.Platform.Call(ctx, "line-check", map[string]any{"line": r.Line, "index": r.Index, "target": r.Target, "quick": r.Quick, "opId": r.OperationID})
 	if err != nil || a.Snapshot().Instance != s.Instance || a.Snapshot().Status != "on" {
 		return engine.ProbeResult{Outcome: engine.Unavailable}
 	}
@@ -279,7 +381,7 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 	defer a.apply.Unlock()
 	before := a.Snapshot()
 	ack := func() engine.Acknowledgement {
-		return engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: before.Instance, AppliedAt: time.Now()}
+		return engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: before.Instance, AppliedAt: a.o.Now()}
 	}
 	if r.Number < before.AppliedRevision {
 		return engine.Acknowledgement{}, fmt.Errorf("stale policy revision")
@@ -293,6 +395,28 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 	files, err := RuleFiles(r.Policy)
 	if err != nil {
 		return engine.Acknowledgement{}, err
+	}
+	beforeRules, nextRules := before.Policy, r.Policy
+	beforeRules.Lanes = nil
+	nextRules.Lanes = nil
+	beforeRules.IPv6 = false
+	nextRules.IPv6 = false
+	if reflect.DeepEqual(beforeRules, nextRules) {
+		files = nil
+	}
+	if before.Status == "off" && before.StartedWith == nil {
+		files = nil
+	}
+	// Node queues a share rewrite before its blocked-set rewrite. Retain both
+	// batches in this temporary adapter, including the intermediate file bytes.
+	if r.Policy.Combine && !reflect.DeepEqual(before.Policy.Shares, r.Policy.Shares) && !reflect.DeepEqual(before.Policy.Blocked, r.Policy.Blocked) {
+		intermediate := r.Policy
+		intermediate.Blocked = before.Policy.Blocked
+		first, err := RuleFiles(intermediate)
+		if err != nil {
+			return engine.Acknowledgement{}, err
+		}
+		files = append(first, files...)
 	}
 	old, err := RuleFiles(before.Policy)
 	if err != nil {
@@ -334,11 +458,13 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 		written = append(written, f.Tag)
 	}
 	if before.Status == "on" {
-		if err := sleep(ctx, 300*time.Millisecond); err != nil {
-			return engine.Acknowledgement{}, rollback(err)
+		if len(files) > 0 {
+			if err := a.o.Sleep(ctx, 300*time.Millisecond); err != nil {
+				return engine.Acknowledgement{}, rollback(err)
+			}
 		}
-		if _, _, err := a.request(ctx, "GET", "/version", nil); err != nil {
-			return engine.Acknowledgement{}, rollback(err)
+		if a.Snapshot().Status != "on" {
+			return engine.Acknowledgement{}, rollback(fmt.Errorf("routing engine stopped while reloading rules"))
 		}
 		if before.StartedWith != nil && len(before.StartedWith.Lines) > 1 {
 			existing := map[string]bool{}
@@ -347,7 +473,7 @@ func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowle
 			}
 			for _, l := range r.Policy.Lines {
 				target := r.Policy.Lanes[l.ID]
-				if !existing[l.ID] || !existing[target] || target == "" || before.Policy.Lanes[l.ID] == target {
+				if !existing[l.ID] || !existing[target] || target == "" || (before.AppliedRevision != 0 && before.Policy.Lanes[l.ID] == target) {
 					continue
 				}
 				if _, _, err := a.request(ctx, "PUT", "/proxies/"+url.PathEscape(apps.LaneSelector(l.ID)), map[string]any{"name": apps.LineOutbound(target)}); err != nil {
@@ -404,7 +530,16 @@ func (a *Adapter) verify() error {
 		if filepath.Base(name) != name || strings.ContainsAny(name, `/\`) {
 			return fmt.Errorf("invalid checksum filename %q", name)
 		}
-		f, err := os.Open(filepath.Join(dir, name))
+		file := filepath.Join(dir, name)
+		info, err := os.Stat(file)
+		if err != nil {
+			return fmt.Errorf("engine %s is missing: %w", name, err)
+		}
+		stamp := verifiedFile{Size: info.Size(), Modified: info.ModTime(), Hash: want}
+		if a.verified[file] == stamp {
+			continue
+		}
+		f, err := os.Open(file)
 		if err != nil {
 			return fmt.Errorf("engine %s is missing: %w", name, err)
 		}
@@ -417,12 +552,13 @@ func (a *Adapter) verify() error {
 		if hex.EncodeToString(hash.Sum(nil)) != want {
 			return fmt.Errorf("engine %s doesn’t match %s", name, want)
 		}
+		a.verified[file] = stamp
 	}
 	return nil
 }
 func (a *Adapter) stopOrphan(ctx context.Context) error {
 	pidFile := filepath.Join(a.o.DataDir, "engine.pid")
-	b, err := os.ReadFile(pidFile)
+	b, err := a.o.Files.Files.ReadFile(pidFile)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -438,7 +574,7 @@ func (a *Adapter) stopOrphan(ctx context.Context) error {
 			return err
 		}
 	}
-	return os.Remove(pidFile)
+	return a.o.Files.Files.Remove(pidFile)
 }
 func (a *Adapter) Start(ctx context.Context, p engine.Policy) error {
 	a.lifecycle.Lock()
@@ -446,11 +582,26 @@ func (a *Adapter) Start(ctx context.Context, p engine.Policy) error {
 	if a.Snapshot().Status == "on" {
 		return nil
 	}
+	if len(p.Lines) == 0 {
+		a.status("error", fmt.Errorf("No internet connection was found. Connect one, then turn routing on."))
+		return nil
+	}
 	a.status("starting", nil)
+	a.mu.Lock()
+	a.lastOutput = nil
+	a.mu.Unlock()
 	err := a.start(ctx, p)
 	if err != nil {
 		_ = a.stopChild(ctx)
-		a.status("error", fmt.Errorf("Routing couldn't start. %w", err))
+		a.mu.Lock()
+		details := append([]string{}, a.lastOutput[max(0, len(a.lastOutput)-6):]...)
+		a.mu.Unlock()
+		suffix := ""
+		if len(details) > 0 {
+			suffix = "\n" + strings.Join(details, "\n")
+		}
+		a.status("error", fmt.Errorf("Routing couldn't start. %w%s", err, suffix))
+		return nil
 	}
 	return err
 }
@@ -461,17 +612,21 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 	if err := a.stopOrphan(ctx); err != nil {
 		return err
 	}
-	if err := a.verify(); err != nil {
+	verify := a.o.Verify
+	if verify == nil {
+		verify = a.verify
+	}
+	if err := verify(); err != nil {
 		return err
 	}
-	apiPort, err := freePort()
+	apiPort, err := a.o.FreePort()
 	if err != nil {
 		return err
 	}
-	secret := randomID()
+	secret := a.o.ID()
 	proxyPort := 0
 	if a.o.Mode == "proxy" {
-		proxyPort, err = freePort()
+		proxyPort, err = a.o.FreePort()
 		if err != nil {
 			return err
 		}
@@ -490,13 +645,13 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 		}
 	}
 	stale := regexp.MustCompile(`^(apps|share|cut)-[0-9a-f]+\.json$`)
-	entries, err := os.ReadDir(a.o.DataDir)
+	entries, err := a.o.ListFiles(a.o.DataDir)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
-		if (stale.MatchString(e.Name()) && !keep[e.Name()]) || e.Name() == "second-apps.json" {
-			if err := os.Remove(filepath.Join(a.o.DataDir, e.Name())); err != nil {
+		if (stale.MatchString(e) && !keep[e]) || e == "second-apps.json" {
+			if err := a.o.Files.Files.Remove(filepath.Join(a.o.DataDir, e)); err != nil {
 				return err
 			}
 		}
@@ -506,31 +661,26 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 		return err
 	}
 	file := filepath.Join(a.o.DataDir, "engine-config.json")
-	if err := os.WriteFile(file, b, 0600); err != nil {
+	if err := a.o.Files.Files.WriteFile(file, b, 0600); err != nil {
 		return err
 	}
-	cmd := exec.Command(a.o.Executable, "run", "-c", file, "--disable-color")
-	cmd.Dir = a.o.DataDir
-	hide(cmd)
-	out, err := cmd.StdoutPipe()
+	cmd, err := a.o.StartProcess(a.o.Executable, file, a.o.DataDir)
 	if err != nil {
 		return err
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
+	out, stderr := cmd.Stdout(), cmd.Stderr()
 	exited := make(chan struct{})
 	a.mu.Lock()
 	a.child = cmd
 	a.exited = exited
 	a.apiPort = apiPort
 	a.secret = secret
-	a.s.PID = cmd.Process.Pid
-	a.s.Instance = randomID()
+	a.s.PID = cmd.PID()
+	a.s.Instance = a.o.ID()
+	if a.stopProbes != nil {
+		a.stopProbes()
+	}
+	a.probeContext, a.stopProbes = context.WithCancel(context.Background())
 	a.s.AppliedRevision = 0
 	a.s.AppliedHash = ""
 	a.s.ProxyPort = nil
@@ -561,8 +711,12 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 		readers.Wait()
 		err := cmd.Wait()
 		a.mu.Lock()
-		if a.child == cmd {
+		own := a.child == cmd
+		if own {
 			a.child = nil
+			if a.stopProbes != nil {
+				a.stopProbes()
+			}
 			if a.s.Status != "stopping" && a.s.Status != "starting" {
 				message := fmt.Sprintf("Routing stopped unexpectedly: %v", err)
 				a.s.Status = "error"
@@ -570,13 +724,16 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 			}
 		}
 		a.mu.Unlock()
+		if own {
+			_ = a.o.Files.Files.Remove(filepath.Join(a.o.DataDir, "engine.pid"))
+		}
 		close(exited)
 	}()
-	if err := os.WriteFile(filepath.Join(a.o.DataDir, "engine.pid"), []byte(strconv.Itoa(cmd.Process.Pid)), 0600); err != nil {
+	if err := a.o.Files.Files.WriteFile(filepath.Join(a.o.DataDir, "engine.pid"), []byte(strconv.Itoa(cmd.PID())), 0600); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
+	deadline := a.o.Now().Add(15 * time.Second)
+	for a.o.Now().Before(deadline) {
 		select {
 		case <-exited:
 			return fmt.Errorf("the routing engine closed while starting")
@@ -584,19 +741,23 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 		}
 		if _, _, err := a.request(ctx, "GET", "/version", nil); err == nil {
 			a.mu.Lock()
+			if a.child != cmd {
+				a.mu.Unlock()
+				return fmt.Errorf("the routing engine closed while starting")
+			}
 			copy := clonePolicy(p)
 			a.s.StartedWith = &copy
 			a.s.Policy = clonePolicy(p)
 			for _, line := range p.Lines {
 				a.s.Policy.Lanes[line.ID] = line.ID
 			}
-			a.s.StartedAt = time.Now()
+			a.s.StartedAt = a.o.Now()
 			a.s.Status = "on"
 			a.s.Error = nil
 			a.mu.Unlock()
 			return nil
 		}
-		if err := sleep(ctx, 250*time.Millisecond); err != nil {
+		if err := a.o.Sleep(ctx, 250*time.Millisecond); err != nil {
 			return err
 		}
 	}
@@ -609,17 +770,17 @@ func (a *Adapter) stopChild(ctx context.Context) error {
 	if child == nil {
 		return nil
 	}
-	if err := child.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := child.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return err
 	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(8 * time.Second):
-		return fmt.Errorf("routing engine %d did not stop", child.Process.Pid)
+		return fmt.Errorf("routing engine %d did not stop", child.PID())
 	case <-exited:
 	}
-	if err := os.Remove(filepath.Join(a.o.DataDir, "engine.pid")); err != nil && !os.IsNotExist(err) {
+	if err := a.o.Files.Files.Remove(filepath.Join(a.o.DataDir, "engine.pid")); err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
@@ -627,6 +788,11 @@ func (a *Adapter) stopChild(ctx context.Context) error {
 func (a *Adapter) Stop(ctx context.Context) error {
 	a.lifecycle.Lock()
 	defer a.lifecycle.Unlock()
+	a.mu.Lock()
+	if a.stopProbes != nil {
+		a.stopProbes()
+	}
+	a.mu.Unlock()
 	a.status("stopping", nil)
 	a.apply.Lock()
 	defer a.apply.Unlock()

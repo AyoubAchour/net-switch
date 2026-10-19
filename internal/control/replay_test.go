@@ -3,17 +3,23 @@ package control
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine"
+	"github.com/AyoubAchour/net-switch/internal/engine/singbox"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/usage"
 )
@@ -76,6 +82,7 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 				initial[k] = v
 			}
 			c, e, clock, fs := testCore(t, initial)
+			installReplayAdapter(t, c, e, clock, fs)
 			if trace.Scenario.Now != nil {
 				clock.at = time.UnixMilli(*trace.Scenario.Now)
 			}
@@ -89,8 +96,14 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			c.usage = usage.New(location)
 			var expected []map[string]any
 			var expectedCommands []map[string]any
+			var expectedReads []string
 			var expectedWrites []map[string]any
+			var expectedEngineWrites []map[string]any
 			var expectedLogs []string
+			var expectedRemoves []string
+			var expectedSpawns []any
+			var expectedOutside []any
+			var expectedConsole string
 			var adapters []map[string]any
 			completion := 0
 			for i, entry := range trace.Entries {
@@ -116,6 +129,18 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 				if entry.Direction == "output" && entry.Kind == "api" {
 					expected = append(expected, m)
 				}
+				if entry.Direction == "output" {
+					switch entry.Kind {
+					case "remove":
+						expectedRemoves = append(expectedRemoves, js.Text(m["file"]))
+					case "spawn":
+						expectedSpawns = append(expectedSpawns, m)
+					case "outside-close":
+						expectedOutside = append(expectedOutside, m["items"])
+					case "console":
+						expectedConsole = js.Text(m["text"])
+					}
+				}
 				if entry.Direction == "output" && entry.Kind == "log" {
 					text := js.Text(m["text"])
 					switch text {
@@ -129,8 +154,14 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 				if entry.Direction == "output" && entry.Kind == "write" && controlFile(js.Text(m["file"])) {
 					expectedWrites = append(expectedWrites, m)
 				}
+				if entry.Direction == "output" && entry.Kind == "write" && engineFile(js.Text(m["file"])) {
+					expectedEngineWrites = append(expectedEngineWrites, m)
+				}
 				if entry.Direction == "output" && entry.Kind == "engine" && (m["method"] == "PUT" || m["method"] == "DELETE") {
 					expectedCommands = append(expectedCommands, m)
+				}
+				if entry.Direction == "output" && entry.Kind == "engine" && m["method"] == "GET" && !strings.HasSuffix(js.Text(m["route"]), "/delay") {
+					expectedReads = append(expectedReads, js.Text(m["route"]))
 				}
 			}
 			c.adapters = adapters
@@ -143,7 +174,13 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			c.routesAt = c.now()
 			c.policy = float64(1)
 			c.elevated = true
-			c.Announce(47821)
+			if err := c.ApplyPolicy(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			consoleMessage, err := c.PublishSession(47821, strings.Repeat("ab", 24), 123)
+			if err != nil {
+				t.Fatal(err)
+			}
 			probes := map[string]any{}
 			e.probe = func(r engine.ProbeRequest) engine.ProbeResult {
 				value, ok := probes[r.Line]
@@ -179,6 +216,12 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 				mapping[from] = to
 				reverse[to] = from
 			}
+			for _, w := range expectedWrites {
+				if filepath.Base(js.Text(w["file"])) == "server.json" {
+					v, _ := js.Decode([]byte(js.Text(w["text"])))
+					mapID(strings.Repeat("ab", 24), js.Text(js.Object(v)["token"]))
+				}
+			}
 			for _, step := range trace.Scenario.Steps {
 				switch step.Kind {
 				case "tick":
@@ -203,6 +246,7 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 				case "helper-line":
 					c.HelperLine([]byte(step.Line))
 				case "connections":
+					e.wireConnections = append(json.RawMessage{}, step.Value...)
 					if err := json.Unmarshal(step.Value, &e.connections); err != nil {
 						t.Fatal(err)
 					}
@@ -335,6 +379,15 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			if !reflect.DeepEqual(actualCommands, expectedCommands) {
 				t.Fatalf("engine mutation sequence differs\ngot %v\nwant %v", actualCommands, expectedCommands)
 			}
+			reads := []string{}
+			for _, r := range e.requests {
+				if r["method"] == "GET" {
+					reads = append(reads, js.Text(r["route"]))
+				}
+			}
+			if !equalStringLists(reads, expectedReads) {
+				t.Fatalf("engine read request sequence differs: %v != %v", reads, expectedReads)
+			}
 			if completion == 0 {
 				t.Fatal("no asynchronous completions replayed")
 			}
@@ -368,9 +421,150 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			if !reflect.DeepEqual(fs.logs, expectedLogs) {
 				t.Fatalf("log condition sequence differs\ngot: %q\nwant: %q", fs.logs, expectedLogs)
 			}
+			removes := []string{}
+			for _, p := range fs.removes {
+				removes = append(removes, normalizeResourceString(p, mapping))
+			}
+			if len(removes) != len(expectedRemoves) || !equalStringLists(removes, expectedRemoves) {
+				t.Fatalf("remove sequence differs: %v != %v", removes, expectedRemoves)
+			}
+			if len(fs.spawns) != len(expectedSpawns) {
+				t.Fatalf("spawn count differs: %d != %d", len(fs.spawns), len(expectedSpawns))
+			}
+			for i, s := range fs.spawns {
+				b, _ := js.Marshal(s)
+				normalized, err := rewriteTraceStrings(b, func(s string) string { return normalizeResourceString(s, mapping) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				v, _ := js.Decode(normalized)
+				if !reflect.DeepEqual(v, expectedSpawns[i]) {
+					t.Fatalf("spawn differs: %s", firstDifference(v, expectedSpawns[i], "$"))
+				}
+			}
+			if len(fs.outsideCloses) != len(expectedOutside) {
+				t.Fatalf("outside close count differs")
+			}
+			for i, v := range fs.outsideCloses {
+				if !reflect.DeepEqual(v, expectedOutside[i]) {
+					t.Fatalf("outside selectors differ: %s", firstDifference(v, expectedOutside[i], "$"))
+				}
+			}
+			for from, to := range mapping {
+				consoleMessage = strings.ReplaceAll(consoleMessage, from, to)
+			}
+			if consoleMessage != expectedConsole {
+				t.Fatalf("console announcement differs: %s != %s", consoleMessage, expectedConsole)
+			}
+			engineWrites := []recordedWrite{}
+			for _, w := range fs.writes {
+				if engineFile(w.Path) {
+					engineWrites = append(engineWrites, w)
+				}
+			}
+			if len(engineWrites) != len(expectedEngineWrites) {
+				t.Fatalf("engine writes: got %d, want %d", len(engineWrites), len(expectedEngineWrites))
+			}
+			for i, w := range engineWrites {
+				want := expectedEngineWrites[i]
+				name := normalizeResourceString(filepath.Base(w.Path), mapping)
+				if name != filepath.Base(js.Text(want["file"])) {
+					t.Fatalf("engine write %d: %s != %s", i, name, want["file"])
+				}
+				if name == "engine-config.json" {
+					a, _ := js.Decode(w.Bytes)
+					b, _ := js.Decode([]byte(js.Text(want["text"])))
+					secret := func(v any) string {
+						return js.Text(js.Object(js.Object(js.Object(v)["experimental"])["clash_api"])["secret"])
+					}
+					mapID(secret(a), secret(b))
+				}
+				normalized, err := rewriteTraceStrings(w.Bytes, func(s string) string { return normalizeResourceString(s, mapping) })
+				if err != nil {
+					t.Fatal(err)
+				}
+				sum := sha256.Sum256(normalized)
+				if hex.EncodeToString(sum[:]) != want["sha256"] {
+					t.Fatalf("engine write %d %s SHA-256 differs: %x != %s\n%s", i, name, sum, want["sha256"], normalized)
+				}
+			}
 			t.Logf("%s: %d entries, %d completion records, %d API outputs", trace.Name, len(trace.Entries), completion, responses)
 		})
 	}
+}
+
+type replayChild struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (*replayChild) PID() int          { return 456 }
+func (*replayChild) Stdout() io.Reader { return strings.NewReader("") }
+func (*replayChild) Stderr() io.Reader { return strings.NewReader("") }
+func (p *replayChild) Wait() error     { <-p.closed; return nil }
+func (p *replayChild) Kill() error     { p.once.Do(func() { close(p.closed) }); return nil }
+
+type replayTransport func(*http.Request) (*http.Response, error)
+
+func (f replayTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+func installReplayAdapter(t *testing.T, c *Core, e *fakeEngine, clock *fakeClock, files *memoryFiles) {
+	t.Helper()
+	client := &http.Client{Transport: replayTransport(func(r *http.Request) (*http.Response, error) {
+		var body any
+		if r.Body != nil {
+			b, err := io.ReadAll(r.Body)
+			if err != nil {
+				return nil, err
+			}
+			if len(b) > 0 {
+				body, err = js.Decode(b)
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+		if r.Method == "PUT" || r.Method == "DELETE" {
+			command := map[string]any{"route": r.URL.Path, "method": r.Method}
+			if body != nil {
+				command["body"] = body
+			}
+			e.commands = append(e.commands, command)
+		}
+		e.requests = append(e.requests, map[string]any{"route": r.URL.Path, "method": r.Method})
+		response := []byte(`{}`)
+		if r.URL.Path == "/connections" {
+			connections := e.wireConnections
+			if len(connections) == 0 {
+				connections = []byte(`[]`)
+			}
+			response = append([]byte(`{"connections":`), connections...)
+			response = append(response, '}')
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(response)), Header: http.Header{}, Request: r}, nil
+	})}
+	c.op.Platform.(*fakePlatform).probe = func(a map[string]any) (any, error) {
+		return e.probe(engine.ProbeRequest{OperationID: js.Text(a["opId"]), Line: js.Text(a["line"]), Index: uint32(js.Number(a["index"])), Target: js.Text(a["target"]), Quick: a["quick"] == true}), nil
+	}
+	e.real = singbox.New(singbox.Options{Executable: "/test/engine/sing-box.exe", DataDir: "/test", Mode: "tun", Platform: c.op.Platform, HTTP: client, Files: c.op.IO, Now: clock.Now, Sleep: func(context.Context, time.Duration) error { return nil }, FreePort: func() (int, error) { return 49000, nil }, ID: c.op.ID, Verify: func() error { return nil }, StartProcess: func(exe, config, dir string) (singbox.Child, error) {
+		files.spawns = append(files.spawns, map[string]any{"exe": exe, "args": []string{"run", "-c", config, "--disable-color"}})
+		return &replayChild{closed: make(chan struct{})}, nil
+	}, ListFiles: func(dir string) ([]string, error) {
+		files.mu.Lock()
+		defer files.mu.Unlock()
+		names := []string{}
+		for path := range files.data {
+			if filepath.Dir(path) == filepath.Clean(dir) {
+				names = append(names, filepath.Base(path))
+			}
+		}
+		sort.Strings(names)
+		return names, nil
+	}})
+	t.Cleanup(func() {
+		if err := e.real.Stop(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
 }
 func remapTrace(v any, mapping map[string]string) any {
 	switch x := v.(type) {
@@ -446,9 +640,83 @@ func clockOrigin(trace recordedTrace) int64 {
 	}
 	return 1792411200000
 }
+func engineFile(path string) bool {
+	base := filepath.Base(strings.ReplaceAll(path, `\`, "/"))
+	return base == "engine-config.json" || base == "engine.pid" || strings.HasPrefix(base, "apps-") || strings.HasPrefix(base, "share-") || strings.HasPrefix(base, "cut-")
+}
+func normalizeResourceString(s string, mapping map[string]string) string {
+	if v, ok := mapping[s]; ok {
+		return v
+	}
+	for from, to := range mapping {
+		for _, prefix := range []string{"line-", "lane-", "apps-", "share-", "cut-"} {
+			if s == prefix+from {
+				return prefix + to
+			}
+			if s == prefix+from+".json" {
+				return prefix + to + ".json"
+			}
+		}
+	}
+	resource := strings.ReplaceAll(s, `\`, "/")
+	if resource == "/test/engine/sing-box.exe" {
+		return "/oracle/engine/sing-box.exe"
+	}
+	if strings.HasPrefix(resource, "/test/") {
+		return "/oracle/data/" + normalizeResourceString(strings.TrimPrefix(resource, "/test/"), mapping)
+	}
+	return s
+}
+func equalStringLists(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+func rewriteTraceStrings(b []byte, convert func(string) string) ([]byte, error) {
+	out := []byte{}
+	for i := 0; i < len(b); {
+		if b[i] != '"' {
+			out = append(out, b[i])
+			i++
+			continue
+		}
+		end := i + 1
+		for end < len(b) {
+			if b[end] == '\\' {
+				end += 2
+				continue
+			}
+			if b[end] == '"' {
+				break
+			}
+			end++
+		}
+		if end >= len(b) {
+			return nil, fmt.Errorf("unterminated JSON string")
+		}
+		var text string
+		if err := json.Unmarshal(b[i:end+1], &text); err != nil {
+			return nil, err
+		}
+		next := convert(text)
+		if next == text {
+			out = append(out, b[i:end+1]...)
+		} else {
+			out = append(out, js.MarshalString(next)...)
+		}
+		i = end + 1
+	}
+	return out, nil
+}
 func controlFile(path string) bool {
 	base := filepath.Base(strings.ReplaceAll(path, `\`, "/"))
-	return base == "settings.json" || base == "settings.json.bak" || base == "usage.json" || base == "windows-undo.json" || base == "windows-undo.json.bak"
+	return base == "server.json" || base == "settings.json" || base == "settings.json.bak" || base == "usage.json" || base == "windows-undo.json" || base == "windows-undo.json.bak"
 }
 func orderedTraceJSON(b []byte) (any, error) {
 	d := json.NewDecoder(bytes.NewReader(b))

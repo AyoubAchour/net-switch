@@ -5,7 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"path/filepath"
 	"reflect"
@@ -463,7 +465,7 @@ func (c *Core) Start(ctx context.Context) error {
 		}
 		p := c.policyLocked()
 		current := c.op.Engine.Snapshot()
-		if current.Status != "on" && current.Status != "starting" {
+		if len(p.Lines) > 0 && current.Status != "on" && current.Status != "starting" {
 			c.statusLocked(engine.Snapshot{Status: "starting"})
 		}
 		c.mu.Unlock()
@@ -477,6 +479,9 @@ func (c *Core) Start(ctx context.Context) error {
 		c.statusLocked(c.op.Engine.Snapshot())
 		c.sampleLinesLocked(c.op.Engine.Snapshot())
 		c.mu.Unlock()
+		if c.op.Engine.Snapshot().Status != "on" {
+			return nil
+		}
 		if err := c.ApplyPolicy(ctx); err != nil {
 			return err
 		}
@@ -532,6 +537,9 @@ func (c *Core) applyPolicy(ctx context.Context, auto bool) error {
 	p := c.policyLocked()
 	gen := c.generation
 	s := c.op.Engine.Snapshot()
+	if auto && !p.Combine {
+		p.Shares = append(lines.Shares{}, s.Policy.Shares...)
+	}
 	c.mu.Unlock()
 	if reflect.DeepEqual(p, s.Policy) && s.AppliedRevision != 0 {
 		return nil
@@ -552,12 +560,15 @@ func (c *Core) applyPolicy(ctx context.Context, auto bool) error {
 	if gen != c.generation {
 		return nil
 	}
-	for _, line := range p.Lines {
-		id, target := line.ID, p.Lanes[line.ID]
-		if l := c.lanes[id]; l != nil {
-			if l.target == nil || *l.target != target {
-				l.target = ptr(target)
-				c.log("%s's apps now use %s", c.labelLocked(id), c.labelLocked(target))
+	active := c.op.Engine.Snapshot()
+	if active.Status == "on" && active.StartedWith != nil && len(active.StartedWith.Lines) > 1 {
+		for _, line := range p.Lines {
+			id, target := line.ID, p.Lanes[line.ID]
+			if l := c.lanes[id]; l != nil {
+				if l.target == nil || *l.target != target {
+					l.target = ptr(target)
+					c.log("%s's apps now use %s", c.labelLocked(id), c.labelLocked(target))
+				}
 			}
 		}
 	}
@@ -687,6 +698,11 @@ func (c *Core) Shutdown(ctx context.Context) error {
 	}
 	if err := c.SaveUsage(); err != nil {
 		c.log("could not save the data use record: %v", err)
+	}
+	if c.op.IO.Files != nil {
+		if err := c.op.IO.Files.Remove(filepath.Join(c.op.UserDir, "server.json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			c.log("could not remove server.json: %v", err)
+		}
 	}
 	c.cancel()
 	c.log("quit")

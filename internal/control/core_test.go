@@ -27,11 +27,14 @@ import (
 )
 
 type memoryFiles struct {
-	mu     sync.Mutex
-	data   map[string][]byte
-	fail   bool
-	writes []recordedWrite
-	logs   []string
+	mu            sync.Mutex
+	data          map[string][]byte
+	fail          bool
+	writes        []recordedWrite
+	logs          []string
+	removes       []string
+	spawns        []map[string]any
+	outsideCloses []any
 }
 type recordedWrite struct {
 	Path  string
@@ -54,6 +57,9 @@ func (f *memoryFiles) WriteFile(p string, b []byte, _ fs.FileMode) error {
 		return errors.New("disk full")
 	}
 	f.data[p] = append([]byte{}, b...)
+	if !strings.HasSuffix(p, ".tmp") {
+		f.writes = append(f.writes, recordedWrite{Path: p, Bytes: append([]byte{}, b...)})
+	}
 	return nil
 }
 func (f *memoryFiles) Rename(a, b string) error {
@@ -72,6 +78,7 @@ func (f *memoryFiles) Remove(p string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.data, p)
+	f.removes = append(f.removes, p)
 	return nil
 }
 
@@ -89,25 +96,42 @@ func (f *fakeClock) advance(ms int64) {
 }
 
 type fakeEngine struct {
-	mu          sync.Mutex
-	s           engine.Snapshot
-	connections []engine.Connection
-	calls       []string
-	commands    []map[string]any
-	failure     error
-	beforeApply func(engine.Revision)
-	probe       func(engine.ProbeRequest) engine.ProbeResult
+	mu              sync.Mutex
+	s               engine.Snapshot
+	connections     []engine.Connection
+	calls           []string
+	commands        []map[string]any
+	failure         error
+	beforeApply     func(engine.Revision)
+	probe           func(engine.ProbeRequest) engine.ProbeResult
+	real            engine.Engine
+	wireConnections json.RawMessage
+	requests        []map[string]any
 }
 
-func (f *fakeEngine) Snapshot() engine.Snapshot { f.mu.Lock(); defer f.mu.Unlock(); return f.s }
+func (f *fakeEngine) Snapshot() engine.Snapshot {
+	if f.real != nil {
+		return f.real.Snapshot()
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.s
+}
 func (f *fakeEngine) Fail(err error) {
+	if f.real != nil {
+		f.real.Fail(err)
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.s.Status = "error"
 	text := err.Error()
 	f.s.Error = &text
 }
-func (f *fakeEngine) Start(_ context.Context, p engine.Policy) error {
+func (f *fakeEngine) Start(ctx context.Context, p engine.Policy) error {
+	if f.real != nil {
+		return f.real.Start(ctx, p)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "start")
@@ -119,7 +143,10 @@ func (f *fakeEngine) Start(_ context.Context, p engine.Policy) error {
 	f.s.StartedAt = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 	return f.failure
 }
-func (f *fakeEngine) Stop(context.Context) error {
+func (f *fakeEngine) Stop(ctx context.Context) error {
+	if f.real != nil {
+		return f.real.Stop(ctx)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "stop")
@@ -128,7 +155,10 @@ func (f *fakeEngine) Stop(context.Context) error {
 	}
 	return f.failure
 }
-func (f *fakeEngine) Apply(_ context.Context, r engine.Revision) (engine.Acknowledgement, error) {
+func (f *fakeEngine) Apply(ctx context.Context, r engine.Revision) (engine.Acknowledgement, error) {
+	if f.real != nil {
+		return f.real.Apply(ctx, r)
+	}
 	if f.beforeApply != nil {
 		f.beforeApply(r)
 	}
@@ -151,7 +181,10 @@ func (f *fakeEngine) Apply(_ context.Context, r engine.Revision) (engine.Acknowl
 	f.s.AppliedHash = r.Hash
 	return engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: f.s.Instance, AppliedAt: f.s.StartedAt}, nil
 }
-func (f *fakeEngine) CloseFlows(_ context.Context, r engine.CloseRequest) (engine.CloseResult, error) {
+func (f *fakeEngine) CloseFlows(ctx context.Context, r engine.CloseRequest) (engine.CloseResult, error) {
+	if f.real != nil {
+		return f.real.CloseFlows(ctx, r)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, id := range r.ConnectionIDs {
@@ -160,19 +193,28 @@ func (f *fakeEngine) CloseFlows(_ context.Context, r engine.CloseRequest) (engin
 	}
 	return engine.CloseResult{Closed: len(r.ConnectionIDs)}, nil
 }
-func (f *fakeEngine) Connections(context.Context) ([]engine.Connection, error) {
+func (f *fakeEngine) Connections(ctx context.Context) ([]engine.Connection, error) {
+	if f.real != nil {
+		return f.real.Connections(ctx)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]engine.Connection{}, f.connections...), nil
 }
-func (f *fakeEngine) CloseConnection(_ context.Context, id string) error {
+func (f *fakeEngine) CloseConnection(ctx context.Context, id string) error {
+	if f.real != nil {
+		return f.real.CloseConnection(ctx, id)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "close:"+id)
 	f.commands = append(f.commands, map[string]any{"method": "DELETE", "route": "/connections/" + id})
 	return nil
 }
-func (f *fakeEngine) Probe(_ context.Context, r engine.ProbeRequest) engine.ProbeResult {
+func (f *fakeEngine) Probe(ctx context.Context, r engine.ProbeRequest) engine.ProbeResult {
+	if f.real != nil {
+		return f.real.Probe(ctx, r)
+	}
 	if f.probe != nil {
 		return f.probe(r)
 	}
@@ -180,9 +222,11 @@ func (f *fakeEngine) Probe(_ context.Context, r engine.ProbeRequest) engine.Prob
 }
 
 type fakePlatform struct {
-	network map[string]any
-	calls   []string
-	mu      sync.Mutex
+	network     map[string]any
+	calls       []string
+	mu          sync.Mutex
+	recordClose func(any)
+	probe       func(map[string]any) (any, error)
 }
 
 func (f *fakePlatform) Call(_ context.Context, name string, a map[string]any) (any, error) {
@@ -190,11 +234,19 @@ func (f *fakePlatform) Call(_ context.Context, name string, a map[string]any) (a
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, name)
 	switch name {
+	case "line-check":
+		if f.probe != nil {
+			return f.probe(a)
+		}
+		return nil, fmt.Errorf("no fake probe result")
 	case "network":
 		return f.network, nil
 	case "elevated":
 		return true, nil
 	case "close-tcp":
+		if f.recordClose != nil {
+			f.recordClose(a["connections"])
+		}
 		n := 0
 		if tt, ok := a["connections"].([]*apps.Tuple); ok {
 			n = len(tt)
@@ -240,7 +292,11 @@ func testCore(t *testing.T, initial map[string]any) (*Core, *fakeEngine, *fakeCl
 		t.Fatal(err)
 	}
 	f := &fakeEngine{s: engine.Snapshot{Status: "off", Instance: "test-engine", Policy: engine.Policy{}}}
-	p := &fakePlatform{}
+	p := &fakePlatform{recordClose: func(v any) {
+		b, _ := js.Marshal(v)
+		decoded, _ := js.Decode(b)
+		files.outsideCloses = append(files.outsideCloses, decoded)
+	}}
 	c, err := New(context.Background(), Options{Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: time.UTC, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, Background: func(fn func()) { fn() }, Log: func(s string) { files.mu.Lock(); files.logs = append(files.logs, s); files.mu.Unlock() }})
 	if err != nil {
 		t.Fatal(err)

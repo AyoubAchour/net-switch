@@ -163,7 +163,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	system := &win.System{Workers: worker.Supervisor{Executable: exe}, EnginePath: path, Root: *root, UserDir: *user, MachineDir: *machine}
+	system := &win.System{Workers: worker.Supervisor{Executable: exe, Log: func(err error) { log.append("worker: " + err.Error()) }}, EnginePath: path, Root: *root, UserDir: *user, MachineDir: *machine}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if *machine != *user && !*dev {
@@ -242,19 +242,15 @@ func run() error {
 	if err := core.RefreshAdapters(ctx); err != nil {
 		log.append("initial adapter scan failed: " + err.Error())
 	}
+	core.RefreshAutostart(ctx)
 	if err := core.ApplyPolicy(ctx); err != nil {
 		return err
 	}
-	b, err := js.Marshal(map[string]any{"port": port, "token": token, "pid": os.Getpid(), "mode": mode, "startedAt": time.Now().UTC().Format("2006-01-02T15:04:05.000Z")})
+	message, err := core.PublishSession(port, token, os.Getpid())
 	if err != nil {
 		return err
 	}
-	session := filepath.Join(*user, "server.json")
-	if err := settings.AtomicWrite(session, b, ioOptions); err != nil {
-		return err
-	}
-	core.Announce(port)
-	fmt.Printf("Net Switch is running at http://127.0.0.1:%d/#token=%s\n", port, token)
+	fmt.Println(message)
 	core.Run()
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
@@ -269,9 +265,6 @@ func run() error {
 		}
 	case err := <-serveErr:
 		return err
-	}
-	if err := os.Remove(session); err != nil && !os.IsNotExist(err) {
-		log.append("could not remove server.json: " + err.Error())
 	}
 	shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

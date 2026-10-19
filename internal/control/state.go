@@ -1,6 +1,7 @@
 package control
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
@@ -180,7 +181,7 @@ func (c *Core) State() map[string]any {
 				}
 			}
 		}
-		ll = append(ll, map[string]any{"id": line.ID, "alias": line.Alias, "label": line.Label, "kind": kind, "main": i == 0, "connected": connected, "problem": problem, "ping": ping, "connections": c.connections[line.ID], "carrying": carrying, "target": target, "rate": rate, "ssid": ssid, "metered": line.Metered, "strict": line.Strict, "cap": line.Cap, "usage": c.usage.Used(line.ID), "exhausted": c.exhausted[line.ID], "blocked": blocked, "weight": line.Weight, "share": share})
+		ll = append(ll, map[string]any{"id": line.ID, "alias": line.Alias, "label": json.RawMessage(js.MarshalString(line.Label)), "kind": kind, "main": i == 0, "connected": connected, "problem": problem, "ping": ping, "connections": c.connections[line.ID], "carrying": carrying, "target": target, "rate": rate, "ssid": ssid, "metered": line.Metered, "strict": line.Strict, "cap": line.Cap, "usage": c.usage.Used(line.ID), "exhausted": c.exhausted[line.ID], "blocked": blocked, "weight": line.Weight, "share": share})
 	}
 	for _, a := range c.adapters {
 		if a["kind"] == "wifi" {
