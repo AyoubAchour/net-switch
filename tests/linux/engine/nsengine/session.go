@@ -326,6 +326,8 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		return engine.Stats{}, fmt.Errorf("stats gauges: %w", err)
 	}
 	return engine.Stats{
+		PeakUnknown: g.PeakUnknown, PeakUnknownUDP: g.PeakUnknownUDP,
+		AdmittedUnknown: g.AdmittedUnknown, AdmittedUnknownUDP: g.AdmittedUnknownUDP,
 		OwnerLookup: nested["ownerLookup"],
 		TunKernel:   nested["tunKernel"],
 		PeakFlows:   g.PeakFlows, PeakHandshakes: g.PeakHandshakes, PeakUDP: g.PeakUDP, PeakPerApp: g.PeakPerApp, PeakUDPPerApp: g.PeakUDPPerApp,

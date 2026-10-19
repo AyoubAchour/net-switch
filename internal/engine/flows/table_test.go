@@ -257,6 +257,34 @@ func TestRejectionNoticeLimits(t *testing.T) {
 	}
 }
 
+func TestUnknownAdmissionCountersSurviveClosureAndExcludeRefusals(t *testing.T) {
+	l := Defaults()
+	l.Unknown = 3
+	l.UnknownUDP = 1
+	f := table(t, l)
+	var held []flowapi.Ticket
+	held = append(held, admit(t, f, "tcp", ""), admit(t, f, "udp", ""), admit(t, f, "tcp", ""), admit(t, f, "tcp", "known"))
+	refused, err := f.Begin("udp", tuple)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := refused.Resolve(platform.Owner{}); err != ErrBudget {
+		t.Fatalf("expected unknown budget refusal: %v", err)
+	}
+	refused.Close()
+	before := f.Stats()
+	if before.Admitted != 4 || before.AdmittedUnknown != 3 || before.AdmittedUnknownUDP != 1 || before.PeakUnknown != 3 || before.PeakUnknownUDP != 1 {
+		t.Fatalf("admission counters: %+v", before)
+	}
+	for _, ticket := range held {
+		ticket.Close()
+	}
+	after := f.Stats()
+	if after.Unknown != 0 || after.UnknownUDP != 0 || after.AdmittedUnknown != 3 || after.AdmittedUnknownUDP != 1 || after.PeakUnknown != 3 {
+		t.Fatalf("closure erased lifetime evidence: %+v", after)
+	}
+}
+
 func TestUnattributedRefusalsShareOnlyTheGlobalBudget(t *testing.T) {
 	f := table(t, Defaults())
 	fixed := time.Now()
