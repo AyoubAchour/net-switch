@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,6 +49,28 @@ func TestKernelFileBoundIncludesExactLength(t *testing.T) {
 	}
 	if _, err := readKernelFile(path, len(want)-1); err == nil {
 		t.Fatal("truncation wasn't reported")
+	}
+}
+
+func TestProcessStartReadsTheKernelFieldAcrossUnusualComm(t *testing.T) {
+	b, err := os.ReadFile("/proc/self/stat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	end := strings.LastIndexByte(string(b), ')')
+	fields := strings.Fields(string(b[end+1:]))
+	want, err := strconv.ParseUint(fields[19], 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := string(b[:strings.IndexByte(string(b), '(')+1]) + "worker ) name\n" + string(b[end:])
+	for _, input := range [][]byte{b, []byte(changed)} {
+		if got, err := parseProcessStart(input); err != nil || got != want {
+			t.Fatalf("start-time field: %d want %d error %v", got, want, err)
+		}
+	}
+	if got, err := processStart(uint32(os.Getpid())); err != nil || got != want {
+		t.Fatalf("live process changed identity: %d %v", got, err)
 	}
 }
 
