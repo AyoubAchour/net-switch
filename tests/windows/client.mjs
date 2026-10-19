@@ -9,7 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 if (!process.send) throw new Error('Use the Windows acceptance runner');
 const held = new Map();
 let serial = 0;
-const publicTarget = { host: '1.1.1.1', port: 443, path: '/cdn-cgi/trace', tls: true };
+const publicTarget = { host: '1.0.0.1', port: 443, path: '/cdn-cgi/trace', tls: true };
 
 async function requestOn(item) {
   const target = item.target;
@@ -20,6 +20,7 @@ async function requestOn(item) {
       localAddress: target.source,
       servername: target.tls ? 'one.one.one.one' : undefined, agent: item.agent, signal: AbortSignal.timeout(8000) }, (res) => {
       const port = res.socket.localPort;
+      item.socket = res.socket;
       let body = '';
       res.setEncoding('utf8'); res.on('data', (chunk) => { body += chunk; }); res.on('error', reject);
       res.on('end', () => {
@@ -172,6 +173,21 @@ async function rejectBurst({ target, count = 100, timeout = 5000 }) {
   })));
 }
 
+async function reset({ target }) {
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: target.host, port: target.http, localAddress: target.source });
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error('Reset target timed out')); }, 5000);
+    socket.on('connect', () => socket.write('GET /reset HTTP/1.1\r\nHost: target\r\n\r\n'));
+    socket.on('end', () => { clearTimeout(timer); reject(new Error('RST was converted into FIN')); });
+    socket.on('error', (error) => {
+      clearTimeout(timer);
+      if (error.code === 'ECONNRESET') resolve({ outcome: error.code });
+      else reject(error);
+    });
+    socket.on('close', () => clearTimeout(timer));
+  });
+}
+
 process.on('message', async ({ id, command, ...args }) => {
   try {
     let result;
@@ -180,6 +196,8 @@ process.on('message', async ({ id, command, ...args }) => {
     else if (command === 'udp') result = await udp(args);
     else if (command === 'reuse') result = await reuse(args);
     else if (command === 'reject') result = await rejectBurst(args);
+    else if (command === 'reset') result = await reset(args);
+    else if (command === 'status') result = args.ids.map((key) => ({ id: key, closed: held.get(key)?.socket?.destroyed === true }));
     else if (command === 'close') { for (const item of held.values()) item.agent.destroy(); held.clear(); result = true; }
     else throw new Error(`Unknown command ${command}`);
     process.send({ id, result });

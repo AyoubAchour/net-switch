@@ -43,7 +43,7 @@ if ($Action -eq 'block-direct') {
   }
   if ($Action -eq 'withdraw') {
     Get-NetRoute -InterfaceIndex $index -DestinationPrefix '0.0.0.0/0' | Remove-NetRoute -Confirm:$false
-  } else {
+  } elseif (-not (Get-NetRoute -InterfaceIndex $index -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)) {
     New-NetRoute -InterfaceIndex $index -DestinationPrefix '0.0.0.0/0' -NextHop '0.0.0.0' -RouteMetric 5500 -PolicyStore ActiveStore | Out-Null
   }
 }

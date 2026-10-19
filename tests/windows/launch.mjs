@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { identity, run, until } from './testisp/harness.mjs';
 
 function argument(name, fallback) {
@@ -12,11 +13,13 @@ function argument(name, fallback) {
   return process.argv[index + 1];
 }
 
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+
 export function launchOptions() {
   const server = path.resolve(argument('--server-exe', process.execPath));
   const nodeServer = server.toLowerCase() === process.execPath.toLowerCase();
-  const entry = argument('--server-entry', nodeServer ? 'server.mjs' : null);
-  const engineDir = argument('--engine-dir', 'engine');
+  const entry = argument('--server-entry', nodeServer ? path.join(repoRoot, 'server.mjs') : null);
+  const engineDir = argument('--engine-dir', path.join(repoRoot, 'engine'));
   return {
     server, entry: entry ? path.resolve(entry) : null,
     engine: path.resolve(argument('--engine-exe', path.join(engineDir, 'sing-box.exe'))),
@@ -29,7 +32,7 @@ export function launchOptions() {
 export async function recordLaunch(options, file) {
   const binaries = { server: await identity(options.server, options.serverVersionArgs), engine: await identity(options.engine, options.engineVersionArgs) };
   if (options.entry) {
-    const packageJSON = JSON.parse(await readFile('package.json', 'utf8'));
+    const packageJSON = JSON.parse(await readFile(path.join(repoRoot, 'package.json'), 'utf8'));
     binaries.server.entry = { path: options.entry, version: packageJSON.version,
       sha256: createHash('sha256').update(await readFile(options.entry)).digest('hex') };
   }

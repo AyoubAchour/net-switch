@@ -217,10 +217,13 @@ func probe(args []string) error {
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if *index <= 0 || net.ParseIP(*source).To4() == nil {
-		return errors.New("interface and source are required")
+	if (*index == 0) != (*source == "") || *index < 0 || (*source != "" && net.ParseIP(*source).To4() == nil) {
+		return errors.New("supply both interface and source, or neither for normal Windows routing")
 	}
-	dialer := boundDialer(*index, net.ParseIP(*source))
+	dialer := &net.Dialer{Timeout: *timeout}
+	if *index != 0 {
+		dialer = boundDialer(*index, net.ParseIP(*source))
+	}
 	transport := &http.Transport{DialContext: dialer.DialContext, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DisableKeepAlives: true, Proxy: nil}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: *timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

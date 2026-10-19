@@ -2,7 +2,8 @@
 
 These programs run only on disposable GitHub-hosted Windows runners. Do not run
 the gateway, clients, server, engine or PowerShell network scripts on a developer's
-PC. Local checks are syntax, vet and the pure report/packet unit tests only.
+PC. Local checks are syntax, vet and build only, at Idle priority with two cores.
+All tests run in CI.
 
 The existing app and release packaging are unchanged. `Windows acceptance / x64`
 and `Windows acceptance / ARM64` have a 25-minute job limit and upload reports,
@@ -12,9 +13,13 @@ accepted as evidence.
 
 ## What counts as evidence
 
-- Real internet routing uses a small HTTPS response from `1.1.1.1`. Both bound
+- Real internet routing uses a small HTTPS response from `1.0.0.1`. Both bound
   paths must work before app tests start. The response and TestISP's packet,
-  byte, connection and destination counters distinguish the two paths.
+  byte, connection and destination counters distinguish the two paths. Acceptance
+  traffic uses `1.0.0.1:443`, separate from the app's `1.1.1.1` health checks.
+  Its TestISP destination count must change by exactly the expected number:
+  all pinned TestISP flows, zero main/failover flows, and the secondary share
+  reported while combining.
 - Controlled HTTP reports the source address and port it saw, and echoes a
   random request nonce. UDP must return the exact bytes sent. STUN checks the
   mapped port at two responders and a reply from a third, uncontacted port.
@@ -52,10 +57,21 @@ direct-adapter test must not pretend to test a Go control server.
 
 ## Classification
 
-Every active case is `parity` or `baseline-defect`. The latter needs a recognized
+Pre-engine checks are `harness-baseline`, separate from engine `parity` passes.
+Engine cases are `parity` or `baseline-defect`. The latter needs a recognized
 failure with a successful baseline and records its measured evidence. The
 `baseline` profile reports such defects without failing the job; `v1` makes
-them failures. A defect which no longer reproduces is reported as a pass.
+them failures. Under `baseline`, a defect which no longer reproduces is
+`defect-not-reproduced` and fails CI: review the executable pin and classification.
+Only `v1` expects a former defect to pass.
+
+DNS survival is deliberately `parity`, departing from the locked design's §10
+defect list: the pinned sing-box 1.14.2 does not reproduce the DNS drop. The test
+waits for Windows to report the changed DNS servers, then repeatedly refreshes
+the original sockets and checks the engine PID through a 10-second observation
+window. A future engine bump that drops them must fail, not gain an exemption.
+Pins and combining wait for their returned/applied app state; caps and failover
+wait for blocked and lane state. No fixed readiness sleeps remain in these cases.
 
 Hosted x64 and ARM64 testing also found that today's app returns oversized UDP
 despite the app requesting no fragmentation, on both IPv4 and IPv6. This extra
@@ -78,11 +94,10 @@ recorded and checked. TestISP and engine probes keep the entire tuple fixed, and
 each successful reuse must complete in under 100 ms, excluding the requested
 idle gap. Native failures still capture both ends' TCP states and fail CI.
 
-TestISP retains gVisor's default 60-second TIME_WAIT. Its 1,000-reuse prerequisite
-is `pending-shared-hook`, not a pass or a baseline CI failure, until the shared
-section 5.1 patch in [#29](https://github.com/AyoubAchour/net-switch/pull/29) lands.
-`configureTCPReuse` is the integration point; enabling it makes that probe a
-must-pass automatically. The `v1` profile fails while this gate is pending.
+TestISP installs the shared `tcp.SetTimeWaitHandler` before capture starts and
+retains gVisor's default 60-second TIME_WAIT. Its fixed-tuple 1,000-reuse
+prerequisite is mandatory: every attempt must finish under 100 ms. Engine freeze
+gates require both it and the native baseline, including reuse after 100 MB.
 Timeout zero was removed after a hosted ARM64 trace showed a lost final ACK,
 then a retransmitted FIN receiving RST. Increasing bind retries would hide it.
 
@@ -91,6 +106,11 @@ UDP refusal errors, so this probe uses a native socket and explicitly enables
 `SIO_UDP_CONNRESET` after Go initializes it. The same executable must receive
 exact UDP echoes before applying caps and after clearing them; a timeout cannot
 be blamed on the app when the native refusal baseline failed.
+Every accepted rejection must be faster than the slowest native sample plus
+500 ms. `ETIMEDOUT` is not a rejection. During the blocked burst, neither the
+TCP target's flow counter nor the UDP target's datagram counter may increase.
+An independent cap case holds flows on both lines: old secondary flows must
+close while the exhausted main line, with no stand-in, keeps its original sockets.
 
 Socket behavior is checked against Microsoft's [Winsock port reuse guidance](https://learn.microsoft.com/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse)
 and [UDP IOCTL definitions](https://learn.microsoft.com/windows/win32/winsock/winsock-ioctls),
@@ -102,14 +122,14 @@ fresh random payloads and record source tuples, so stale replies cannot pass.
 
 | Area | Checks |
 | --- | --- |
-| Routing | Pins on both interfaces; existing sockets survive a new pin; combining; route-loss failover and failback. |
+| Routing | Pins on both interfaces; existing sockets survive a new pin; combining; route-loss and gateway-drop failover and failback. |
 | TCP freeze | Passive-close reuse at 0, 10, 100 and 500 ms; up to 1,000 immediate reuses; recovery after the 60-second interval; a 100 MB hash and reuse after it. |
 | DNS | Held sockets before and after a real adapter DNS change, followed by restored DNS and a new connection. |
 | Caps | Repeated TCP rejects, continuously sending UDP, no traffic escaping the block, and the exhausted main line remaining usable. |
-| UDP | Exact payloads at 64, 1,200, 1,800 and 8,192 bytes; fragmentation; STUN mapping and unsolicited replies. |
+| UDP | Exact payloads at 64, 1,200, 1,800, 8,192 and 12,000 bytes; fragmentation across the app's 9,000-byte TUN; STUN mapping and unsolicited replies. |
 | QUIC | Real QUIC v1 handshake and 1 MiB payload hash through the TUN. |
 | IPv6 and ICMP | Controlled IPv6 TCP/UDP; IPv4/IPv6 echo; 1,400-byte echo probes with wire counters; UDP with DF and oversize rejection on both families. |
-| Lifecycle | Engine crash with automatic restart; abrupt control and engine death without restart, direct connectivity, then startup; 20 start/stop cycles with traffic and cleanup. |
+| Lifecycle | Engine crash with automatic restart; abrupt control death followed by observed engine self-exit, unbound direct connectivity, then startup; 20 start/stop cycles with traffic and cleanup. |
 
 ## Design deviations and limits
 
@@ -131,6 +151,10 @@ it is not evidence of public IPv6 connectivity on the hosted NIC. ICMP echo is
 served only for the controlled addresses. The gateway never fabricates echo
 replies for arbitrary internet hosts. The test UDP allowances are restricted
 to the participating programs and controlled source addresses, then removed.
+During engine checks, outbound firewall rules block the client, MTU, QUIC, ping
+and UDP-rejection probes on both TestISP and the uplink. Engine sockets remain
+allowed. Pre-engine negative controls prove IPv6 UDP, echo and MTU probes cannot
+reach the target through TestISP's remaining IPv6 default route.
 
 The socket client cannot inject app-side TCP sequence numbers, stale SYN/data/RST,
 lost final ACKs, disabled timestamps or reordered TUN queues through Winsock.
@@ -141,7 +165,8 @@ worker, migration, update/rollback and uninstall placeholders name milestones
 
 ## Local checks
 
-`check-local.ps1` invokes only the pinned absolute Go toolchain, at Idle priority,
-with two cores and caches below the owner's designated cache directory. Its
-`unit` action runs only pure packet tests; it never calls either program's main.
+`check-local.ps1` uses Go from PATH or `-Go`, checks the repository's pinned
+version, and runs at Idle priority with two cores. It inherits Go's normal cache
+settings (overridable through the standard environment variables). It supports
+`vendor`, `verify`, `vet` and `build`; it never runs tests or either program's main.
 The report classification tests are `test/windows-acceptance.test.mjs`.

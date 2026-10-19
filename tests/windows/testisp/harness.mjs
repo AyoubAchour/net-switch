@@ -102,7 +102,7 @@ export async function startHarness(directory) {
     await network('configure');
     await writeFile(path.join(dir, 'network.json'), JSON.stringify({ uplink, testisp: state }, null, 2));
     const probe = async (line, failure = false) => {
-      const result = await run(probeExe, ['probe', '--interface', String(line.index), '--source', line.address], { failure, timeout: 10_000 });
+      const result = await run(probeExe, ['probe', ...(line ? ['--interface', String(line.index), '--source', line.address] : [])], { failure, timeout: 10_000 });
       if (!failure) {
         const response = JSON.parse(result.stdout);
         assert.match(response.body, /(?:^|\n)ip=/, 'Real HTTPS trace body missing');

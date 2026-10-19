@@ -2,6 +2,7 @@ param([ValidateSet('allow', 'ipv6', 'capture', 'clean')] [string] $Action)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted Windows runners only.' }
 $names = @('NetSwitch-acceptance-client-udp', 'NetSwitch-acceptance-gateway-udp', 'NetSwitch-acceptance-engine-udp', 'NetSwitch-acceptance-probe-udp')
+$captureNames = @('NetSwitch-acceptance-capture-client', 'NetSwitch-acceptance-capture-mtu', 'NetSwitch-acceptance-capture-quic', 'NetSwitch-acceptance-capture-ping', 'NetSwitch-acceptance-capture-udp')
 if ($Action -eq 'ipv6') {
   $primary = [int]$env:ACCEPTANCE_UPLINK
   $virtual = [int]$env:ACCEPTANCE_TESTISP
@@ -29,6 +30,14 @@ if ($Action -eq 'ipv6') {
     Get-NetRoute -InterfaceIndex $virtual -DestinationPrefix $prefix | Remove-NetRoute -Confirm:$false
     if (Get-NetRoute -InterfaceIndex $virtual -DestinationPrefix $prefix -ErrorAction SilentlyContinue) { throw "Direct target route remained: $prefix" }
   }
+  # Only the engine may send these probes through physical interfaces. In
+  # particular, TestISP's IPv6 default must never let a probe bypass the TUN.
+  $interfaces = @((Get-NetAdapter -InterfaceIndex ([int]$env:ACCEPTANCE_UPLINK)).Name, 'TestISP')
+  $programs = @($env:ACCEPTANCE_CLIENT, $env:ACCEPTANCE_MTU, $env:ACCEPTANCE_QUIC, (Get-Command ping.exe).Source, $env:ACCEPTANCE_UDP_PROBE)
+  for ($i = 0; $i -lt $programs.Count; $i++) {
+    if (-not (Test-Path -LiteralPath $programs[$i])) { throw 'Missing capture probe executable.' }
+    New-NetFirewallRule -Name $captureNames[$i] -DisplayName $captureNames[$i] -Direction Outbound -Action Block -Program $programs[$i] -InterfaceAlias $interfaces | Out-Null
+  }
 } elseif ($Action -eq 'allow') {
   $programs = @($env:ACCEPTANCE_CLIENT, $env:ACCEPTANCE_GATEWAY, $env:ACCEPTANCE_ENGINE, $env:ACCEPTANCE_UDP_PROBE)
   for ($i = 0; $i -lt $programs.Count; $i++) {
@@ -39,6 +48,8 @@ if ($Action -eq 'ipv6') {
     New-NetFirewallRule -Name $names[$i] -DisplayName $names[$i] -Direction Inbound -Action Allow -Program $programs[$i] -Protocol UDP -RemoteAddress @($env:ACCEPTANCE_TARGET, '198.19.128.2', '2001:db8:198::2') | Out-Null
   }
 } else {
+  foreach ($name in $captureNames) { Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule }
+  foreach ($name in $captureNames) { if (Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue) { throw "Rule remained: $name" } }
   foreach ($name in $names) { Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule }
   foreach ($name in $names) { if (Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue) { throw "Rule remained: $name" } }
   if ($env:ACCEPTANCE_UPLINK) {

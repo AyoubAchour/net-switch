@@ -1,21 +1,20 @@
 # No networking tests, adapters, engine or server may run here.
-param([ValidateSet('tidy', 'vendor', 'verify', 'vet', 'unit')] [string] $Action = 'unit')
+param([ValidateSet('vendor', 'verify', 'vet', 'build')] [string] $Action = 'vet', [string] $Go = 'go')
 $ErrorActionPreference = 'Stop'
 $env:GOTOOLCHAIN = 'local'
 $env:GOMAXPROCS = '2'
 $env:GOFLAGS = '-p=2'
-$env:GOCACHE = 'C:\Users\Ayoub\Desktop\net-switch\dist\cache\go-home\buildcache'
-$env:GOPATH = 'C:\Users\Ayoub\Desktop\net-switch\dist\cache\go-home\gopath'
-$env:GOMODCACHE = 'C:\Users\Ayoub\Desktop\net-switch\dist\cache\go-home\modcache'
-$go = 'C:\Users\Ayoub\Desktop\net-switch\dist\cache\go-1.27.2\go\bin\go.exe'
+$root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$pins = Get-Content (Join-Path $root 'packaging/versions.json') -Raw | ConvertFrom-Json
+$Go = (Get-Command $Go -ErrorAction Stop).Source
+if ((& $Go version) -notmatch "go$([regex]::Escape($pins.go.version)) ") { throw 'Use the Go version pinned in packaging/versions.json.' }
 $arguments = switch ($Action) {
-  'tidy' { @('mod', 'tidy') }
   'vendor' { @('mod', 'vendor') }
   'verify' { @('mod', 'verify') }
   'vet' { @('vet', './tests/windows/...') }
-  'unit' { @('test', './tests/windows/...') }
+  'build' { @('build', '-p', '2', './tests/windows/...') }
 }
-$p = Start-Process -FilePath $go -ArgumentList $arguments -NoNewWindow -PassThru
+$p = Start-Process -FilePath $Go -ArgumentList $arguments -WorkingDirectory $root -NoNewWindow -PassThru
 $null = $p.Handle
 $p.PriorityClass = 'Idle'
 $p.WaitForExit()

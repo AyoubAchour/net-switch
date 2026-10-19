@@ -39,7 +39,7 @@ jobs:
         with:
           node-version: '24.21.0'
           package-manager-cache: false
-      - name: Build gateway and independent probe
+      - name: Build gateway and separately addressed probe process
         run: |
           go test ./tests/windows/testisp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -108,7 +108,7 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
-      - name: Build the gateway and independent direct probe
+      - name: Build the gateway and separately addressed direct probe process
         run: |
           go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -220,7 +220,7 @@ jobs:
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
-      GOFLAGS: -mod=readonly -p=2
+      GOFLAGS: -mod=vendor -p=2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -237,12 +237,22 @@ jobs:
           cache: false
       # The 1.0 trees by name: "./..." from the root would also walk dist/, where
       # the build scripts keep a whole Go toolchain.
+      - name: Verify and regenerate patched dependencies byte for byte
+        shell: pwsh
+        run: |
+          node scripts/generate-gvisor.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go mod verify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go mod vendor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --exit-code -- third_party/gvisor vendor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $untracked = git ls-files --others --exclude-standard -- third_party/gvisor vendor
+          if ($untracked) { throw "Untracked generated dependencies: $untracked" }
       - run: go vet ./internal/... ./cmd/... ./tests/...
-      - run: go test ./internal/... ./cmd/... ./tests/...
+      - run: go test -v ./internal/... ./cmd/... ./tests/...
       - run: go build ./internal/... ./cmd/... ./tests/...
-      - name: Race checks for the control packages
-        if: runner.os == 'Linux' || matrix.name == 'Windows x64'
-        run: go test -race ./internal/... ./tests/...
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: runner.os == 'Linux'
         with:
@@ -253,6 +263,21 @@ jobs:
         run: |
           go build -o ./bin/differential ./tests/differential/runner
           node tests/differential/run.mjs ./bin/differential
+      - name: Race detector
+        if: matrix.name == 'Linux x64' || matrix.name == 'Linux ARM64' || matrix.name == 'Windows x64'
+        run: go test -race -v ./internal/... ./cmd/... ./tests/...
+      - name: Record the complete TIME_WAIT acceptance gate under race detection
+        if: matrix.name != 'Windows ARM64'
+        run: go test -race -v -count=1 -run 'TimeWait|PacketOrderPerTuple' ./internal/engine/stack
+      - name: Repeat clock and reopen boundaries under race detection
+        if: matrix.name != 'Windows ARM64'
+        run: go test -race -v -count=1000 -run '^TestTimeWait(LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow)$' ./internal/engine/stack
+      - name: Fuzz unprivileged packet and protocol paths
+        if: matrix.name == 'Linux x64'
+        run: |
+          go test -run '^$' -fuzz '^FuzzPackets$' -fuzztime 30s -parallel 2 ./internal/engine/packet
+          go test -run '^$' -fuzz '^FuzzUDPHandler$' -fuzztime 30s -parallel 2 ./internal/engine/udp
+          go test -run '^$' -fuzz '^FuzzProtocol$' -fuzztime 30s -parallel 2 ./internal/engine/protocol
 
   linux:
     name: Linux / Node ${{ matrix.node }} (shared code)

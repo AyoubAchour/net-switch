@@ -72,11 +72,28 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			wg.Add(2)
 			go func() {
 				defer wg.Done()
-				n, _ := io.Copy(remote, local)
-				remote.(*net.TCPConn).CloseWrite()
+				n, err := io.Copy(remote, local)
+				if err != nil {
+					remote.(*net.TCPConn).SetLinger(0)
+					remote.Close()
+					endpoint.Abort()
+				} else {
+					remote.(*net.TCPConn).CloseWrite()
+				}
 				g.transferred(n, true)
 			}()
-			go func() { defer wg.Done(); n, _ := io.Copy(local, remote); local.CloseWrite(); g.transferred(n, false) }()
+			go func() {
+				defer wg.Done()
+				n, err := io.Copy(local, remote)
+				if err != nil {
+					endpoint.Abort()
+					remote.(*net.TCPConn).SetLinger(0)
+					remote.Close()
+				} else {
+					local.CloseWrite()
+				}
+				g.transferred(n, false)
+			}()
 			wg.Wait()
 		}()
 	})
@@ -182,9 +199,10 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 }
 
 func configureTCPReuse(s *stack.Stack, forwarder *tcp.Forwarder) bool {
-	// Keep gVisor's 60-second default. Enable the shared section 5.1 hook here
-	// after #29 lands, then return true to make 1,000 TestISP reuses mandatory.
-	return false
+	// Install before the TUN reader starts; preserve the normal 60-second wait
+	// for final ACK retransmission while allowing a fresh local-app SYN.
+	tcp.SetTimeWaitHandler(s, forwarder.HandlePacket)
+	return true
 }
 
 type netstackError struct{ err tcpip.Error }

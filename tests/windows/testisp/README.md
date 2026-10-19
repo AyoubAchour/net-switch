@@ -1,10 +1,9 @@
 # TestISP
 
-The gateway keeps gVisor's default 60-second TIME_WAIT. The acceptance suite's
-1,000 rapid TestISP reuses are `pending-shared-hook` until the section 5.1 patch
-in [#29](https://github.com/AyoubAchour/net-switch/pull/29) lands. The physical-path
-reuse baseline remains mandatory. `configureTCPReuse` is the shared hook seam;
-timeout zero is unsafe and is not used.
+The gateway keeps gVisor's default 60-second TIME_WAIT and installs the shared
+section 5.1 SYN-reopen hook before starting capture. Both the physical-path
+baseline and 1,000 fixed-tuple TestISP reuses are mandatory. Every TestISP reuse
+must complete in under 100 ms. Timeout zero is unsafe and is not used.
 
 TestISP is a separately observable virtual path sharing the runner's real uplink.
 It is not a physically separate uplink. Run it only on disposable GitHub-hosted
@@ -39,6 +38,11 @@ path still works. A process-and-interface-scoped firewall rule then stops only
 the direct probe; the gateway process can still relay TestISP traffic. These are
 software failure domains sharing one real uplink. The proof checks actual packet
 counters; two outbound labels or identical public source IPs are not evidence.
+
+`testisp-probe.exe` is the same source and binary as the gateway, launched in
+`probe` mode under a separate executable path so firewall rules can distinguish
+the processes. It uses native Winsock HTTP sockets, not the gateway's gVisor
+data path; it is not an independently implemented executable.
 
 Dependencies are vendored from upstream MIT (WireGuard/Wintun) and Apache-2.0
 (gVisor) sources. The gateway is test infrastructure, not the production engine.

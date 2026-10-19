@@ -2,11 +2,14 @@ module github.com/AyoubAchour/net-switch
 
 go 1.27.2
 
+require gvisor.dev/gvisor v0.0.0-20261017122056-1b7906fdee8c
+
+replace gvisor.dev/gvisor => ./third_party/gvisor
+
 require (
 	github.com/quic-go/quic-go v0.64.0
 	golang.org/x/sys v0.49.0
 	golang.zx2c4.com/wireguard v0.0.0-20261006164505-2631ce99a06f
-	gvisor.dev/gvisor v0.0.0-20261017122056-1b7906fdee8c
 )
 
 require (

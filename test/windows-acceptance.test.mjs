@@ -2,6 +2,23 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BaselineDefect, Report } from '../tests/windows/report.mjs';
 
+test('a disappearing baseline defect fails instead of silently changing the oracle', async () => {
+  const report = new Report('baseline');
+  await assert.rejects(report.test('cap hang', 'baseline-defect', async () => ({ ms: 1 })), /no longer reproduces/);
+  assert.equal(report.results.length, 1);
+  assert.equal(report.results[0].status, 'defect-not-reproduced');
+  assert.deepEqual(report.results[0].evidence, { ms: 1 });
+  const v1 = new Report('v1');
+  await v1.test('cap hang', 'baseline-defect', async () => true);
+  assert.equal(v1.results[0].status, 'pass');
+});
+
+test('pre-engine baselines are distinct from engine parity', async () => {
+  const report = new Report('baseline');
+  await report.test('native refusal', 'harness-baseline', async () => true);
+  assert.equal(report.results[0].label, 'harness-baseline');
+});
+
 test('a baseline defect exemption cannot swallow a broken test or target', async () => {
   const report = new Report('baseline');
   await assert.rejects(report.test('unreachable baseline', 'baseline-defect', async () => { throw new Error('target down'); }), /target down/);

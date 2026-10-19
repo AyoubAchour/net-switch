@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-10-19: opt-in local SYN reuse without ISN checks.
 package tcp
 
 import (
@@ -589,6 +590,10 @@ func (r *receiver) handleTimeWaitSegment(s *segment) (resetTimeWait bool, newSyn
 
 	//    (2) returns to TIME-WAIT state if the SYN turns out
 	//      to be an old duplicate".
+	bareSyn := s.flags.Contains(header.TCPFlagSyn) && s.flags&(header.TCPFlagAck|header.TCPFlagFin|header.TCPFlagRst) == 0
+	if bareSyn && r.ep.protocol.timeWaitHandler.Load() != nil {
+		return false, true
+	}
 	if s.flags.Contains(header.TCPFlagSyn) && r.RcvNxt.LessThan(segSeq) {
 		return false, true
 	}

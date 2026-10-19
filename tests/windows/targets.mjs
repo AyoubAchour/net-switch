@@ -15,6 +15,10 @@ export async function targets(address) {
     const observation = { source: req.socket.remoteAddress, port: req.socket.remotePort,
       nonce: url.searchParams.get('nonce'), path: url.pathname };
     seen.push(observation);
+    if (url.pathname === '/reset') {
+      req.socket.resetAndDestroy();
+      return;
+    }
     if (url.pathname === '/close') res.setHeader('Connection', 'close');
     if (url.pathname === '/bytes') {
       const length = Math.min(100_000_000, Math.max(0, Number(url.searchParams.get('length')) || 0));
