@@ -84,7 +84,11 @@ export async function startHarness(directory) {
     }
     return result;
   };
-  const close = async ({ crash = false } = {}) => {
+  // A caller's finally may close again after a failure. Preserve the first
+  // pre-recovery snapshot and error instead of inspecting a recovered device.
+  let closePromise;
+  const close = (options) => closePromise ??= closeOnce(options);
+  const closeOnce = async ({ crash = false } = {}) => {
     const errors = [];
     const evidence = { crash };
     let forced = false;
