@@ -179,6 +179,7 @@ func flowsPagination(e *Env) {
 	var cursors []string
 	var sizes []int
 	var wrong, stray []string
+	unknown := 0
 	cursor := ""
 	for page := 1; ; page++ {
 		e.T.Require(page <= 1000, "the cursor ends within 1,000 pages")
@@ -191,7 +192,12 @@ func flowsPagination(e *Env) {
 			switch {
 			case want[key]:
 				matched[key] = append(matched[key], got{f, page})
-				if f.Protocol != "tcp" || f.App != AppPath("bravo") || f.PID != hold.Pid() || f.Lane != "b" || f.Line != "b" ||
+				identified := f.App == AppPath("bravo") && f.AppID == AppPath("bravo") && f.PID == hold.Pid() && f.Lane == "b" && f.Line == "b"
+				unidentified := f.App == "" && f.AppID == "" && f.PID == 0 && f.Lane == "a" && f.Line == "a"
+				if unidentified {
+					unknown++
+				}
+				if f.Protocol != "tcp" || (!identified && !unidentified) ||
 					f.Revision != loaded.N || f.Epoch != s.Epoch() || f.Point <= loaded.Point {
 					wrong = append(wrong, fmt.Sprintf("%s: %s app %q pid %d lane %s line %s revision %d epoch %d point %d", key, f.Protocol, f.App, f.PID, f.Lane, f.Line, f.Revision, f.Epoch, f.Point))
 				}
@@ -228,8 +234,11 @@ func flowsPagination(e *Env) {
 		"%d flows came over %d pages, each but the last ending in a new cursor (page sizes %v)", n, len(sizes), sizes)
 	e.T.Check(once == n && twice == 0 && dupIDs == 0,
 		"each of bravo's %d held connections was listed exactly once, by its own tuple (once %d, more than once %d, missing %d, ids listed twice %d)", n, once, twice, n-len(matched), dupIDs)
-	e.T.Check(len(wrong) == 0, "every held connection says tcp, bravo, its pid, lane b, line b, revision %d, epoch %d and a point after the revision's (%d didn't: %s)",
+	e.T.Check(len(wrong) == 0, "every held connection has correct identified or unknown ownership, its required lane, revision %d, epoch %d and a point after the revision's (%d didn't: %s)",
 		loaded.N, s.Epoch(), len(wrong), strings.Join(upTo(wrong, 3), "; "))
+	stats, err := s.Stats(e.Ctx())
+	e.T.Require(err == nil, "stats while the paginated connections are held (%v)", err)
+	e.T.Check(int(stats.Unknown) == unknown && stats.LookupMisses == uint64(unknown), "unknown snapshot rows exactly match live admission and lookup misses (%d listed, %d live, %d misses)", unknown, stats.Unknown, stats.LookupMisses)
 	e.T.Check(len(stray) == 0, "no flow claims bravo or the hold server besides the held connections (%s)", strings.Join(upTo(stray, 3), "; "))
 	release.Open(e)
 	var r app.HoldResult

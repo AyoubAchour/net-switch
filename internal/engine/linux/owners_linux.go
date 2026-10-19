@@ -3,6 +3,7 @@
 package linux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -247,19 +248,39 @@ func (o *Owners) resolveUDP(ctx context.Context, r socketRow, unknown bool) (own
 }
 
 func processStart(pid uint32) (uint64, error) {
-	b, err := readKernelFile(fmt.Sprintf("/proc/%d/stat", pid), 4096)
+	storage := processBuffers.Get().(*[16 << 10]byte)
+	defer processBuffers.Put(storage)
+	b, err := readInto(fmt.Sprintf("/proc/%d/stat", pid), storage[:4096])
 	if err != nil {
 		return 0, err
 	}
-	end := strings.LastIndexByte(string(b), ')')
+	return parseProcessStart(b)
+}
+
+func parseProcessStart(b []byte) (uint64, error) {
+	end := bytes.LastIndexByte(b, ')')
 	if end < 0 {
 		return 0, errors.New("bad process stat")
 	}
-	f := strings.Fields(string(b[end+1:]))
-	if len(f) < 20 {
-		return 0, errors.New("short process stat")
+	// Field 22 is the twentieth token after the parenthesized comm. Parsing
+	// just this field avoids allocating a string and slice for every field.
+	position := end + 1
+	for field := 0; field < 20; field++ {
+		for position < len(b) && (b[position] == ' ' || b[position] == '\t' || b[position] == '\n') {
+			position++
+		}
+		start := position
+		for position < len(b) && b[position] != ' ' && b[position] != '\t' && b[position] != '\n' {
+			position++
+		}
+		if start == position {
+			return 0, errors.New("short process stat")
+		}
+		if field == 19 {
+			return strconv.ParseUint(string(b[start:position]), 10, 64)
+		}
 	}
-	return strconv.ParseUint(f[19], 10, 64)
+	return 0, errors.New("short process stat")
 }
 func processOwner(pid uint32) (platform.Owner, error) {
 	start, err := processStart(pid)
@@ -279,9 +300,14 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 	}
 	exe = strings.TrimSuffix(exe, " (deleted)")
 	id := apppath.Normalize(exe, apppath.Linux)
+	storage := processBuffers.Get().(*[16 << 10]byte)
 	// Flatpak's mount namespace metadata identifies apps that have identical
 	// /app/bin executable paths. It belongs to the holder, never to the socket.
-	if b, err := os.ReadFile(root + "root/.flatpak-info"); err == nil {
+	info, infoErr := readInto(root+"root/.flatpak-info", storage[:])
+	if errors.Is(infoErr, errKernelFileLimit) {
+		info, infoErr = os.ReadFile(root + "root/.flatpak-info")
+	}
+	if b, err := info, infoErr; err == nil {
 		section := ""
 		for _, line := range strings.Split(string(b), "\n") {
 			line = strings.TrimSpace(line)
@@ -298,10 +324,16 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 		if len(parts) > 3 {
 			id = "snap:" + parts[2]
 		}
-	} else if b, err := readKernelFile(root+"environ", 8<<20); err == nil {
-		for _, v := range strings.Split(string(b), "\x00") {
-			if strings.HasPrefix(v, "APPIMAGE=") {
-				name := filepath.Base(strings.TrimPrefix(v, "APPIMAGE="))
+	} else {
+		b, err := readInto(root+"environ", storage[:])
+		if errors.Is(err, errKernelFileLimit) {
+			b, err = readKernelFile(root+"environ", 8<<20)
+		}
+		for err == nil && len(b) > 0 {
+			v, rest, _ := bytes.Cut(b, []byte{0})
+			b = rest
+			if bytes.HasPrefix(v, []byte("APPIMAGE=")) {
+				name := filepath.Base(string(v[len("APPIMAGE="):]))
 				if strings.HasSuffix(strings.ToLower(name), ".appimage") {
 					id = "appimage:" + name[:len(name)-9]
 				}
@@ -309,6 +341,7 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 			}
 		}
 	}
+	processBuffers.Put(storage)
 	end, err := processStart(pid)
 	if err != nil || end != start {
 		return platform.Owner{}, os.ErrNotExist
@@ -334,13 +367,21 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 		return nil
 	}
 	o.cgroupStats[1].Add(1)
-	b, err := readKernelFile(filepath.Join(dir, "cgroup.procs"), 1<<20)
+	storage := processBuffers.Get().(*[16 << 10]byte)
+	defer processBuffers.Put(storage)
+	path := filepath.Join(dir, "cgroup.procs")
+	b, err := readInto(path, storage[:])
+	if errors.Is(err, errKernelFileLimit) {
+		b, err = readKernelFile(path, 1<<20)
+	}
 	if err != nil {
 		return nil
 	}
-	var pids []uint32
-	for _, s := range strings.Fields(string(b)) {
-		v, e := strconv.ParseUint(s, 10, 32)
+	pids := make([]uint32, 0, 32)
+	for len(b) > 0 {
+		line, rest, _ := bytes.Cut(b, []byte{'\n'})
+		b = rest
+		v, e := strconv.ParseUint(string(bytes.TrimSpace(line)), 10, 32)
 		if e == nil {
 			pids = append(pids, uint32(v))
 		}
