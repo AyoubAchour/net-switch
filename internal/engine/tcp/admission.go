@@ -43,7 +43,6 @@ func (f *Forwarder) finishClose(ep *gtcp.Endpoint) {
 	f.mu.Unlock()
 	if c != nil && c.ep == ep {
 		c.releaseAdmission()
-		return
 	}
 	if p != nil && closedState(ep) {
 		p.ticket.Retire()

@@ -2,6 +2,7 @@ package stack_test
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
@@ -31,15 +32,17 @@ func TestCloseRetainedCap(t *testing.T) {
 			// must close silently after its FIN, even if no final ACK ever comes.
 			if simultaneous {
 				p.current.conn.CloseWrite()
-				p.wait(header.TCPFlagFin)
+				h := p.wait(header.TCPFlagFin)
 				p.inject(p.packet(p.seq, p.ack, header.TCPFlagFin|header.TCPFlagAck, nil))
 				p.seq++
+				p.ack = h.SequenceNumber() + 1
 			} else {
 				p.inject(p.packet(p.seq, p.ack, header.TCPFlagFin|header.TCPFlagAck, nil))
 				p.seq++
 				p.receiveEOF()
 				p.current.conn.CloseWrite()
-				p.wait(header.TCPFlagFin)
+				h := p.wait(header.TCPFlagFin)
+				p.ack = h.SequenceNumber() + 1
 			}
 			closeSignal(t, p.current.sentEOF, "retained overflow CloseWrite")
 			if state := tcp.EndpointState(second.State()); state != tcp.StateClose {
@@ -48,6 +51,8 @@ func TestCloseRetainedCap(t *testing.T) {
 			if g := p.table.Stats(); g.TimeWait != 1 || g.TimeWaitSkipped != 1 || g.Flows != 0 {
 				t.Fatal("retained cap or live count wrong", g)
 			}
+			// A delayed final ACK to the silently removed endpoint stays silent.
+			p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 			p.inject(firstACK)
 			if simultaneous {
 				if state := tcp.EndpointState(first.State()); state != tcp.StateTimeWait {
@@ -78,7 +83,8 @@ func TestCloseHandshakeCap(t *testing.T) {
 			release := p.holdRelayCleanup()
 			defer release()
 			gate := make(chan struct{})
-			defer close(gate)
+			unblock := sync.OnceFunc(func() { close(gate) })
+			defer unblock()
 			p.setupGate, p.setupEntered = gate, make(chan struct{}, 1)
 			start := func() {
 				p.seq = 1000
@@ -89,6 +95,7 @@ func TestCloseHandshakeCap(t *testing.T) {
 				p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 				closeSignal(t, p.setupEntered, "open held before handshake completion")
 				remote := <-p.accepted
+				p.current = remote
 				deferClose := remote.conn
 				t.Cleanup(func() { deferClose.Close() })
 			}
@@ -101,9 +108,14 @@ func TestCloseHandshakeCap(t *testing.T) {
 					t.Fatal("handshake cap not filled", g)
 				}
 				p.inject(p.packet(p.seq, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
-				p.port++
+				if cap != 1 {
+					p.port++
+				}
 				start()
 			}
+			unblock()
+			release()
+			p.upload([]byte("replacement survived old setup"))
 			if p.table.Stats().Rejected != 0 || p.stack.Stats().TCP.ResetsSent.Value() != 0 || p.stack.Stats().TCP.ForwardMaxInFlightDrop.Value() != 0 {
 				t.Fatal("handshake gate retained a reset request", p.diagnostics())
 			}

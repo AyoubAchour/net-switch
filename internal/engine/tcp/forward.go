@@ -250,7 +250,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	ep.(*gtcp.Endpoint).SetTimeWaitPolicy(retain, ticket.EndTimeWait)
 	c := &connection{id: id, ep: ep, ticket: ticket, last: time.Now(), done: make(chan struct{})}
 	f.mu.Lock()
-	if f.ctx.Err() != nil {
+	if f.ctx.Err() != nil || closedState(ep) {
 		f.mu.Unlock()
 		complete(false)
 		abort()
