@@ -3,19 +3,24 @@
 package wintun
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"golang.org/x/sys/windows"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 )
 
 func testPacket() []byte {
@@ -147,14 +152,204 @@ func TestRingDisconnectedHandleIsNotClosedTwice(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(reused)
-	r := &rings{device: reused, send: ring{make([]byte, MinCapacity+ringHeader+ringSlack), MinCapacity}}
-	r.pin.Pin(&r.send.bytes[0])
+	r, err := allocateRings(MinCapacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.device, r.registered = reused, true
 	r.send.store(4, ^uint32(0))
 	if err := r.close(); err != nil {
 		t.Fatal(err)
 	}
 	if result, err := windows.WaitForSingleObject(reused, 0); err != nil || result != uint32(windows.WAIT_TIMEOUT) {
 		t.Fatalf("closed a reused handle: %d %v", result, err)
+	}
+}
+
+func TestRingWriteSideRemovalWaitsForTail(t *testing.T) {
+	r, err := allocateRings(MinCapacity)
+	must(t, err)
+	reused, err := windows.CreateEvent(nil, 0, 0, nil)
+	must(t, err)
+	defer windows.CloseHandle(reused)
+	r.device, r.registered = reused, true
+	r.receive.store(0, ^uint32(0))
+	send := r.send
+	done := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		send.store(4, ^uint32(0))
+		close(done)
+	}()
+	must(t, r.close())
+	<-done
+	must(t, r.close())
+	must(t, windows.SetEvent(reused))
+}
+
+func TestRingFailedCloseSurvivesGC(t *testing.T) {
+	for _, writeDisconnected := range []bool{false, true} {
+		t.Run(fmt.Sprint(writeDisconnected), func(t *testing.T) {
+			r, err := allocateRings(MinCapacity)
+			must(t, err)
+			address := r.allocation
+			// There is no driver in this unit test; release the deliberately
+			// retained pages ourselves after checking their post-GC lifetime.
+			defer windows.VirtualFree(address, 0, windows.MEM_RELEASE)
+			r.device, r.registered = windows.Handle(123), true
+			if writeDisconnected {
+				r.receive.store(0, ^uint32(0))
+			}
+			calls := 0
+			closeHandle := func(windows.Handle) error { calls++; return windows.ERROR_INVALID_HANDLE }
+			err = r.closeWith(closeHandle)
+			if !errors.Is(err, errRingsRetained) || (!writeDisconnected && !errors.Is(err, windows.ERROR_INVALID_HANDLE)) {
+				t.Fatal(err)
+			}
+			if r.device != 0 {
+				t.Fatal("retained stale handle")
+			}
+			must(t, r.closeWith(closeHandle))
+			want := 1
+			if writeDisconnected {
+				want = 0
+			}
+			if calls != want {
+				t.Fatalf("CloseHandle calls: %d, want %d", calls, want)
+			}
+			r = nil
+			runtime.GC()
+			runtime.GC()
+			var info windows.MemoryBasicInformation
+			must(t, windows.VirtualQuery(address, &info, unsafe.Sizeof(info)))
+			if info.State != windows.MEM_COMMIT {
+				t.Fatal("freed memory before driver termination")
+			}
+		})
+	}
+}
+
+func TestRingDropsPlaceholdersAndOversizedPackets(t *testing.T) {
+	for _, kind := range []string{"placeholder", "oversized", "nonzero damage"} {
+		t.Run(kind, func(t *testing.T) {
+			r, err := allocateRings(MinCapacity)
+			must(t, err)
+			defer r.close()
+			first := make([]byte, 20)
+			if kind == "oversized" {
+				first = packet.IP(netip.MustParseAddr("198.19.240.1"), netip.MustParseAddr("198.19.240.2"), 253, make([]byte, 10000))
+			} else if kind == "nonzero damage" {
+				first[0] = 0x45
+			}
+			next := aligned(uint32(len(first)) + 4)
+			binary.LittleEndian.PutUint32(r.send.data(), uint32(len(first)))
+			copy(r.send.data()[4:], first)
+			p := testPacket()
+			binary.LittleEndian.PutUint32(r.send.data()[next:], uint32(len(p)))
+			copy(r.send.data()[next+4:], p)
+			r.send.store(4, next+aligned(uint32(len(p))+4))
+			buf, sizes := make([]byte, 9000), make([]int, 1)
+			n, err := r.read([][]byte{buf}, sizes)
+			if kind == "nonzero damage" {
+				if n != 0 || !errors.Is(err, ErrCorrupt) {
+					t.Fatalf("damage escaped: %d %v", n, err)
+				}
+				return
+			}
+			if n != 1 || err != nil || !bytes.Equal(buf[:sizes[0]], p) || r.head != r.send.load(4) {
+				t.Fatalf("reader stuck after %s: %d %v", kind, n, err)
+			}
+			if (kind == "placeholder" && r.placeholders != 1) || (kind == "oversized" && r.oversized != 1) {
+				t.Fatal("drop was not counted")
+			}
+		})
+	}
+}
+
+func TestRingFragmentHeaderChecksum(t *testing.T) {
+	p := testPacket()
+	p[6] = 0x20
+	p[10], p[11] = 0, 0
+	binary.BigEndian.PutUint16(p[10:12], ^checksum.Checksum(p[:20], 0))
+	if !validIP(p) {
+		t.Fatal("valid fragment rejected")
+	}
+	p[8] ^= 1
+	if validIP(p) {
+		t.Fatal("bad fragment header accepted")
+	}
+}
+
+func TestRingChecksumHandoff(t *testing.T) {
+	s := &Session{}
+	for _, pair := range [][2]string{{"198.18.0.1:1234", "198.18.0.2:4321"}, {"[fd00::1]:1234", "[fd00::2]:4321"}} {
+		p := packet.UDP(netip.MustParseAddrPort(pair[0]), netip.MustParseAddrPort(pair[1]), []byte("checksum"))
+		if !validIP(p) || !s.RXChecksumVerified(p) {
+			t.Fatal("verified UDP lost checksum metadata")
+		}
+		p[len(p)-1] ^= 1
+		if validIP(p) {
+			t.Fatal("damaged UDP accepted")
+		}
+		p[len(p)-1] ^= 1
+		if p[0]>>4 == 4 {
+			p[6] = 0x20
+		} else {
+			p[6] = 44
+		}
+		if s.RXChecksumVerified(p) {
+			t.Fatal("fragment bypasses stack checksum verification")
+		}
+	}
+	if s.RXChecksumVerified(testPacket()) {
+		t.Fatal("unverified protocol bypasses stack checks")
+	}
+}
+
+func TestRingReopenBackoff(t *testing.T) {
+	stop := make(chan struct{})
+	calls := 0
+	start := time.Now()
+	want := &rings{}
+	r, err := reopenRings(stop, func() (*rings, error) {
+		calls++
+		if calls < 3 {
+			return nil, windows.ERROR_ALREADY_INITIALIZED
+		}
+		return want, nil
+	})
+	if r != want || err != nil || calls != 3 || time.Since(start) < 30*time.Millisecond {
+		t.Fatalf("retry: %d %v", calls, err)
+	}
+	close(stop)
+	_, err = reopenRings(stop, func() (*rings, error) { return nil, windows.ERROR_ALREADY_INITIALIZED })
+	if !errors.Is(err, net.ErrClosed) {
+		t.Fatal(err)
+	}
+	if got := windows.STATUS_ALREADY_INITIALIZED.Errno(); got != windows.ERROR_ALREADY_INITIALIZED {
+		t.Fatalf("unexpected NTSTATUS mapping: %v", got)
+	}
+}
+
+func TestRingDLLLoadRetriesFailure(t *testing.T) {
+	var cache libraryCache
+	calls := 0
+	load := func() (*library, error) {
+		calls++
+		if calls == 1 {
+			return nil, windows.ERROR_FILE_NOT_FOUND
+		}
+		return &library{}, nil
+	}
+	if _, err := cache.get(load); err == nil {
+		t.Fatal("missing DLL accepted")
+	}
+	a, err := cache.get(load)
+	must(t, err)
+	b, err := cache.get(load)
+	must(t, err)
+	if a != b || calls != 2 {
+		t.Fatal("did not cache only success")
 	}
 }
 

@@ -60,6 +60,9 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 			}
 			for i := 0; i < n; i++ {
 				p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(bytes.Clone(bufs[i][:sizes[i]]))})
+				if s, ok := session.(*Session); ok {
+					p.RXChecksumValidated = s.RXChecksumVerified(bufs[i][:sizes[i]])
+				}
 				link.InjectInbound(ipv4.ProtocolNumber, p)
 				p.DecRef()
 			}
@@ -300,7 +303,13 @@ func shortLatency(t *testing.T, mode string) float64 {
 	return float64(samples[len(samples)*95/100]) / 1000
 }
 
-func median(values []float64) float64 { sort.Float64s(values); return values[len(values)/2] }
+func mean(values []float64) float64 {
+	var sum float64
+	for _, n := range values {
+		sum += n
+	}
+	return sum / float64(len(values))
+}
 
 // Run with the test binary's -test.cpuprofile flag. Keep the reference and our
 // session in separate profiles so their CPU costs can be compared directly.
@@ -325,9 +334,10 @@ func TestWintunProfile(t *testing.T) {
 func TestWintunPerformance(t *testing.T) {
 	requireRunner(t)
 	results := map[string]map[string][]float64{"dll": {}, "ours": {}}
-	// Alternate order across three independent trials to expose warm-up or
-	// runner noise. Compare medians; retain every raw measurement in the log.
-	for trial := 0; trial < 3; trial++ {
+	// Balance order across six pairs, then pool all samples. Hosted runners
+	// vary by about 30%; no individual pair is a 10% regression gate.
+	const pairs = 6
+	for trial := 0; trial < pairs; trial++ {
 		modes := []string{"dll", "ours"}
 		if trial%2 != 0 {
 			modes = []string{"ours", "dll"}
@@ -341,8 +351,20 @@ func TestWintunPerformance(t *testing.T) {
 				}
 				measure("udp_p95_us", shortLatency(t, mode))
 				for _, streams := range []int{1, 8} {
+					var before Stats
+					if s, ok := f.io.(*Session); ok {
+						before = s.Stats()
+					}
 					value, err := udpTransfer(t, streams)
 					must(t, err)
+					if s, ok := f.io.(*Session); ok {
+						after := s.Stats()
+						packets, wakes := after.WrittenPackets-before.WrittenPackets, after.Wakeups-before.Wakeups
+						if wakes == 0 {
+							t.Fatal("UDP comparison wrote no batches")
+						}
+						report(t, map[string]any{"test": "udp_batching", "arch": runtime.GOARCH, "trial": trial, "streams": streams, "written_packets": packets, "wakeups": wakes, "packets_per_wakeup": float64(packets) / float64(wakes)})
+					}
 					if fault := f.fault(); fault != nil {
 						if mode != "dll" || !errors.Is(fault, windows.ERROR_INVALID_DATA) {
 							t.Fatal(fault)
@@ -404,16 +426,16 @@ func TestWintunPerformance(t *testing.T) {
 	}
 	for metric, dllValues := range results["dll"] {
 		ownValues := results["ours"][metric]
-		if len(dllValues) != 3 || len(ownValues) != 3 {
+		if len(dllValues) != pairs || len(ownValues) != pairs {
 			t.Errorf("incomplete comparison: %s", metric)
 			continue
 		}
-		dll, own := median(dllValues), median(ownValues)
+		dll, own := mean(dllValues), mean(ownValues)
 		if dll == 0 {
-			t.Errorf("DLL failed most %s trials; no usable performance comparison", metric)
+			t.Errorf("DLL failed all %s trials; no usable performance comparison", metric)
 			continue
 		}
-		report(t, map[string]any{"test": "performance_median", "arch": runtime.GOARCH, "metric": metric, "dll": dll, "ours": own, "ratio": own / dll})
+		report(t, map[string]any{"test": "performance_pooled", "arch": runtime.GOARCH, "pairs": pairs, "metric": metric, "dll": dll, "ours": own, "ratio": own / dll, "dll_samples": dllValues, "ours_samples": ownValues})
 		if metric == "udp_p95_us" {
 			if own > dll*1.10 {
 				t.Errorf("latency regression: ours %.2f, DLL %.2f us", own, dll)
@@ -421,5 +443,37 @@ func TestWintunPerformance(t *testing.T) {
 		} else if own < dll*0.90 {
 			t.Errorf("throughput regression %s: ours %.2f, DLL %.2f MB/s", metric, own, dll)
 		}
+	}
+}
+
+func TestWintunBatchCost(t *testing.T) {
+	requireRunner(t)
+	for _, batch := range []int{1, 8, 64} {
+		r, err := allocateRings(MinCapacity)
+		must(t, err)
+		r.writeEvent, err = windows.CreateEvent(nil, 0, 0, nil)
+		must(t, err)
+		packets := make([][]byte, batch)
+		for i := range packets {
+			packets[i] = make([]byte, 1228)
+		}
+		const samples = 20000
+		var total time.Duration
+		for i := 0; i < samples; i++ {
+			r.receive.store(0, r.tail) // Simulate the driver's consumption outside timing.
+			start := ticks()
+			n, drops, err := r.write(packets)
+			total += elapsed(start)
+			if err != nil || n != batch || drops != 0 {
+				t.Fatalf("batch: %d %d %v", n, drops, err)
+			}
+			result, err := windows.WaitForSingleObject(r.writeEvent, 0)
+			must(t, err)
+			if result != windows.WAIT_OBJECT_0 {
+				t.Fatal("missing batch wake")
+			}
+		}
+		must(t, r.close())
+		report(t, map[string]any{"test": "batch_cost", "arch": runtime.GOARCH, "batch": batch, "packet_bytes": 1228, "samples": samples, "ns_per_batch": float64(total.Nanoseconds()) / samples, "ns_per_packet": float64(total.Nanoseconds()) / float64(samples*batch)})
 	}
 }

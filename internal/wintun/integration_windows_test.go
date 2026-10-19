@@ -11,11 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -592,13 +594,15 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 		case "alignment":
 			r.send.store(4, head+1)
 		case "body":
-			binary.LittleEndian.PutUint32(r.send.data()[head:], 20)
-			clear(r.send.data()[head+4 : head+24])
-			r.send.store(4, (head+24)&(r.send.capacity-1))
+			p := testPacket()
+			p[8] ^= 1 // Real nonzero damage: invalidate the IPv4 header checksum.
+			binary.LittleEndian.PutUint32(r.send.data()[head:], uint32(len(p)))
+			copy(r.send.data()[head+4:], p)
+			r.send.store(4, (head+aligned(uint32(len(p))+4))&(r.send.capacity-1))
 		}
 		windows.SetEvent(r.readEvent)
 		s.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		buf := make([]byte, MaxPacketSize)
 		for {
 			n, err := s.ReadPacket(ctx, buf)
@@ -763,6 +767,10 @@ func TestWintunLifetime(t *testing.T) {
 
 func TestWintunAdapterRemoval(t *testing.T) {
 	requireRunner(t)
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(previous)
 	owner := newAdapter(t, MinCapacity)
 	borrowed, err := Open(owner.config)
 	must(t, err)
@@ -775,6 +783,7 @@ func TestWintunAdapterRemoval(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
+	var reads, writes atomic.Uint64
 	go func() {
 		buf := make([]byte, MaxPacketSize)
 		for {
@@ -782,22 +791,56 @@ func TestWintunAdapterRemoval(t *testing.T) {
 				done <- err
 				return
 			}
+			reads.Add(1)
 		}
 	}()
-	// The owner removes an adapter while another reference has a blocked read.
-	// This exercises the driver's real PnP disconnection path.
+	writerDone := make(chan error, 1)
+	go func() {
+		packets := [][]byte{testPacket()}
+		for ctx.Err() == nil {
+			_, err := s.WriteBatch(packets)
+			if err != nil && !errors.Is(err, ErrDisconnected) {
+				writerDone <- err
+				return
+			}
+			writes.Add(1)
+			runtime.Gosched()
+		}
+		writerDone <- ctx.Err()
+	}()
+	c := udpSocket(t)
+	defer c.Close()
+	for reads.Load() < 10 || writes.Load() < 10 {
+		if ctx.Err() != nil {
+			t.Fatal("reader/writer did not become busy")
+		}
+		c.Write([]byte("removal traffic"))
+		time.Sleep(time.Millisecond)
+	}
+	// Real PnP removal while both directions are active, including write-side
+	// observation of Receive.Head before the final Send.Tail marker.
 	must(t, owner.Close())
 	select {
 	case err := <-done:
-		if err == nil || errors.Is(err, context.DeadlineExceeded) {
+		if !errors.Is(err, ErrAdapterRemoved) {
 			t.Fatalf("removal did not wake reader: %v", err)
 		}
 	case <-ctx.Done():
 		t.Fatal("adapter removal left a blocked reader")
 	}
+	if err := <-writerDone; !errors.Is(err, ErrAdapterRemoved) {
+		t.Fatalf("writer removal: %v", err)
+	}
 	must(t, s.Close())
+	runtime.GC()
+	if s.Stats().RecoveryFailures != 0 || s.Stats().Recoveries != 0 {
+		t.Fatalf("removal counted as recovery: %+v", s.Stats())
+	}
+	if strings.Count(logs.String(), "Wintun adapter removed") != 1 || strings.Contains(logs.String(), "level=ERROR") {
+		t.Fatalf("wrong removal logging: %s", logs.String())
+	}
 	assertPnPAbsent(t, owner.InstanceID())
-	report(t, map[string]any{"test": "adapter_removal", "arch": runtime.GOARCH, "stats": s.Stats()})
+	report(t, map[string]any{"test": "adapter_removal", "arch": runtime.GOARCH, "stats": s.Stats(), "read_calls": reads.Load(), "write_calls": writes.Load(), "removal_logs": 1})
 }
 
 func TestWintunCrashChild(t *testing.T) {
@@ -845,9 +888,131 @@ func TestWintunCrash(t *testing.T) {
 	if child.Wait() == nil {
 		t.Fatal("child did not crash")
 	}
-	must(t, RecoverAfterCrash(Config{Name: "NsRingCrashCI", GUID: guid.String(), Capacity: MinCapacity}))
+	if !pnpExists(t, instance) {
+		t.Fatal("crash left no phantom; cleanup was not exercised")
+	}
+	// A fresh process cannot have queued any DLL orphan sweep. Its cleanup
+	// assertion must observe and remove exactly one phantom without loading DLL.
+	cleanup := exec.CommandContext(ctx, exe, "-test.run=^TestWintunCrashCleanupChild$", "-test.v")
+	cleanup.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	cleanup.Env = append(os.Environ(), "NETSWITCH_WINTUN_GUID="+guid.String(), "NETSWITCH_WINTUN_INSTANCE="+instance)
+	output, err := cleanup.CombinedOutput()
+	if err != nil || !bytes.Contains(output, []byte("PHANTOM_REMOVED_WITHOUT_DLL")) {
+		t.Fatalf("cleanup child: %v\n%s", err, output)
+	}
+	t.Logf("%s", output)
 	assertPnPAbsent(t, instance)
 	report(t, map[string]any{"test": "crash", "arch": runtime.GOARCH, "cleanup": "service-recovery hook", "non_present_devices": 0})
+}
+
+func TestWintunCrashCleanupChild(t *testing.T) {
+	requireRunner(t)
+	instance := os.Getenv("NETSWITCH_WINTUN_INSTANCE")
+	if instance == "" {
+		t.Skip("cleanup child only")
+	}
+	if dllCache.loaded != nil || !pnpExists(t, instance) {
+		t.Fatal("missing phantom or DLL already loaded")
+	}
+	config := Config{Name: "NsRingCrashCI", GUID: os.Getenv("NETSWITCH_WINTUN_GUID")}
+	removed, err := recoverAfterCrash(config)
+	must(t, err)
+	if removed != 1 {
+		t.Fatalf("our hook removed %d devices", removed)
+	}
+	assertPnPAbsent(t, instance)
+	removed, err = recoverAfterCrash(config)
+	must(t, err)
+	if removed != 0 || dllCache.loaded != nil {
+		t.Fatal("clean-system cleanup did work or loaded DLL")
+	}
+	fmt.Println("PHANTOM_REMOVED_WITHOUT_DLL")
+}
+
+func TestWintunRecoveryLeak(t *testing.T) {
+	requireRunner(t)
+	a := newAdapter(t, 0)
+	s, err := a.StartSession()
+	must(t, err)
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, MaxPacketSize)
+		for ctx.Err() == nil {
+			if _, err := s.ReadPacket(ctx, buf); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { cancel(); <-done }()
+	recoverOne := func() {
+		// A native read wait holds mu.RLock; wake it before taking the writer lock.
+		windows.SetEvent(s.wake)
+		s.mu.Lock()
+		r := s.rings
+		binary.LittleEndian.PutUint32(r.send.data()[r.head:], MaxPacketSize+1)
+		r.send.store(4, (r.head+8)&(r.send.capacity-1))
+		windows.SetEvent(r.readEvent)
+		windows.ResetEvent(s.wake)
+		s.mu.Unlock()
+		deadline := time.NewTimer(3 * time.Second)
+		defer deadline.Stop()
+		for {
+			select {
+			case e := <-s.Events():
+				if e.Kind == "recovered" {
+					return
+				}
+				if e.Kind == "failed" {
+					t.Fatal(e.Err)
+				}
+			case <-deadline.C:
+				t.Fatal("injected recovery did not complete")
+			}
+		}
+	}
+	for i := 0; i < 8; i++ {
+		recoverOne()
+	}
+	debug.FreeOSMemory()
+	beforeHandles, beforeBytes := processUsage(t)
+	beforeDevices := pnpDevices(t)
+	start := time.Now()
+	for i := 0; i < 32; i++ {
+		recoverOne()
+	}
+	debug.FreeOSMemory()
+	afterHandles, afterBytes := processUsage(t)
+	afterDevices := pnpDevices(t)
+	if afterHandles > beforeHandles+2 || afterBytes > beforeBytes+16<<20 || !slices.Equal(beforeDevices, afterDevices) {
+		t.Fatalf("recovery leak: handles %d -> %d, bytes %d -> %d, devices %v -> %v", beforeHandles, afterHandles, beforeBytes, afterBytes, beforeDevices, afterDevices)
+	}
+	if s.Stats().Recoveries != 40 || s.Stats().RecoveryFailures != 0 || time.Since(start) < 7*time.Second {
+		t.Fatalf("missing recoveries or backoff: %+v in %v", s.Stats(), time.Since(start))
+	}
+	report(t, map[string]any{"test": "recovery_leak", "arch": runtime.GOARCH, "measured_recoveries": 32, "seconds": time.Since(start).Seconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes, "pnp_before": beforeDevices, "pnp_after": afterDevices})
+}
+
+func pnpDevices(t *testing.T) []string {
+	t.Helper()
+	set, err := windows.SetupDiGetClassDevsEx(&netClass, "SWD\\Wintun", 0, 0, 0, "")
+	must(t, err)
+	defer set.Close()
+	var ids []string
+	for i := 0; ; i++ {
+		dev, err := set.EnumDeviceInfo(i)
+		if errors.Is(err, windows.ERROR_NO_MORE_ITEMS) {
+			break
+		}
+		must(t, err)
+		id, err := set.DeviceInstanceID(dev)
+		must(t, err)
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 func handleTypes(t *testing.T) map[uint32]int {
@@ -867,4 +1032,3 @@ func handleTypes(t *testing.T) map[uint32]int {
 	}
 	return types
 }
-

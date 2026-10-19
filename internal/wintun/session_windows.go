@@ -4,6 +4,7 @@ package wintun
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -36,6 +37,8 @@ type Stats struct {
 	Recoveries       uint64
 	RecoveryFailures uint64
 	Wakeups          uint64
+	Placeholders     uint64
+	OversizedPackets uint64
 }
 
 // Events are advisory and bounded. Stats remain authoritative if a caller
@@ -62,6 +65,7 @@ type Session struct {
 	read, written, dropped            atomic.Uint64
 	corruptions, recoveries, failures atomic.Uint64
 	wakeups                           atomic.Uint64
+	placeholders, oversized           atomic.Uint64
 }
 
 func (a *Adapter) StartSession() (*Session, error) {
@@ -98,14 +102,38 @@ func (a *Adapter) StartSession() (*Session, error) {
 func (s *Session) MTU() int             { return s.adapter.MTU() }
 func (s *Session) LUID() uint64         { return s.adapter.LUID() }
 func (s *Session) Events() <-chan Event { return s.events }
+
+// RXChecksumVerified is called only for an unmodified packet returned by Read.
+// validIP already checked TCP/UDP and the IPv4 header. Keep stack verification
+// for fragments, ICMP, and all other protocols, including unknown extensions.
+func (*Session) RXChecksumVerified(p []byte) bool {
+	if len(p) >= 20 && p[0]>>4 == 4 {
+		return binary.BigEndian.Uint16(p[6:8])&0x3fff == 0 && (p[9] == 6 || p[9] == 17)
+	}
+	if len(p) >= 40 && p[0]>>4 == 6 {
+		protocol, body := p[6], p[40:]
+		for protocol == 0 || protocol == 43 || protocol == 60 {
+			if len(body) < 8 {
+				return false
+			}
+			n := (int(body[1]) + 1) * 8
+			if n > len(body) {
+				return false
+			}
+			protocol, body = body[0], body[n:]
+		}
+		return protocol == 6 || protocol == 17
+	}
+	return false
+}
 func (s *Session) Stats() Stats {
-	return Stats{s.read.Load(), s.written.Load(), s.dropped.Load(), s.corruptions.Load(), s.recoveries.Load(), s.failures.Load(), s.wakeups.Load()}
+	return Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load()}
 }
 
 // fail is called with mu held. Recovery runs elsewhere so neither a full ring
 // nor a damaged ring can make a stack writer wait for PnP or driver teardown.
 func (s *Session) fail(err error) {
-	if s.closed.Load() || !s.recovering.CompareAndSwap(false, true) {
+	if s.closed.Load() || s.err != nil || !s.recovering.CompareAndSwap(false, true) {
 		return
 	}
 	if errors.Is(err, ErrCorrupt) {
@@ -126,6 +154,8 @@ func (s *Session) maintain() {
 	defer close(s.stopped)
 	defer close(s.events)
 	var lastLog time.Time
+	var lastRecovery time.Time
+	var delay time.Duration
 	for {
 		select {
 		case <-s.stop:
@@ -143,22 +173,37 @@ func (s *Session) maintain() {
 			s.readMu.Unlock()
 			return
 		case cause := <-s.repair:
+			if errors.Is(cause, ErrCorrupt) {
+				if time.Since(lastRecovery) < 10*time.Second {
+					delay = min(max(delay*2, 10*time.Millisecond), 250*time.Millisecond)
+				} else {
+					delay = 0
+				}
+				if err := waitRetry(s.stop, delay); err != nil {
+					continue
+				}
+				lastRecovery = time.Now()
+			}
 			s.mu.Lock()
 			if s.closed.Load() {
 				s.mu.Unlock()
 				continue
 			}
-			if time.Since(lastLog) >= 10*time.Second {
-				slog.Error("Wintun session stopped; reopening rings", "adapter", s.adapter.config.Name, "error", cause, "corruptions", s.corruptions.Load())
-				lastLog = time.Now()
-			}
-			s.event("recovering", cause)
 			err := s.rings.close()
-			if err == nil {
-				s.rings = nil
-				s.rings, err = openRings(s.adapter.devicePath, s.adapter.config.Capacity)
+			s.rings = nil
+			removed := errors.Is(cause, ErrDisconnected)
+			if !removed && err == nil {
+				s.event("recovering", cause)
+				s.rings, err = reopenRings(s.stop, func() (*rings, error) {
+					return openRings(s.adapter.devicePath, s.adapter.config.Capacity)
+				})
+				removed = errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) || errors.Is(err, windows.ERROR_DEVICE_NOT_CONNECTED)
 			}
-			if err != nil {
+			if removed {
+				s.err = errors.Join(ErrAdapterRemoved, err)
+				s.event("removed", s.err)
+				slog.Info("Wintun adapter removed", "adapter", s.adapter.config.Name, "error", err)
+			} else if err != nil {
 				s.failures.Add(1)
 				s.err = fmt.Errorf("Wintun session recovery after %v: %w", cause, err)
 				s.event("failed", s.err)
@@ -166,12 +211,41 @@ func (s *Session) maintain() {
 			} else {
 				s.recoveries.Add(1)
 				s.event("recovered", nil)
+				if time.Since(lastLog) >= 10*time.Second {
+					slog.Warn("Wintun ring corruption recovered", "adapter", s.adapter.config.Name, "error", cause, "corruptions", s.corruptions.Load())
+					lastLog = time.Now()
+				}
 			}
 			s.recovering.Store(false)
 			windows.ResetEvent(s.wake)
 			close(s.changed)
 			s.changed = make(chan struct{})
 			s.mu.Unlock()
+		}
+	}
+}
+
+func waitRetry(stop <-chan struct{}, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-stop:
+		return net.ErrClosed
+	case <-timer.C:
+		return nil
+	}
+}
+
+// 0.14.1 returns STATUS_ALREADY_INITIALIZED while removal owns RegistrationLock.
+// Retry only that transient result, with a bound and interruptible backoff.
+func reopenRings(stop <-chan struct{}, open func() (*rings, error)) (*rings, error) {
+	for attempt := 0; ; attempt++ {
+		r, err := open()
+		if !errors.Is(err, windows.ERROR_ALREADY_INITIALIZED) || attempt == 6 {
+			return r, err
+		}
+		if err := waitRetry(stop, (10*time.Millisecond)<<attempt); err != nil {
+			return nil, err
 		}
 	}
 }
@@ -212,6 +286,9 @@ func (s *Session) WriteBatch(packets [][]byte) (int, error) {
 	}
 	if err != nil {
 		s.fail(err)
+	}
+	if errors.Is(err, ErrDisconnected) {
+		err = ErrAdapterRemoved
 	}
 	return n, err
 }
@@ -266,7 +343,12 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 			}
 			continue
 		}
-		n, err := s.rings.read(buffers, sizes)
+		r := s.rings
+		placeholders, oversized := r.placeholders, r.oversized
+		n, err := r.read(buffers, sizes)
+		s.placeholders.Add(r.placeholders - placeholders)
+		s.oversized.Add(r.oversized - oversized)
+		s.dropped.Add(r.placeholders - placeholders + r.oversized - oversized)
 		if errors.Is(err, ErrCorrupt) || errors.Is(err, ErrDisconnected) {
 			s.fail(err)
 			// Valid packets preceding the damaged entry remain ordered.

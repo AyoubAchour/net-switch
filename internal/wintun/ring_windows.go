@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
-	"runtime"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
@@ -28,6 +28,8 @@ const (
 
 var ErrCorrupt = errors.New("Wintun ring corruption")
 var ErrDisconnected = errors.New("Wintun adapter disconnected")
+var ErrAdapterRemoved = errors.New("Wintun adapter removed")
+var errRingsRetained = errors.New("Wintun teardown incomplete; ring memory retained until process exit")
 
 func corrupt(r ring, direction, reason string, head, tail uint32) error {
 	var size uint32
@@ -71,13 +73,15 @@ func (r ring) store(offset int, n uint32) { atomic.StoreUint32(r.word(offset), n
 func (r ring) data() []byte               { return r.bytes[ringHeader:] }
 
 // Go atomics are sequentially consistent (stronger than the ABI's acquire and
-// release requirements), including on ARM64. The backing arrays are pinned
-// until CloseHandle has synchronously unregistered the driver's MDLs.
+// release requirements), including on ARM64. Native memory has no Go finalizer:
+// an incomplete driver teardown must retain it even after the session is gone.
 type rings struct {
 	send, receive                 ring
-	pin                           runtime.Pinner
+	allocation                    uintptr
+	registered, closed            bool
 	device, readEvent, writeEvent windows.Handle
 	head, tail                    uint32
+	placeholders, oversized       uint64 // protected by the session's read lock
 }
 
 type ringRegistration struct {
@@ -87,21 +91,32 @@ type ringRegistration struct {
 }
 type registration struct{ Send, Receive ringRegistration }
 
-func openRings(path string, capacity uint32) (_ *rings, err error) {
+func allocateRings(capacity uint32) (*rings, error) {
 	if !validCapacity(capacity) {
 		return nil, fmt.Errorf("invalid ring capacity %d", capacity)
 	}
-	r := &rings{}
+	size := int(capacity) + ringHeader + ringSlack
+	address, err := windows.VirtualAlloc(0, uintptr(size*2), windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_READWRITE)
+	if err != nil {
+		return nil, fmt.Errorf("allocate Wintun rings: %w", err)
+	}
+	// VirtualAlloc returns an address outside the Go heap. Reinterpret that
+	// native address without Go pointer arithmetic (also valid under checkptr).
+	pointer := *(*unsafe.Pointer)(unsafe.Pointer(&address))
+	buffer := unsafe.Slice((*byte)(pointer), size*2)
+	return &rings{allocation: address, send: ring{buffer[:size], capacity}, receive: ring{buffer[size:], capacity}}, nil
+}
+
+func openRings(path string, capacity uint32) (_ *rings, err error) {
+	r, err := allocateRings(capacity)
+	if err != nil {
+		return nil, err
+	}
 	defer func() {
 		if err != nil {
 			err = errors.Join(err, r.close())
 		}
 	}()
-	size := int(capacity) + ringHeader + ringSlack
-	buffer := make([]byte, size*2)
-	r.pin.Pin(&buffer[0])
-	r.send = ring{buffer[:size], capacity}
-	r.receive = ring{buffer[size:], capacity}
 	r.readEvent, err = windows.CreateEvent(nil, 0, 0, nil)
 	if err != nil {
 		return nil, err
@@ -120,42 +135,71 @@ func openRings(path string, capacity uint32) (_ *rings, err error) {
 		return nil, err
 	}
 	desc := registration{
-		Send:    ringRegistration{uint32(size), &r.send.bytes[0], r.readEvent},
-		Receive: ringRegistration{uint32(size), &r.receive.bytes[0], r.writeEvent},
+		Send:    ringRegistration{uint32(len(r.send.bytes)), &r.send.bytes[0], r.readEvent},
+		Receive: ringRegistration{uint32(len(r.receive.bytes)), &r.receive.bytes[0], r.writeEvent},
 	}
 	var returned uint32
 	err = windows.DeviceIoControl(r.device, registerRingsIOCTL, (*byte)(unsafe.Pointer(&desc)), uint32(unsafe.Sizeof(desc)), nil, 0, &returned, nil)
 	if err != nil {
 		return nil, fmt.Errorf("register Wintun rings: %w", err)
 	}
+	r.registered = true
 	return r, nil
 }
 
 func (r *rings) close() error {
+	return r.closeWith(windows.CloseHandle)
+}
+
+func (r *rings) awaitRelease() bool {
+	deadline := time.Now().Add(250 * time.Millisecond)
+	for r.send.load(4) != ^uint32(0) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return true
+}
+
+// closeWith is also the fault-injection boundary for failed CloseHandle calls.
+// A close attempt consumes ownership even on error. Never retry a handle value.
+func (r *rings) closeWith(closeHandle func(windows.Handle) error) error {
+	if r.closed {
+		return nil
+	}
+	r.closed = true
 	var err error
-	// The device must go first: this sets Disconnected and waits for the receive
-	// thread and outstanding NDIS packets before unlocking either ring.
-	if r.device != 0 {
-		// On PnP removal 0.14.1 closes the owner's handle from the kernel.
-		// Unregistration publishes MAXULONG only after all NDIS packets have
-		// returned and the receive thread has stopped. The numeric handle can
-		// already name an unrelated newly opened object: never close it again.
-		if r.send.load(4) != ^uint32(0) {
-			if e := windows.CloseHandle(r.device); e != nil {
-				if e != windows.ERROR_INVALID_HANDLE || r.send.load(4) != ^uint32(0) {
-					return e
-				}
+	h := r.device
+	r.device = 0
+	released := !r.registered || r.send.load(4) == ^uint32(0)
+	if r.registered && !released && r.receive.load(0) == ^uint32(0) {
+		// PnP closes the handle BEFORE Receive.Head, then publishes Send.Tail.
+		// Wait for that second marker. If it never comes, ownership is ambiguous:
+		// retain the allocation instead of closing a possibly recycled number.
+		released = r.awaitRelease()
+	} else if h != 0 && (!r.registered || !released) {
+		err = closeHandle(h)
+		if r.registered {
+			released = r.awaitRelease()
+			if released && errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+				err = nil // PnP completed our close and published its final marker.
 			}
 		}
-		r.device = 0
+	}
+	if !released {
+		err = errors.Join(err, errRingsRetained)
 	}
 	for _, h := range []*windows.Handle{&r.readEvent, &r.writeEvent} {
 		if *h != 0 {
-			err = errors.Join(err, windows.CloseHandle(*h))
+			err = errors.Join(err, closeHandle(*h))
 			*h = 0
 		}
 	}
-	r.pin.Unpin()
+	if released && r.allocation != 0 {
+		err = errors.Join(err, windows.VirtualFree(r.allocation, 0, windows.MEM_RELEASE))
+	}
+	r.allocation = 0 // Unreleased native pages intentionally live until exit.
 	r.send.bytes, r.receive.bytes = nil, nil
 	return err
 }
@@ -169,7 +213,8 @@ func (r *rings) read(buffers [][]byte, sizes []int) (int, error) {
 		return 0, corrupt(r.send, "Send", "head changed", r.send.load(0), tail)
 	}
 	head := r.head
-	for i := range buffers {
+	i := 0
+	for i < len(buffers) {
 		packet, next, err := entry(r.send.data(), r.send.capacity, head, tail)
 		if err == io.EOF {
 			return i, nil
@@ -178,20 +223,38 @@ func (r *rings) read(buffers [][]byte, sizes []int) (int, error) {
 			return i, corrupt(r.send, "Send", "invalid entry", head, tail)
 		}
 		if len(buffers[i]) < len(packet) {
-			return i, io.ErrShortBuffer
+			r.oversized++
+		} else {
+			copy(buffers[i], packet)
+			// Validate a private copy before releasing any driver memory.
+			p := buffers[i][:len(packet)]
+			if binary.LittleEndian.Uint32(r.send.data()[head:head+4]) != uint32(len(packet)) {
+				return i, corrupt(r.send, "Send", "packet length changed", head, tail)
+			}
+			if allZero(p) {
+				// NdisGetDataBuffer failure leaves a sized zero placeholder.
+				r.placeholders++
+			} else if !validIP(p) {
+				return i, corrupt(r.send, "Send", "packet failed validation", head, tail)
+			} else {
+				sizes[i] = len(packet)
+				i++
+			}
 		}
-		copy(buffers[i], packet)
-		// The driver's parallel-producer bug can overwrite occupied data.
-		// Check the private copy before publishing Head or delivering anything.
-		if binary.LittleEndian.Uint32(r.send.data()[head:head+4]) != uint32(len(packet)) || !validIP(buffers[i][:len(packet)]) {
-			return i, corrupt(r.send, "Send", "packet changed or failed validation", head, tail)
-		}
-		sizes[i] = len(packet)
 		head = next
 		r.head = head
 		r.send.store(0, head)
 	}
 	return len(buffers), nil
+}
+
+func allZero(p []byte) bool {
+	for _, b := range p {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // Checksums catch damaged bodies whose ring length still looks plausible.
@@ -213,11 +276,11 @@ func validIP(p []byte) bool {
 		if n < 20 || n > len(p) || int(binary.BigEndian.Uint16(p[2:4])) != len(p) {
 			return false
 		}
-		if binary.BigEndian.Uint16(p[6:8])&0x3fff != 0 {
-			return true
-		}
 		if checksum.Checksum(p[:n], 0) != 65535 {
 			return false
+		}
+		if binary.BigEndian.Uint16(p[6:8])&0x3fff != 0 {
+			return true
 		}
 		src = netip.AddrFrom4([4]byte(p[12:16]))
 		dst = netip.AddrFrom4([4]byte(p[16:20]))

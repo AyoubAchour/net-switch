@@ -15,7 +15,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -64,7 +63,29 @@ type library struct {
 	create, open, close, luid, deleteDriver uintptr
 }
 
-var loadLibrary = sync.OnceValues(func() (*library, error) {
+type libraryCache struct {
+	sync.Mutex
+	loaded *library
+}
+
+func (c *libraryCache) get(load func() (*library, error)) (*library, error) {
+	c.Lock()
+	defer c.Unlock()
+	if c.loaded != nil {
+		return c.loaded, nil
+	}
+	l, err := load()
+	if err == nil {
+		c.loaded = l
+	}
+	return l, err
+}
+
+var dllCache libraryCache
+
+func loadLibrary() (*library, error) { return dllCache.get(loadVerifiedLibrary) }
+
+func loadVerifiedLibrary() (*library, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -123,7 +144,7 @@ var loadLibrary = sync.OnceValues(func() (*library, error) {
 	// Do not unload: the DLL queues asynchronous orphan cleanup callbacks.
 	ok = true
 	return l, nil
-})
+}
 
 type Adapter struct {
 	mu                     sync.Mutex
@@ -268,32 +289,59 @@ func DeleteDriver() error {
 
 // RecoverAfterCrash is called by the service-manager cleanup action under the
 // engine's ownership-journal lock, after verifying that the owner has exited.
-// The signed DLL retains phantom PnP nodes after process death. Recreating the
-// journaled GUID and closing its owning DLL handle removes that node as well.
-// No driver is uninstalled, and a present adapter is never taken over.
+// Remove only a non-present Wintun device matching that GUID. This deliberately
+// does not load or call the DLL: its asynchronous orphan sweep is unscoped.
 func RecoverAfterCrash(config Config) error {
+	_, err := recoverAfterCrash(config)
+	return err
+}
+
+func recoverAfterCrash(config Config) (int, error) {
 	if config.GUID == "" || config.Name == "" {
-		return fmt.Errorf("crash recovery requires the journaled adapter name and GUID")
+		return 0, fmt.Errorf("crash recovery requires the journaled adapter name and GUID")
 	}
 	guid, err := windows.GUIDFromString(config.GUID)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if _, _, err := deviceForGUID(guid); err == nil {
-		return fmt.Errorf("refusing crash cleanup of present adapter %s", config.GUID)
-	} else if !errors.Is(err, windows.ERROR_NOT_FOUND) {
-		return err
+	set, err := windows.SetupDiGetClassDevsEx(&netClass, "SWD\\Wintun", 0, 0, 0, "")
+	if err != nil {
+		return 0, err
 	}
-	// The DLL can still be finishing asynchronous orphan cleanup. A bounded
-	// retry handles that transition; all attempts retain the same identity.
-	var last error
-	for i := 0; i < 5; i++ {
-		a, err := Create(config)
-		if err == nil {
-			return a.Close()
+	defer set.Close()
+	for i := 0; ; i++ {
+		dev, err := set.EnumDeviceInfo(i)
+		if errors.Is(err, windows.ERROR_NO_MORE_ITEMS) {
+			return 0, nil // A clean system requires no adapter creation or DLL load.
 		}
-		last = err
-		time.Sleep(100 * time.Millisecond)
+		if err != nil {
+			return 0, err
+		}
+		h, err := set.OpenDevRegKey(dev, windows.DICS_FLAG_GLOBAL, 0, windows.DIREG_DRV, windows.KEY_QUERY_VALUE)
+		if err != nil {
+			continue
+		}
+		key := registry.Key(h)
+		id, _, readErr := key.GetStringValue("NetCfgInstanceId")
+		key.Close()
+		if readErr != nil || !strings.EqualFold(id, guid.String()) {
+			continue
+		}
+		var status, problem uint32
+		err = windows.CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0)
+		if err == nil {
+			return 0, fmt.Errorf("refusing crash cleanup of present adapter %s", config.GUID)
+		}
+		if !errors.Is(err, windows.CR_NO_SUCH_DEVNODE) {
+			return 0, fmt.Errorf("check crashed Wintun device: %w", err)
+		}
+		params := windows.RemoveDeviceParams{ClassInstallHeader: *windows.MakeClassInstallHeader(windows.DIF_REMOVE), Scope: windows.DI_REMOVEDEVICE_GLOBAL}
+		if err := set.SetClassInstallParams(dev, &params.ClassInstallHeader, uint32(unsafe.Sizeof(params))); err != nil {
+			return 0, err
+		}
+		if err := set.CallClassInstaller(windows.DIF_REMOVE, dev); err != nil {
+			return 0, fmt.Errorf("remove crashed Wintun device: %w", err)
+		}
+		return 1, nil
 	}
-	return fmt.Errorf("recover crashed Wintun adapter: %w", last)
 }
