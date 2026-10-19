@@ -49,6 +49,7 @@ type Gauges struct {
 	UDPReadBytes                                                                                      int64
 	DoubleReleases                                                                                    uint64
 	TimeWait                                                                                          int
+	TimeWaitSkipped                                                                                   uint64
 	EventsDropped                                                                                     uint64
 	Flows, Handshakes, UDP, Unknown, UnknownUDP                                                       int
 	TCPBytes, PendingBytes, SnapshotBytes                                                             int64
@@ -72,6 +73,7 @@ type Table struct {
 	snapshots            map[uint64]*snapshot
 	nextSnapshot         uint64
 	rejectSecond         int64
+	timeWaitLogSecond    int64
 	rejectTotal          int
 	rejectApps           map[string]int
 	events               chan flowapi.Event
@@ -166,7 +168,7 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 		t.gauges.Rejected++
 		return nil, policy.ErrIPv6
 	}
-	if t.gauges.Flows >= t.limits.Flows || (protocol == "udp" && t.gauges.UDP >= t.limits.UDP) || (protocol == "tcp" && (t.gauges.Handshakes >= t.limits.Handshakes || t.gauges.Flows-t.gauges.UDP >= t.limits.TimeWait)) {
+	if t.gauges.Flows >= t.limits.Flows || (protocol == "udp" && t.gauges.UDP >= t.limits.UDP) || (protocol == "tcp" && t.gauges.Handshakes >= t.limits.Handshakes) {
 		t.gauges.Rejected++
 		return nil, ErrBudget
 	}
@@ -186,24 +188,24 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 }
 
 type ticket struct {
-	accountMu                   sync.RWMutex
-	accountClosed               bool
-	up, down                    atomic.Uint64
-	timeWait                    bool
-	lineAddresses               []netip.Addr
-	table                       *Table
-	record                      Record
-	resolved, closed, handshake bool
-	tcpBytes                    int64
-	receive, send               int
-	cancel                      context.CancelFunc
+	accountMu                           sync.RWMutex
+	accountClosed                       bool
+	up, down                            atomic.Uint64
+	retired, timeWait, timeWaitReserved bool
+	lineAddresses                       []netip.Addr
+	table                               *Table
+	record                              Record
+	resolved, closed, handshake         bool
+	tcpBytes                            int64
+	receive, send                       int
+	cancel                              context.CancelFunc
 }
 
 func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	t := f.table
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if f.closed || f.record.Closing || t.policy == nil {
+	if f.closed || f.retired || f.record.Closing || t.policy == nil {
 		return flowapi.Decision{}, ErrStopped
 	}
 	if f.resolved {
@@ -256,7 +258,7 @@ func (f *ticket) Grow(receive, send int) bool {
 	t := f.table
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if f.closed || !f.resolved || f.record.Protocol != "tcp" || receive < f.receive || send < f.send || receive > 8<<20 || send > 6<<20 {
+	if f.closed || f.retired || !f.resolved || f.record.Protocol != "tcp" || receive < f.receive || send < f.send || receive > 8<<20 || send > 6<<20 {
 		return false
 	}
 	delta := int64(receive-f.receive) + int64(send-f.send)
@@ -284,15 +286,88 @@ func (f *ticket) Shrink(receive, send int) {
 	t.gauges.TCPBytes -= delta
 }
 
-// TIME_WAIT retains its admitted flow slot and owner quota until the endpoint
-// is actually removed. Capacity is never obtained by evicting a live endpoint.
-func (f *ticket) TimeWait() {
+// TimeWait exchanges the live-flow reservation for a separate endpoint slot.
+// Called at the actual TCP transition, never by a delayed monitor sweep.
+// False means close this endpoint without a reset; it cannot reject a new flow.
+func (f *ticket) TimeWait() bool {
 	t := f.table
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if !f.closed && !f.timeWait {
-		f.timeWait = true
-		t.gauges.TimeWait++
+	if f.closed || f.timeWait {
+		return f.timeWaitReserved
+	}
+	f.timeWait = true
+	f.retireLocked()
+	if t.gauges.TimeWait >= t.limits.TimeWait {
+		t.gauges.TimeWaitSkipped++
+		second := t.now().Unix()
+		if t.gauges.TimeWaitSkipped == 1 || second != t.timeWaitLogSecond {
+			t.timeWaitLogSecond = second
+			t.Emit(flowapi.Event{Type: "log", Message: "TIME_WAIT cap reached; closing without waiting", App: f.record.Owner.AppID})
+		}
+		return false
+	}
+	f.timeWaitReserved = true
+	t.gauges.TimeWait++
+	return true
+}
+
+// EndTimeWait releases the endpoint slot on removal, not on the next sweep.
+func (f *ticket) EndTimeWait() {
+	f.table.mu.Lock()
+	defer f.table.mu.Unlock()
+	f.endTimeWaitLocked()
+}
+
+func (f *ticket) endTimeWaitLocked() {
+	if f.timeWaitReserved {
+		f.timeWaitReserved = false
+		f.table.gauges.TimeWait--
+	}
+}
+
+// Retire frees admission immediately while the relay finishes its last byte
+// accounting. Close folds those bytes and releases memory once the relay ends.
+func (f *ticket) Retire() {
+	f.table.mu.Lock()
+	defer f.table.mu.Unlock()
+	f.retireLocked()
+}
+
+func (f *ticket) retireLocked() {
+	if f.retired {
+		return
+	}
+	f.retired = true
+	t := f.table
+	t.gauges.Flows--
+	if f.handshake {
+		t.gauges.Handshakes--
+		f.handshake = false
+	}
+	udp := f.record.Protocol == "udp"
+	if udp {
+		t.gauges.UDP--
+		t.gauges.UDPReadBytes -= flowapi.UDPReadBuffer
+	}
+	if f.resolved {
+		app := f.record.Owner.AppID
+		c := t.apps[app]
+		c.flows--
+		if udp {
+			c.udp--
+		}
+		if c.flows == 0 {
+			delete(t.apps, app)
+		} else {
+			t.apps[app] = c
+		}
+		if app == "" {
+			t.gauges.Unknown--
+			if udp {
+				t.gauges.UnknownUDP--
+			}
+		}
 	}
 }
 func (f *ticket) Established(source netip.Addr) {
@@ -337,43 +412,16 @@ func (f *ticket) Close() {
 		return
 	}
 	f.closed = true
-	if f.timeWait {
-		t.gauges.TimeWait--
-	}
+	f.endTimeWaitLocked()
+	f.retireLocked()
 	delete(t.flows, f.record.ID)
-	t.gauges.Flows--
 	t.gauges.TCPBytes -= f.tcpBytes
-	if f.handshake {
-		t.gauges.Handshakes--
-	}
-	udp := f.record.Protocol == "udp"
-	if udp {
-		t.gauges.UDP--
-		t.gauges.UDPReadBytes -= flowapi.UDPReadBuffer
-	}
 	if f.resolved {
 		f.accountMu.Lock()
 		f.accountClosed = true
 		fold(t.totals.Apps, f.record.Owner.AppID, f.up.Load(), f.down.Load())
 		fold(t.totals.Lines, f.record.Line, f.up.Load(), f.down.Load())
 		f.accountMu.Unlock()
-		app := f.record.Owner.AppID
-		c := t.apps[app]
-		c.flows--
-		if udp {
-			c.udp--
-		}
-		if c.flows == 0 {
-			delete(t.apps, app)
-		} else {
-			t.apps[app] = c
-		}
-		if app == "" {
-			t.gauges.Unknown--
-			if udp {
-				t.gauges.UnknownUDP--
-			}
-		}
 	}
 }
 func (t *Table) ReservePending(n int) bool {
@@ -543,6 +591,9 @@ func (t *Table) CloseFlows(s Selector, before uint64) (CloseResult, error) {
 	var cancels []context.CancelFunc
 	result := CloseResult{}
 	for id, f := range t.flows {
+		if f.retired {
+			continue
+		}
 		r := f.record
 		match := ids[id] || (s.Line != "" && r.Line == s.Line) || (s.App != "" && r.Owner.AppID == s.App && r.Line != s.NotLine) || f.matchesSource(s.Source) || (s.IPv6 && r.Source.Addr().Is6())
 		if !match {
@@ -572,6 +623,9 @@ func (t *Table) CloseAll() {
 	t.mu.Lock()
 	var callbacks []context.CancelFunc
 	for _, f := range t.flows {
+		if f.retired {
+			continue
+		}
 		f.record.Closing = true
 		if f.cancel != nil {
 			callbacks = append(callbacks, f.cancel)

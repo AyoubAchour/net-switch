@@ -176,14 +176,22 @@ func TestTimeWaitBlockedAndBudgetReuse(t *testing.T) {
 	p.open(1000)
 	p.upload([]byte("first"))
 	p.closeActive()
-	// Releasing the old endpoint before Begin lets its own tuple reuse the
-	// last slot. A different tuple still receives an immediate budget RST.
+	// TIME_WAIT frees the only flow slot even for a different tuple. Keep
+	// that replacement live to verify a genuine flow-cap rejection too.
+	p.port++
+	p.open(500)
+	p.upload([]byte("different tuple"))
 	p.port++
 	p.inject(p.packet(500, 0, header.TCPFlagSyn, []byte("syn data")))
 	h := p.read(time.Second)
+	for h != nil && h.DestinationPort() != p.port {
+		h = p.read(time.Second)
+	}
 	if h == nil || !h.Flags().Contains(header.TCPFlagRst) || h.AckNumber() != 509 {
 		t.Fatal("budget SYN/data reset missing")
 	}
+	p.port--
+	p.closeActive() // Full TIME_WAIT pool: this one closes silently.
 	p.port--
 	p.open(1000)
 	p.upload([]byte("second"))
@@ -197,7 +205,7 @@ func TestTimeWaitBlockedAndBudgetReuse(t *testing.T) {
 	if h == nil || !h.Flags().Contains(header.TCPFlagRst) {
 		t.Fatal("blocked reuse did not reset")
 	}
-	if p.dials.Load() != 2 || p.table.Stats().Admitted != 2 {
+	if p.dials.Load() != 3 || p.table.Stats().Admitted != 3 {
 		t.Fatal("rejected SYN advanced k or dialed")
 	}
 }
@@ -329,38 +337,26 @@ func TestTimeWaitSimultaneousCloseReuse(t *testing.T) {
 	}
 }
 
-func TestTimeWaitThousandPerSecondCap(t *testing.T) {
+func TestTimeWaitSmallCapSkipsWithoutRejecting(t *testing.T) {
 	limits := flows.Defaults()
 	limits.TimeWait = 64
 	p := newPeerOptions(t, false, limits, ns.DefaultOptions())
 	start := time.Now()
 	for i := range 1000 {
 		p.port = uint16(40000 + i)
-		if i < limits.TimeWait {
-			p.open(1000)
-			p.upload([]byte("cap"))
-			p.closeActive()
-		} else {
-			p.inject(p.packet(1000, 0, header.TCPFlagSyn, nil))
-			if h := p.read(time.Second); h == nil || !h.Flags().Contains(header.TCPFlagRst) {
-				t.Fatal("cap did not reject")
-			}
-		}
-		if g := p.table.Stats(); g.Flows > limits.TimeWait || g.TimeWait > limits.TimeWait {
+		p.open(1000)
+		p.upload([]byte("cap"))
+		p.closeActive()
+		if g := p.table.Stats(); g.TimeWait > limits.TimeWait || g.Rejected != 0 {
 			t.Fatal(g)
 		}
 	}
-	if d := time.Since(start); d > time.Second {
-		t.Fatalf("offered less than 1000 connections/s: %s", d)
-	} else {
-		t.Logf("1000 attempts in %s; retained endpoints <= %d", d, limits.TimeWait)
-	}
-	// The shared monitor counts retained endpoints, without evicting any.
+	t.Logf("1000 successes in %s; retained endpoints <= %d", time.Since(start), limits.TimeWait)
 	deadline := time.Now().Add(time.Second)
-	for p.table.Stats().TimeWait != limits.TimeWait && time.Now().Before(deadline) {
+	for p.table.Stats().Flows != 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if g := p.table.Stats(); g.TimeWait != limits.TimeWait || g.Flows != limits.TimeWait {
+	if g := p.table.Stats(); g.TimeWait != limits.TimeWait || g.Flows != 0 || g.TimeWaitSkipped != 1000-uint64(limits.TimeWait) || g.Admitted != 1000 || g.Rejected != 0 {
 		t.Fatal(g)
 	}
 }

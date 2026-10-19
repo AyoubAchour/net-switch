@@ -33,6 +33,7 @@ type Forwarder struct {
 	stack                         *stack.Stack
 	inFlight                      int
 	connections                   map[stack.TransportEndpointID]*connection
+	retired                       map[*connection]struct{}
 	control                       flowapi.Controller
 	owners                        platform.OwnerLookup
 	dialer                        platform.LineDialer
@@ -42,7 +43,7 @@ type Forwarder struct {
 
 func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Controller, owners platform.OwnerLookup, dialer platform.LineDialer, out flowapi.Output) *Forwarder {
 	ctx, cancel := context.WithCancel(ctx)
-	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]flowapi.Ticket), connections: make(map[stack.TransportEndpointID]*connection), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
+	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]flowapi.Ticket), connections: make(map[stack.TransportEndpointID]*connection), retired: make(map[*connection]struct{}), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 2*inFlight, f.open)
 	s.SetTransportProtocolHandler(gtcp.ProtocolNumber, f.Handle)
 	gtcp.SetTimeWaitHandler(s, f.Handle)
@@ -73,17 +74,23 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c := f.connections[id]; c != nil {
-		// Unregister precedes the reopen callback, so a following TUN SYN
-		// can reach this handler first. Serialize with endpoint teardown and
-		// retire its reservation here for both ingress paths. Do not wait for
-		// the shared monitor, or the last available slot would spuriously RST.
-		ep := c.ep.(*gtcp.Endpoint)
-		ep.LockUser()
-		state := gtcp.EndpointState(ep.State())
-		ep.UnlockUser()
-		if state == gtcp.StateClose || state == gtcp.StateError {
-			<-c.done
-			c.ticket.Close()
+		// State is atomic and Close is published after endpoint removal.
+		// The hook can run under the old endpoint lock: never wait for that
+		// lock or for the relay, which may itself need this TCP processor.
+		state := gtcp.EndpointState(c.ep.State())
+		// A TUN SYN can reach the default handler in the small gap between
+		// unregister and StateClose. Check registration to cover that gap
+		// without waiting on the endpoint lock.
+		registered := f.stack.FindTransportEndpoint(p.NetworkProtocolNumber, gtcp.ProtocolNumber, id, p.NICID)
+		if state == gtcp.StateClose || state == gtcp.StateError || any(registered) != any(c.ep) {
+			c.ticket.Retire()
+			select {
+			case <-c.done:
+				// Final accounting is ready; no need to retain this old graph.
+				c.ticket.Close()
+			default:
+				f.retired[c] = struct{}{}
+			}
 			delete(f.connections, id)
 		} else {
 			// A delayed reopen callback can follow a duplicate SYN that has
@@ -201,12 +208,13 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	if errTCP != nil {
 		return
 	}
-	complete(false)
 	closeEndpoint := sync.OnceFunc(ep.Close)
 	defer closeEndpoint()
 	stopApp := context.AfterFunc(ctx, ep.Abort)
 	defer stopApp()
 	if ctx.Err() != nil {
+		// The handshake succeeded; Abort owns the reset, not admission.
+		complete(false)
 		ep.Abort()
 		return
 	}
@@ -214,16 +222,21 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	ep.SocketOptions().SetReceiveBufferSize(int64(rx), true)
 	ep.SocketOptions().SetSendBufferSize(int64(tx), true)
 	ep.SocketOptions().SetKeepAlive(true)
-	c := &connection{ep: ep, ticket: ticket, last: time.Now(), done: make(chan struct{})}
+	ep.(*gtcp.Endpoint).SetTimeWaitPolicy(ticket.TimeWait, ticket.EndTimeWait)
+	c := &connection{id: id, ep: ep, ticket: ticket, last: time.Now(), done: make(chan struct{})}
 	f.mu.Lock()
 	if f.ctx.Err() != nil {
 		f.mu.Unlock()
+		complete(false)
 		ep.Abort()
 		return
 	}
 	f.connections[id] = c
 	owned = false // the shared monitor now owns the reservation
 	f.mu.Unlock()
+	// Keep the pending entry through endpoint setup. A delayed reopen hook
+	// must see either pending or connections, never a gap between them.
+	complete(false)
 	defer close(c.done)
 	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint}
 	if a, ok := remote.LocalAddr().(*net.TCPAddr); ok {
@@ -236,8 +249,8 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		ep.Abort()
 	}
 	app.Close()
-	// Admission survives the relay through TIME_WAIT. Reopen releases this
-	// exact old ticket before admitting a replacement on the same tuple.
+	// TIME_WAIT releases admission at the state transition. The monitor keeps
+	// this ticket until removal and relay completion for final byte accounting.
 }
 
 // Stop cancels dials and relays. The owner must close the stack before Wait,
