@@ -339,6 +339,8 @@ func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 	if fd := descriptor(reused); fd != oldFD {
 		t.Fatalf("fixture must reuse the descriptor: old %d new %d", oldFD, fd)
 	}
+	window := o.windows[uint32(os.Getpid())]
+	t.Logf("reusing fd %d in pid %d, indexed through %d, observed extent %d, last matched fd %d", oldFD, os.Getpid(), window.high, window.extent, window.lastFD)
 	source := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(reused.LocalAddr().(*net.UDPAddr).Port))
 	newOwner, err := o.UDPFor(ctx, platform.Tuple{Source: source, Destination: netip.MustParseAddrPort("192.0.2.1:443")})
 	if err != nil || newOwner.PID != uint32(os.Getpid()) || newOwner.Generation == oldCookie {
