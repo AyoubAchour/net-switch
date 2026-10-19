@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   native-repeats:
-    name: Native scan timing / ${{ matrix.arch }} / ${{ matrix.shard }}
+    name: Native repeats / ${{ matrix.arch }} / ${{ matrix.shard }}
     if: github.event_name == 'workflow_dispatch' && inputs.native_tests
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
@@ -47,12 +47,14 @@ jobs:
           package-manager-cache: false
       - name: Build the native helper
         run: ./scripts/build-helper.ps1 -Arch ${{ matrix.arch }}
-      - name: Measure the cold scan during the Node suite
-        env:
-          NETSWITCH_SCAN_TIMING: '1'
+      - name: Repeat the native Node tests ten times without retries
         run: |
-          npm test
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          for ($repeat = 1; $repeat -le 10; $repeat++) {
+            Write-Host "NATIVE REPEAT $repeat / 10 (${{ matrix.arch }}, shard ${{ matrix.shard }})"
+            node --test --test-reporter=tap test/helper.test.mjs test/monitor.test.mjs test/ps.test.mjs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          Write-Host 'NATIVE REPEATS COMPLETE: 10 / 10'
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
