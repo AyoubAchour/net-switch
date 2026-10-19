@@ -37,7 +37,7 @@ type cachedHolders struct {
 type fdWindow struct {
 	start      uint64
 	next       int64
-	high       int64
+	high       int64 // end of the sequentially indexed range; tail probes cannot advance it
 	lastFD     int64
 	tailProbed bool
 	observed   time.Time
@@ -421,7 +421,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			o.mu.Lock()
 			window := o.windows[h.pid]
 			if window.start != h.start {
-				window = fdWindow{start: h.start, scanning: window.scanning}
+				window = fdWindow{start: h.start, lastFD: -1, scanning: window.scanning}
 			}
 			window.lastFD = fd
 			window.observed = time.Now()
@@ -524,7 +524,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		o.mu.Lock()
 		window := o.windows[pid]
 		if window.start != start {
-			window = fdWindow{start: start, scanning: gate}
+			window = fdWindow{start: start, lastFD: -1, scanning: gate}
 		}
 		// Once a live holder is known, reuse other processes' very recent
 		// search windows. A burst must not rescan the same 64 descriptors in
@@ -544,12 +544,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 		remember := map[uint32]holder{}
 		maxFD := window.high
+		advancing := false
 		visit := func(names []string) error {
 			for _, fd := range names {
 				if expired() {
 					break
 				}
-				if number, err := strconv.ParseInt(fd, 10, 64); err == nil {
+				if number, err := strconv.ParseInt(fd, 10, 64); err == nil && advancing {
 					maxFD = max(maxFD, number)
 				}
 				got, err := os.Readlink(dir + "/" + fd)
@@ -593,7 +594,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		if !complete {
 			// Small descriptor sets are commonly reused by concurrent short
 			// connections. The last descriptor alone misses its neighbours.
-			if window.lastFD > 0 && window.lastFD < 128 {
+			if window.lastFD >= 0 && window.lastFD < 128 {
 				if _, err := f.Seek(0, 0); err == nil {
 					names, _ := f.Readdirnames(128)
 					if err := visit(names); err != nil {
@@ -606,7 +607,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 			// Reopening normally reuses the previous descriptor. Check that
 			// one live link even when another lookup just scanned this process.
-			if window.lastFD > 0 {
+			if window.lastFD >= 0 {
 				if err := visit([]string{strconv.FormatInt(window.lastFD, 10)}); err != nil {
 					return err
 				}
@@ -619,10 +620,16 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			// 256 neighbours in every unrelated process made multi-app bursts
 			// spend their entire lookup budget reading the same symlinks.
 			if _, err := f.Seek(window.high+3, 0); err == nil {
-				names, _ := f.Readdirnames(128)
+				count := 128
+				if canIndex {
+					count = 512
+				}
+				names, _ := f.Readdirnames(count)
+				advancing = true
 				if err := visit(names); err != nil {
 					return err
 				}
+				advancing = false
 				if len(found) > 0 && found[len(found)-1].pid == pid {
 					return nil
 				}
@@ -637,7 +644,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					current := o.windows[pid]
 					if current.start == start {
 						current.tailProbed = true
-						current.high = max(current.high, tail)
 						o.windows[pid] = current
 					}
 					o.mu.Unlock()
