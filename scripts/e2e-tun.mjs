@@ -22,7 +22,8 @@ await copyFile(process.execPath, clientExe);
 const engine = new ControlUnderTest(dir);
 const report = [];
 function log(message) { console.log(message); report.push(message); }
-async function network(action, adapter) {
+async function network(action, adapter, timeoutMs = 45_000) {
+  const started = Date.now();
   const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
     path.resolve('scripts/tun-test-network.ps1'), '-Action', action], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
@@ -32,11 +33,12 @@ async function network(action, adapter) {
   child.stdout.on('data', (chunk) => { output += chunk; });
   child.stderr.on('data', (chunk) => { errors += chunk; });
   let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; child.kill(); }, 45_000);
+  const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
   try {
     const [code, signal] = await once(child, 'exit');
-    const result = timedOut ? 'timed out after 45 seconds; PowerShell was killed' : `exited ${code}${signal ? ` (${signal})` : ''}`;
+    const result = timedOut ? `timed out after ${timeoutMs / 1000} seconds; PowerShell was killed` : `exited ${code}${signal ? ` (${signal})` : ''}`;
     assert.equal(code, 0, `Network ${action} ${result}: ${errors}\n${output}`);
+    if (timeoutMs > 45_000) log(`ARM64 cold preflight network read completed in ${Date.now() - started} ms`);
     return JSON.parse(output.replace(/^\uFEFF/, '').trim());
   } finally { clearTimeout(timer); }
 }
@@ -90,10 +92,10 @@ async function routed(items, line) {
     throw error;
   }
 }
-async function clean(label) {
+async function clean(label, firstReadTimeout = 45_000) {
   let state;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    state = await network('state');
+    state = await network('state', undefined, attempt === 0 ? firstReadTimeout : 45_000);
     if (Object.values(state).every((items) => items.length === 0)) { log(`ok - ${label}: no TUN adapter, routes or sing-tun firewall rules`); return; }
     await delay(500);
   }
@@ -104,7 +106,10 @@ let restoreDns = false;
 try {
   const pins = JSON.parse(await readFile('packaging/versions.json', 'utf8'));
   log(`Engine ${pins.singBox.version}, Windows ${process.arch}, Node ${process.version}`);
-  await clean('before start');
+  // The first ARM64 PowerShell/Windows-provider read can exceed 45 s before
+  // Control or TUN exists. Only this cold baseline read gets extra time;
+  // every subsequent read and every routing/cleanup assertion keeps its bound.
+  await clean('before start', process.arch === 'arm64' ? 90_000 : 45_000);
   adapter = await network('inspect');
   log(`Physical adapter: ${JSON.stringify(adapter)}`);
   log(`PORT-REUSE direct baseline: ${JSON.stringify(await client('reuse'))}`);
