@@ -64,7 +64,7 @@ func TestMachineFolderKeepsTrustedDataAndObjectIdentity(t *testing.T) {
 	if err := os.WriteFile(path, []byte("trusted saved data"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.Stat(path)
+	before, err := eagerFileInfo(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestMachineFolderKeepsTrustedDataAndObjectIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	after, err := os.Stat(path)
+	after, err := eagerFileInfo(path)
 	if err != nil || !os.SameFile(before, after) {
 		t.Fatalf("trusted object was replaced: %v", err)
 	}

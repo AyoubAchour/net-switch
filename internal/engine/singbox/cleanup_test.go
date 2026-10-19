@@ -87,6 +87,15 @@ func TestExitOwnsPIDCleanupThroughConcurrentStop(t *testing.T) {
 				if _, err := files.ReadFile(filepath.Join("/test", "engine.pid")); err != fs.ErrNotExist {
 					t.Fatal("exit owner did not remove the pre-existing PID record", err)
 				}
+				// A later Stop may encounter an unrelated stale record, as the
+				// real routing fixture does. Completed ownership must not hide it.
+				files.data[filepath.Join("/test", "engine.pid")] = []byte("invalid")
+				if err := a.Stop(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := files.ReadFile(filepath.Join("/test", "engine.pid")); err != fs.ErrNotExist {
+					t.Fatal("later Stop ignored a new orphan PID record", err)
+				}
 			}
 			warning := strings.Join(logs, "\n")
 			if deletion.err == fs.ErrPermission && (!strings.Contains(warning, "cleanup warning") || !strings.Contains(warning, "engine.pid")) {

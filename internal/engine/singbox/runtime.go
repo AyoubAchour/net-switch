@@ -931,6 +931,14 @@ func (a *Adapter) stopChild(ctx context.Context) error {
 		return fmt.Errorf("routing engine did not finish stopping")
 	case <-exited:
 	}
+	// Ownership ends only after the sole deletion attempt has completed. A
+	// later lifecycle operation may then clean a newly discovered orphan PID,
+	// without adding a second delete to this child's Stop operation.
+	a.mu.Lock()
+	if a.exited == exited {
+		a.exited = nil
+	}
+	a.mu.Unlock()
 	return nil
 }
 func (a *Adapter) Stop(ctx context.Context) error {

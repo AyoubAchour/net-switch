@@ -12,6 +12,18 @@ import (
 
 const validUndo = `{"metrics":{"Wi-Fi":[{"family":"IPv6","automatic":false,"metric":25}]},"policy":{"value":-2147483648}}`
 
+// On Windows os.Stat can defer the file-ID query until os.SameFile. If the
+// pathname has been replaced by then, both snapshots describe the new object.
+// File.Stat captures the ID now; close the handle before testing any rename.
+func eagerFileInfo(path string) (os.FileInfo, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	return file.Stat()
+}
+
 func TestMachineFolderMigrationPreservesValidatedRecordsOnce(t *testing.T) {
 	hostedSecurity(t)
 	for _, primary := range []string{validUndo, "damaged", "missing"} {
@@ -34,7 +46,7 @@ func TestMachineFolderMigrationPreservesValidatedRecordsOnce(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			before, err := os.Stat(root)
+			before, err := eagerFileInfo(root)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -42,7 +54,7 @@ func TestMachineFolderMigrationPreservesValidatedRecordsOnce(t *testing.T) {
 			if err := protectDirectory(root, func(s string) { logs = append(logs, s) }, nil); err != nil {
 				t.Fatal(err)
 			}
-			after, err := os.Stat(root)
+			after, err := eagerFileInfo(root)
 			if err != nil || os.SameFile(before, after) {
 				t.Fatal("legacy folder identity was retained", err)
 			}
@@ -62,7 +74,7 @@ func TestMachineFolderMigrationPreservesValidatedRecordsOnce(t *testing.T) {
 			if err := ProtectDirectory(root); err != nil {
 				t.Fatal(err)
 			}
-			again, err := os.Stat(root)
+			again, err := eagerFileInfo(root)
 			if err != nil || !os.SameFile(after, again) {
 				t.Fatal("migrated twice", err)
 			}
@@ -81,7 +93,7 @@ func TestMachineFolderMigrationResumesAfterInterruption(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, "windows-undo.json"), []byte(validUndo), 0600); err != nil {
 				t.Fatal(err)
 			}
-			original, err := os.Stat(root)
+			original, err := eagerFileInfo(root)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -95,11 +107,11 @@ func TestMachineFolderMigrationResumesAfterInterruption(t *testing.T) {
 			if !errors.Is(err, interrupted) {
 				t.Fatal("fault did not execute", err)
 			}
-			staged, err := os.Stat(root + ".migrating")
+			staged, err := eagerFileInfo(root + ".migrating")
 			if err != nil {
 				t.Fatal("pending stage never existed", err)
 			}
-			live, err := os.Stat(root)
+			live, err := eagerFileInfo(root)
 			if stopAt == "quarantined" {
 				if !os.IsNotExist(err) {
 					t.Fatal("fault did not leave the live root absent", err)
@@ -110,7 +122,7 @@ func TestMachineFolderMigrationResumesAfterInterruption(t *testing.T) {
 			if err := ProtectDirectory(root); err != nil {
 				t.Fatal(err)
 			}
-			live, err = os.Stat(root)
+			live, err = eagerFileInfo(root)
 			if err != nil || !os.SameFile(staged, live) {
 				t.Fatal("recovery did not publish the staged directory", err)
 			}
@@ -121,7 +133,7 @@ func TestMachineFolderMigrationResumesAfterInterruption(t *testing.T) {
 			if err != nil || len(old) != 1 {
 				t.Fatal("original tree was not quarantined once", old, err)
 			}
-			quarantined, err := os.Stat(old[0])
+			quarantined, err := eagerFileInfo(old[0])
 			if err != nil || !os.SameFile(original, quarantined) {
 				t.Fatal("quarantine lost the original directory", err)
 			}
@@ -210,14 +222,14 @@ func TestMachineFolderRejectsTransplantedMigrationMarker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(second, directoryMarkerName), b, 0600); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.Stat(second)
+	before, err := eagerFileInfo(second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := ProtectDirectory(second); err != nil {
 		t.Fatal(err)
 	}
-	after, err := os.Stat(second)
+	after, err := eagerFileInfo(second)
 	if err != nil || os.SameFile(before, after) {
 		t.Fatal("transplanted admin-owned marker was trusted", err)
 	}
