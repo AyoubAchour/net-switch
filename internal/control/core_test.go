@@ -137,6 +137,7 @@ type fakeEngine struct {
 	replies         []recordedReply
 	resourceIDs     map[string]string
 	beforeStart     func()
+	beforeClose     func(engine.CloseRequest) error
 }
 type recordedReply struct {
 	Route  string
@@ -220,6 +221,11 @@ func (f *fakeEngine) Apply(ctx context.Context, r engine.Revision) (engine.Ackno
 	return engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: f.s.Instance, AppliedAt: f.s.StartedAt}, nil
 }
 func (f *fakeEngine) CloseFlows(ctx context.Context, r engine.CloseRequest) (engine.CloseResult, error) {
+	if f.beforeClose != nil {
+		if err := f.beforeClose(r); err != nil {
+			return engine.CloseResult{}, err
+		}
+	}
 	if f.real != nil {
 		return f.real.CloseFlows(ctx, r)
 	}
@@ -241,16 +247,6 @@ func (f *fakeEngine) Connections(ctx context.Context) ([]engine.Connection, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]engine.Connection{}, f.connections...), nil
-}
-func (f *fakeEngine) CloseConnection(ctx context.Context, id string) error {
-	if f.real != nil {
-		return f.real.CloseConnection(ctx, id)
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.calls = append(f.calls, "close:"+id)
-	f.commands = append(f.commands, map[string]any{"method": "DELETE", "route": "/connections/" + id})
-	return nil
 }
 func (f *fakeEngine) Probe(ctx context.Context, r engine.ProbeRequest) engine.ProbeResult {
 	if f.real != nil {

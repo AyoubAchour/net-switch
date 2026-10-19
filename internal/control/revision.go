@@ -15,6 +15,7 @@ type closureIntent struct {
 	ID          string              `json:"intentId"`
 	Revision    uint64              `json:"revision"`
 	PeriodStart float64             `json:"periodStart"`
+	Purpose     string              `json:"purpose,omitempty"`
 	Request     engine.CloseRequest `json:"request"`
 }
 
@@ -262,7 +263,7 @@ func (c *Core) finishClosures(ctx context.Context, gen uint64) error {
 		if result.Failed > 0 {
 			return fmt.Errorf("%d connections on %s could not be closed", result.Failed, request.Line)
 		}
-		if result.Closed > 0 {
+		if result.Closed > 0 && intent.Purpose != "reconnect" {
 			plural := ""
 			if result.Closed != 1 {
 				plural = "s"
@@ -274,6 +275,9 @@ func (c *Core) finishClosures(ctx context.Context, gen uint64) error {
 		}
 		if err := c.completeIntent(intent.ID); err != nil {
 			return err
+		}
+		if intent.Purpose == "reconnect" {
+			continue
 		}
 		c.mu.Lock()
 		if gen == c.generation {

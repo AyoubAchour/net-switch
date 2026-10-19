@@ -105,6 +105,7 @@ type Adapter struct {
 	probeContext     context.Context
 	stopProbes       context.CancelFunc
 	appliedTimes     map[uint64]time.Time
+	observed         map[string]engine.Connection
 }
 type verifiedFile struct {
 	Size     int64
@@ -248,6 +249,7 @@ func (a *Adapter) request(ctx context.Context, method, path string, body any) ([
 	return b, response.StatusCode, nil
 }
 func (a *Adapter) Connections(ctx context.Context) ([]engine.Connection, error) {
+	instance := a.Snapshot().Instance
 	b, _, err := a.request(ctx, "GET", "/connections", nil)
 	if err != nil {
 		return nil, err
@@ -279,6 +281,14 @@ func (a *Adapter) Connections(ctx context.Context) ([]engine.Connection, error) 
 		}
 		out = append(out, engine.Connection{Connection: c, Host: host})
 	}
+	a.mu.Lock()
+	if a.s.Instance == instance {
+		a.observed = map[string]engine.Connection{}
+		for _, connection := range out {
+			a.observed[connection.ID] = connection
+		}
+	}
+	a.mu.Unlock()
 	return out, nil
 }
 func (a *Adapter) CloseConnection(ctx context.Context, id string) error {
@@ -289,6 +299,9 @@ func (a *Adapter) CloseConnection(ctx context.Context, id string) error {
 	return err
 }
 func (a *Adapter) CloseFlows(ctx context.Context, r engine.CloseRequest) (engine.CloseResult, error) {
+	if r.OperationID == "" {
+		return engine.CloseResult{}, fmt.Errorf("closure intent requires an operation id")
+	}
 	a.apply.Lock()
 	defer a.apply.Unlock()
 	a.mu.Lock()
@@ -318,13 +331,27 @@ func (a *Adapter) CloseFlows(ctx context.Context, r engine.CloseRequest) (engine
 		defer stop()
 		defer cancel()
 	}
-	connections, err := a.Connections(ctx)
-	if err != nil {
-		return engine.CloseResult{}, err
-	}
 	live := map[string]engine.Connection{}
-	for _, c := range connections {
-		live[c.ID] = c
+	var connections []engine.Connection
+	if r.Line == "" && r.ConnectionIDs != nil {
+		// Reconnect uses the poll that selected these IDs, as Node does. Clash
+		// IDs are instance-scoped UUIDs; never select again on a delayed retry.
+		a.mu.Lock()
+		for _, id := range r.ConnectionIDs {
+			if c, ok := a.observed[id]; ok {
+				live[id] = c
+			}
+		}
+		a.mu.Unlock()
+	} else {
+		var err error
+		connections, err = a.Connections(ctx)
+		if err != nil {
+			return engine.CloseResult{}, err
+		}
+		for _, c := range connections {
+			live[c.ID] = c
+		}
 	}
 	if r.ConnectionIDs == nil {
 		for _, c := range connections {
@@ -342,7 +369,7 @@ func (a *Adapter) CloseFlows(ctx context.Context, r engine.CloseRequest) (engine
 		}
 		line := apps.ConnectionLine(&c.Connection)
 		started, err := time.Parse(time.RFC3339Nano, c.Start)
-		if line == nil || *line != r.Line || err != nil || !started.Before(r.StartedBefore) {
+		if line == nil || (r.Line != "" && *line != r.Line) || err != nil || !started.Before(r.StartedBefore) {
 			result.Gone++
 			continue
 		}
@@ -715,6 +742,9 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 	a.s.AppliedRevision = 0
 	a.s.AppliedHash = ""
 	a.appliedTimes = map[uint64]time.Time{}
+	a.observed = nil
+	a.closeResults = map[string]engine.CloseResult{}
+	a.closeOrder = nil
 	a.s.ProxyPort = nil
 	if proxyPort > 0 {
 		a.s.ProxyPort = &proxyPort

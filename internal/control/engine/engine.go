@@ -83,7 +83,8 @@ type Connection struct {
 }
 
 // Apply acknowledges only after the adapter has applied all parts of a policy.
-// The closure cutoff is captured before Apply, never from a subsequent poll.
+// Policy closures name their revision before Apply; acknowledgement resolves
+// its cutoff. Explicit selections such as Reconnect retain their original time.
 type Engine interface {
 	Snapshot() Snapshot
 	// Fail reports a control-side prerequisite failure without starting the engine.
@@ -93,6 +94,5 @@ type Engine interface {
 	Apply(context.Context, Revision) (Acknowledgement, error)
 	CloseFlows(context.Context, CloseRequest) (CloseResult, error)
 	Connections(context.Context) ([]Connection, error)
-	CloseConnection(context.Context, string) error
 	Probe(context.Context, ProbeRequest) ProbeResult
 }

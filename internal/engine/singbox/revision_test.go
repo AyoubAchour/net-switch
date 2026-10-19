@@ -161,3 +161,23 @@ func TestCloseIntentSkipsNewFlowsAndIsIdempotent(t *testing.T) {
 		t.Fatal("wrong-instance closure accepted")
 	}
 }
+
+func TestReconnectUsesObservedIDsAndKeepsItsCutoff(t *testing.T) {
+	a, _, now, requests := fixtureAdapter(t)
+	a.observed = map[string]engine.Connection{
+		"old": {Connection: apps.Connection{ID: "old", Chains: []string{"line-bb"}, Start: now.Add(-time.Minute).Format(time.RFC3339Nano)}},
+		"new": {Connection: apps.Connection{ID: "new", Chains: []string{"line-bb"}, Start: now.Add(time.Second).Format(time.RFC3339Nano)}},
+	}
+	r := engine.CloseRequest{OperationID: "reconnect-1", Instance: "instance-1", StartedBefore: *now, ConnectionIDs: []string{"old", "new"}}
+	first, err := a.CloseFlows(context.Background(), r)
+	if err != nil || first.Closed != 1 || first.Gone != 1 {
+		t.Fatalf("%+v %v", first, err)
+	}
+	if !reflect.DeepEqual(*requests, []string{"DELETE /connections/old"}) {
+		t.Fatal(*requests)
+	}
+	again, err := a.CloseFlows(context.Background(), r)
+	if err != nil || again != first || len(*requests) != 1 {
+		t.Fatalf("retry repeated a closure: %+v %v", again, err)
+	}
+}

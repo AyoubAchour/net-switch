@@ -9,6 +9,7 @@ import (
 	"unicode/utf16"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
+	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/lines"
 	"github.com/AyoubAchour/net-switch/internal/platform"
@@ -297,6 +298,12 @@ func (c *Core) reconnect(ctx context.Context, key string) (map[string]any, error
 	if s.Status != "on" {
 		return nil, bad("Turn routing on first.")
 	}
+	// Resolve any outstanding desired policy before selecting the old flows.
+	// Reconnect itself changes no policy; its persisted cutoff is this selection.
+	if err := c.ApplyPolicy(ctx); err != nil {
+		return nil, err
+	}
+	s = c.op.Engine.Snapshot()
 	c.mu.Lock()
 	path := ""
 	for _, a := range c.tracker.Snapshot(nil) {
@@ -350,11 +357,30 @@ func (c *Core) reconnect(ctx context.Context, key string) (map[string]any, error
 	}
 	c.mu.Unlock()
 	closed, failed, gone := 0, 0, 0
-	for _, id := range routed {
-		if err := c.op.Engine.CloseConnection(ctx, id); err != nil {
-			failed++
+	if len(routed) > 0 {
+		// Reconnect selects only the old flows the user saw. Retrying this
+		// operation must never select the app's subsequently opened flows.
+		intent := closureIntent{ID: c.op.ID(), Revision: s.AppliedRevision, Purpose: "reconnect", Request: engine.CloseRequest{Instance: s.Instance, StartedBefore: c.op.Clock.Now(), ConnectionIDs: routed}}
+		intent.Request.OperationID = intent.ID
+		if c.op.Journal != nil {
+			if _, err := c.op.Journal.Change(func(v map[string]any) map[string]any {
+				return map[string]any{"closures": append(array(v["closures"]), intent)}
+			}); err != nil {
+				return nil, err
+			}
+		}
+		result, err := c.op.Engine.CloseFlows(ctx, intent.Request)
+		if err != nil {
+			failed += len(routed)
 		} else {
-			closed++
+			closed += result.Closed
+			failed += result.Failed
+			gone += result.Gone
+			if result.Failed == 0 {
+				if err := c.completeIntent(intent.ID); err != nil {
+					return nil, err
+				}
+			}
 		}
 	}
 	v, err := c.op.Platform.Call(ctx, "close-tcp", map[string]any{"connections": tuples})

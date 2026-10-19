@@ -176,6 +176,9 @@ the equivalent Go filesystem and helper work is injected directly.
 Separate adversarial tests cover a late probe, an old connection reply after
 stop, a completed rebind racing the supervisor, concurrent settings/state/
 counter updates, failed file replacement with rollback, failed apply without
-closure, and retrying a closure without admitting newer flows. These tests add
+closure, and retrying a closure without admitting newer flows. Reconnect also
+persists its selected IDs and original cutoff before calling `closeFlows`; the
+adapter uses that existing poll's UUIDs, preserving Node's DELETE sequence.
+These tests add
 coverage beyond the original immediate-completion traces. Windows kernel
 behavior remains in the hosted Windows parity and real-engine CI jobs.
