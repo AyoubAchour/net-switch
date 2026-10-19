@@ -98,7 +98,7 @@ async function freePort() {
   });
 }
 
-async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
+async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, maxMs = Infinity }) {
   const port = reusePort ?? await freePort();
   const samples = [];
   if (target.httpPorts) assert.equal(target.httpPorts.length, count, 'Each native reuse needs a distinct responder port');
@@ -106,25 +106,30 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
     const peerPort = target.httpPorts?.[i] ?? target.http;
     const nonce = randomBytes(12).toString('hex');
     const started = performance.now();
+    const startedAt = Date.now();
     let result, bindRetries = 0;
     do {
       result = await new Promise((resolve) => {
         const start = performance.now();
         let connected = false, remoteClosedFirst = false, header = '', body = '', bytes = 0, gotHeader = false;
+        const phases = {};
         const digest = createHash('sha256');
         const socket = connect({ host: target.host, port: peerPort, localAddress: target.source, localPort: port, allowHalfOpen: true });
         const timer = setTimeout(() => finish('timeout'), length ? 30_000 : 2000);
         let done = false;
         function finish(outcome) {
           if (done) return; done = true; clearTimeout(timer); socket.destroy();
-          resolve({ port, peerPort, outcome, connected, remoteClosedFirst, ms: performance.now() - start, bytes, sha256: digest.digest('hex'), header, body });
+          resolve({ port, peerPort, outcome, connected, remoteClosedFirst, startedAt, phases, ms: performance.now() - start, bytes, sha256: digest.digest('hex'), header, body });
         }
         socket.on('connect', () => {
           connected = true;
+          phases.connectMs = performance.now() - started;
           const path = length ? `/bytes?length=${length}&nonce=${nonce}` : `/close?nonce=${nonce}`;
           socket.write(`GET ${path} HTTP/1.1\r\nHost: target\r\nConnection: close\r\n\r\n`);
         });
         socket.on('data', (data) => {
+          phases.firstDataMs ??= performance.now() - started;
+          phases.lastDataMs = performance.now() - started;
           if (!gotHeader) {
             const combined = Buffer.concat([Buffer.from(header, 'latin1'), data]);
             const separator = combined.indexOf('\r\n\r\n');
@@ -134,7 +139,7 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
           }
           bytes += data.length; digest.update(data); if (!length) body += data;
         });
-        socket.on('end', () => { remoteClosedFirst = true; socket.end(); });
+        socket.on('end', () => { phases.finMs = performance.now() - started; remoteClosedFirst = true; socket.end(); });
         socket.on('close', () => finish(remoteClosedFirst ? 'closed' : 'closed-without-fin'));
         socket.on('error', (error) => finish(error.code ?? error.message));
       });
@@ -157,6 +162,9 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
       expected.update(cipher.final());
       assert.equal(result.bytes, length); assert.equal(result.sha256, expected.digest('hex'), 'Large TCP payload corrupted');
     }
+    // Preserve the gateway's short packet trace at the first slow attempt.
+    // A later successful connection must not overwrite evidence for this failure.
+    if (result.ms >= maxMs) break;
     if (gap) await delay(gap);
   }
   return samples;

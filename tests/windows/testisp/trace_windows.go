@@ -16,6 +16,7 @@ type tcpObservation struct {
 	Flags     byte   `json:"flags"`
 	Sequence  uint32 `json:"sequence"`
 	Ack       uint32 `json:"ack"`
+	Payload   int    `json:"payloadBytes"`
 }
 
 // A short header-only tail makes passive-close failures diagnosable without a
@@ -33,6 +34,7 @@ func (g *gateway) trace(packet []byte, direction string) {
 	}
 	tcp := packet[offset:]
 	item := tcpObservation{At: time.Now().UnixMicro(), Direction: direction, Source: binary.BigEndian.Uint16(tcp), Target: binary.BigEndian.Uint16(tcp[2:]), Flags: tcp[13], Sequence: binary.BigEndian.Uint32(tcp[4:]), Ack: binary.BigEndian.Uint32(tcp[8:])}
+	item.Payload = len(tcp) - int(tcp[12]>>4)*4
 	g.stats.Lock()
 	defer g.stats.Unlock()
 	if len(g.stats.TCPTrace) == 64 {

@@ -252,11 +252,16 @@ try {
   });
   const gatewayReuse = await observe('TestISP 1,000 rapid fixed-tuple reuses', 'harness-baseline', async () => {
     assert.equal(harness.testisp.tcpReuseHook, true, 'TestISP must install the shared TIME_WAIT hook');
-    const samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000 });
+    const samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000, maxMs: 100 });
     const failed = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
+    const trace = failed && (await harness.control('stats')).tcpTrace;
     let sockets;
     if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection -LocalPort ${failed.port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess) | ConvertTo-Json -Compress`]);
-    assert(samples.length === 1000 && !failed, `Gateway reuse failed: ${JSON.stringify({ samples, sockets, trace: failed && (await harness.control('stats')).tcpTrace })}`);
+    if (samples.length !== 1000 || failed) {
+      const error = new Error(`Gateway reuse failed: ${JSON.stringify({ count: samples.length, failed, trace })}`);
+      error.evidence = { samples, sockets, trace };
+      throw error;
+    }
     assert.equal(new Set(samples.map((sample) => `${sample.port}:${sample.peerPort}`)).size, 1, 'TestISP reuse changed the tuple');
     console.log(`TESTISP REUSE ${JSON.stringify({ count: samples.length, maxMs: Math.max(...samples.map((sample) => sample.ms)), architecture: process.arch })}`);
     return samples;
