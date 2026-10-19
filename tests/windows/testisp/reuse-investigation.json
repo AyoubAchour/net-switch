@@ -1,0 +1,566 @@
+{
+  "measured": "2026-10-19",
+  "diagnosis": "Pinned Wintun 0.14.1 misses a receive-ring wake-up. The original FIN remains queued until another send (the TCP retransmission) wakes the driver; the two copies then enter the Windows NIC together.",
+  "fixed": false,
+  "blocker": "The upstream fix changes both Wintun's userspace API and kernel driver. The official signed download and latest tag are still 0.14.1. No signed binary was replaced, deadline changed, failed round retried, or wake-up traffic added.",
+  "upstream": {
+    "commit": "ec0a6b98456fe1ba52567bb2add4bbf5f64315a1",
+    "url": "https://git.zx2c4.com/wintun/commit/?id=ec0a6b98456fe1ba52567bb2add4bbf5f64315a1",
+    "locations": [
+      "api/session.c: WintunSendPacket, between storing Tail and reading Alertable",
+      "driver/wintun.c: TunProcessReceiveData, between storing Alertable and reading Tail"
+    ],
+    "pin": "packaging/versions.json: nativeSources.wintun"
+  },
+  "runs": [
+    {
+      "id": 39253385682,
+      "stage": "Before PR #33",
+      "commit": "3ed892dc54f948d31b109b3c147f5b577a23e87b",
+      "url": "https://github.com/AyoubAchour/net-switch/actions/runs/39253385682",
+      "totals": [
+        {
+          "architecture": "x64",
+          "jobs": 10,
+          "attempts": 100000,
+          "atLeast100ms": 2,
+          "nonClosed": 0,
+          "maxMs": 282.4543999999987
+        },
+        {
+          "architecture": "arm64",
+          "jobs": 10,
+          "attempts": 86130,
+          "atLeast100ms": 21,
+          "nonClosed": 2,
+          "maxMs": 388.2518
+        }
+      ],
+      "jobs": [
+        {
+          "id": 118062485420,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 3",
+          "attempts": 10000,
+          "atLeast100ms": 6,
+          "nonClosed": 0,
+          "maxMs": 370.1844000000001
+        },
+        {
+          "id": 118062485773,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 3",
+          "attempts": 10000,
+          "atLeast100ms": 1,
+          "nonClosed": 0,
+          "maxMs": 282.4543999999987
+        },
+        {
+          "id": 118062485782,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 1",
+          "attempts": 277,
+          "atLeast100ms": 1,
+          "nonClosed": 1,
+          "maxMs": 107.71509999999995
+        },
+        {
+          "id": 118062485790,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 2",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 31.83809999999994
+        },
+        {
+          "id": 118062485815,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 8",
+          "attempts": 10000,
+          "atLeast100ms": 2,
+          "nonClosed": 0,
+          "maxMs": 366.6731
+        },
+        {
+          "id": 118062485822,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 6",
+          "attempts": 10000,
+          "atLeast100ms": 2,
+          "nonClosed": 0,
+          "maxMs": 366.65890000000013
+        },
+        {
+          "id": 118062485840,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 4",
+          "attempts": 10000,
+          "atLeast100ms": 1,
+          "nonClosed": 0,
+          "maxMs": 367.2460000000001
+        },
+        {
+          "id": 118062485856,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 6",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 88.4323000000004
+        },
+        {
+          "id": 118062485907,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 4",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 70.91170000000056
+        },
+        {
+          "id": 118062485931,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 5",
+          "attempts": 10000,
+          "atLeast100ms": 1,
+          "nonClosed": 0,
+          "maxMs": 325.83150000000023
+        },
+        {
+          "id": 118062485946,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 2",
+          "attempts": 10000,
+          "atLeast100ms": 4,
+          "nonClosed": 0,
+          "maxMs": 368.4192999999999
+        },
+        {
+          "id": 118062486007,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 1",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 89.62489999999889
+        },
+        {
+          "id": 118062486009,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 7",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 24.469500000001062
+        },
+        {
+          "id": 118062486054,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 8",
+          "attempts": 10000,
+          "atLeast100ms": 1,
+          "nonClosed": 0,
+          "maxMs": 266.5973
+        },
+        {
+          "id": 118062486126,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 7",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 87.90279999999984
+        },
+        {
+          "id": 118062486175,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 5",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 30.251399999999194
+        },
+        {
+          "id": 118062487581,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 9",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 27.231400000000576
+        },
+        {
+          "id": 118062487646,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 10",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 25.798999999999978
+        },
+        {
+          "id": 118062487700,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 9",
+          "attempts": 5853,
+          "atLeast100ms": 2,
+          "nonClosed": 1,
+          "maxMs": 321.5022
+        },
+        {
+          "id": 118062487973,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 10",
+          "attempts": 10000,
+          "atLeast100ms": 2,
+          "nonClosed": 0,
+          "maxMs": 388.2518
+        }
+      ]
+    },
+    {
+      "id": 39254207549,
+      "stage": "After merging PR #33 and regenerating vendor",
+      "commit": "3e9a172f6312733318eae526e4929ecbe8194a37",
+      "url": "https://github.com/AyoubAchour/net-switch/actions/runs/39254207549",
+      "totals": [
+        {
+          "architecture": "x64",
+          "jobs": 10,
+          "attempts": 100000,
+          "atLeast100ms": 3,
+          "nonClosed": 0,
+          "maxMs": 271.8642
+        },
+        {
+          "architecture": "arm64",
+          "jobs": 10,
+          "attempts": 100000,
+          "atLeast100ms": 33,
+          "nonClosed": 0,
+          "maxMs": 369.8010000000004
+        }
+      ],
+      "jobs": [
+        {
+          "id": 118065291761,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 3",
+          "attempts": 10000,
+          "atLeast100ms": 2,
+          "nonClosed": 0,
+          "maxMs": 271.8642
+        },
+        {
+          "id": 118065291770,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 1",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 41.2116
+        },
+        {
+          "id": 118065291835,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 7",
+          "attempts": 10000,
+          "atLeast100ms": 3,
+          "nonClosed": 0,
+          "maxMs": 351.0098999999991
+        },
+        {
+          "id": 118065291853,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 1",
+          "attempts": 10000,
+          "atLeast100ms": 4,
+          "nonClosed": 0,
+          "maxMs": 369.3939999999993
+        },
+        {
+          "id": 118065291862,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 2",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 18.8113000000003
+        },
+        {
+          "id": 118065291874,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 6",
+          "attempts": 10000,
+          "atLeast100ms": 1,
+          "nonClosed": 0,
+          "maxMs": 351.46450000000004
+        },
+        {
+          "id": 118065291951,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 3",
+          "attempts": 10000,
+          "atLeast100ms": 5,
+          "nonClosed": 0,
+          "maxMs": 365
+        },
+        {
+          "id": 118065291970,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 4",
+          "attempts": 10000,
+          "atLeast100ms": 2,
+          "nonClosed": 0,
+          "maxMs": 365.65410000000156
+        },
+        {
+          "id": 118065292008,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 4",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 79.90949999999975
+        },
+        {
+          "id": 118065292012,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 8",
+          "attempts": 10000,
+          "atLeast100ms": 3,
+          "nonClosed": 0,
+          "maxMs": 354.59820000000036
+        },
+        {
+          "id": 118065292024,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 2",
+          "attempts": 10000,
+          "atLeast100ms": 3,
+          "nonClosed": 0,
+          "maxMs": 354.371799999999
+        },
+        {
+          "id": 118065292048,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 6",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 91.75110000000006
+        },
+        {
+          "id": 118065292104,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 5",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 20.79439999999977
+        },
+        {
+          "id": 118065292105,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 7",
+          "attempts": 10000,
+          "atLeast100ms": 1,
+          "nonClosed": 0,
+          "maxMs": 258.0463
+        },
+        {
+          "id": 118065292124,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 8",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 90.53200000000015
+        },
+        {
+          "id": 118065292211,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 5",
+          "attempts": 10000,
+          "atLeast100ms": 2,
+          "nonClosed": 0,
+          "maxMs": 337.64230000000134
+        },
+        {
+          "id": 118065293929,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 9",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 29.725099999999657
+        },
+        {
+          "id": 118065293960,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 10",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 27.591900000000123
+        },
+        {
+          "id": 118065294044,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 9",
+          "attempts": 10000,
+          "atLeast100ms": 8,
+          "nonClosed": 0,
+          "maxMs": 369.8010000000004
+        },
+        {
+          "id": 118065294193,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 10",
+          "attempts": 10000,
+          "atLeast100ms": 2,
+          "nonClosed": 0,
+          "maxMs": 350.8580000000002
+        }
+      ]
+    },
+    {
+      "id": 39255636353,
+      "stage": "Post-#33 Windows Packet Monitor capture",
+      "commit": "9dff27856d432b2300aa7115706b4332fbf857ab",
+      "url": "https://github.com/AyoubAchour/net-switch/actions/runs/39255636353",
+      "totals": [
+        {
+          "architecture": "x64",
+          "jobs": 3,
+          "attempts": 30000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 32.40909999999985
+        },
+        {
+          "architecture": "arm64",
+          "jobs": 3,
+          "attempts": 30000,
+          "atLeast100ms": 4,
+          "nonClosed": 0,
+          "maxMs": 360.22320000000013
+        }
+      ],
+      "jobs": [
+        {
+          "id": 118070104008,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 2",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 29.04019999999946
+        },
+        {
+          "id": 118070104030,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 2",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 32.40909999999985
+        },
+        {
+          "id": 118070104107,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 3",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 26.768599999999424
+        },
+        {
+          "id": 118070104194,
+          "architecture": "arm64",
+          "name": "TestISP reuse investigation / ARM64 / 1",
+          "attempts": 10000,
+          "atLeast100ms": 4,
+          "nonClosed": 0,
+          "maxMs": 360.22320000000013
+        },
+        {
+          "id": 118070104301,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 3",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 30.434000000000196
+        },
+        {
+          "id": 118070104372,
+          "architecture": "x64",
+          "name": "TestISP reuse investigation / x64 / 1",
+          "attempts": 10000,
+          "atLeast100ms": 0,
+          "nonClosed": 0,
+          "maxMs": 27.71519999999873
+        }
+      ]
+    }
+  ],
+  "packetEvidence": {
+    "run": 39255636353,
+    "job": 118070104194,
+    "artifact": 12187983885,
+    "architecture": "arm64",
+    "round": 1,
+    "attempt": 104,
+    "totalMs": 344.4099,
+    "connectMs": 0.8694,
+    "firstDataMs": 1.4997,
+    "finMs": 344.2067,
+    "sequence": 128541580,
+    "submittedUTC": "2026-10-19T13:03:26.520292Z",
+    "retransmittedUTC": "2026-10-19T13:03:26.862966Z",
+    "nicArrivalUTC": [
+      "2026-10-19T13:03:26.8631337Z",
+      "2026-10-19T13:03:26.8632408Z"
+    ],
+    "packetMonitorLostEvents": 0,
+    "ipAndTCPChecksumsValid": true,
+    "windowsRetransmitsBefore": 17,
+    "windowsRetransmitsAtSlow": 17,
+    "windowsInputErrorsBefore": 0,
+    "windowsInputErrorsAtSlow": 0
+  },
+  "counterEvidence": {
+    "run": 39253385682,
+    "job": 118062485773,
+    "round": 10,
+    "attempt": 421,
+    "totalMs": 282.4544,
+    "connectMs": 0.7484,
+    "firstDataMs": 1.1336,
+    "finMs": 282.2642,
+    "gvisorRetransmitsDelta": 1,
+    "gvisorTimeoutsDelta": 0,
+    "windowsRetransmitsBefore": 3,
+    "windowsRetransmitsAtSlow": 3,
+    "ringFull": 0,
+    "ndisDiscards": 0,
+    "ringAndNdisErrors": 0,
+    "gatewayHeartbeatGapsOver5ms": 0,
+    "clientHeartbeatMaxGapMs": 16.297,
+    "gcPausesDuringAttempt": []
+  },
+  "handshakeTimers": {
+    "gvisorInitialMs": 1000,
+    "windowsInitialMs": 1000,
+    "windowsEvidenceJob": 118070104194,
+    "note": "Get-NetTCPSetting InitialRto is 1000 for Internet, Datacenter and compatibility templates. Established-connection FIN recovery is distinct from SYN/SYN-ACK retransmission."
+  },
+  "limits": [
+    "Two pre-#33 ARM64 jobs ended early on a failed bind; they were not retried. Counts include their actual partial rounds.",
+    "Windows TCP counters are host-wide; packet sequence and NIC timestamps provide attribution.",
+    "Endpoint states are sampled at packet/relay boundaries and at 1 ms heartbeat requests, so intermediate transitions may be missed.",
+    "The Node heartbeat requests a 1 ms timer; Windows commonly schedules it at roughly 16 ms."
+  ]
+}

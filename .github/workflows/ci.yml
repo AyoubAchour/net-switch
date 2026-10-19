@@ -3,12 +3,196 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      packet_capture:
+        description: Capture Windows packet/drop events on three runners per architecture
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  testisp-reproduction:
+    name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        repeat: ${{ fromJSON(inputs.packet_capture && '[1,2,3]' || '[1,2,3,4,5,6,7,8,9,10]') }}
+        arch: [x64, ARM64]
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: ARM64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+      TESTISP_PACKET_CAPTURE: ${{ inputs.packet_capture }}
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Build TestISP only
+        run: |
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
+      - name: Measure 10000 fixed-tuple reuses without an app or engine
+        run: |
+          node tests/windows/testisp/reproduce.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Keep every round and slow attempt
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: testisp-reproduction-${{ matrix.arch }}-${{ matrix.repeat }}
+          path: dist/testisp-reproduction/
+          retention-days: 14
+
+  windows-acceptance:
+    if: github.event_name != 'workflow_dispatch'
+    name: Windows acceptance / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: ARM64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Build gateway and separately addressed probe process
+        run: |
+          go test ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/quicprobe.exe ./tests/windows/quicprobe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/mtuprobe.exe ./tests/windows/mtuprobe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/udpreject.exe ./tests/windows/udpreject
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build today's native helper
+        # The helper has its own module and its own dependency policy.
+        env:
+          GOFLAGS: -mod=readonly -p=2
+        run: ./scripts/build-helper.ps1
+      - name: Fetch the verified engine and signed Wintun DLL
+        run: |
+          ./scripts/fetch-engine.ps1
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
+      - name: Run acceptance against today's Node server and sing-box
+        run: |
+          node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry server.mjs --engine-exe engine/sing-box.exe --profile baseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Keep report, executable identities and traffic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-acceptance-${{ matrix.arch }}
+          path: |
+            dist/windows-acceptance/*.json
+            dist/windows-acceptance/testisp/*.json
+            dist/windows-acceptance/**/*.log*
+          retention-days: 14
+
+  testisp:
+    if: github.event_name != 'workflow_dispatch'
+    name: TestISP proof / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: ARM64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Build the gateway and separately addressed direct probe process
+        run: |
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Fetch and verify the signed Wintun DLL
+        run: ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
+      - name: Prove two observable paths and independent failures
+        run: |
+          node tests/windows/testisp/proof.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Keep proof and gateway logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: testisp-proof-${{ matrix.arch }}
+          path: dist/testisp-proof/
+          retention-days: 14
+
   engine:
+    if: github.event_name != 'workflow_dispatch'
     name: Windows ${{ matrix.arch }} / engine configs and TUN
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -47,6 +231,21 @@ jobs:
         run: |
           node scripts/check-engine-config.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build TestISP for the legacy TUN assertions
+        env:
+          GOTOOLCHAIN: local
+          GOMAXPROCS: '2'
+          GOFLAGS: -mod=vendor -p=2
+        run: |
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Test real TUN routing and report port reuse and DNS changes
         run: |
           node scripts/e2e-tun.mjs
@@ -60,11 +259,15 @@ jobs:
             dist/tun-test/*.log*
             dist/tun-test/udp/*.log*
             dist/tun-test/report.txt
+            dist/tun-test/executables.json
+            dist/tun-test/testisp/*.json
+            dist/tun-test/testisp/*.log*
           retention-days: 14
 
   # Net Switch 1.0, in progress: the Go code in the root module (cmd/, internal/).
   # Nothing here ships until 1.0; 0.3.x keeps building from the jobs below.
   go1:
+    if: github.event_name != 'workflow_dispatch'
     name: Go 1.0 / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -173,6 +376,7 @@ jobs:
           go test -run '^$' -fuzz '^FuzzProtocol$' -fuzztime 30s -parallel 2 ./internal/engine/protocol
 
   wintun:
+    if: github.event_name != 'workflow_dispatch'
     name: Wintun session / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -250,6 +454,7 @@ jobs:
           ./bin/wintun-race.test.exe '-test.v' '-test.timeout=5m' '-test.run=TestRing|TestWintun(RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|Lifetime)$'
 
   linux:
+    if: github.event_name != 'workflow_dispatch'
     name: Linux / Node ${{ matrix.node }} (shared code)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -268,6 +473,7 @@ jobs:
       - run: npm test
 
   linux-helper:
+    if: github.event_name != 'workflow_dispatch'
     name: Linux / helper build and shared tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -294,6 +500,7 @@ jobs:
       - run: go build ./...
 
   test:
+    if: github.event_name != 'workflow_dispatch'
     name: Windows / Node ${{ matrix.node }}
     runs-on: windows-latest
     timeout-minutes: 20
@@ -328,6 +535,7 @@ jobs:
         run: ./scripts/build-release.ps1 -SkipInstaller
 
   installer:
+    if: github.event_name != 'workflow_dispatch'
     name: Installer smoke test
     runs-on: windows-latest
     timeout-minutes: 30
@@ -346,6 +554,7 @@ jobs:
           ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-x64.exe"
 
   arm64:
+    if: github.event_name != 'workflow_dispatch'
     name: Windows ARM64 / tests and installer
     runs-on: windows-11-arm
     timeout-minutes: 30

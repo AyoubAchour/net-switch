@@ -1,5 +1,5 @@
 # Only e2e-tun.mjs on a disposable GitHub-hosted Windows runner may use this.
-param([ValidateSet('inspect', 'state', 'dns-change', 'dns-restore')] [string] $Action)
+param([ValidateSet('inspect', 'state', 'dns-state', 'dns-change', 'dns-restore')] [string] $Action)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
   throw 'TUN network tests are restricted to GitHub-hosted runners.'
@@ -31,7 +31,7 @@ if ($Action -eq 'inspect') {
     $before = @((Get-DnsClientServerAddress -InterfaceIndex $index -AddressFamily IPv4).ServerAddresses)
     $servers = if (($before -join ',') -eq '1.1.1.1,8.8.8.8') { @('8.8.8.8', '1.1.1.1') } else { @('1.1.1.1', '8.8.8.8') }
     $dnsClient | Set-DnsClientServerAddress -ServerAddresses $servers
-  } else {
+  } elseif ($Action -eq 'dns-restore') {
     if ($env:NETSWITCH_TEST_STATIC_DNS) {
       $dnsClient | Set-DnsClientServerAddress -ServerAddresses ($env:NETSWITCH_TEST_STATIC_DNS -split '[,;\s]+' | Where-Object { $_ })
     } else {

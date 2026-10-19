@@ -6,8 +6,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { buildEngineConfig, buildRuleSets } from '../lib/engine.mjs';
 import { ruleCases } from '../test/windows-golden-cases.mjs';
+import { launchOptions } from '../tests/windows/launch.mjs';
+import { identity } from '../tests/windows/testisp/harness.mjs';
 
-const exe = path.resolve('engine/sing-box.exe');
+const options = launchOptions();
+const exe = options.engine;
+console.log(`Config-check executable: ${JSON.stringify(await identity(exe, options.engineVersionArgs))}`);
 const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^ENABLE_DEPRECATED_/i.test(key)));
 const dir = await mkdtemp(path.join(tmpdir(), 'netswitch-config-check-'));
 function run(args) {

@@ -1,0 +1,694 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { launchOptions, recordLaunch, startServer, verifyEngineProcess } from './launch.mjs';
+import { BaselineDefect, Report } from './report.mjs';
+import { targets } from './targets.mjs';
+import { hostedOnly, identity, run, startHarness, until } from './testisp/harness.mjs';
+
+hostedOnly();
+const options = launchOptions();
+assert(['baseline', 'v1'].includes(options.profile), 'Use --profile baseline or v1');
+const dir = path.resolve('dist/windows-acceptance');
+const dataDir = path.join(dir, 'app');
+await mkdir(dataDir, { recursive: true });
+const report = new Report(options.profile);
+const output = createWriteStream(path.join(dir, 'server-output.log'));
+const clientExe = path.join(dir, 'acceptance-app.exe');
+await copyFile(process.execPath, clientExe);
+let harness, responder, server, worker, dnsAdapter, quicServer, quic, restoreDNS = false;
+const quicExe = path.resolve('dist/windows-test/quicprobe.exe');
+const mtuExe = path.resolve('dist/windows-test/mtuprobe.exe');
+const udpRejectExe = path.resolve('dist/windows-test/udpreject.exe');
+const rejections = new Set(['ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EACCES']);
+const publicDestination = '1.0.0.1:443';
+const appDeviceIDs = new Set();
+const destinationCount = (stats, destination) => stats.destinations?.[destination] ?? 0;
+
+async function applied(route, body, matches) {
+  await server.api(route, body);
+  return until(async () => {
+    const state = await server.api('state');
+    return state.routing.status === 'on' && matches(state) && state;
+  }, `${route} applied state`, 30_000);
+}
+
+async function pinApp(program, line) {
+  return applied('app-line', { path: program, line }, (state) => {
+    const app = state.apps.find((item) => item.path.toLowerCase() === program.toLowerCase());
+    return (app?.line ?? null) === line;
+  });
+}
+
+async function combine(on) {
+  return applied('combine', { on, mode: 'manual', weights: { [main.id]: 1, [second.id]: 1 } },
+    (state) => state.combine.on === on && (!on || state.combine.active));
+}
+
+function exactTraffic(before, after, expected, destination = publicDestination) {
+  assert.equal(destinationCount(after, destination) - destinationCount(before, destination), expected,
+    `Unexpected TestISP traffic to ${destination}: ${JSON.stringify({ before: before.destinations, after: after.destinations, expected })}`);
+}
+let main, second;
+const pending = new Map();
+let serial = 0;
+
+// Independent probes keep reporting after a failure. The job still fails, and
+// tests needing that baseline are explicitly blocked instead of counted as passes.
+async function observe(name, label, fn) {
+  try { return await report.test(name, label, fn); }
+  catch { process.exitCode = 1; return undefined; }
+}
+
+function client(command, args = {}, timeout = 120_000) {
+  return new Promise((resolve, reject) => {
+    const id = ++serial;
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${command}: client deadline`)); }, timeout);
+    pending.set(id, { resolve, reject, timer }); worker.send({ id, command, ...args });
+  });
+}
+
+async function network(action, adapter) {
+  const result = await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.resolve('scripts/tun-test-network.ps1'), '-Action', action], {
+    env: { NETSWITCH_TEST_ADAPTER: String(adapter?.index ?? ''), NETSWITCH_TEST_STATIC_DNS: adapter?.staticDns ?? '' },
+  });
+  return JSON.parse(result.stdout.replace(/^\uFEFF/, ''));
+}
+
+async function clean() {
+  return until(async () => {
+    const state = await network('state');
+    const pnp = await pnpDevices();
+    assert(Object.values(state).every((list) => list.length === 0) && pnp.length === 0, JSON.stringify({ ...state, pnp }));
+    return { ...state, pnp };
+  }, 'no NetSwitch adapter (including non-present PnP), route or firewall leftovers', 20_000);
+}
+
+async function pnpDevices() {
+  const result = await run('powershell.exe', ['-NoProfile', '-File', path.resolve('tests/windows/pnp.ps1')]);
+  const value = result.stdout ? JSON.parse(result.stdout) : [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function rememberAppDevices(devices) {
+  for (const device of devices.filter((device) => device.present)) appDeviceIDs.add(device.instanceId);
+}
+
+async function stoppedSnapshot() {
+  const state = await until(async () => {
+    const value = await network('state');
+    assert(Object.values(value).every((list) => list.length === 0), JSON.stringify(value));
+    return value;
+  }, 'stopped app routes and present adapters disappear', 20000);
+  const pnp = await pnpDevices();
+  assert(!pnp.some((device) => device.present), `Present device survived stop: ${JSON.stringify(pnp)}`);
+  return { state, pnp };
+}
+
+async function recordOrphanPnP(name, state, pnp) {
+  await observe(name, pnp.length ? 'baseline-defect' : 'parity', async () => {
+    assert(pnp.every((device) => !device.present && appDeviceIDs.has(device.instanceId)), `Unrecognized PnP leftover: ${JSON.stringify(pnp)}`);
+    if (pnp.length) throw new BaselineDefect('Engine exit left an owned, non-present Wintun device; Get-NetAdapter could not see it', { state, pnp });
+    return { state, pnp };
+  });
+}
+
+async function pin(line) {
+  await client('close');
+  await until(async () => {
+    const state = await server.api('state');
+    const app = state.apps.find((item) => item.path.toLowerCase() === clientExe.toLowerCase());
+    return !app || Object.values(app.connections).every((count) => count === 0);
+  }, 'previous test-app connections closed', 25_000);
+  await pinApp(clientExe, line);
+}
+
+async function counts(total) {
+  return until(async () => {
+    const state = await server.api('state');
+    const app = state.apps.find((item) => item.path.toLowerCase() === clientExe.toLowerCase());
+    if (!app || Object.values(app.connections).reduce((sum, n) => sum + n, 0) < total) return null;
+    return app.connections;
+  }, `${total} real test-app flows in app state`, 25_000);
+}
+
+async function newPublicOn(line, count = 3) {
+  await pin(line.id);
+  const before = await harness.control('stats');
+  const opened = await client('open', { count });
+  const byLine = await counts(count);
+  assert.equal(byLine[line.id], count, JSON.stringify(byLine));
+  assert.equal(Object.values(byLine).reduce((sum, n) => sum+n, 0), count, 'Old sockets still counted');
+  const after = await harness.control('stats');
+  exactTraffic(before, after, line.id === second.id ? count : 0);
+  return { opened, byLine, before, after };
+}
+
+async function publicBaseline() { return { direct: await harness.probe(harness.uplink), virtual: await harness.probe(harness.testisp) }; }
+
+async function targetFirewall(action) {
+  return run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.resolve('tests/windows/target-network.ps1'), '-Action', action], {
+    env: { ACCEPTANCE_CLIENT: clientExe, ACCEPTANCE_GATEWAY: path.resolve('dist/windows-test/testisp.exe'), ACCEPTANCE_ENGINE: options.engine, ACCEPTANCE_TARGET: harness?.uplink.address ?? '',
+      ACCEPTANCE_UPLINK: String(harness?.uplink.index ?? ''), ACCEPTANCE_TESTISP: String(harness?.testisp.index ?? ''), ACCEPTANCE_UDP_PROBE: udpRejectExe,
+      ACCEPTANCE_MTU: mtuExe, ACCEPTANCE_QUIC: quicExe },
+  });
+}
+
+async function ping(host, source, size = 32, df = false) {
+  const args = [host.includes(':') ? '-6' : '-4', '-n', '1', '-w', '3000', '-l', String(size)];
+  if (host.includes(':') && !source) {
+    // Windows' ICMP API can bypass program-scoped firewall rules. Require the
+    // selected source to belong to the app TUN and bind ping to that source.
+    const selected = JSON.parse((await run('powershell.exe', ['-NoProfile', '-Command',
+      'Find-NetRoute -RemoteIPAddress $env:ACCEPTANCE_PING_TARGET | Where-Object { $_.PSObject.Properties.Name -contains "IPAddress" } | Select-Object IPAddress,InterfaceAlias | ConvertTo-Json -Compress'],
+    { env: { ACCEPTANCE_PING_TARGET: host } })).stdout);
+    assert.equal(selected.InterfaceAlias, 'NetSwitch', `IPv6 echo would bypass the engine: ${JSON.stringify(selected)}`);
+    assert.notEqual(selected.IPAddress, '2001:db8:19::1', 'IPv6 echo selected TestISP directly');
+    source = selected.IPAddress;
+  }
+  if (source && host.includes(':')) args.push('-S', source);
+  if (df) args.push('-f');
+  args.push(host);
+  const result = await run('ping.exe', args, { timeout: 10_000 });
+  assert.match(result.stdout, /(?:time[=<]|TTL=)/i, 'Ping had no actual echo reply');
+  return { output: result.stdout, source };
+}
+
+async function quicProbe(host, source, index) {
+  const port = quic.address.split(':').at(-1);
+  const args = ['--address', `${host}:${port}`, '--certificate', quic.certificate];
+  if (source) args.push('--source', source);
+  if (index) args.push('--interface', String(index));
+  const result = await run(quicExe, args, { timeout: 20_000 });
+  return JSON.parse(result.stdout);
+}
+
+async function start() {
+  server = await startServer(options, dataDir, (chunk) => output.write(chunk));
+  const state = await server.on();
+  await verifyEngineProcess(options, dataDir);
+  rememberAppDevices(await pnpDevices());
+  return state;
+}
+
+async function mtuProbe(host, size, source, index) {
+  const args = ['--address', `${host.includes(':') ? `[${host}]` : host}:${responder.virtual.udp[0]}`, '--size', String(size)];
+  if (source) args.push('--source', source);
+  if (index) args.push('--interface', String(index));
+  return JSON.parse((await run(mtuExe, args, { timeout: 10_000 })).stdout);
+}
+
+async function udpReject(target, count = 100, timeout = 5000) {
+  return JSON.parse((await run(udpRejectExe, ['--address', `${target.host}:${target.udp[0]}`, '--count', String(count), '--timeout', `${Math.ceil(timeout)}ms`], { timeout: 10_000 })).stdout);
+}
+
+try {
+  await recordLaunch(options, path.join(dir, 'executables.json'));
+  await report.test('clean before start', 'harness-baseline', clean);
+  dnsAdapter = await network('inspect');
+  harness = await startHarness(path.join(dir, 'testisp'));
+  responder = await targets(harness.uplink.address);
+  await targetFirewall('allow');
+  await targetFirewall('ipv6');
+  await writeFile(path.join(dir, 'quic-executable.json'), JSON.stringify(await identity(quicExe), null, 2));
+  await writeFile(path.join(dir, 'mtu-executable.json'), JSON.stringify(await identity(mtuExe), null, 2));
+  await writeFile(path.join(dir, 'udp-reject-executable.json'), JSON.stringify(await identity(udpRejectExe), null, 2));
+  const quicState = path.join(dir, `quic-ready-${Date.now()}.json`);
+  quicServer = spawn(quicExe, ['--serve', '--address', `${harness.uplink.address}:0`, '--interface', String(harness.uplink.index), '--state', quicState], {
+    windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  quicServer.stdout.on('data', (chunk) => output.write(chunk)); quicServer.stderr.on('data', (chunk) => output.write(chunk));
+  quic = await until(async () => JSON.parse(await readFile(quicState, 'utf8')), 'controlled QUIC target ready');
+  await harness.control('targets', { ports: [responder.direct.http, ...responder.direct.udp, Number(quic.address.split(':').at(-1))] });
+  worker = spawn(clientExe, [path.resolve('tests/windows/client.mjs')], { windowsHide: true, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+  worker.on('message', ({ id, result, error }) => {
+    const entry = pending.get(id); if (!entry) return;
+    pending.delete(id); clearTimeout(entry.timer);
+    if (error) entry.reject(new Error(error)); else entry.resolve(result);
+  });
+  worker.on('exit', (code) => { for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(new Error(`Client exited ${code}`)); } pending.clear(); });
+  await report.test('both public egress baselines', 'harness-baseline', publicBaseline);
+  await report.test('real QUIC v1 baseline on both line addresses', 'harness-baseline', async () => ({
+    direct: await quicProbe(harness.uplink.address, harness.uplink.address, harness.uplink.index),
+    virtual: await quicProbe(responder.virtual.host, harness.testisp.address, harness.testisp.index),
+  }));
+  await report.test('controlled HTTP reachable through both line addresses', 'harness-baseline', async () => {
+    const direct = await client('open', { target: responder.direct }); await client('close');
+    const before = await harness.control('stats');
+    const virtual = await client('open', { target: { ...responder.virtual, source: harness.testisp.address } }); await client('close');
+    const after = await harness.control('stats');
+    assert(after.testisp.connections > before.testisp.connections);
+    return { direct, virtual, before, after };
+  });
+  for (const size of [64, 1200, 1800, 8192, 12000]) {
+    await report.test(`controlled UDP baseline ${size} bytes on both lines`, 'harness-baseline', async () => ({
+      direct: await client('udp', { target: responder.direct, size }),
+      virtual: await client('udp', { target: responder.virtual, size, localAddress: harness.testisp.address }),
+    }));
+  }
+  const rejectBaseline = await observe('Windows reports controlled closed TCP and UDP ports', 'harness-baseline', async () => {
+    const tcp = await client('reject', { target: responder.rejected, count: 3 });
+    const udp = await udpReject(responder.rejected, 3);
+    assert([...tcp, ...udp].every((sample) => rejections.has(sample.outcome)), `Closed ports did not report rejection: ${JSON.stringify({ tcp, udp })}`);
+    return { tcp, udp };
+  });
+  const resetBaseline = await observe('RST survives both native and TestISP relays', 'harness-baseline', async () => {
+    const direct = await client('reset', { target: responder.direct });
+    const virtual = await client('reset', { target: { ...responder.virtual, source: harness.testisp.address } });
+    assert.equal(direct.outcome, 'ECONNRESET', JSON.stringify(direct));
+    assert.equal(virtual.outcome, 'ECONNRESET', JSON.stringify(virtual));
+    return { direct, virtual };
+  });
+  await report.test('gateway preserves STUN mapping before engine starts', 'harness-baseline', async () => {
+    const result = await client('udp', { target: responder.virtual, stun: true, localAddress: harness.testisp.address });
+    assert.equal(new Set(result.mappings.map((item) => item.port)).size, 1, JSON.stringify(result));
+    assert(result.unsolicited, `The gateway lost the third, uncontacted STUN sender: ${JSON.stringify({ result, stats: await harness.control('stats'), target: responder.seen.slice(-5) })}`);
+    return result;
+  });
+  const directReuse = await observe('physical controlled port reuse baseline', 'harness-baseline', async () => {
+    const peers = await responder.reuseTargets(1000);
+    try {
+      const samples = await client('reuse', { target: { ...peers.target, source: harness.uplink.address }, count: 1000 });
+      const failed = samples.find((sample) => sample.outcome !== 'closed');
+      let sockets;
+      if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection | Where-Object { $_.LocalPort -eq ${failed.port} -or $_.RemotePort -eq ${failed.port} } | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess,CreationTime) | ConvertTo-Json -Compress`]);
+      assert(samples.length === 1000 && !failed, `Physical reuse failed: ${JSON.stringify({ samples, sockets, target: peers.target })}`);
+      assert.equal(new Set(samples.map((sample) => sample.port)).size, 1, 'Native source port changed');
+      assert.equal(new Set(samples.map((sample) => sample.peerPort)).size, 1000, 'Native responder port was reused');
+      for (const sample of samples) {
+        const seen = JSON.parse(sample.body);
+        assert.equal(seen.source, harness.uplink.address);
+        assert.equal(seen.port, samples[0].port, 'Responder saw a different native source port');
+      }
+      return samples;
+    } finally { await peers.close(); }
+  });
+  const gatewayReuse = await observe('TestISP 1,000 rapid fixed-tuple reuses', 'harness-baseline', async () => {
+    assert.equal(harness.testisp.tcpReuseHook, true, 'TestISP must install the shared TIME_WAIT hook');
+    const rounds = [];
+    let samples;
+    // Consecutive rounds expose occasional relay delays. Every round must
+    // pass; a failure stops immediately and is never retried into a pass.
+    for (let round = 1; round <= 4; round++) {
+      const before = await harness.control('diagnostics');
+      samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000, maxMs: 100, diagnostics: harness.diagnosticClient });
+      const after = await harness.control('diagnostics');
+      const failed = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
+      const stats = failed && await harness.control('stats');
+      let sockets;
+      if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection -LocalPort ${failed.port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess) | ConvertTo-Json -Compress`]);
+      if (samples.length !== 1000 || failed) {
+        const error = new Error(`Gateway reuse failed: ${JSON.stringify({ round, count: samples.length, failed, trace: stats.tcpTrace })}`);
+        error.evidence = { rounds, samples, sockets, stats, before, after };
+        throw error;
+      }
+      assert.equal(new Set(samples.map((sample) => `${sample.port}:${sample.peerPort}`)).size, 1, 'TestISP reuse changed the tuple');
+      const result = { round, count: samples.length, maxMs: Math.max(...samples.map((sample) => sample.ms)), tuple: [samples[0].port, samples[0].peerPort], architecture: process.arch };
+      rounds.push({ ...result, before, after, clientHeartbeat: await client('heartbeat') });
+      console.log(`TESTISP REUSE ${JSON.stringify(result)}`);
+    }
+    return { rounds, samples };
+  });
+  const icmpBaseline = await observe('controlled ICMP v4/v6 baselines', 'harness-baseline', async () => ({
+    v4: await ping(responder.virtual.host, harness.testisp.address),
+    v6: await ping('2001:db8:198::2', '2001:db8:19::1'),
+  }));
+  const ipv6Target = { ...responder.virtual, host: '2001:db8:198::2' };
+  const ipv6Baseline = await observe('controlled IPv6 TCP and UDP baselines', 'harness-baseline', async () => {
+    const tcp = await client('open', { target: { ...ipv6Target, source: '2001:db8:19::1' } }); await client('close');
+    const udp = await client('udp', { target: ipv6Target, localAddress: '2001:db8:19::1' });
+    return { tcp, udp };
+  });
+  const mtuBaselines = {};
+  for (const [host, source] of [[responder.virtual.host, harness.testisp.address], [ipv6Target.host, '2001:db8:19::1']]) {
+    mtuBaselines[host] = await observe(`DF and oversize UDP baseline ${host}`, 'harness-baseline', async () => {
+      const small = await mtuProbe(host, 1200, source, harness.testisp.index);
+      assert.equal(small.outcome, 'reply', JSON.stringify(small));
+      const large = await mtuProbe(host, 2000, source, harness.testisp.index);
+      assert.equal(large.outcome, 'message-too-large', JSON.stringify(large));
+      return { small, large };
+    });
+  }
+  await writeFile(path.join(dataDir, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
+  await targetFirewall('capture');
+  await report.test('IPv6 probes cannot bypass the stopped engine', 'harness-baseline', async () => {
+    await assert.rejects(client('udp', { target: ipv6Target }));
+    await assert.rejects(ping(ipv6Target.host));
+    const mtu = await mtuProbe(ipv6Target.host, 1200).catch((error) => ({ outcome: 'blocked', error: error.message }));
+    assert.notEqual(mtu.outcome, 'reply', JSON.stringify(mtu));
+    return { udp: 'blocked', ping: 'blocked', mtu };
+  });
+  const initial = await start();
+  main = initial.lines[0];
+  assert.equal(main.alias, harness.uplink.alias, 'Default line is not the real uplink');
+  await server.api('lines/add', { alias: 'TestISP' });
+  const state = await server.on();
+  second = state.lines.find((line) => line.alias === 'TestISP');
+  assert(second && state.lines.length === 2, JSON.stringify(state.lines));
+  await report.test('pins cross two actual interfaces', 'parity', async () => ({ direct: await newPublicOn(main), virtual: await newPublicOn(second) }));
+  await report.test('new pin leaves old connections alive', 'parity', async () => {
+    const original = await client('open', { count: 3 });
+    await pinApp(clientExe, main.id);
+    const next = await client('open', { count: 3 });
+    await client('refresh', { ids: original.map((item) => item.id) });
+    const byLine = await counts(9);
+    assert(byLine[second.id] >= 6 && byLine[main.id] === 3, JSON.stringify(byLine));
+    return { original, next, byLine };
+  });
+  await pin(null);
+  await report.test('combining distributes real traffic over both interfaces', 'parity', async () => {
+    await pin(null);
+    await combine(true);
+    const before = await harness.control('stats');
+    await client('open', { count: 40 });
+    const byLine = await counts(40);
+    assert(byLine[main.id] >= 10 && byLine[second.id] >= 10, JSON.stringify(byLine));
+    const after = await harness.control('stats');
+    exactTraffic(before, after, byLine[second.id]);
+    await client('close');
+    await combine(false);
+    return { byLine, before, after };
+  });
+  for (const fault of ['withdraw', 'drop']) await report.test(`${fault === 'withdraw' ? 'default-route loss' : 'dead gateway with route present'} fails over and restoration fails back`, 'parity', async () => {
+    await pin(second.id);
+    if (fault === 'withdraw') await harness.network('withdraw');
+    else await harness.control('mode', { mode: 'drop' });
+    try {
+      const failedOver = await until(async () => {
+        const state = await server.api('state');
+        return state.lines.find((line) => line.id === second.id)?.target === main.id && state.lines;
+      }, 'TestISP failover', 60_000);
+      const routes = await harness.network('state');
+      assert.equal(routes.defaultRoute, fault === 'drop', 'Fault injection changed the wrong failure domain');
+      const before = await harness.control('stats');
+      await client('open', { count: 3 });
+      const byLine = await counts(3); assert.equal(byLine[main.id], 3);
+      const after = await harness.control('stats');
+      exactTraffic(before, after, 0);
+      if (fault === 'withdraw') await harness.network('restore');
+      else await harness.control('mode', { mode: 'running' });
+      const failedBack = await until(async () => {
+        const state = await server.api('state');
+        return state.lines.find((line) => line.id === second.id)?.target === second.id && state.lines;
+      }, 'TestISP failback', 90_000);
+      return { fault, routes, failedOver, byLine, before, after, failedBack, traffic: await newPublicOn(second) };
+    } finally {
+      if (fault === 'drop') await harness.control('mode', { mode: 'running' });
+      // restore is idempotent when a route is already present.
+      else await harness.network('restore');
+    }
+  });
+  await pin(second.id);
+  await report.test('controlled HTTP crosses the app TUN and TestISP', 'parity', async () => {
+    const before = await harness.control('stats');
+    const response = await client('open', { target: responder.virtual });
+    const byLine = await counts(1); assert.equal(byLine[second.id], 1);
+    const after = await harness.control('stats'); assert(after.testisp.connections > before.testisp.connections);
+    await client('close'); return { response, byLine, before, after };
+  });
+  await observe('TCP reset crosses the app TUN unchanged', 'baseline-defect', async () => {
+    assert(resetBaseline, 'Blocked: the reset baseline failed');
+    const result = await client('reset', { target: responder.virtual });
+    if (result.outcome === 'fin') throw new BaselineDefect('The engine converts an upstream RST into FIN', { resetBaseline, result });
+    assert.equal(result.outcome, 'ECONNRESET', JSON.stringify(result));
+    return result;
+  });
+  for (const size of [64, 1200, 1800, 8192, 12000]) {
+    await observe(`UDP payload and fragmentation through TUN: ${size} bytes`, 'parity', () => client('udp', { target: responder.virtual, size }));
+  }
+  await observe('STUN two-server mapping through TUN', 'parity', async () => {
+    const result = await client('udp', { target: responder.virtual, stun: true });
+    assert.equal(new Set(result.mappings.map((item) => item.port)).size, 1, JSON.stringify(result));
+    assert(result.unsolicited, 'The app lost the third, uncontacted STUN sender');
+    return result;
+  });
+  await observe('real QUIC v1 through TUN has the right payload hash', 'parity', async () => {
+    await pinApp(quicExe, second.id);
+    const before = await harness.control('stats');
+    const response = await quicProbe(responder.virtual.host);
+    const after = await harness.control('stats');
+    assert(after.testisp.bytesIn > before.testisp.bytesIn && after.testisp.bytesOut > before.testisp.bytesOut);
+    return { response, before, after };
+  });
+  await observe('controlled IPv6 TCP and UDP through TUN', 'parity', async () => {
+    assert(ipv6Baseline, 'Blocked: the controlled IPv6 baseline failed');
+    assert.equal((await server.api('state')).routing.ipv6, true, 'IPv6 capture was not enabled');
+    const tcp = await client('open', { target: ipv6Target });
+    const byLine = await counts(1); assert(byLine[second.id] >= 1); await client('close');
+    const udp = await client('udp', { target: ipv6Target }); return { tcp, udp, byLine };
+  });
+  await pinApp(mtuExe, second.id);
+  for (const host of [responder.virtual.host, ipv6Target.host]) {
+    await observe(`DF and oversize UDP through TUN ${host}`, 'baseline-defect', async () => {
+      assert(mtuBaselines[host], 'Blocked: the controlled DF baseline failed');
+      const small = await mtuProbe(host, 1200);
+      assert.equal(small.outcome, 'reply', JSON.stringify(small));
+      if (host.includes(':')) assert(!small.source.startsWith('[2001:db8:19::1]:'), `MTU probe bypassed the TUN: ${JSON.stringify(small)}`);
+      const large = await mtuProbe(host, 2000);
+      if (host.includes(':')) assert(!large.source.startsWith('[2001:db8:19::1]:'), `MTU probe bypassed the TUN: ${JSON.stringify(large)}`);
+      if (large.outcome === 'reply') throw new BaselineDefect('Oversize UDP succeeds instead of reporting packet too large', { baseline: mtuBaselines[host], small, large });
+      assert.equal(large.outcome, 'message-too-large', JSON.stringify(large));
+      return { small, large };
+    });
+  }
+  await observe('ICMP v4/v6 and 1400-byte MTU probes through TUN', 'parity', async () => {
+    assert(icmpBaseline, 'Blocked: the controlled ICMP baseline failed');
+    await server.api('lines/order', { ids: [second.id, main.id] }); await server.on();
+    try {
+      const before = await harness.control('stats');
+      const result = { v4: await ping(responder.virtual.host), v6: await ping(ipv6Target.host),
+        mtu4: await ping(responder.virtual.host, undefined, 1400, true), mtu6: await ping(ipv6Target.host, undefined, 1400) };
+      const after = await harness.control('stats');
+      for (const host of [responder.virtual.host, ipv6Target.host]) assert((after.echoRequests?.[host] ?? 0) >= (before.echoRequests?.[host] ?? 0) + 2, `Echo replies for ${host} did not reach the controlled path`);
+      return { result, before, after };
+    } finally { await server.api('lines/order', { ids: [main.id, second.id] }); await server.on(); }
+  });
+  const reuseReady = directReuse && gatewayReuse;
+  if (!reuseReady) report.results.push({ name: 'freeze gate', label: 'baseline-defect', status: 'blocked', reason: 'Native or fixed-tuple TestISP reuse prerequisite failed; no engine conclusion is possible.' });
+  for (const gap of reuseReady ? [0, 10, 100, 500] : []) {
+    await observe(`freeze gate: ${gap} ms port reuse`, 'baseline-defect', async () => {
+      const samples = await client('reuse', { target: responder.virtual, count: gap ? 10 : 1000, gap });
+      const failure = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
+      if (failure?.outcome === 'timeout' && samples[0].outcome === 'closed') {
+        let recovery;
+        if (gap === 0) {
+          const started = performance.now();
+          await delay(62_000);
+          recovery = await client('reuse', { target: responder.virtual, count: 1, reusePort: failure.port });
+          assert.equal(recovery[0].outcome, 'closed', 'Port did not recover after the expected TIME_WAIT interval');
+          recovery = { afterMs: performance.now() - started, samples: recovery };
+        }
+        throw new BaselineDefect('A reusable app port stalls behind the TUN after a successful passive close', { samples, directReuse, gatewayReuse, recovery });
+      }
+      assert(!failure, JSON.stringify(failure));
+      return { count: samples.length, maxMs: Math.max(...samples.map((sample) => sample.ms)) };
+    });
+  }
+  const large = await observe('100 MB TCP transfer with a payload hash', 'parity', async () => {
+    const samples = await client('reuse', { target: responder.virtual, count: 1, length: 100_000_000 });
+    assert.equal(samples[0]?.outcome, 'closed', JSON.stringify(samples)); return samples;
+  });
+  if (reuseReady && large) await observe('freeze gate: reuse after 100 MB transfer', 'baseline-defect', async () => {
+    const samples = await client('reuse', { target: responder.virtual, count: 1000, reusePort: large[0].port });
+    if (samples.some((sample) => sample.outcome === 'timeout')) throw new BaselineDefect('Port stalls after a verified 100 MB transfer', samples);
+    assert(samples.length === 1000 && samples.every((sample) => sample.outcome === 'closed' && sample.ms < 100), JSON.stringify(samples));
+    return samples;
+  });
+  await report.test('DNS change leaves held sockets alive', 'parity', async () => {
+    await client('close');
+    const held = await client('open', { count: 5, target: responder.virtual });
+    const beforePID = await readFile(path.join(dataDir, 'engine.pid'), 'utf8');
+    restoreDNS = true;
+    const changed = await network('dns-change', dnsAdapter);
+    assert.notDeepEqual(changed, dnsAdapter.dns);
+    await until(async () => {
+      const actual = await network('dns-state', dnsAdapter);
+      assert.deepEqual(actual, changed);
+      return actual;
+    }, 'Windows applied the requested DNS servers');
+    // Keep exercising the original sockets across asynchronous network-change
+    // notifications. This is an observation window, not a readiness sleep.
+    const deadline = Date.now() + 10_000;
+    let refreshes = 0;
+    do {
+      await client('refresh', { ids: held.map((item) => item.id) });
+      assert.equal(await readFile(path.join(dataDir, 'engine.pid'), 'utf8'), beforePID, 'DNS change restarted the engine');
+      refreshes++;
+      await delay(200);
+    } while (Date.now() < deadline);
+    const after = await server.api('state'); assert.equal(after.routing.status, 'on');
+    const afterPID = await readFile(path.join(dataDir, 'engine.pid'), 'utf8');
+    assert.equal(afterPID, beforePID, 'DNS change restarted the engine');
+    await network('dns-restore', dnsAdapter); restoreDNS = false;
+    await client('close');
+    await client('open', { target: responder.virtual }); await client('close');
+    return { changed, held, beforePID, afterPID, refreshes };
+  });
+  await report.test('cap exhaustion closes old secondary flows and preserves main flows', 'parity', async () => {
+    await pin(main.id);
+    const mainHeld = await client('open', { count: 2 });
+    await pinApp(clientExe, second.id);
+    const secondHeld = await client('open', { count: 2, target: responder.virtual });
+    await counts(4);
+    try {
+      // Main has no stand-in, so its exception must preserve these sockets.
+      await applied('lines/update', { id: second.id, strict: true }, (state) => state.lines.find((line) => line.id === second.id)?.strict);
+      await server.api('lines/update', { id: main.id, cap: { bytes: 1, period: 'day' } });
+      await server.api('lines/update', { id: second.id, cap: { bytes: 1, period: 'day' } });
+      const blocked = await until(async () => {
+        const state = await server.api('state');
+        return state.lines.find((line) => line.id === second.id)?.blocked && state.lines;
+      }, 'secondary cap applied');
+      const closed = await until(async () => {
+        const sockets = await client('status', { ids: secondHeld.map((item) => item.id) });
+        return sockets.every((socket) => socket.closed) && sockets;
+      }, 'flows admitted before the secondary cap closed');
+      await client('refresh', { ids: mainHeld.map((item) => item.id) });
+      assert.equal(blocked.find((line) => line.id === main.id).blocked, false);
+      return { mainHeld, secondHeld, closed, blocked };
+    } finally {
+      await server.api('lines/update', { id: main.id, cap: null });
+      await server.api('lines/update', { id: second.id, cap: null, strict: false });
+      await until(async () => !(await server.api('state')).lines.some((line) => line.exhausted || line.blocked), 'caps cleared');
+      await pin(second.id);
+    }
+  });
+  await observe('exhausted secondary rejects a burst instead of hanging', 'baseline-defect', async () => {
+    assert(rejectBaseline, 'Blocked: the Windows rejection baseline failed');
+    await client('close');
+    await client('open', { target: responder.virtual }); await client('close');
+    await pinApp(udpRejectExe, second.id);
+    const udpBefore = await udpReject(responder.virtual, 3);
+    assert(udpBefore.every((sample) => sample.outcome === 'reply'), JSON.stringify(udpBefore));
+    try {
+      await server.api('lines/update', { id: main.id, cap: { bytes: 1, period: 'day' } });
+      await server.api('lines/update', { id: second.id, cap: { bytes: 1, period: 'day' } });
+      const blocked = await until(async () => { const state = await server.api('state'); return state.lines.find((line) => line.id === second.id)?.blocked && state.lines; }, 'both caps exhausted and secondary blocked', 30_000);
+      const tcpLimitMs = Math.max(...rejectBaseline.tcp.map((sample) => sample.ms)) + 500;
+      const udpLimitMs = Math.max(...rejectBaseline.udp.map((sample) => sample.ms)) + 500;
+      const readiness = [];
+      if (options.profile === 'baseline') {
+        // 0.3.x reports a written rule file, not sing-box's asynchronous reload.
+        // Observe an actual refusal before starting the measured burst. The
+        // v1 state contract acknowledges an applied revision, so it gets no grace.
+        await until(async () => {
+          const [sample] = await client('reject', { target: responder.virtual, count: 1, timeout: tcpLimitMs });
+          readiness.push(sample);
+          assert(rejections.has(sample.outcome) && sample.ms <= tcpLimitMs,
+            `Cap not applied yet: ${JSON.stringify({ tcpLimitMs, blocked, recent: readiness.slice(-5) })}`);
+          return true;
+        }, 'sing-box has applied the cap rejection rule', 30_000);
+      }
+      const beforeBurst = await harness.control('stats');
+      const samples = await client('reject', { target: responder.virtual, timeout: tcpLimitMs });
+      const udp = await udpReject(responder.virtual, 100, udpLimitMs);
+      const afterBurst = await harness.control('stats');
+      const burstEvidence = { blocked, tcpLimitMs, udpLimitMs, readiness, samples, udp, beforeBurst, afterBurst };
+      assert(!samples.some((item) => item.outcome === 'connected'), `A capped app escaped the applied block: ${JSON.stringify(burstEvidence)}`);
+      exactTraffic(beforeBurst, afterBurst, 0, `${responder.virtual.host}:${responder.virtual.http}`);
+      exactTraffic(beforeBurst, afterBurst, 0, `${responder.virtual.host}:${responder.virtual.udp[0]}`);
+      assert(!udp.some((item) => item.outcome === 'reply'), 'Capped UDP escaped the block');
+      assert([...samples, ...udp].every((item) => item.outcome === 'timeout' || rejections.has(item.outcome)), `Unexpected probe failure: ${JSON.stringify({ samples, udp })}`);
+      assert.equal(blocked.find((line) => line.id === main.id).blocked, false, 'Main line exception was removed');
+      const mainException = await newPublicOn(main);
+      await server.api('lines/update', { id: main.id, cap: null });
+      await server.api('lines/update', { id: second.id, cap: null });
+      await until(async () => !(await server.api('state')).lines.some((line) => line.exhausted || line.blocked), 'caps cleared before recovery probes');
+      await pin(second.id); await client('open', { target: responder.virtual }); await client('close');
+      const beforeRecovery = await harness.control('stats');
+      const udpAfter = await udpReject(responder.virtual, 3);
+      assert(udpAfter.every((sample) => sample.outcome === 'reply'), JSON.stringify({ udpBefore, udp, udpAfter, state: await server.api('state'), beforeRecovery, afterRecovery: await harness.control('stats') }));
+      const evidence = { rejectBaseline, ...burstEvidence, udpBefore, udpAfter, mainException };
+      if (samples.some((item) => !rejections.has(item.outcome) || item.ms > tcpLimitMs)
+        || udp.some((item) => !rejections.has(item.outcome) || item.ms > udpLimitMs)) {
+        throw new BaselineDefect('Capped TCP/UDP did not fail fast; clearing the caps restored the same target', evidence);
+      }
+      return evidence;
+    } finally {
+      await server.api('lines/update', { id: main.id, cap: null });
+      await server.api('lines/update', { id: second.id, cap: null });
+      await until(async () => !(await server.api('state')).lines.some((line) => line.exhausted || line.blocked), 'caps cleared');
+      await pin(second.id);
+    }
+  });
+  await report.test('20 start/stop cycles clean up routes and present adapters', 'parity', async () => {
+    const cycles = [], snapshots = [];
+    for (let n = 1; n <= 20; n++) {
+      await server.api('routing', { on: false });
+      snapshots.push({ cycle: n, ...await stoppedSnapshot() });
+      await server.api('routing', { on: true }); await server.on();
+      rememberAppDevices(await pnpDevices());
+      await client('open', { target: responder.virtual }); await client('close');
+      cycles.push(n); console.log(`cycle ${n}/20`);
+    }
+    const devices = [...new Map(snapshots.flatMap((s) => s.pnp).map((device) => [device.instanceId, device])).values()];
+    await recordOrphanPnP('PnP cleanup across 20 normal routing stops', { snapshots }, devices);
+    return cycles;
+  });
+  await report.test('engine crash with automatic restart', 'parity', async () => {
+    const engine = await verifyEngineProcess(options, dataDir);
+    try { process.kill(engine.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
+    const restarted = await until(async () => {
+      const current = await verifyEngineProcess(options, dataDir);
+      return current.pid !== engine.pid && current;
+    }, 'engine automatic restart', 90_000);
+    await server.on();
+    const response = await client('open', { target: responder.virtual }); await client('close');
+    const devices = await pnpDevices();
+    rememberAppDevices(devices);
+    await recordOrphanPnP('PnP cleanup after automatic engine restart', { engine, restarted }, devices.filter((device) => !device.present));
+    return { engine, restarted, response };
+  });
+  await report.test('crash without a restart restores direct connectivity', 'parity', async () => {
+    const engine = await verifyEngineProcess(options, dataDir);
+    server.child.kill('SIGKILL');
+    // Engine exit is independently observed. Never confuse killing the whole
+    // process tree with the app cleaning up after one component crashes.
+    await until(() => server.child.exitCode !== null || server.child.signalCode !== null, 'control process death');
+    const exited = await until(() => {
+      try { process.kill(engine.pid, 0); return false; }
+      catch (error) { if (error.code !== 'ESRCH') throw error; return { pid: engine.pid, exitedWithoutHarnessKill: true }; }
+    }, 'engine exits on its own after control process death', 30_000);
+    const state = await stoppedSnapshot();
+    await recordOrphanPnP('PnP cleanup immediately after control-process crash', state.state, state.pnp);
+    const direct = await harness.probe();
+    await start();
+    const response = await client('open', { target: responder.virtual }); await client('close');
+    return { exited, state, direct, response };
+  });
+  report.deferred('service lifecycle, lease reattach and lapse, hung worker', 2, 'Today’s Node app has no service/lease/worker IPC contract.');
+  report.deferred('installer migration from 0.3.0/0.3.1, update rollback and uninstall', 5, 'The 1.0 service layout and installer do not exist yet. Existing installer smoke tests remain required.');
+  report.deferred('freeze: sequence wrap, stale SYN/data/RST, final ACK loss, timestamps off, reordered TUN queues', 3, 'These require the engine’s in-memory link endpoint; Winsock does not expose the app-side TCP sequence or queue injection. Socket reuse tests above run against today’s app.');
+} catch (error) {
+  console.error(error); process.exitCode = 1;
+  if (!report.results.some((result) => result.status === 'fail')) report.results.push({ name: 'acceptance setup or teardown', label: server ? 'parity' : 'harness-baseline', status: 'fail', error: error.stack });
+} finally {
+  if (restoreDNS) try { await network('dns-restore', dnsAdapter); } catch (error) { console.error(error); process.exitCode = 1; }
+  if (worker?.exitCode === null && worker.connected) worker.disconnect();
+  if (quicServer?.exitCode === null) quicServer.kill();
+  if (server?.child.exitCode === null) try { await server.quit(); } catch (error) { console.error(error); process.exitCode = 1; }
+  // Check before TestISP's Wintun shutdown can erase an orphan. Only the same
+  // non-present IDs observed while our engine was running may use this baseline
+  // exemption. The normal 0.3.x stop also terminates its child on Windows.
+  let finalPnP = [], finalPnPError;
+  try { if (server) finalPnP = await pnpDevices(); } catch (error) { finalPnPError = error; }
+  const knownOrphans = finalPnP.length > 0 && finalPnP.every((device) => !device.present && appDeviceIDs.has(device.instanceId));
+  await observe('final NetSwitch adapter, route and firewall cleanup', knownOrphans ? 'baseline-defect' : server ? 'parity' : 'harness-baseline', async () => {
+    if (finalPnPError) throw finalPnPError;
+    if (!knownOrphans) return clean();
+    const state = await network('state');
+    assert(Object.values(state).every((list) => list.length === 0), JSON.stringify(state));
+    throw new BaselineDefect('An owned non-present Wintun device remains before TestISP shuts down', { state, pnp: finalPnP });
+  });
+  if (harness) try { await harness.close(); } catch (error) { console.error(error); process.exitCode = 1; }
+  try { await targetFirewall('clean'); } catch (error) { console.error(error); process.exitCode = 1; }
+  if (responder) { await writeFile(path.join(dir, 'target-observations.json'), JSON.stringify(responder.seen, null, 2)); await responder.close(); }
+  output.end();
+  await report.save(path.join(dir, 'report.json'));
+  if (options.profile === 'v1' && report.results.some((result) => ['deferred', 'blocked', 'pending-shared-hook'].includes(result.status))) {
+    console.error('The v1 profile cannot pass while required gates are deferred, blocked or pending the shared hook.'); process.exitCode = 1;
+  }
+}
