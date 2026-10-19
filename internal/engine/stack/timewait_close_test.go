@@ -131,6 +131,9 @@ func TestTimeWaitZeroCapClosingBatch(t *testing.T) {
 	})
 	old.conn.Close()
 	p.upload([]byte("replacement"))
+	if g := p.table.Stats(); g.Flows != 1 {
+		t.Fatal("queued close retired the live replacement", p.diagnostics())
+	}
 	p.closeActive()
 	deadline := time.Now().Add(time.Second)
 	for p.table.Stats().TimeWaitSkipped != 2 && time.Now().Before(deadline) {

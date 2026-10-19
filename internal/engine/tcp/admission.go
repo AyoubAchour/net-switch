@@ -15,6 +15,7 @@ type pendingOpen struct {
 	request   *gtcp.ForwarderRequest // published under f.mu before endpoint creation
 	once      sync.Once
 	completed atomic.Bool
+	hungUp    atomic.Bool // endpoint-specific notification, never inferred from a reused tuple
 }
 
 func (f *Forwarder) complete(id stack.TransportEndpointID, p *pendingOpen, reset bool) {
@@ -44,7 +45,7 @@ func (f *Forwarder) finishClose(ep *gtcp.Endpoint) {
 	if c != nil && c.ep == ep {
 		c.releaseAdmission()
 	}
-	if p != nil && closedState(ep) {
+	if p != nil && p.hungUp.Load() && closedState(ep) {
 		p.ticket.Retire()
 		// Release both gates before ingress can admit another SYN. open may
 		// still be blocked closing the remote or finishing other deferred work.

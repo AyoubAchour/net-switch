@@ -222,6 +222,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		return
 	}
 	var wq waiter.Queue
+	// A closing queue can hand off a SYN before its drain returns. A tuple
+	// lookup can then find a newer pending request. Only this request's own
+	// endpoint notification authorizes retiring it from the ingress fence.
+	closed := waiter.NewFunctionEntry(waiter.EventHUp, func(waiter.EventMask) { pending.hungUp.Store(true) })
+	wq.EventRegister(&closed)
+	defer wq.EventUnregister(&closed)
 	ep, errTCP := r.CreateEndpoint(&wq)
 	if errTCP != nil {
 		// TCP already handled the failed handshake. In particular an app RST
