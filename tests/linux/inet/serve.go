@@ -107,7 +107,7 @@ func Main(args []string) error {
 			serveTCP(":"+strconv.Itoa(wire.PortHold), rec, holdOpen),
 			serveTCP(":"+strconv.Itoa(wire.PortBulk), rec, bulk),
 			serveTCP(":"+strconv.Itoa(wire.PortDNS), rec, dnsTCP(rec)),
-			serveTCP(":"+strconv.Itoa(wire.PortProbe), rec, func(net.Conn) {}),
+			serveProbes(*out, rec),
 			serveHTTP(":"+strconv.Itoa(wire.PortHTTP), rec),
 		)
 		echoAddrs := append([]netip.Addr{topo.Server4, topo.Server4b, topo.Third4, topo.Server6, topo.Server6b}, topo.ManyServers()...)

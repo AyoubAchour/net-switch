@@ -54,6 +54,7 @@ type Platform struct {
 	LineDown       func(string)
 	AddressRemoved func(netip.Addr)
 	Fatal          func(error)
+	WrapTun        func(platform.TunDevice) platform.TunDevice
 }
 type ownedObject struct {
 	kind string
@@ -126,6 +127,7 @@ func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 			return nil, err
 		}
 	}
+	if p.WrapTun != nil { return p.WrapTun(p.objects.tun), nil }
 	return p.objects.tun, nil
 }
 
@@ -137,11 +139,11 @@ func allRoutes(ctx context.Context) ([]netlink.Route, error) {
 func allRules(ctx context.Context) ([]netlink.Rule, error) {
 	var all []netlink.Rule
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
-		rules, err := retryDump(ctx, func() ([]netlink.Rule, error) { return netlink.RuleList(family) })
+		rules, err := readRules(ctx, family)
 		if err != nil {
 			return nil, err
 		}
-		all = append(all, rules...)
+		for _,r := range rules { all = append(all,r.rule) }
 	}
 	return all, nil
 }
@@ -249,6 +251,7 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 	p.lines = next
 	if err := p.reconcileLocked(ctx); err != nil {
 		p.lines = old
+		if p.capturing && p.Fatal != nil { go p.Fatal(fmt.Errorf("cannot reconcile line revision safely: %w",err)) }
 		return err
 	}
 	return nil

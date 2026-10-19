@@ -33,6 +33,7 @@ var modes = map[string]mode{
 	"tcphold":     {runTCPHold, "many TCP connections held open at once"},
 	"udpburst":    {runUDPBurst, "first datagrams to many destinations at once, from one socket"},
 	"udpflood":    {runUDPFlood, "one datagram on each of thousands of UDP sockets"},
+	"udpqueue":    {runUDPQueue, "paced datagrams on held UDP sockets to exercise byte and output queues"},
 	"stream":      {runStream, "one long TCP connection, pinging"},
 	"bulk":        {runBulk, "a hashed TCP download or upload"},
 	"bulkhold":    {runBulkHold, "a full-speed download that then trickles, every byte checked, held until released"},

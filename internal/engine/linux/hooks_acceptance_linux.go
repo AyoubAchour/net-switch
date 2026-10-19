@@ -11,11 +11,29 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine"
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 )
 
 // This file, including every fault implementation, is absent from production.
 func (p *Platform) InstallAcceptanceHooks(e *engine.Engine, s *protocol.Server) {
+	var gates sync.Mutex
+	var lookupGate, writeGate chan struct{}
+	var unknown bool
+	var pressure []byte
+	p.Owners.fault = func(ctx context.Context) error {
+		gates.Lock(); gate,miss := lookupGate,unknown; gates.Unlock()
+		if gate != nil {
+			// Intentionally hold beyond the normal lookup deadline to exercise
+			// pending queues. Engine shutdown still cancels the injected stall.
+			select { case <-gate: case <-p.ctx.Done(): return p.ctx.Err() }
+		}
+		if miss { return errForcedUnknown }
+		return nil
+	}
+	p.WrapTun = func(t platform.TunDevice) platform.TunDevice {
+		return &stalledTun{TunDevice:t, gate:func() <-chan struct{} {gates.Lock(); defer gates.Unlock(); return writeGate}}
+	}
 	var mode atomic.Int32
 	var delay atomic.Int64
 	var pending sync.WaitGroup
@@ -52,9 +70,22 @@ func (p *Platform) InstallAcceptanceHooks(e *engine.Engine, s *protocol.Server) 
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, err
 		}
-		if f.Kind != "udp-destroy-notifications" {
-			return nil, errors.New("unsupported acceptance fault")
+		ack := func() any { return struct { Active bool; Description string }{true,f.Kind+": "+f.Mode} }
+		if f.Kind == "owner-lookups" || f.Kind == "tun-writer" || f.Kind == "heap-pressure" {
+			gates.Lock(); defer gates.Unlock()
+			switch f.Kind {
+			case "owner-lookups":
+				if lookupGate!=nil {close(lookupGate);lookupGate=nil};unknown=false
+				switch f.Mode {case "hold":lookupGate=make(chan struct{});case "unknown":unknown=true;case "off":default:return nil,errors.New("invalid lookup fault")}
+			case "tun-writer":
+				if writeGate!=nil {close(writeGate);writeGate=nil}
+				switch f.Mode {case "hold":writeGate=make(chan struct{});case "off":default:return nil,errors.New("invalid TUN fault")}
+			case "heap-pressure":
+				switch f.Mode {case "on":pressure=make([]byte,512<<20);for i:=0;i<len(pressure);i+=4096{pressure[i]=1};case "off":pressure=nil;default:return nil,errors.New("invalid heap fault")}
+			}
+			return ack(),nil
 		}
+		if f.Kind != "udp-destroy-notifications" { return nil, errors.New("unsupported acceptance fault") }
 		switch f.Mode {
 		case "drop":
 			mode.Store(1)
@@ -74,4 +105,10 @@ func (p *Platform) InstallAcceptanceHooks(e *engine.Engine, s *protocol.Server) 
 			Description string
 		}{true, "UDP destroy listener: " + f.Mode + "; one-second reconciliation remains active"}, nil
 	}
+}
+
+type stalledTun struct { platform.TunDevice; gate func() <-chan struct{} }
+func(t *stalledTun)WritePacket(ctx context.Context,b []byte)error{
+	if gate:=t.gate();gate!=nil{select{case<-gate:case<-ctx.Done():return ctx.Err()}}
+	return t.TunDevice.WritePacket(ctx,b)
 }

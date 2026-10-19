@@ -293,9 +293,9 @@ func TestAttachAdoptsTheNewSession(t *testing.T) {
 	if _, err := r.d.CloseFlows(ctx, engine.Selector{Line: "b"}); err != nil {
 		t.Fatalf("closeFlows after the reattach: %v", err)
 	}
-	// Stop reaches the engine through the new session; only waiting for the
-	// process is still the stub's.
-	if err := r.d.Stop(ctx); !errors.Is(err, engine.ErrNotImplemented) {
+	// Stop reaches the engine through the new session. This injected transport
+	// has no OS process to wait for.
+	if err := r.d.Stop(ctx); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	if fresh.renewing() {
@@ -361,12 +361,12 @@ func TestStatsShapes(t *testing.T) {
 	}
 }
 
-func TestStubSaysNotImplemented(t *testing.T) {
+func TestUnconnectedDriverRefusesCommands(t *testing.T) {
 	d := New("netswitch-engine")
 	if _, err := d.Hello(context.Background()); !errors.Is(err, engine.ErrNotImplemented) {
 		t.Fatalf("without a control socket every operation is not implemented, got %v", err)
 	}
-	if err := d.Start(context.Background(), engine.Env{}, config()); !errors.Is(err, engine.ErrNotImplemented) {
+	if err := d.Start(context.Background(), engine.Env{}, config()); err == nil {
 		t.Fatalf("start: %v", err)
 	}
 }

@@ -106,12 +106,12 @@ func (d objectDriver) Inspect(ctx context.Context, f journal.Fingerprint) (journ
 		if err := json.Unmarshal([]byte(f["object"]), &want); err != nil {
 			return nil, false, err
 		}
-		rules, err := retryDump(ctx, func() ([]netlink.Rule, error) { return netlink.RuleList(want.Family) })
+		rules, err := readRules(ctx, want.Family)
 		if err != nil {
 			return nil, false, err
 		}
 		for _, r := range rules {
-			if maps.Equal(ruleFP(d.o, r), f) {
+			if len(r.extra)==0 && maps.Equal(ruleFP(d.o, r.rule), f) {
 				return f, true, nil
 			}
 		}

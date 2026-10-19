@@ -49,10 +49,13 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 		return err
 	}
 	// The recovery deadline is not the lifetime of forwarding.
-	p.ctx = ctx
+	forwarding, cancelForwarding := context.WithCancel(ctx)
+	defer cancelForwarding()
+	p.ctx = forwarding
 	defer p.Close()
-	e := engine.New(ctx, engine.Dependencies{OpenTun: p.OpenTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners}, flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncDir})
-	srv := protocol.New(e, e.Table, p)
+	e := engine.New(forwarding, engine.Dependencies{OpenTun: p.OpenTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners}, flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncDir})
+	runtime := serviceRuntime{Engine:e, cancel:cancelForwarding}
+	srv := protocol.New(runtime, e.Table, p)
 	srv.Instance = p.Instance
 	fatal := make(chan error, 1)
 	p.Fatal = func(err error) {
@@ -148,7 +151,7 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	// Remove capture even if the control transport failed. A nonpersistent
 	// TUN disappearing on SIGKILL also removes its default route, leaving main.
 	stop, cancelStop := context.WithTimeout(context.Background(), 10*time.Second)
-	err = errors.Join(err, e.Stop(stop))
+	err = errors.Join(err, runtime.Stop(stop))
 	cancelStop()
 	cancel()
 	l.Close()
@@ -156,3 +159,6 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	clients.Wait()
 	return err
 }
+
+type serviceRuntime struct { *engine.Engine; cancel context.CancelFunc }
+func(r serviceRuntime)Stop(ctx context.Context)error{r.cancel();return r.Engine.Stop(ctx)}

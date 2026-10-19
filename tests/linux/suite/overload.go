@@ -53,14 +53,14 @@ func addOverload(r *registry) {
 		harness.Requires10, "5.3, 5.9", 2*time.Minute, rejectionNoticesTotal)
 	r.add("overload.timewait-cap", "5,000 server-closed connections in 15 s: TIME_WAIT holds at most 4,096 endpoints, they aren't live flows, the rest skip it, and no connection is refused",
 		harness.Requires10, "5.9", 3*time.Minute, timeWaitCap)
-	r.pending("overload.udp-pending-bytes", "Pending UDP stays within 32 MiB in total and each new session's first-packet queue within 64 datagrams and 256 KiB; the excess is dropped and counted",
-		"5.3, 5.9", "a test-build hook that holds owner lookups, so new sessions stay pending long enough to fill their queues on purpose")
-	r.pending("overload.unknown-owner-limits", "Flows whose owner is unknown are capped at 2,048, and their UDP sessions at 512",
-		"5.9", "a test-build hook that makes owner lookups miss, or another way to create owner-less flows from the PC at will")
-	r.pending("overload.tun-write-queue", "The TUN write queue holds at most 1,024 packets; the rest are dropped and counted, and forwarding never blocks on it",
-		"5.9", "a test-build hook that stalls the TUN writer")
-	r.pending("overload.memory-at-limit", "At the GOMEMLIMIT target, the byte budgets still hold and no existing flow is cut to make room",
-		"5.9", "a way to put the engine under memory pressure at its limit, and its heap size in stats")
+	r.add("overload.udp-pending-bytes", "Pending UDP stays within 32 MiB in total and each new session's first-packet queue within 64 datagrams and 256 KiB; the excess is dropped and counted",
+		harness.Requires10, "5.3, 5.9", 2*time.Minute, pendingBytes)
+	r.add("overload.unknown-owner-limits", "Flows whose owner is unknown are capped at 2,048, and their UDP sessions at 512",
+		harness.Requires10, "5.9", 3*time.Minute, unknownLimits)
+	r.add("overload.tun-write-queue", "The TUN write queue holds at most 1,024 packets; the rest are dropped and counted, and forwarding never blocks on it",
+		harness.Requires10, "5.9", 2*time.Minute, tunQueue)
+	r.add("overload.memory-at-limit", "At the GOMEMLIMIT target, the byte budgets still hold and no existing flow is cut to make room",
+		harness.Requires10, "5.9", 2*time.Minute, memoryLimit)
 }
 
 // floodTargets are ten echo servers for the i-th flooding app.

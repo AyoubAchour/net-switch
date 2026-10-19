@@ -108,6 +108,12 @@ jobs:
           --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance"
           --quic "$RUNNER_TEMP/nsquic"
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
+      - name: Make root-produced evidence readable by the artifact uploader
+        if: ${{ always() }}
+        run: |
+          if test -d "$RUNNER_TEMP/acceptance"; then
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/acceptance"
+          fi
       - name: Upload the report and logs
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

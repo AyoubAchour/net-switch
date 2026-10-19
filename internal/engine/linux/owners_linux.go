@@ -25,6 +25,8 @@ type holder struct {
 	start uint64
 	fd    string
 }
+
+var errForcedUnknown = errors.New("acceptance: unknown owner")
 type Owners struct {
 	mu      sync.Mutex
 	cgroups map[uint64]string
@@ -67,9 +69,11 @@ func (o *Owners) TCP(ctx context.Context, t platform.Tuple) (platform.Owner, err
 	return platform.Owner{}, os.ErrNotExist
 }
 func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (platform.Owner, error) {
+	unknown := false
 	if o.fault != nil {
 		if err := o.fault(ctx); err != nil {
-			return platform.Owner{}, err
+			if !errors.Is(err,errForcedUnknown) { return platform.Owner{}, err }
+			unknown = true
 		}
 	}
 	ctx, cancel := lookupContext(ctx)
@@ -92,7 +96,10 @@ func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (platform.Owner
 	if err != nil {
 		return platform.Owner{}, err
 	}
-	return o.holders(ctx, r)
+	if unknown { return platform.Owner{Generation:r.generation()},nil }
+	owner, err := o.holders(ctx, r)
+	if err != nil { owner = platform.Owner{Generation:r.generation()} }
+	return owner,err
 }
 
 func processStart(pid uint32) (uint64, error) {
@@ -386,6 +393,8 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 		}
 	}
 	out := make(map[netip.AddrPort]platform.Owner, len(keys))
+	processes := map[uint32]platform.Owner{}
+	checked := map[uint32]bool{}
 	for _, k := range keys {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
@@ -398,19 +407,17 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 		cached := append([]holder(nil), o.cache[r.cookie]...)
 		o.mu.Unlock()
 		var owner platform.Owner
+		if len(cached) == 0 { out[k] = platform.Owner{Generation:r.generation()}; continue }
 		// Reconcile every cookie, plus revalidate recorded holders. A changed
 		// holder is resolved afresh on the next datagram after closing the mapping.
 		for _, h := range cached {
-			start, err := processStart(h.pid)
-			if err != nil || start != h.start {
+			if !checked[h.pid] { processes[h.pid], _ = processOwner(h.pid); checked[h.pid] = true }
+			v := processes[h.pid]
+			if v.StartTime != h.start || v.AppID == "" {
 				continue
 			}
 			link, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd))
 			if err != nil || link != "socket:["+strconv.FormatUint(uint64(r.inode), 10)+"]" {
-				continue
-			}
-			v, err := processOwner(h.pid)
-			if err != nil {
 				continue
 			}
 			if owner.AppID != "" && owner.AppID != v.AppID {

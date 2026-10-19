@@ -43,7 +43,7 @@ func (o *Owners) listenDestroy(ctx context.Context, destroy func(netip.AddrPort,
 	refresh()
 	b := make([]byte, 64<<10)
 	for {
-		n, err := f.Read(b)
+		n, err := readNetlink(f, b)
 		if err != nil {
 			if errors.Is(err, unix.ENOBUFS) {
 				refresh()

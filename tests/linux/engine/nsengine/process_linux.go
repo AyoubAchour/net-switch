@@ -49,6 +49,7 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 		return err
 	}
 	p.cmd = exec.Command("ip", "netns", "exec", env.Netns, d.exe.Path, "run", "--socket", p.socket, "--state-dir", p.state)
+	p.cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+filepath.Join(filepath.Dir(env.WorkDir),"inet","probe-ca.pem"))
 	p.cmd.Stdout = f
 	p.cmd.Stderr = f
 	if err := p.cmd.Start(); err != nil {
@@ -57,7 +58,16 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 		return err
 	}
 	d.process = p
-	go func() { p.err = p.cmd.Wait(); f.Close(); close(p.done) }()
+	go func() {
+		p.err = p.cmd.Wait()
+		f.Close()
+		if p.err != nil && env.Logf != nil {
+			data,_ := os.ReadFile(p.log)
+			if len(data)>4096 {data=data[len(data)-4096:]}
+			env.Logf("engine exited: %v\n%s",p.err,data)
+		}
+		close(p.done)
+	}()
 	d.call = func(ctx context.Context, r protocol.Request) ([]byte, error) {
 		c, err := (&net.Dialer{}).DialContext(ctx, "unix", p.socket)
 		if err != nil {
@@ -151,7 +161,7 @@ func (d *Driver) crash() error {
 }
 func (d *Driver) waitExit(ctx context.Context) error {
 	if d.process == nil {
-		return errors.New("engine was not launched")
+		return nil // an injected in-memory transport has no child process
 	}
 	select {
 	case <-d.process.done:
