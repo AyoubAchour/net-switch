@@ -62,6 +62,42 @@ The gateway uses Wintun's documented session API with the same 8 MiB rings.
 This exposes `ERROR_BUFFER_OVERFLOW`, which the former WireGuard wrapper
 silently reported as a successful write. No packet is retried by this wrapper.
 
+Set the dispatch input `packet_capture=true` for three additional runners per
+architecture with Windows Packet Monitor. This records the NIC and TCP/IP
+arrival times, packet checksums and drop reasons. Capture is diagnostic only;
+it leaves the 100 ms gate unchanged.
+
+### Wintun wake-up race, measured 2026-10-19
+
+Run `39255636353`, ARM64 job `118070104194`, round 1 attempt 104 took 344.41 ms.
+Connect took 0.87 ms and first data 1.50 ms. The gateway submitted FIN sequence
+128541580 at 13:03:26.520292 UTC, then retransmitted at 13:03:26.862966.
+Packet Monitor saw both FINs reach TestISP's NIC at 13:03:26.8631337 and
+13:03:26.8632408, only 107 microseconds apart. It reported **no events lost**.
+Both packets had valid IP/TCP checksums. gVisor retransmits increased by one;
+its timeout counter, Windows retransmits and Wintun/NDIS drop/error counters
+did not change. Neither heartbeat had a gap matching the stall. Round 2 attempt
+163 showed the same queued-packet pair (339.87 ms).
+
+This matches Wintun 0.14.1's missed wake-up in the receive-ring Alertable/Tail
+handshake. The producer and consumer can both see stale state and leave the
+driver asleep until another packet signals it. Upstream fixed both store/load
+ordering points in [commit ec0a6b9](https://git.zx2c4.com/wintun/commit/?id=ec0a6b98456fe1ba52567bb2add4bbf5f64315a1):
+`api/session.c` in `WintunSendPacket` and `driver/wintun.c` in
+`TunProcessReceiveData`. The [official signed download](https://www.wintun.net/)
+and [latest release tag](https://git.zx2c4.com/wintun/refs/tags) are still 0.14.1
+as of the measurement date; that release lacks the fix.
+
+The fix belongs in the Wintun API/driver distribution used by the harness and
+engine. This branch keeps the verified signed binary and reports the failure;
+it does not add wake-up traffic, retry a failed round or relax the deadline.
+The mandatory gate remains capable of failing until the dependency is fixed.
+PR #33 was merged and vendor regenerated before the second stress run
+(`39254207549`); the FIN stalls still reproduced. Its SYN handoff change cannot
+explain these cases: the handshake already finished in under 2 ms. A lost SYN
+or SYN-ACK would instead exercise the handshake retransmission timer (gVisor's
+initial value is one second), not this established-connection FIN recovery.
+
 `testisp-probe.exe` is the same source and binary as the gateway, launched in
 `probe` mode under a separate executable path so firewall rules can distinguish
 the processes. It uses native Winsock HTTP sockets, not the gateway's gVisor

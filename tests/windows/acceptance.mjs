@@ -664,9 +664,11 @@ try {
   if (server?.child.exitCode === null) try { await server.quit(); } catch (error) { console.error(error); process.exitCode = 1; }
   // Check before TestISP's Wintun shutdown can erase an orphan. Only the same
   // non-present IDs observed after our crashes may use this baseline exemption.
-  const finalPnP = server ? await pnpDevices() : [];
+  let finalPnP = [], finalPnPError;
+  try { if (server) finalPnP = await pnpDevices(); } catch (error) { finalPnPError = error; }
   const knownOrphans = finalPnP.length > 0 && finalPnP.every((device) => !device.present && crashOrphans.has(device.instanceId));
   await observe('final NetSwitch adapter, route and firewall cleanup', knownOrphans ? 'baseline-defect' : server ? 'parity' : 'harness-baseline', async () => {
+    if (finalPnPError) throw finalPnPError;
     if (!knownOrphans) return clean();
     const state = await network('state');
     assert(Object.values(state).every((list) => list.length === 0), JSON.stringify(state));
