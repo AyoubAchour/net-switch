@@ -131,9 +131,9 @@ jobs:
       - name: Record the complete TIME_WAIT acceptance gate under race detection
         if: matrix.name != 'Windows ARM64'
         run: go test -race -v -count=1 -run 'TimeWait|PacketOrderPerTuple' ./internal/engine/stack
-      - name: Repeat the simulated-clock boundary under race detection
+      - name: Repeat clock and reopen boundaries under race detection
         if: matrix.name != 'Windows ARM64'
-        run: go test -race -v -count=1000 -run '^TestTimeWaitLostFinalACK$' ./internal/engine/stack
+        run: go test -race -v -count=1000 -run '^TestTimeWait(LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow)$' ./internal/engine/stack
       - name: Fuzz unprivileged packet and protocol paths
         if: matrix.name == 'Linux x64'
         run: |

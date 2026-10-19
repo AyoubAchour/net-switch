@@ -47,6 +47,7 @@ type peer struct {
 	table              *flows.Table
 	config             policy.Config
 	port               uint16
+	forward            *ntcp.Forwarder
 }
 
 func newPeer(t *testing.T, timestamps bool) *peer {
@@ -73,6 +74,7 @@ func newPeerOptions(t *testing.T, timestamps bool, limits flows.Limits, options 
 		return a, nil
 	}}
 	f := ntcp.New(context.Background(), s, limits.Handshakes, table, &testfake.Owners{Value: platform.Owner{AppID: "peer"}}, d, l)
+	p.forward = f
 	t.Cleanup(func() { f.Stop(); s.Close(); s.Wait(); f.Wait(); l.Close() })
 	return p
 }

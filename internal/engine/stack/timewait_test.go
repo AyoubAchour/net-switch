@@ -232,6 +232,80 @@ func TestTimeWaitThreeQueuedSYNsDialOnce(t *testing.T) {
 	t.Log("three SYNs queued on TIME_WAIT: one replacement dial, one k advance, no RST")
 }
 
+func TestTimeWaitSYNBetweenRemovalAndHook(t *testing.T) {
+	limits := flows.Defaults()
+	limits.Flows, limits.TimeWait = 1, 1
+	p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+	p.open(1000)
+	p.upload([]byte("old"))
+	p.closeActive()
+	entered, release := make(chan struct{}), make(chan struct{})
+	// Stop exactly after the old endpoint is unregistered, before its
+	// callback reaches admission. The next TUN SYN now reaches Handle directly.
+	tcp.SetTimeWaitHandler(p.stack, func(id gv.TransportEndpointID, pkt *gv.PacketBuffer) bool {
+		close(entered)
+		<-release
+		return p.forward.Handle(id, pkt)
+	})
+	if d := p.openWith(1000, func(syn []byte) {
+		p.inject(syn)
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("reopen hook not reached")
+		}
+		p.inject(syn)
+		close(release)
+	}); d > 100*time.Millisecond {
+		t.Fatal(d)
+	}
+	p.upload([]byte("replacement"))
+	p.closeActive()
+	if p.dials.Load() != 2 || p.table.Stats().Admitted != 2 {
+		t.Fatal("retirement gap duplicated admission")
+	}
+}
+
+func TestTimeWaitLateHookDoesNotReadmitLiveFlow(t *testing.T) {
+	limits := flows.Defaults()
+	limits.Flows, limits.TimeWait = 1, 1
+	p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+	p.open(1000)
+	p.upload([]byte("old"))
+	p.closeActive()
+	type retained struct {
+		id     gv.TransportEndpointID
+		packet *gv.PacketBuffer
+	}
+	hook := make(chan retained, 1)
+	tcp.SetTimeWaitHandler(p.stack, func(id gv.TransportEndpointID, pkt *gv.PacketBuffer) bool {
+		pkt.IncRef()
+		hook <- retained{id, pkt}
+		return true
+	})
+	var delayed retained
+	p.openWith(1000, func(syn []byte) {
+		p.inject(syn)
+		select {
+		case delayed = <-hook:
+		case <-time.After(time.Second):
+			t.Fatal("reopen hook not reached")
+		}
+		p.inject(syn)
+	})
+	defer delayed.packet.DecRef()
+	p.upload([]byte("already established"))
+	p.forward.Handle(delayed.id, delayed.packet)
+	if g := p.table.Stats(); g.Rejected != 0 || g.Admitted != 2 {
+		t.Fatal("late SYN callback readmitted or reset a live flow", g)
+	}
+	p.upload([]byte("still clean"))
+	p.closeActive()
+	if p.dials.Load() != 2 {
+		t.Fatal("late callback dialed again")
+	}
+}
+
 func TestTimeWaitSimultaneousCloseReuse(t *testing.T) {
 	p := newPeer(t, false)
 	p.open(1000)

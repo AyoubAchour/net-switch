@@ -45,7 +45,7 @@ func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Cont
 	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]flowapi.Ticket), connections: make(map[stack.TransportEndpointID]*connection), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 2*inFlight, f.open)
 	s.SetTransportProtocolHandler(gtcp.ProtocolNumber, f.Handle)
-	gtcp.SetTimeWaitHandler(s, f.reopen)
+	gtcp.SetTimeWaitHandler(s, f.Handle)
 	f.wg.Go(f.maintain)
 	return f
 }
@@ -72,6 +72,26 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if c := f.connections[id]; c != nil {
+		// Unregister precedes the reopen callback, so a following TUN SYN
+		// can reach this handler first. Serialize with endpoint teardown and
+		// retire its reservation here for both ingress paths. Do not wait for
+		// the shared monitor, or the last available slot would spuriously RST.
+		ep := c.ep.(*gtcp.Endpoint)
+		ep.LockUser()
+		state := gtcp.EndpointState(ep.State())
+		ep.UnlockUser()
+		if state == gtcp.StateClose || state == gtcp.StateError {
+			<-c.done
+			c.ticket.Close()
+			delete(f.connections, id)
+		} else {
+			// A delayed reopen callback can follow a duplicate SYN that has
+			// already established the replacement. It must not reset or dial
+			// that live incarnation a second time.
+			return true
+		}
+	}
 	if _, ok := f.pending[id]; ok {
 		return true
 	}
@@ -218,24 +238,6 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	app.Close()
 	// Admission survives the relay through TIME_WAIT. Reopen releases this
 	// exact old ticket before admitting a replacement on the same tuple.
-}
-
-func (f *Forwarder) reopen(id stack.TransportEndpointID, p *stack.PacketBuffer) bool {
-	f.mu.Lock()
-	c := f.connections[id]
-	f.mu.Unlock()
-	if c != nil && gtcp.EndpointState(c.ep.State()) == gtcp.StateClose {
-		// The endpoint is already removed. Drain the completed relay's final
-		// counters before freeing its slot and advancing the new admission.
-		<-c.done
-		f.mu.Lock()
-		c.ticket.Close()
-		if f.connections[id] == c {
-			delete(f.connections, id)
-		}
-		f.mu.Unlock()
-	}
-	return f.Handle(id, p)
 }
 
 // Stop cancels dials and relays. The owner must close the stack before Wait,
