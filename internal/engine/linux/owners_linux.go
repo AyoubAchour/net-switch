@@ -438,6 +438,14 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 		return nil
 	}
+	hasHolder := func(pid uint32) bool {
+		for _, h := range found {
+			if h.pid == pid {
+				return true
+			}
+		}
+		return false
+	}
 	o.mu.Lock()
 	cached := o.cache[r.cookie].holders
 	indexed := o.inodes[r.inode]
@@ -480,7 +488,24 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		// One scanner per process. Followers consume the inode hints it
 		// publishes instead of issuing the same hundreds of readlinks again.
 		gate := make(chan struct{})
+		remember := make(map[uint32]holder, 32)
 		for {
+			if expired() {
+				return nil
+			}
+			// A previous scan may have completed while this lookup read proc
+			// metadata. Recheck before becoming a scanner for an already known
+			// inode. Keep checking other candidate holders for ambiguity.
+			if result.AppID == "" {
+				hints := o.indexed(r.inode)
+				hinted += hints.count()
+				if err := hints.visit(accept); err != nil {
+					return err
+				}
+				if hasHolder(pid) {
+					return nil
+				}
+			}
 			o.mu.Lock()
 			if len(o.windows) > 4096 {
 				for old, state := range o.windows {
@@ -508,7 +533,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				o.unsubscribe(r.inode, notice)
 				return err
 			}
-			if result.AppID != "" {
+			if hasHolder(pid) {
 				o.unsubscribe(r.inode, notice)
 				return nil
 			}
@@ -529,7 +554,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			if err := hints.visit(accept); err != nil {
 				return err
 			}
-			if result.AppID != "" {
+			if hasHolder(pid) {
 				return nil
 			}
 		}
@@ -571,7 +596,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				return nil
 			}
 		}
-		remember := make(map[uint32]holder, 32)
 		maxFD := window.high
 		advancing := false
 		visit := func(names []string) error {
