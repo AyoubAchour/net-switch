@@ -157,6 +157,57 @@ func TestTCPReadinessPreservesDataEOFAndClose(t *testing.T) {
 	}
 }
 
+func TestUDPCacheReleasesUnreferencedLiveSockets(t *testing.T) {
+	o := newTestOwners(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := o.Warm(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var keys []netip.AddrPort
+	var owners []platform.Owner
+	var cutoff time.Time
+	destination := netip.MustParseAddrPort("192.0.2.1:443")
+	for range 2 {
+		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		key := c.LocalAddr().(*net.UDPAddr).AddrPort()
+		if len(keys) == 1 {
+			cutoff = time.Now()
+		}
+		v, err := o.UDPFor(ctx, platform.Tuple{Source: key, Destination: destination})
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, key)
+		owners = append(owners, v)
+	}
+	if len(o.cache) != 2 {
+		t.Fatalf("expected both cache entries before reconciliation, got %d", len(o.cache))
+	}
+	if _, err := o.SnapshotAt(ctx, keys[:1], cutoff); err != nil || len(o.cache) != 2 {
+		t.Fatalf("lookup completed after enumeration but before dump must survive: %v entries=%d", err, len(o.cache))
+	}
+	got, err := o.Snapshot(ctx, keys[:1])
+	if err != nil || got[keys[0]] != owners[0] || len(o.cache) != 1 {
+		t.Fatalf("unreferenced cache wasn't released: %v %v entries=%d", got, err, len(o.cache))
+	}
+	rows, err := o.query(ctx, unix.AF_INET, unix.IPPROTO_UDP, keys[1], destination)
+	if err != nil || len(rows) != 1 || rows[0].generation() != owners[1].Generation {
+		t.Fatal("the unreferenced kernel socket must still be alive")
+	}
+	if _, err := o.UDPFor(ctx, platform.Tuple{Source: keys[1], Destination: destination}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = o.Snapshot(ctx, keys)
+	if err != nil || got[keys[1]] != owners[1] || len(o.cache) != 2 {
+		t.Fatalf("referenced pending/active cache lost: %v %v entries=%d", got, err, len(o.cache))
+	}
+}
+
 func TestUDPErrorCallbackUsesTheRealICMPQuote(t *testing.T) {
 	target, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -205,7 +256,7 @@ func TestUDPErrorCallbackUsesTheRealICMPQuote(t *testing.T) {
 }
 
 func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
-	const count = 256
+	const count = 2048
 	keys := make(map[netip.AddrPort]bool, count)
 	for range count {
 		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})

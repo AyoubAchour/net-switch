@@ -65,6 +65,13 @@ type UDPIdentity interface {
 	Snapshot(context.Context, []netip.AddrPort) (map[netip.AddrPort]Owner, error)
 }
 
+// UDPIdentityAt supplies the beginning of session enumeration, so a cache
+// can retain lookups that completed after that list was collected. The list
+// includes pending sessions; only ready sessions consume its validation.
+type UDPIdentityAt interface {
+	SnapshotAt(context.Context, []netip.AddrPort, time.Time) (map[netip.AddrPort]Owner, error)
+}
+
 type TCPConn interface {
 	net.Conn
 	CloseRead() error

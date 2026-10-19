@@ -53,7 +53,8 @@ type Owners struct {
 	cgroups         map[uint64]string
 	recent          map[uint32][]uint32
 	cache           map[uint64]cachedHolders
-	inodes          map[uint32][]holder
+	inodes          map[uint32]inodeHolders
+	waiters         map[uint32]*inodeWaiter
 	windows         map[uint32]fdWindow
 	ambiguousPorts  map[uint16]bool
 	// Fault callbacks are assigned only by the acceptance build.
@@ -128,7 +129,9 @@ func (o *Owners) Warm(ctx context.Context) error {
 }
 
 func NewOwners() *Owners {
-	return &Owners{cgroups: map[uint64]string{}, recent: map[uint32][]uint32{}, cache: map[uint64]cachedHolders{}, inodes: map[uint32][]holder{}, windows: map[uint32]fdWindow{}, ambiguousPorts: map[uint16]bool{}}
+	// Allocate the bounded index's backing tables before capture. Growing
+	// them under the shared lock can turn one GC assist into many timeouts.
+	return &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32][]uint32, 64), cache: make(map[uint64]cachedHolders, 65536), inodes: make(map[uint32]inodeHolders, 131072), waiters: make(map[uint32]*inodeWaiter, 32768), windows: make(map[uint32]fdWindow, 4096), ambiguousPorts: map[uint16]bool{}}
 }
 
 func (o *Owners) Close() { o.queries.close() }
@@ -436,15 +439,18 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		return nil
 	}
 	o.mu.Lock()
-	cached := append([]holder(nil), o.cache[r.cookie].holders...)
-	cached = append(cached, o.inodes[r.inode]...)
-	hinted += len(cached)
-	recent := append([]uint32(nil), o.recent[r.uid]...)
+	cached := o.cache[r.cookie].holders
+	indexed := o.inodes[r.inode]
+	hinted += len(cached) + indexed.count()
+	recent := o.recent[r.uid]
 	o.mu.Unlock()
 	for _, h := range cached {
 		if err := accept(h); err != nil {
 			return platform.Owner{}, err
 		}
+	}
+	if err := indexed.visit(accept); err != nil {
+		return platform.Owner{}, err
 	}
 
 	// /proc's fd directory is seekable: its position is fd+2 (fs/proc/fd.c).
@@ -473,7 +479,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		dir := fmt.Sprintf("/proc/%d/fd", pid)
 		// One scanner per process. Followers consume the inode hints it
 		// publishes instead of issuing the same hundreds of readlinks again.
-		var gate chan struct{}
+		gate := make(chan struct{})
 		for {
 			o.mu.Lock()
 			if len(o.windows) > 4096 {
@@ -488,7 +494,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 			window := o.windows[pid]
 			if window.scanning == nil {
-				gate = make(chan struct{})
 				window.scanning = gate
 				o.windows[pid] = window
 				o.mu.Unlock()
@@ -496,23 +501,33 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 			wait := window.scanning
 			o.mu.Unlock()
+			notice := o.subscribe(r.inode)
+			hints := o.indexed(r.inode)
+			hinted += hints.count()
+			if err := hints.visit(accept); err != nil {
+				o.unsubscribe(r.inode, notice)
+				return err
+			}
+			if result.AppID != "" {
+				o.unsubscribe(r.inode, notice)
+				return nil
+			}
 			waiting := time.Now()
 			waitPID = pid
 			select {
 			case <-ctx.Done():
 				scanWait += time.Since(waiting)
+				o.unsubscribe(r.inode, notice)
 				return nil
+			case <-notice.ready:
 			case <-wait:
 			}
 			scanWait += time.Since(waiting)
-			o.mu.Lock()
-			hints := append([]holder(nil), o.inodes[r.inode]...)
-			hinted += len(hints)
-			o.mu.Unlock()
-			for _, h := range hints {
-				if err := accept(h); err != nil {
-					return err
-				}
+			o.unsubscribe(r.inode, notice)
+			hints = o.indexed(r.inode)
+			hinted += hints.count()
+			if err := hints.visit(accept); err != nil {
+				return err
 			}
 			if result.AppID != "" {
 				return nil
@@ -556,7 +571,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				return nil
 			}
 		}
-		remember := map[uint32]holder{}
+		remember := make(map[uint32]holder, 32)
 		maxFD := window.high
 		advancing := false
 		visit := func(names []string) error {
@@ -579,6 +594,10 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				h := holder{pid, start, fd}
 				if canIndex || uint32(inode) == r.inode {
 					remember[uint32(inode)] = h
+					if len(remember) >= 32 {
+						o.publish(remember)
+						clear(remember)
+					}
 				}
 				if uint32(inode) == r.inode {
 					if err := accept(h); err != nil {
@@ -589,21 +608,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return nil
 		}
 		defer func() {
+			o.publish(remember)
 			o.mu.Lock()
 			defer o.mu.Unlock()
 			if current := o.windows[pid]; current.start == start {
 				current.high = max(current.high, maxFD)
 				current.observed = time.Now()
 				o.windows[pid] = current
-			}
-			if len(o.inodes) > 131072 {
-				clear(o.inodes)
-			}
-			for inode, h := range remember {
-				old := o.inodes[inode]
-				if !slices.Contains(old, h) && len(old) < 8 {
-					o.inodes[inode] = append(old, h)
-				}
 			}
 		}()
 		if !complete {
@@ -712,11 +723,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return result, os.ErrNotExist
 		}
 		result.Generation = r.generation()
+		newRecent := make([]uint32, 1, 32)
+		newRecent[0] = result.PID
 		o.mu.Lock()
 		if r.protocol == unix.IPPROTO_UDP {
 			o.cache[r.cookie] = cachedHolders{found, time.Now()}
 		}
-		newRecent := []uint32{result.PID}
 		for _, pid := range o.recent[r.uid] {
 			if pid != result.PID && len(newRecent) < 32 {
 				newRecent = append(newRecent, pid)
@@ -750,13 +762,8 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	}
 	// Finish the hinted cgroup before spending the remaining budget on
 	// unrelated UIDs and processes. Recheck neighbours' newly indexed rows.
-	o.mu.Lock()
-	groupHints := append([]holder(nil), o.inodes[r.inode]...)
-	o.mu.Unlock()
-	for _, h := range groupHints {
-		if err := accept(h); err != nil {
-			return platform.Owner{}, err
-		}
+	if err := o.indexed(r.inode).visit(accept); err != nil {
+		return platform.Owner{}, err
 	}
 	if result.AppID != "" {
 		return finish()
@@ -823,13 +830,8 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	}
 	// Other concurrent lookups may have found this new socket while scanning
 	// a neighbouring window. Check those hints before the remaining full scan.
-	o.mu.Lock()
-	hints := append([]holder(nil), o.inodes[r.inode]...)
-	o.mu.Unlock()
-	for _, h := range hints {
-		if err := accept(h); err != nil {
-			return platform.Owner{}, err
-		}
+	if err := o.indexed(r.inode).visit(accept); err != nil {
+		return platform.Owner{}, err
 	}
 	if result.AppID != "" {
 		return finish()
@@ -907,7 +909,10 @@ func descriptorTail(f *os.File, pid uint32, expired func() bool) (int64, error) 
 }
 
 func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip.AddrPort]platform.Owner, error) {
-	started := time.Now()
+	return o.SnapshotAt(ctx, keys, time.Now())
+}
+
+func (o *Owners) SnapshotAt(ctx context.Context, keys []netip.AddrPort, started time.Time) (map[netip.AddrPort]platform.Owner, error) {
 	rows := map[int][]socketRow{}
 	for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
 		need := false
@@ -933,21 +938,10 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 			byPort[r.local.Port()] = append(byPort[r.local.Port()], r)
 		}
 	}
-	// Discard only dead cookies from a complete dump, and never a cache entry
-	// created while that dump was in progress. TCP lookups aren't retained.
-	live := map[uint64]bool{}
-	for _, familyRows := range rows {
-		for _, row := range familyRows {
-			live[row.cookie] = true
-		}
-	}
-	o.mu.Lock()
-	for cookie, cached := range o.cache {
-		if !live[cookie] && cached.observed.Before(started) {
-			delete(o.cache, cookie)
-		}
-	}
-	o.mu.Unlock()
+	// Keep only cookies referenced by engine sessions (including pending
+	// ones). A capped app can keep its refused kernel sockets open forever;
+	// their existence alone must not retain an unbounded ownership cache.
+	live := make(map[uint64]bool, len(keys))
 	out := make(map[netip.AddrPort]platform.Owner, len(keys))
 	processes := map[uint32]platform.Owner{}
 	checked := map[uint32]bool{}
@@ -957,6 +951,9 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 		}
 		r, err := matchUDP(byPort[k.Port()], k)
 		if errors.Is(err, errSocketAmbiguous) {
+			for _, candidate := range udpCandidates(byPort[k.Port()], k) {
+				live[candidate.cookie] = true
+			}
 			o.mu.Lock()
 			o.ambiguousPorts[k.Port()] = true
 			o.mu.Unlock()
@@ -966,8 +963,9 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 		if err != nil {
 			continue
 		}
+		live[r.cookie] = true
 		o.mu.Lock()
-		cached := append([]holder(nil), o.cache[r.cookie].holders...)
+		cached := o.cache[r.cookie].holders
 		o.mu.Unlock()
 		var owner platform.Owner
 		if len(cached) == 0 {
@@ -1002,5 +1000,12 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 			out[k] = owner
 		}
 	}
+	o.mu.Lock()
+	for cookie, cached := range o.cache {
+		if !live[cookie] && cached.observed.Before(started) {
+			delete(o.cache, cookie)
+		}
+	}
+	o.mu.Unlock()
 	return out, nil
 }

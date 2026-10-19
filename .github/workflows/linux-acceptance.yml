@@ -123,7 +123,7 @@ jobs:
         run: |
           if test -d "$RUNNER_TEMP/acceptance"; then
             find "$RUNNER_TEMP/acceptance" -name 'cpu-*.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodecount=35 "$RUNNER_TEMP/netswitch-engine" {} \;
-            find "$RUNNER_TEMP/acceptance" -name 'block-*.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -cum -focus='Owners' -nodecount=20 "$RUNNER_TEMP/netswitch-engine" {} \;
+            find "$RUNNER_TEMP/acceptance" -name 'block-*.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodefraction=0 -focus='Owners' -nodecount=20 "$RUNNER_TEMP/netswitch-engine" {} \;
           fi
       - name: Make root-produced evidence readable by the artifact uploader
         if: ${{ always() }}
