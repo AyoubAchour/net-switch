@@ -50,6 +50,7 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 	}
 	p.cmd = exec.Command("ip", "netns", "exec", env.Netns, d.exe.Path, "run", "--socket", p.socket, "--state-dir", p.state)
 	p.cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+filepath.Join(filepath.Dir(env.WorkDir), "inet", "probe-ca.pem"))
+	if os.Getenv("NSACCEPT_PROFILE")=="true"{p.cmd.Env=append(p.cmd.Env,"NETSWITCH_ACCEPTANCE_PROFILE="+filepath.Join(env.WorkDir,"cpu.pprof"))}
 	p.cmd.Stdout = f
 	p.cmd.Stderr = f
 	if err := p.cmd.Start(); err != nil {
