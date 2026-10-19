@@ -78,7 +78,35 @@ async function network(action, adapter) {
 }
 
 async function clean() {
-  return until(async () => { const state = await network('state'); assert(Object.values(state).every((list) => list.length === 0), JSON.stringify(state)); return state; }, 'no NetSwitch adapter, route or firewall leftovers', 20_000);
+  return until(async () => {
+    const state = await network('state');
+    const pnp = await pnpDevices();
+    assert(Object.values(state).every((list) => list.length === 0) && pnp.length === 0, JSON.stringify({ ...state, pnp }));
+    return { ...state, pnp };
+  }, 'no NetSwitch adapter (including non-present PnP), route or firewall leftovers', 20_000);
+}
+
+async function pnpDevices() {
+  const result = await run('powershell.exe', ['-NoProfile', '-File', path.resolve('tests/windows/pnp.ps1')]);
+  const value = result.stdout ? JSON.parse(result.stdout) : [];
+  return Array.isArray(value) ? value : [value];
+}
+
+async function crashCleanup(name) {
+  // Keep connectivity/route checks mandatory. A recognized non-present device
+  // is reported separately, before a restart or Wintun shutdown can remove it.
+  const state = await until(async () => {
+    const value = await network('state');
+    assert(Object.values(value).every((list) => list.length === 0), JSON.stringify(value));
+    return value;
+  }, 'crashed app routes and present adapters disappear', 20000);
+  const pnp = await pnpDevices();
+  assert(!pnp.some((device) => device.present), `Present device survived crash: ${JSON.stringify(pnp)}`);
+  await observe(name, pnp.length ? 'baseline-defect' : 'parity', async () => {
+    if (pnp.length) throw new BaselineDefect('Abrupt app exit left a non-present Wintun device; Get-NetAdapter could not see it', { state, pnp });
+    return { state, pnp };
+  });
+  return { state, pnp };
 }
 
 async function pin(line) {
@@ -257,19 +285,21 @@ try {
     // Consecutive rounds expose occasional relay delays. Every round must
     // pass; a failure stops immediately and is never retried into a pass.
     for (let round = 1; round <= 4; round++) {
-      samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000, maxMs: 100 });
+      const before = await harness.control('diagnostics');
+      samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000, maxMs: 100, diagnostics: harness.diagnosticClient });
+      const after = await harness.control('diagnostics');
       const failed = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
       const stats = failed && await harness.control('stats');
       let sockets;
       if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection -LocalPort ${failed.port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess) | ConvertTo-Json -Compress`]);
       if (samples.length !== 1000 || failed) {
         const error = new Error(`Gateway reuse failed: ${JSON.stringify({ round, count: samples.length, failed, trace: stats.tcpTrace })}`);
-        error.evidence = { rounds, samples, sockets, stats };
+        error.evidence = { rounds, samples, sockets, stats, before, after };
         throw error;
       }
       assert.equal(new Set(samples.map((sample) => `${sample.port}:${sample.peerPort}`)).size, 1, 'TestISP reuse changed the tuple');
       const result = { round, count: samples.length, maxMs: Math.max(...samples.map((sample) => sample.ms)), tuple: [samples[0].port, samples[0].peerPort], architecture: process.arch };
-      rounds.push(result);
+      rounds.push({ ...result, before, after, clientHeartbeat: await client('heartbeat') });
       console.log(`TESTISP REUSE ${JSON.stringify(result)}`);
     }
     return { rounds, samples };
@@ -529,25 +559,26 @@ try {
       await server.api('lines/update', { id: main.id, cap: { bytes: 1, period: 'day' } });
       await server.api('lines/update', { id: second.id, cap: { bytes: 1, period: 'day' } });
       const blocked = await until(async () => { const state = await server.api('state'); return state.lines.find((line) => line.id === second.id)?.blocked && state.lines; }, 'both caps exhausted and secondary blocked', 30_000);
-      const limitMs = Math.max(...rejectBaseline.tcp.map((sample) => sample.ms), ...rejectBaseline.udp.map((sample) => sample.ms)) + 500;
+      const tcpLimitMs = Math.max(...rejectBaseline.tcp.map((sample) => sample.ms)) + 500;
+      const udpLimitMs = Math.max(...rejectBaseline.udp.map((sample) => sample.ms)) + 500;
       const readiness = [];
       if (options.profile === 'baseline') {
         // 0.3.x reports a written rule file, not sing-box's asynchronous reload.
         // Observe an actual refusal before starting the measured burst. The
         // v1 state contract acknowledges an applied revision, so it gets no grace.
         await until(async () => {
-          const [sample] = await client('reject', { target: responder.virtual, count: 1, timeout: limitMs });
+          const [sample] = await client('reject', { target: responder.virtual, count: 1, timeout: tcpLimitMs });
           readiness.push(sample);
-          assert(rejections.has(sample.outcome) && sample.ms <= limitMs,
-            `Cap not applied yet: ${JSON.stringify({ limitMs, blocked, recent: readiness.slice(-5) })}`);
+          assert(rejections.has(sample.outcome) && sample.ms <= tcpLimitMs,
+            `Cap not applied yet: ${JSON.stringify({ tcpLimitMs, blocked, recent: readiness.slice(-5) })}`);
           return true;
         }, 'sing-box has applied the cap rejection rule', 30_000);
       }
       const beforeBurst = await harness.control('stats');
-      const samples = await client('reject', { target: responder.virtual, timeout: limitMs });
-      const udp = await udpReject(responder.virtual, 100, limitMs);
+      const samples = await client('reject', { target: responder.virtual, timeout: tcpLimitMs });
+      const udp = await udpReject(responder.virtual, 100, udpLimitMs);
       const afterBurst = await harness.control('stats');
-      const burstEvidence = { blocked, limitMs, readiness, samples, udp, beforeBurst, afterBurst };
+      const burstEvidence = { blocked, tcpLimitMs, udpLimitMs, readiness, samples, udp, beforeBurst, afterBurst };
       assert(!samples.some((item) => item.outcome === 'connected'), `A capped app escaped the applied block: ${JSON.stringify(burstEvidence)}`);
       exactTraffic(beforeBurst, afterBurst, 0, `${responder.virtual.host}:${responder.virtual.http}`);
       exactTraffic(beforeBurst, afterBurst, 0, `${responder.virtual.host}:${responder.virtual.udp[0]}`);
@@ -563,7 +594,8 @@ try {
       const udpAfter = await udpReject(responder.virtual, 3);
       assert(udpAfter.every((sample) => sample.outcome === 'reply'), JSON.stringify({ udpBefore, udp, udpAfter, state: await server.api('state'), beforeRecovery, afterRecovery: await harness.control('stats') }));
       const evidence = { rejectBaseline, ...burstEvidence, udpBefore, udpAfter, mainException };
-      if ([...samples, ...udp].some((item) => !rejections.has(item.outcome) || item.ms > limitMs)) {
+      if (samples.some((item) => !rejections.has(item.outcome) || item.ms > tcpLimitMs)
+        || udp.some((item) => !rejections.has(item.outcome) || item.ms > udpLimitMs)) {
         throw new BaselineDefect('Capped TCP/UDP did not fail fast; clearing the caps restored the same target', evidence);
       }
       return evidence;
@@ -605,7 +637,7 @@ try {
       try { process.kill(engine.pid, 0); return false; }
       catch (error) { if (error.code !== 'ESRCH') throw error; return { pid: engine.pid, exitedWithoutHarnessKill: true }; }
     }, 'engine exits on its own after control process death', 30_000);
-    const state = await clean();
+    const state = await crashCleanup('PnP cleanup immediately after control-process crash');
     const direct = await harness.probe();
     await start();
     const response = await client('open', { target: responder.virtual }); await client('close');

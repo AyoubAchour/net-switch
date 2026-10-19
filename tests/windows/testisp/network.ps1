@@ -1,4 +1,4 @@
-param([ValidateSet('inspect', 'state', 'configure', 'withdraw', 'restore', 'block-direct', 'unblock-direct', 'clean')] [string] $Action)
+param([ValidateSet('inspect', 'state', 'configure', 'reuse-route', 'withdraw', 'restore', 'block-direct', 'unblock-direct', 'clean')] [string] $Action)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted Windows runners only.' }
 $admin = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
@@ -29,6 +29,11 @@ if ($Action -eq 'block-direct') {
   if ($index -le 0 -or $adapter.Name -ne 'TestISP') { throw 'Refusing to change an adapter other than TestISP.' }
   if ($Action -eq 'state') {
     [pscustomobject]@{ defaultRoute = [bool](Get-NetRoute -InterfaceIndex $index -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue) } | ConvertTo-Json -Compress
+    exit
+  }
+  if ($Action -eq 'reuse-route') {
+    New-NetRoute -InterfaceIndex $index -DestinationPrefix '198.19.128.2/32' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
+    '{}'
     exit
   }
   if ($Action -eq 'configure') {

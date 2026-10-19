@@ -115,8 +115,9 @@ UDP refusal errors, so this probe uses a native socket and explicitly enables
 `SIO_UDP_CONNRESET` after Go initializes it. The same executable must receive
 exact UDP echoes before applying caps and after clearing them; a timeout cannot
 be blamed on the app when the native refusal baseline failed.
-Every accepted rejection must be faster than the slowest native sample plus
-500 ms. `ETIMEDOUT` is not a rejection. During the blocked burst, neither the
+TCP and UDP each use their own slowest native sample plus 500 ms as the rejection
+deadline. TCP's roughly two-second refusal cannot grant UDP the same delay.
+`ETIMEDOUT` is not a rejection. During the blocked burst, neither the
 TCP target's flow counter nor the UDP target's datagram counter may increase.
 The 0.3.x blocked flag acknowledges a written file, not sing-box's reload. The
 baseline adapter therefore records canary outcomes until an actual prompt

@@ -27,6 +27,7 @@ import (
 
 func (g *gateway) startStack() (*stack.Stack, error) {
 	s := stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6}})
+	g.stack = s
 	link := channel.New(1024, 1500, "")
 	if err := s.CreateNIC(1, link); err != nil {
 		s.Close()
@@ -47,18 +48,23 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 		}
 	}
 	forwarder := tcp.NewForwarder(s, 64*1024, 2048, func(request *tcp.ForwarderRequest) {
+		connection, tuple := g.newConnection(request.ID())
 		go func() {
 			id := request.ID()
 			destination := net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort)))
 			g.record(destination)
+			g.event("dial-start", connection, tuple, "")
 			remote, err := boundDialer(g.index, g.uplinkIP).DialContext(context.Background(), "tcp4", g.backend(destination))
 			if err != nil {
+				g.event("dial-error", connection, tuple, err.Error())
 				g.failure(destination, err)
 				request.Complete(true)
 				return
 			}
 			defer remote.Close()
+			g.event("dial-end", connection, tuple, remote.LocalAddr().String())
 			var queue waiter.Queue
+			g.event("handshake-start", connection, tuple, "SYN-RCVD")
 			endpoint, terr := request.CreateEndpoint(&queue)
 			if terr != nil {
 				request.Complete(true)
@@ -66,13 +72,15 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 				return
 			}
 			request.Complete(false)
+			g.event("handshake-end", connection, tuple, "")
+			g.watchEndpoint(connection, tuple, endpoint)
 			local := gonet.NewTCPConn(&queue, endpoint)
 			defer local.Close()
 			var wg sync.WaitGroup
 			wg.Add(2)
 			go func() {
 				defer wg.Done()
-				n, err := io.Copy(remote, local)
+				n, err := io.Copy(remote, &observedReader{Reader: local, g: g, id: connection, tuple: tuple, direction: "client"})
 				if err != nil {
 					remote.(*net.TCPConn).SetLinger(0)
 					remote.Close()
@@ -84,21 +92,30 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			}()
 			go func() {
 				defer wg.Done()
-				n, err := io.Copy(local, remote)
+				n, err := io.Copy(local, &observedReader{Reader: remote, g: g, id: connection, tuple: tuple, direction: "backend"})
 				if err != nil {
 					endpoint.Abort()
 					remote.(*net.TCPConn).SetLinger(0)
 					remote.Close()
 				} else {
 					local.CloseWrite()
+					g.event("close-write", connection, tuple, "")
+					g.states()
 				}
 				g.transferred(n, false)
 			}()
 			wg.Wait()
 		}()
 	})
-	g.tcpReuseHook = configureTCPReuse(s, forwarder)
-	s.SetTransportProtocolHandler(tcp.ProtocolNumber, forwarder.HandlePacket)
+	handle := func(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
+		g.event("forwarder-handle", 0, id.RemoteAddress.String(), "")
+		return forwarder.HandlePacket(id, pkt)
+	}
+	g.tcpReuseHook = configureTCPReuse(s, func(id stack.TransportEndpointID, pkt *stack.PacketBuffer) bool {
+		g.event("timewait-hook", 0, id.RemoteAddress.String(), "")
+		return handle(id, pkt)
+	})
+	s.SetTransportProtocolHandler(tcp.ProtocolNumber, handle)
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, g.udpHandler(link))
 	go func() {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -113,7 +130,8 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			data := view.AsSlice()
 			if g.mode.Load() == 0 {
 				g.trace(data, "reply")
-				_, err := g.device.Write([][]byte{data}, 0)
+				err := g.device.Write(data)
+				if err != nil { g.event("wintun-write-error", 0, "", err.Error()) } else { g.trace(data, "delivered") }
 				g.stats.Lock()
 				if err != nil {
 					g.stats.TestISP.Errors++
@@ -129,7 +147,6 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 	}()
 	go func() {
 		packet := make([]byte, 65535)
-		sizes := []int{0}
 		for {
 			if g.mode.Load() == 1 {
 				select {
@@ -139,7 +156,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 				}
 				continue
 			}
-			_, err := g.device.Read([][]byte{packet}, sizes, 0)
+			n, err := g.device.Read(packet)
 			if err != nil {
 				select {
 				case <-g.done:
@@ -150,7 +167,6 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 					return
 				}
 			}
-			n := sizes[0]
 			g.stats.Lock()
 			g.stats.TestISP.PacketsIn++
 			g.stats.TestISP.BytesIn += uint64(n)
@@ -198,10 +214,10 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 	return s, nil
 }
 
-func configureTCPReuse(s *stack.Stack, forwarder *tcp.Forwarder) bool {
+func configureTCPReuse(s *stack.Stack, handler func(stack.TransportEndpointID, *stack.PacketBuffer) bool) bool {
 	// Install before the TUN reader starts; preserve the normal 60-second wait
 	// for final ACK retransmission while allowing a fresh local-app SYN.
-	tcp.SetTimeWaitHandler(s, forwarder.HandlePacket)
+	tcp.SetTimeWaitHandler(s, handler)
 	return true
 }
 

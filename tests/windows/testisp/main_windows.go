@@ -23,7 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.zx2c4.com/wireguard/tun"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 func main() {
@@ -74,7 +74,9 @@ type observations struct {
 
 type gateway struct {
 	tcpReuseHook bool
-	device       tun.Device
+	device       *observedDevice
+	stack        *stack.Stack
+	diag         diagnostics
 	index        int
 	uplinkIP     net.IP
 	mode         atomic.Int32 // 0 running, 1 paused, 2 dropping
@@ -105,8 +107,7 @@ func serve(args []string) error {
 	if len(token) < 32 {
 		return errors.New("TESTISP_TOKEN must contain at least 32 characters")
 	}
-	tun.WintunTunnelType = "TestISP"
-	device, err := tun.CreateTUN("TestISP", 1500)
+	device, err := openDevice()
 	if err != nil {
 		return err
 	}
@@ -117,6 +118,7 @@ func serve(args []string) error {
 		return err
 	}
 	defer stack.Close()
+	go g.heartbeat()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		return err
@@ -149,6 +151,9 @@ func serve(args []string) error {
 		g.stats.Lock()
 		defer g.stats.Unlock()
 		json.NewEncoder(w).Encode(&g.stats)
+	})
+	mux.HandleFunc("GET /diagnostics", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(g.diagnosticSnapshot())
 	})
 	mux.HandleFunc("POST /mode", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {

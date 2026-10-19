@@ -10,6 +10,31 @@ if (!process.send) throw new Error('Use the Windows acceptance runner');
 const held = new Map();
 let serial = 0;
 const publicTarget = { host: '1.0.0.1', port: 443, path: '/cdn-cgi/trace', tls: true };
+let heartbeatPrevious = performance.now(), heartbeatTicks = 0, heartbeatMaxMs = 0;
+const heartbeatGaps = [];
+setInterval(() => {
+  const now = performance.now(), ms = now - heartbeatPrevious;
+  heartbeatTicks++;
+  heartbeatMaxMs = Math.max(heartbeatMaxMs, ms);
+  if (ms > 5) {
+    heartbeatGaps.push({ from: (performance.timeOrigin + heartbeatPrevious) * 1000, to: (performance.timeOrigin + now) * 1000, ms });
+    if (heartbeatGaps.length > 512) heartbeatGaps.shift();
+  }
+  heartbeatPrevious = now;
+}, 1).unref();
+
+function heartbeat() {
+  return { periodMs: 1, ticks: heartbeatTicks, maxGapMs: heartbeatMaxMs, gaps: [...heartbeatGaps] };
+}
+
+async function diagnosticCapture(control) {
+  const get = async (endpoint) => {
+    const response = await fetch(`${control.url}/${endpoint}`, { headers: { Authorization: `Bearer ${control.token}` }, signal: AbortSignal.timeout(10000) });
+    assert(response.ok, `Gateway ${endpoint}: ${response.status}`);
+    return response.json();
+  };
+  return { clientHeartbeat: heartbeat(), gateway: await get('diagnostics'), stats: await get('stats') };
+}
 
 async function requestOn(item) {
   const target = item.target;
@@ -98,7 +123,7 @@ async function freePort() {
   });
 }
 
-async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, maxMs = Infinity }) {
+async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, maxMs = Infinity, diagnostics, continueAfterSlow = false }) {
   const port = reusePort ?? await freePort();
   const samples = [];
   if (target.httpPorts) assert.equal(target.httpPorts.length, count, 'Each native reuse needs a distinct responder port');
@@ -106,7 +131,7 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, max
     const peerPort = target.httpPorts?.[i] ?? target.http;
     const nonce = randomBytes(12).toString('hex');
     const started = performance.now();
-    const startedAt = Date.now();
+    const startedAt = performance.timeOrigin + started;
     let result, bindRetries = 0;
     do {
       result = await new Promise((resolve) => {
@@ -151,6 +176,9 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, max
     } while (true);
     result.bindRetries = bindRetries;
     result.ms = performance.now() - started;
+    if (diagnostics && (result.ms >= maxMs || result.outcome !== 'closed')) {
+      result.diagnostics = await diagnosticCapture(diagnostics);
+    }
     samples.push(result);
     if (result.outcome !== 'closed') break;
     assert.match(result.header, /^HTTP\/1\.1 200/);
@@ -164,7 +192,7 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, max
     }
     // Preserve the gateway's short packet trace at the first slow attempt.
     // A later successful connection must not overwrite evidence for this failure.
-    if (result.ms >= maxMs) break;
+    if (result.ms >= maxMs && !continueAfterSlow) break;
     if (gap) await delay(gap);
   }
   return samples;
@@ -203,6 +231,7 @@ process.on('message', async ({ id, command, ...args }) => {
     else if (command === 'refresh') result = await Promise.all(args.ids.map((key) => requestOn(held.get(key))));
     else if (command === 'udp') result = await udp(args);
     else if (command === 'reuse') result = await reuse(args);
+    else if (command === 'heartbeat') result = heartbeat();
     else if (command === 'reject') result = await rejectBurst(args);
     else if (command === 'reset') result = await reset(args);
     else if (command === 'status') result = args.ids.map((key) => ({ id: key, closed: held.get(key)?.socket?.destroyed === true }));

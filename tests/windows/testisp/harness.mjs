@@ -111,6 +111,6 @@ export async function startHarness(directory) {
       assert.notEqual(result.code, 0, 'Failure injection did not stop the selected path');
       return result;
     };
-    return { uplink, testisp: state, control, network, probe, close };
+    return { uplink, testisp: state, control, diagnosticClient: { url: state.control, token }, network, probe, close };
   } catch (error) { await close(); throw error; }
 }
