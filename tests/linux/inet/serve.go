@@ -104,6 +104,7 @@ func Main(args []string) error {
 		errs = append(errs,
 			serveTCP(":"+strconv.Itoa(wire.PortWhoami), rec, whoami),
 			serveTCP(":"+strconv.Itoa(wire.PortStream), rec, stream),
+			serveTCP(":"+strconv.Itoa(wire.PortHold), rec, holdOpen),
 			serveTCP(":"+strconv.Itoa(wire.PortBulk), rec, bulk),
 			serveTCP(":"+strconv.Itoa(wire.PortDNS), rec, dnsTCP(rec)),
 			serveTCP(":"+strconv.Itoa(wire.PortProbe), rec, func(net.Conn) {}),
@@ -208,6 +209,17 @@ func stream(conn net.Conn) {
 	for scanner.Scan() {
 		line := strings.TrimPrefix(scanner.Text(), "ping ")
 		if _, err := fmt.Fprintf(conn, "pong %s %s\n", line, ip); err != nil {
+			return
+		}
+	}
+}
+
+// holdOpen keeps a connection until the client closes it, sending nothing:
+// tens of thousands of them cost a socket and a small goroutine each.
+func holdOpen(conn net.Conn) {
+	var b [1]byte
+	for {
+		if _, err := conn.Read(b[:]); err != nil {
 			return
 		}
 	}

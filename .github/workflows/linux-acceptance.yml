@@ -28,23 +28,23 @@ jobs:
     name: Linux acceptance / ${{ matrix.runner }}
     # Pinned labels: ubuntu-latest moves between releases.
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm]
     env:
       GOTOOLCHAIN: local
-      GOFLAGS: -mod=readonly
       CGO_ENABLED: '0'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # squashfs-tools: `snap pack` builds the test snap with it.
       - name: Install test tools
         run: |
           sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends jq nftables iproute2 flatpak fuse3
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends jq nftables iproute2 flatpak fuse3 squashfs-tools
       - name: Read the pinned Go and Node versions
         id: pins
         run: |
@@ -60,7 +60,20 @@ jobs:
           node-version: ${{ steps.pins.outputs.node_version }}
           package-manager-cache: false
       - name: Build the harness
+        env:
+          GOFLAGS: -mod=vendor
         run: go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
+      # The QUIC fixture is its own module at a pinned quic-go, so QUIC never
+      # enters Net Switch's go.mod or vendor/.
+      - name: Check and build the QUIC fixture
+        working-directory: tests/quicfixture
+        env:
+          GOFLAGS: -mod=readonly
+        run: |
+          go mod verify
+          go vet ./...
+          go test -count=1 -v ./...
+          go build -trimpath -o "$RUNNER_TEMP/nsquic" .
       - name: Fetch sing-box at the pinned version and check its SHA-256
         run: sudo "$RUNNER_TEMP/nsaccept" fetch-sing-box --dest /opt/sing-box
       # In a transient scope with Delegate=yes: systemd lets a program create
@@ -70,9 +83,10 @@ jobs:
           RUN_FILTER: ${{ inputs.run }}
         run: >-
           sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-${{ github.run_id }}-${{ strategy.job-index }}" --
-          env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
+          env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
           "$RUNNER_TEMP/nsaccept" run --engine sing-box --engine-path /opt/sing-box/sing-box
           --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance"
+          --quic "$RUNNER_TEMP/nsquic"
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
       - name: Upload the report and logs
         if: ${{ always() }}

@@ -209,10 +209,14 @@ func ipv6Off(e *Env) {
 	v4.WaitJSON(e, 20*time.Second, &s4)
 	v6.WaitJSON(e, 20*time.Second, &s6)
 	e.T.Check(s4.Connected && s6.Connected, "both streams were up before (IPv4 %v, IPv6 %v)", s4.Connected, s6.Connected)
+	// Mandatory: IPv6 traffic stops when IPv6 is turned off, and the IPv4
+	// stream's answers only ever came over b. The defect is collateral: the
+	// IPv4 stream closing too.
 	lines4 := StreamLines(s4)
-	e.T.Expect(s6.ClosedAt != 0 && s6.ClosedAt-off <= 2000 && s4.ClosedAt == 0 && s4.MaxGapMS < 2000 && lines4["b"] == s4.Pongs,
-		"turning IPv6 off closes bravo's IPv6 stream within 2 s (%s) and leaves its IPv4 stream on b (%s, pongs %d, longest silence %d ms)",
-		closedAfter(s6, off), closedAfter(s4, off), s4.Pongs, s4.MaxGapMS)
+	e.T.Check(s6.ClosedAt != 0 && s6.ClosedAt-off <= 2000, "turning IPv6 off closes bravo's IPv6 stream within 2 s (%s)", closedAfter(s6, off))
+	e.T.Check(lines4["b"] == s4.Pongs, "every answer bravo's IPv4 stream got came over b (%s)", Describe(lines4))
+	e.T.Expect(s4.ClosedAt == 0 && s4.MaxGapMS < 2000 && s4.Pongs > 0,
+		"turning IPv6 off leaves bravo's IPv4 stream running (%s, pongs %d, longest silence %d ms)", closedAfter(s4, off), s4.Pongs, s4.MaxGapMS)
 	r := e.TCP("bravo", AsUser, "--to", To(topo.Server6, wire.PortWhoami), "--count", "3", "--timeout", "5000")
 	e.T.Check(r.OK == 0 && r.FailedMS.Max < 1000, "new IPv6 connections are refused at once now (connected %d, slowest failure %.0f ms)", r.OK, r.FailedMS.Max)
 	e.ExpectTCP("bravo's IPv4 still uses b", "bravo", AsUser, "b", topo.Server4, 3)

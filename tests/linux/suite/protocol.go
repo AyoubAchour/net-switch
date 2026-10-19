@@ -25,15 +25,16 @@ func addProtocol(r *registry) {
 		r.add(id, title, harness.Requires10, spec, timeout, fn)
 	}
 	add("protocol.revisions", "Revisions: the same n and hash is idempotent, the same n with another hash conflicts, a lower n is stale", "3.3, 5.10", 0, revisions)
-	add("protocol.lease-fencing", "A newer controller fences the old one: its renewals and commands are refused", "2, 5.10", 0, leaseFencing)
+	add("protocol.lease-fencing", "A newer controller fences the old one: its renewals and commands are refused", "2, 5.9, 5.10", 0, leaseFencing)
 	add("protocol.reattach-within-lease", "Control stops renewing; the engine keeps forwarding, and a new controller reattaches with the same instance and revision", "2, 3.3", 0, reattachWithinLease)
 	add("protocol.lease-lapse-cleans-up", "When the lease lapses the engine stops, cleans up and exits; normal internet works again", "2", 2*time.Minute, leaseLapse)
-	add("protocol.flows-pagination", "flows{cursor} pages through 300 open flows exactly once each, with lane, line, revision and epoch", "5.10", 0, flowsPagination)
+	add("protocol.flows-pagination", "flows{cursor} pages through 300 held connections over several pages, each exactly once, with its tuple, app, lane, line, revision, epoch and pid", "5.10", 0, flowsPagination)
+	add("protocol.snapshot-budget", "Four flow snapshots at once: a fifth is refused for capacity until one finishes, and snapshots lapse after 10 s", "5.9, 5.10", 0, snapshotBudget)
 	add("protocol.totals-include-closed", "totals count bytes of flows that have already closed, per app and per line", "5.10", 0, totalsIncludeClosed)
 	add("protocol.closeflows-started-before", "closeFlows with startedBefore closes only flows admitted before a revision, and repeating it is safe", "3.3, 4.6, 5.10", 0, closeStartedBefore)
 	add("protocol.predict-keeps-counter", "predict gives a shared app's distribution without advancing the combining counter", "5.4, 5.10", 0, predictKeepsCounter)
-	add("protocol.lookup-counters", "stats counts ambiguous owners and records lookup latency", "5.6, 5.10", 0, lookupCounters)
-	add("protocol.probe-quick-per-line", "A quick probe tests the physical line, not its lane, and repeating its operation id returns the recorded result", "4.5, 5.10", 0, probePerLine)
+	add("protocol.lookup-counters", "stats counts ambiguous owners and records lookup time", "5.6, 5.10", 0, lookupCounters)
+	add("protocol.probe-per-line", "A probe tests the physical line, not its lane, and repeating its operation id returns the recorded result", "4.5, 5.10", 0, probePerLine)
 	add("udp.identity-without-notifications", "UDP port reuse is caught within 1 s with destroy notifications dropped or delayed, for an opposite pin and a blocked line", "5.3", 3*time.Minute, udpIdentityWithoutNotifications)
 }
 
@@ -57,28 +58,35 @@ func (e *Env) hello(v1 engine.V1) engine.Hello {
 	return h
 }
 
+// applied is the revision in effect, or stops the case.
+func (e *Env) applied(v1 engine.V1) engine.Applied {
+	h := e.hello(v1)
+	e.T.Require(h.Applied != nil, "the started engine reports the revision in effect")
+	return *h.Applied
+}
+
 func revisions(e *Env) {
 	cfg := e.DefaultConfig()
 	e.StartEngine(cfg)
 	v1, s := e.v1()
-	loaded := e.hello(v1).LoadedRevision
-	e.T.Require(loaded != nil, "the started engine reports a loaded revision")
+	loaded := e.applied(v1)
 	next := cfg
-	next.Policy.Pins = append(next.Policy.Pins, engine.Pin{App: e.App("delta"), Line: "c"})
-	rev := engine.Revision{N: loaded.N + 1, Hash: engine.RevisionHash(next)}
-	first, err := s.Apply(e.Ctx(), rev, next)
-	e.T.Require(err == nil && first.Applied == rev, "revision %d is applied and acknowledged (%+v, %v)", rev.N, first, err)
-	again, err := s.Apply(e.Ctx(), rev, next)
-	e.T.Check(err == nil && again.Applied == rev, "sending the same n and hash again is a success (%+v, %v)", again, err)
+	next.Policy.Pins = append(append([]engine.Pin{}, cfg.Policy.Pins...), engine.Pin{App: e.App("delta"), Line: "c"})
+	n := loaded.N + 1
+	first, err := s.Apply(e.Ctx(), n, next)
+	e.T.Require(err == nil && first.N == n && first.Hash != "" && first.Point > loaded.Point,
+		"revision %d is applied and acknowledged with its hash and a later apply point (%+v after %+v, %v)", n, first, loaded, err)
+	again, err := s.Apply(e.Ctx(), n, next)
+	e.T.Check(err == nil && again.Revision == first.Revision, "sending the same n and config again is a success (%+v, %v)", again, err)
 	other := next
 	other.Policy.IPv6 = !other.Policy.IPv6
-	_, err = s.Apply(e.Ctx(), engine.Revision{N: rev.N, Hash: engine.RevisionHash(other)}, other)
-	e.T.Check(engine.RefusedWith(err, engine.RefusedConflict), "the same n with another hash is refused as a conflict (%v)", err)
-	_, err = s.Apply(e.Ctx(), engine.Revision{N: loaded.N, Hash: loaded.Hash}, cfg)
+	_, err = s.Apply(e.Ctx(), n, other)
+	e.T.Check(engine.RefusedWith(err, engine.RefusedConflict), "the same n with another config is refused as a conflict (%v)", err)
+	_, err = s.Apply(e.Ctx(), loaded.N, cfg)
 	e.T.Check(engine.RefusedWith(err, engine.RefusedStale), "a lower n is refused as stale (%v)", err)
-	now := e.hello(v1).LoadedRevision
-	e.T.Check(now != nil && *now == rev, "the loaded revision is still %d (%+v)", rev.N, now)
-	e.ExpectTCP("delta follows revision "+fmt.Sprint(rev.N), "delta", AsUser, "c", topo.Server4, 3)
+	now := e.applied(v1)
+	e.T.Check(now.Revision == first.Revision, "the revision in effect is still %d (%+v)", n, now)
+	e.ExpectTCP(fmt.Sprintf("delta follows revision %d", n), "delta", AsUser, "c", topo.Server4, 3)
 }
 
 func leaseFencing(e *Env) {
@@ -86,8 +94,9 @@ func leaseFencing(e *Env) {
 	v1, old := e.v1()
 	fresh, err := v1.Attach(e.Ctx())
 	e.T.Require(err == nil, "a second controller attaches (%v)", err)
-	e.T.Check(fresh.Epoch() > old.Epoch() && fresh.InstanceID() == old.InstanceID(),
-		"the engine handed out a higher epoch for the same instance (%d after %d)", fresh.Epoch(), old.Epoch())
+	h := e.hello(v1)
+	e.T.Check(fresh.Epoch() > old.Epoch() && fresh.InstanceID() == old.InstanceID() && h.Epoch == fresh.Epoch(),
+		"the engine handed out a higher epoch for the same instance (%d after %d; hello says %d)", fresh.Epoch(), old.Epoch(), h.Epoch)
 	e.T.Check(engine.RefusedWith(old.Renew(e.Ctx()), engine.RefusedFenced), "the old controller's renewal is refused as fenced")
 	_, err = old.Flows(e.Ctx(), "")
 	e.T.Check(engine.RefusedWith(err, engine.RefusedFenced), "the old controller's commands are refused as fenced (%v)", err)
@@ -101,7 +110,8 @@ func reattachWithinLease(e *Env) {
 	cfg := e.DefaultConfig()
 	e.StartEngine(cfg)
 	v1, old := e.v1()
-	before := e.hello(v1)
+	before := e.applied(v1)
+	instance := e.hello(v1).InstanceID
 	stream := e.StartStream("bravo", AsUser, 20*time.Second)
 	// Control "crashes": no more renewals.
 	old.SetAutoRenew(false)
@@ -110,9 +120,8 @@ func reattachWithinLease(e *Env) {
 	fresh, err := v1.Attach(e.Ctx())
 	e.T.Require(err == nil, "a restarted controller reattaches within the lease (%v)", err)
 	after := e.hello(v1)
-	e.T.Check(after.InstanceID == before.InstanceID && fresh.Epoch() > old.Epoch(), "the same engine instance, with a new epoch (%s, %d after %d)", after.InstanceID, fresh.Epoch(), old.Epoch())
-	e.T.Check(after.LoadedRevision != nil && before.LoadedRevision != nil && *after.LoadedRevision == *before.LoadedRevision,
-		"the loaded revision survived (%+v, was %+v)", after.LoadedRevision, before.LoadedRevision)
+	e.T.Check(after.InstanceID == instance && fresh.Epoch() > old.Epoch(), "the same engine instance, with a new epoch (%s, %d after %d)", after.InstanceID, fresh.Epoch(), old.Epoch())
+	e.T.Check(after.Applied != nil && *after.Applied == before, "the revision in effect survived (%+v, was %+v)", after.Applied, before)
 	fresh.SetAutoRenew(true)
 	var s Stream
 	stream.WaitJSON(e, 40*time.Second, &s)
@@ -133,45 +142,142 @@ func leaseLapse(e *Env) {
 	e.ExpectTCP("bravo after the lapse (normal routing)", "bravo", AsUser, "a", topo.Server4, 3)
 }
 
+// holdConns starts an app holding n connections to the hold server until
+// the returned barrier opens, and returns their addresses as the app sees
+// them.
+func (e *Env) holdConns(name string, n int, release Release) (*Bg, app.HeldList) {
+	args := append([]string{"tcphold", "--to", To(topo.Server4, wire.PortHold), "--count", fmt.Sprint(n), "--concurrency", "50", "--timeout", "5000", "--tuples"}, release.Arg()...)
+	hold := e.Start(Run{App: name, Args: args})
+	var held app.HeldList
+	hold.WaitHeld(e, "held", 60*time.Second, &held)
+	e.T.Require(held.Established == n && len(held.Conns) == n, "%s holds its %d connections (%d)", name, n, held.Established)
+	return hold, held
+}
+
 func flowsPagination(e *Env) {
+	const n = 300
 	e.StartEngine(e.DefaultConfig())
 	v1, s := e.v1()
-	hold := e.Start(Run{App: "bravo", Args: []string{"tcphold", "--to", To(topo.Server4, wire.PortStream), "--count", "300", "--concurrency", "50", "--hold", "15000"}})
-	hold.WaitOutput(e, "holding 300", 30*time.Second)
-	loaded := e.hello(v1).LoadedRevision
-	seen := map[string]bool{}
-	pages, dup, bad := 0, 0, 0
+	loaded := e.applied(v1)
+	release := e.NewRelease("pages")
+	hold, held := e.holdConns("bravo", n, release)
+	want := map[string]bool{}
+	for _, c := range held.Conns {
+		want[c.Local+" "+c.Remote] = true
+	}
+	e.T.Require(len(want) == n, "bravo's %d connections have %d distinct tuples", n, len(want))
+
+	// Every page of one snapshot, from the protocol itself: no other listing
+	// is consulted, and every flow is identified by its tuple, not its label.
+	type got struct {
+		f    engine.Flow
+		page int
+	}
+	matched := map[string][]got{}
+	ids := map[string]int{}
+	var cursors []string
+	var sizes []int
+	var wrong, stray []string
 	cursor := ""
-	for {
-		page, err := s.Flows(e.Ctx(), cursor)
-		e.T.Require(err == nil, "page %d of flows (%v)", pages+1, err)
-		pages++
-		for _, f := range page.Flows {
-			if seen[f.ID] {
-				dup++
-			}
-			seen[f.ID] = true
-			if f.App == AppPath("bravo") && (f.Line != "b" || f.Lane != "b" || loaded == nil || f.Revision != loaded.N || f.Epoch == 0 || f.PID == 0) {
-				bad++
+	for page := 1; ; page++ {
+		e.T.Require(page <= 1000, "the cursor ends within 1,000 pages")
+		p, err := s.Flows(e.Ctx(), cursor)
+		e.T.Require(err == nil, "page %d of flows (%v)", page, err)
+		sizes = append(sizes, len(p.Flows))
+		for _, f := range p.Flows {
+			ids[f.ID]++
+			key := f.Source.String() + " " + f.Destination.String()
+			switch {
+			case want[key]:
+				matched[key] = append(matched[key], got{f, page})
+				if f.Protocol != "tcp" || f.App != AppPath("bravo") || f.PID != hold.Pid() || f.Lane != "b" || f.Line != "b" ||
+					f.Revision != loaded.N || f.Epoch != s.Epoch() || f.Point <= loaded.Point {
+					wrong = append(wrong, fmt.Sprintf("%s: %s app %q pid %d lane %s line %s revision %d epoch %d point %d", key, f.Protocol, f.App, f.PID, f.Lane, f.Line, f.Revision, f.Epoch, f.Point))
+				}
+			case f.App == AppPath("bravo") || f.Destination.Port() == wire.PortHold:
+				stray = append(stray, fmt.Sprintf("%s %s %q", f.Protocol, key, f.App))
 			}
 		}
-		if page.Next == "" || pages > 10000 {
+		if p.Next == "" {
 			break
 		}
-		cursor = page.Next
+		e.T.Require(len(p.Flows) > 0, "page %d has flows before its cursor (%d)", page, len(p.Flows))
+		for _, c := range cursors {
+			e.T.Require(c != p.Next, "page %d's cursor %q is new, not one already followed", page, p.Next)
+		}
+		cursors = append(cursors, p.Next)
+		cursor = p.Next
 	}
-	count := len(seen)
-	held := 0
-	all, err := e.Eng.Flows(e.Ctx())
-	e.T.Require(err == nil, "listing flows (%v)", err)
-	for _, f := range all {
-		if f.App == AppPath("bravo") && f.Destination.Port() == wire.PortStream {
-			held++
+	e.T.Require(hold.Running(), "bravo still holds its connections after the listing")
+	once, twice := 0, 0
+	for _, list := range matched {
+		if len(list) == 1 {
+			once++
+		} else {
+			twice++
 		}
 	}
-	e.T.Check(held >= 300 && count >= 300 && dup == 0, "%d pages listed %d flows once each (bravo's held flows: %d; duplicates %d)", pages, count, held, dup)
-	e.T.Check(bad == 0, "every bravo flow says lane b, line b, the loaded revision, an epoch and a pid (%d didn't)", bad)
-	hold.Stop()
+	dupIDs := 0
+	for _, count := range ids {
+		if count > 1 {
+			dupIDs++
+		}
+	}
+	e.T.Check(len(sizes) >= 2 && len(cursors) == len(sizes)-1,
+		"%d flows came over %d pages, each but the last ending in a new cursor (page sizes %v)", n, len(sizes), sizes)
+	e.T.Check(once == n && twice == 0 && dupIDs == 0,
+		"each of bravo's %d held connections was listed exactly once, by its own tuple (once %d, more than once %d, missing %d, ids listed twice %d)", n, once, twice, n-len(matched), dupIDs)
+	e.T.Check(len(wrong) == 0, "every held connection says tcp, bravo, its pid, lane b, line b, revision %d, epoch %d and a point after the revision's (%d didn't: %s)",
+		loaded.N, s.Epoch(), len(wrong), strings.Join(upTo(wrong, 3), "; "))
+	e.T.Check(len(stray) == 0, "no flow claims bravo or the hold server besides the held connections (%s)", strings.Join(upTo(stray, 3), "; "))
+	release.Open(e)
+	var r app.HoldResult
+	hold.WaitJSON(e, 30*time.Second, &r)
+	e.T.Check(r.StillOpen == n, "all %d connections were still open at the end (%d)", n, r.StillOpen)
+}
+
+// upTo is the first n of a list, and how many more there are.
+func upTo(list []string, n int) []string {
+	if len(list) > n {
+		return append(list[:n:n], fmt.Sprintf("... %d more", len(list)-n))
+	}
+	return list
+}
+
+func snapshotBudget(e *Env) {
+	e.StartEngine(e.DefaultConfig())
+	_, s := e.v1()
+	release := e.NewRelease("snapshots")
+	hold, _ := e.holdConns("bravo", 200, release)
+	var open []string
+	for i := 1; i <= 4; i++ {
+		p, err := s.Flows(e.Ctx(), "")
+		e.T.Require(err == nil && p.Next != "", "snapshot %d starts, with more pages to come (%v)", i, err)
+		open = append(open, p.Next)
+	}
+	_, err := s.Flows(e.Ctx(), "")
+	e.T.Check(engine.RefusedWith(err, engine.RefusedCapacity), "a fifth snapshot while four are open is refused for capacity (%v)", err)
+	cursor := open[0]
+	for cursor != "" {
+		p, err := s.Flows(e.Ctx(), cursor)
+		e.T.Require(err == nil, "following snapshot 1 to its end (%v)", err)
+		cursor = p.Next
+	}
+	_, err = s.Flows(e.Ctx(), "")
+	e.T.Check(err == nil, "with snapshot 1 finished, a new snapshot starts (%v)", err)
+	// Every snapshot now open lapses 10 s after it started.
+	e.Sleep(11 * time.Second)
+	_, err = s.Flows(e.Ctx(), open[1])
+	e.T.Check(err != nil && !engine.RefusedWith(err, engine.RefusedCapacity), "an 11 s old cursor is no longer valid (%v)", err)
+	started := 0
+	for range 4 {
+		if p, err := s.Flows(e.Ctx(), ""); err == nil && p.Next != "" {
+			started++
+		}
+	}
+	e.T.Check(started == 4, "once the old snapshots lapse, four new ones start (%d)", started)
+	release.Open(e)
+	hold.Wait(e, 30*time.Second)
 }
 
 func totalsIncludeClosed(e *Env) {
@@ -183,11 +289,13 @@ func totalsIncludeClosed(e *Env) {
 	var r app.BulkResult
 	e.RunJSON(Run{App: "charlie", Args: []string{"bulk", "--to", To(topo.Server4, wire.PortBulk), "--bytes", fmt.Sprint(size)}}, &r)
 	e.T.Require(r.OK, "charlie downloaded 1 MiB (%s)", r.Err)
-	_, open := e.WaitFlow(0, func(f engine.Flow) bool { return f.App == AppPath("charlie") })
-	e.T.Check(!open, "charlie's transfer has closed")
+	// The app has closed its connection; the engine lets go of it shortly
+	// after. Poll until it does, within a bound.
+	left, gone := e.WaitNoFlow(5*time.Second, func(f engine.Flow) bool { return f.App == AppPath("charlie") })
+	e.T.Require(gone, "within 5 s the engine no longer lists charlie's finished transfer (%d left)", len(left))
 	after, err := s.Totals(e.Ctx())
 	e.T.Require(err == nil, "totals (%v)", err)
-	app := after.PerApp[AppPath("charlie")].Down - before.PerApp[AppPath("charlie")].Down
+	app := after.PerApp[e.App("charlie").Key()].Down - before.PerApp[e.App("charlie").Key()].Down
 	line := after.PerLine["c"].Down - before.PerLine["c"].Down
 	e.T.Check(app >= size && line >= size, "the closed transfer's 1 MiB is in charlie's total (+%d) and line c's (+%d)", app, line)
 }
@@ -196,9 +304,8 @@ func closeStartedBefore(e *Env) {
 	cfg := e.DefaultConfig()
 	e.StartEngine(cfg)
 	v1, s := e.v1()
-	loaded := e.hello(v1).LoadedRevision
-	e.T.Require(loaded != nil, "the started engine reports a loaded revision")
-	isStream := func(rev int64) func(engine.Flow) bool {
+	loaded := e.applied(v1)
+	isStream := func(rev uint64) func(engine.Flow) bool {
 		return func(f engine.Flow) bool {
 			return f.App == AppPath("bravo") && f.Destination.Port() == wire.PortStream && f.Revision == rev
 		}
@@ -207,22 +314,21 @@ func closeStartedBefore(e *Env) {
 	oldFlow, ok := e.WaitFlow(3*time.Second, isStream(loaded.N))
 	e.T.Require(ok, "bravo's first stream is admitted under revision %d", loaded.N)
 	next := cfg
-	next.Policy.Pins = append(next.Policy.Pins, engine.Pin{App: e.App("delta"), Line: "b"})
-	rev := engine.Revision{N: loaded.N + 1, Hash: engine.RevisionHash(next)}
-	ack, err := s.Apply(e.Ctx(), rev, next)
-	e.T.Require(err == nil && ack.Applied == rev && ack.ApplyPoint > 0, "revision %d is acknowledged with an apply point (%+v, %v)", rev.N, ack, err)
+	next.Policy.Pins = append(append([]engine.Pin{}, cfg.Policy.Pins...), engine.Pin{App: e.App("delta"), Line: "b"})
+	ack, err := s.Apply(e.Ctx(), loaded.N+1, next)
+	e.T.Require(err == nil && ack.N == loaded.N+1 && ack.Point > oldFlow.Point, "revision %d is acknowledged with an apply point after the first stream's (%+v, flow point %d, %v)", loaded.N+1, ack, oldFlow.Point, err)
 	newer := e.StartStream("bravo", AsUser, 10*time.Second)
-	newFlow, ok := e.WaitFlow(3*time.Second, isStream(rev.N))
-	e.T.Require(ok, "bravo's second stream is admitted under revision %d", rev.N)
-	res, err := s.CloseFlows(e.Ctx(), "op-close-1", engine.Selector{Line: "b"}, ack.ApplyPoint)
+	newFlow, ok := e.WaitFlow(3*time.Second, isStream(ack.N))
+	e.T.Require(ok && newFlow.Point > ack.Point, "bravo's second stream is admitted under revision %d, after its apply point (%d)", ack.N, newFlow.Point)
+	res, err := s.CloseFlows(e.Ctx(), "op-close-1", engine.Selector{Line: "b"}, ack.Point)
 	e.T.Require(err == nil, "closeFlows (%v)", err)
-	again, err := s.CloseFlows(e.Ctx(), "op-close-1", engine.Selector{Line: "b"}, ack.ApplyPoint)
+	again, err := s.CloseFlows(e.Ctx(), "op-close-1", engine.Selector{Line: "b"}, ack.Point)
 	e.T.Check(err == nil && res == again, "repeating the operation id returns the recorded result (%+v, then %+v, %v)", res, again, err)
 	e.T.Check(res.Closed == 1, "exactly the older flow was closed (%+v)", res)
 	var so, sn Stream
 	older.WaitJSON(e, 30*time.Second, &so)
 	newer.WaitJSON(e, 30*time.Second, &sn)
-	e.T.Check(so.ClosedAt != 0, "flow %s, admitted before revision %d, was closed (%q)", oldFlow.ID, rev.N, so.CloseErr)
+	e.T.Check(so.ClosedAt != 0, "flow %s, admitted before revision %d, was closed (%q)", oldFlow.ID, ack.N, so.CloseErr)
 	e.CheckStreamSurvived("flow "+newFlow.ID+", admitted after the revision", sn, "b")
 }
 
@@ -240,19 +346,19 @@ func predictKeepsCounter(e *Env) {
 		return st
 	}
 	before := stats()
-	var dist map[engine.LineID]float64
+	var p engine.Prediction
 	var err error
 	for range 10 {
-		if dist, err = s.Predict(e.Ctx(), e.App("alpha")); err != nil {
+		if p, err = s.Predict(e.Ctx(), e.App("alpha")); err != nil {
 			e.T.Fatalf("predict: %v", err)
 		}
 	}
-	e.T.Check(math.Abs(dist["a"]-2.0/3) < 0.01 && math.Abs(dist["b"]-1.0/3) < 0.01, "predict for unpinned alpha is the share distribution (%v)", dist)
+	e.T.Check(math.Abs(p.Distribution["a"]-2.0/3) < 0.01 && math.Abs(p.Distribution["b"]-1.0/3) < 0.01, "predict for unpinned alpha is the share distribution (%+v)", p)
 	pinned, err := s.Predict(e.Ctx(), e.App("bravo"))
 	if err != nil {
 		e.T.Fatalf("predict: %v", err)
 	}
-	e.T.Check(len(pinned) == 1 && pinned["b"] == 1, "predict for pinned bravo is its lane target b (%v)", pinned)
+	e.T.Check(pinned.Line == "b" && pinned.Distribution == nil && !pinned.Blocked, "predict for pinned bravo is its lane target b (%+v)", pinned)
 	mid := stats()
 	e.T.Check(mid.Admitted == before.Admitted, "11 predictions left the counter at %d (now %d)", before.Admitted, mid.Admitted)
 	e.TCP("alpha", AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "3")
@@ -267,8 +373,7 @@ func lookupCounters(e *Env) {
 	e.T.Require(err == nil, "stats (%v)", err)
 	e.T.Check(topo.LineOfText(r.Seen) == "a", "the ambiguous socket went to the main line (%q)", topo.LineOfText(r.Seen))
 	e.T.Check(after.LookupAmbiguous >= 1, "the ambiguous owner was counted (%d)", after.LookupAmbiguous)
-	p95, known := after.LookupLatency.Quantile(0.95)
-	e.T.Check(after.LookupLatency.Total() >= 1 && known && p95 > 0, "lookup latency is recorded (%d lookups, p95 %v)", after.LookupLatency.Total(), p95)
+	e.T.Check(after.LookupCount >= 1 && after.LookupTime > 0, "lookup time is recorded (%d lookups, %v in total, mean %v)", after.LookupCount, after.LookupTime, after.LookupMean())
 }
 
 func probePerLine(e *Env) {
@@ -281,11 +386,11 @@ func probePerLine(e *Env) {
 	}
 	e.SetLanes(map[engine.LineID]engine.LineID{"b": "a"})
 	since := time.Now().UnixMilli()
-	okA, err := s.Probe(e.Ctx(), "probe-a", "a", "cloudflare", "quick")
-	e.T.Check(err == nil && okA.Outcome == "ok", "line a's quick probe passes (%+v, %v)", okA, err)
-	failB, err := s.Probe(e.Ctx(), "probe-b", "b", "cloudflare", "quick")
-	e.T.Check(err == nil && failB.Outcome == "lineFailed", "line b's quick probe fails though b's lane points at a (%+v, %v)", failB, err)
-	again, err := s.Probe(e.Ctx(), "probe-b", "b", "cloudflare", "quick")
+	okA, err := s.Probe(e.Ctx(), "probe-a", "a", "cloudflare")
+	e.T.Check(err == nil && okA.OK, "line a's probe passes (%+v, %v)", okA, err)
+	failB, err := s.Probe(e.Ctx(), "probe-b", "b", "cloudflare")
+	e.T.Check(err == nil && !failB.OK && failB.Error != "", "line b's probe fails though b's lane points at a (%+v, %v)", failB, err)
+	again, err := s.Probe(e.Ctx(), "probe-b", "b", "cloudflare")
 	e.T.Check(err == nil && again == failB, "repeating the operation id returns the recorded result (%+v, %v)", again, err)
 	probes := Select(e.Records(), func(r inet.Record) bool { return r.Kind == "tcp" && r.T >= since && strings.HasSuffix(r.Dst, ":443") })
 	e.T.Check(len(probes) == 1 && topo.LineOfText(probes[0].Src) == "a", "the probe servers saw exactly one probe, line a's (%d, lines %s)", len(probes), Describe(RecordLines(probes)))

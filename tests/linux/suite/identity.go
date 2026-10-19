@@ -31,16 +31,29 @@ func addIdentity(r *registry) {
 	r.add("identity.replaced-binary", "An app whose program file is replaced while it runs keeps its line", harness.Parity, "5.4, 5.6", 0, replacedBinary)
 }
 
-// Fixtures are the outside programs the identity cases run, provisioned once
-// before any case so downloads never count against a case's time.
+// Fixtures are the packaged apps the identity cases run, provisioned once
+// before any case so building and installing never count against a case's
+// time. Each is built here around the harness's own test app, so what it
+// runs never moves: no store decides its content. The one outside input is
+// the Snap's base (and snapd's own snap), which the Snap Store supplies when
+// the runner lacks them; their revisions are recorded. These cases are
+// required (SYSTEM-DESIGN.md 10), so a fixture that can't be provisioned
+// fails the run rather than skipping anything.
 type Fixtures struct {
-	SnapProgram   string // e.g. /snap/curl/2423/usr/local/bin/curl
-	FlatpakBranch string // the Freedesktop runtime branch the test apps use
-	AppImage      string // NsTool.AppImage
-	// Recorded identifies each fixture for the report (the Snap Store and
-	// Flathub can't be pinned from CI, so what was used is recorded).
+	SnapProgram string // the test app inside the snap: /snap/nsaccept-tool/<revision>/bin/nsapp
+	SnapCommand string // how it's started: /snap/bin/nsaccept-tool
+	AppImage    string // NsTool.AppImage
+	// Recorded identifies each fixture for the report.
 	Recorded map[string]string
 }
+
+// The packaged test apps' names.
+const (
+	snapName       = "nsaccept-tool"
+	snapBase       = "core24"
+	flatpakRuntime = "com.netswitch.TestPlatform"
+	flatpakBranch  = "1"
+)
 
 // NeedsFixtures reports whether any of the cases uses them.
 func NeedsFixtures(ids []string) bool {
@@ -78,55 +91,102 @@ func Provision(ctx context.Context, self string, logf func(string, ...any)) (*Fi
 	if err := os.MkdirAll(fixtureDir, 0o755); err != nil {
 		return nil, err
 	}
-
-	// Snap: the Snap Store's curl.
-	if _, err := host(3*time.Minute, 3, "snap", "install", "curl"); err != nil {
+	sum, err := harness.FileSHA256(self)
+	if err != nil {
 		return nil, err
 	}
-	rev, err := os.Readlink("/snap/curl/current")
-	if err != nil {
-		return nil, fmt.Errorf("snap curl has no current revision: %w", err)
-	}
-	for _, p := range []string{"usr/local/bin/curl", "usr/bin/curl", "bin/curl"} {
-		if _, err := os.Stat(filepath.Join("/snap/curl", rev, p)); err == nil {
-			f.SnapProgram = filepath.Join("/snap/curl", rev, p)
-			break
-		}
-	}
-	if f.SnapProgram == "" {
-		return nil, fmt.Errorf("can't find curl inside /snap/curl/%s", rev)
-	}
-	f.Recorded["fixture snap"] = "curl revision " + rev + " (latest/stable)"
 
-	// Flatpak: the Freedesktop runtime from Flathub, and two apps built here.
+	// Snap: the test app packed as a strict snap here, installed unsigned
+	// (so its revision reads x1, x2...). Its base comes from the Snap Store
+	// if the runner doesn't have it: a store that can't supply it fails the
+	// run, with snapd's own words.
+	arch := map[string]string{"amd64": "amd64", "arm64": "arm64"}[runtime.GOARCH]
+	snapWork := filepath.Join(fixtureDir, "snap")
+	_ = os.RemoveAll(snapWork)
+	root := filepath.Join(snapWork, "root")
+	yaml := fmt.Sprintf("name: %s\nversion: '1'\nsummary: Net Switch acceptance test app\ndescription: The Linux acceptance harness's test app, packaged as a Snap.\n"+
+		"base: %s\nconfinement: strict\ngrade: devel\narchitectures: [%s]\napps:\n  %s:\n    command: bin/nsapp\n    plugs: [network]\n", snapName, snapBase, arch, snapName)
+	if err := writeFile(filepath.Join(root, "meta", "snap.yaml"), yaml, 0o644); err != nil {
+		return nil, err
+	}
+	if err := copyFile(self, filepath.Join(root, "bin", "nsapp"), 0o755); err != nil {
+		return nil, err
+	}
+	if _, err := host(2*time.Minute, 1, "snap", "pack", root, snapWork); err != nil {
+		return nil, err
+	}
+	snapFile := filepath.Join(snapWork, fmt.Sprintf("%s_1_%s.snap", snapName, arch))
+	snapSum, err := harness.FileSHA256(snapFile)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := host(6*time.Minute, 2, "snap", "install", "--dangerous", snapFile); err != nil {
+		return nil, fmt.Errorf("installing the test snap (its base %s comes from the Snap Store): %w", snapBase, err)
+	}
+	rev, err := os.Readlink(filepath.Join("/snap", snapName, "current"))
+	if err != nil {
+		return nil, fmt.Errorf("snap %s has no current revision: %w", snapName, err)
+	}
+	f.SnapProgram = filepath.Join("/snap", snapName, rev, "bin", "nsapp")
+	f.SnapCommand = filepath.Join("/snap", "bin", snapName)
+	if _, err := os.Stat(f.SnapProgram); err != nil {
+		return nil, err
+	}
+	f.Recorded["fixture snap"] = fmt.Sprintf("%s built here from the harness (snap SHA-256 %s), installed as revision %s", snapName, snapSum, rev)
+	list, err := host(time.Minute, 1, "snap", "list", snapBase, "snapd")
+	if err != nil {
+		return nil, err
+	}
+	f.Recorded["fixture snap base"] = strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(list), "\n", " | ")), " ")
+
+	// Flatpak: a runtime and two apps built here; nothing from Flathub. The
+	// runtime is a metadata file and ldconfig (flatpak runs it when an app
+	// starts), as flatpak's own test suite builds one: the apps' program is
+	// the harness's static binary, which needs nothing else from it.
 	if _, err := os.Stat("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); err == nil {
 		// Ubuntu restricts unprivileged user namespaces, which bwrap needs.
 		if _, err := host(time.Minute, 1, "sysctl", "-q", "-w", "kernel.apparmor_restrict_unprivileged_userns=0"); err != nil {
 			return nil, err
 		}
 	}
-	if _, err := host(2*time.Minute, 3, "flatpak", "remote-add", "--system", "--if-not-exists", "flathub", "https://dl.flathub.org/repo/flathub.flatpakrepo"); err != nil {
+	work := filepath.Join(fixtureDir, "flatpak")
+	_ = os.RemoveAll(work)
+	rt := filepath.Join(work, "runtime")
+	if err := writeFile(filepath.Join(rt, "metadata"), "[Runtime]\nname="+flatpakRuntime+"\n", 0o644); err != nil {
 		return nil, err
 	}
-	for _, b := range []string{"25.08", "24.08"} {
-		if _, err := host(6*time.Minute, 2, "flatpak", "install", "--system", "-y", "--noninteractive", "flathub", "org.freedesktop.Platform//"+b); err == nil {
-			f.FlatpakBranch = b
+	if err := os.MkdirAll(filepath.Join(rt, "files"), 0o755); err != nil {
+		return nil, err
+	}
+	ldconfig := ""
+	for _, p := range []string{"/usr/sbin/ldconfig.real", "/sbin/ldconfig.real", "/usr/sbin/ldconfig", "/sbin/ldconfig"} {
+		if _, err := os.Stat(p); err == nil {
+			ldconfig = p
 			break
 		}
 	}
-	if f.FlatpakBranch == "" {
-		return nil, errors.New("couldn't install a Freedesktop runtime from Flathub")
+	if ldconfig == "" {
+		return nil, errors.New("no ldconfig to put in the test Flatpak runtime")
 	}
-	commit, err := host(time.Minute, 1, "flatpak", "info", "--system", "--show-commit", "org.freedesktop.Platform//"+f.FlatpakBranch)
-	if err != nil {
+	if err := copyFile(ldconfig, filepath.Join(rt, "usr", "bin", "ldconfig"), 0o755); err != nil {
 		return nil, err
 	}
-	f.Recorded["fixture flatpak"] = "org.freedesktop.Platform//" + f.FlatpakBranch + " commit " + strings.TrimSpace(commit)
-	work := filepath.Join(fixtureDir, "flatpak")
-	_ = os.RemoveAll(work)
+	if err := os.MkdirAll(filepath.Join(rt, "usr", "lib"), 0o755); err != nil {
+		return nil, err
+	}
+	runtimeRepo, appRepo := filepath.Join(work, "runtime-repo"), filepath.Join(work, "app-repo")
+	if _, err := host(2*time.Minute, 1, "flatpak", "build-export", "--runtime", "--disable-sandbox", runtimeRepo, rt, flatpakBranch); err != nil {
+		return nil, err
+	}
+	if _, err := host(time.Minute, 1, "flatpak", "remote-add", "--system", "--no-gpg-verify", "--if-not-exists", "nsaccept-runtime", runtimeRepo); err != nil {
+		return nil, err
+	}
+	if _, err := host(3*time.Minute, 1, "flatpak", "install", "--system", "-y", "--noninteractive", "--reinstall", "nsaccept-runtime", flatpakRuntime+"//"+flatpakBranch); err != nil {
+		return nil, err
+	}
 	for _, id := range strings.Fields(flatpakApps) {
 		dir := filepath.Join(work, id)
-		if _, err := host(2*time.Minute, 1, "flatpak", "build-init", dir, id, "org.freedesktop.Platform", "org.freedesktop.Platform", f.FlatpakBranch); err != nil {
+		if _, err := host(2*time.Minute, 1, "flatpak", "build-init", dir, id, flatpakRuntime, flatpakRuntime, flatpakBranch); err != nil {
 			return nil, err
 		}
 		// Both apps' program is the same file at the same path, /app/bin/nsapp.
@@ -136,16 +196,25 @@ func Provision(ctx context.Context, self string, logf func(string, ...any)) (*Fi
 		if _, err := host(2*time.Minute, 1, "flatpak", "build-finish", dir, "--command=nsapp", "--share=network"); err != nil {
 			return nil, err
 		}
-		if _, err := host(2*time.Minute, 1, "flatpak", "build-export", filepath.Join(work, "repo"), dir); err != nil {
+		if _, err := host(2*time.Minute, 1, "flatpak", "build-export", "--disable-sandbox", appRepo, dir); err != nil {
 			return nil, err
 		}
 	}
-	if _, err := host(time.Minute, 1, "flatpak", "remote-add", "--system", "--no-gpg-verify", "--if-not-exists", "nsaccept-local", filepath.Join(work, "repo")); err != nil {
+	if _, err := host(time.Minute, 1, "flatpak", "remote-add", "--system", "--no-gpg-verify", "--if-not-exists", "nsaccept-apps", appRepo); err != nil {
 		return nil, err
 	}
-	if _, err := host(3*time.Minute, 1, "flatpak", append([]string{"install", "--system", "-y", "--noninteractive", "--reinstall", "nsaccept-local"}, strings.Fields(flatpakApps)...)...); err != nil {
+	if _, err := host(3*time.Minute, 1, "flatpak", append([]string{"install", "--system", "-y", "--noninteractive", "--reinstall", "nsaccept-apps"}, strings.Fields(flatpakApps)...)...); err != nil {
 		return nil, err
 	}
+	var commits []string
+	for _, ref := range append([]string{flatpakRuntime + "//" + flatpakBranch}, strings.Fields(flatpakApps)...) {
+		commit, err := host(time.Minute, 1, "flatpak", "info", "--system", "--show-commit", ref)
+		if err != nil {
+			return nil, err
+		}
+		commits = append(commits, ref+" "+strings.TrimSpace(commit))
+	}
+	f.Recorded["fixture flatpak"] = "built here from the harness (SHA-256 " + sum + "): " + strings.Join(commits, ", ")
 
 	// AppImage: built with pinned tools.
 	tools := appImageTools[runtime.GOARCH]
@@ -182,11 +251,11 @@ func Provision(ctx context.Context, self string, logf func(string, ...any)) (*Fi
 		return nil, err
 	}
 	f.AppImage = filepath.Join(aw, "NsTool.AppImage")
-	arch := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
+	appImageArch := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
 	c, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	build := exec.CommandContext(c, filepath.Join(aw, "appimagetool"), "--no-appstream", "--runtime-file", filepath.Join(aw, "runtime"), appDir, f.AppImage)
-	build.Env = append(os.Environ(), "ARCH="+arch, "APPIMAGE_EXTRACT_AND_RUN=1")
+	build.Env = append(os.Environ(), "ARCH="+appImageArch, "APPIMAGE_EXTRACT_AND_RUN=1")
 	if out, err := build.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("appimagetool: %v: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -206,27 +275,29 @@ func (e *Env) fixtures() *Fixtures {
 func snapIdentity(e *Env) {
 	fx := e.fixtures()
 	cfg := e.DefaultConfig()
-	cfg.Policy.Pins = append(cfg.Policy.Pins, engine.Pin{App: engine.App{ID: "snap:curl", Path: fx.SnapProgram}, Line: "b"})
+	cfg.Policy.Pins = append(cfg.Policy.Pins, engine.Pin{App: engine.App{ID: "snap:" + snapName, Path: fx.SnapProgram}, Line: "b"})
 	e.StartEngine(cfg)
-	url := "http://" + To(topo.Server4, wire.PortHTTP) + "/"
 	for _, c := range []struct {
 		label, program string
+		args           []string
 		want           engine.LineID
 	}{
-		{"the curl snap, pinned to b", "/snap/bin/curl", "b"},
-		{"the system's /usr/bin/curl, unpinned", "/usr/bin/curl", "a"},
+		{"the " + snapName + " snap, pinned to b", fx.SnapCommand, []string{"app"}, "b"},
+		// The same program outside the snap isn't the snap.
+		{"the same program as delta, unpinned", AppPath("delta"), []string{"app"}, "a"},
 	} {
-		got := map[engine.LineID]int{}
-		for range 3 {
-			out, err := e.TryExec(Run{Program: c.program, Args: []string{"-s", "--max-time", "5", url}})
-			id := topo.LineOfText(strings.TrimSpace(string(out)))
-			if err != nil || id == "" {
-				id = "?"
-			}
-			got[id]++
-		}
-		e.T.Check(got[c.want] == 3, "%s: 3 requests on line %s (lines %s)", c.label, c.want, Describe(got))
+		var r app.TCPResult
+		e.RunJSON(Run{Program: c.program, Args: append(c.args, "tcp", "--to", To(topo.Server4, wire.PortWhoami), "--count", "3"), Timeout: 2 * time.Minute}, &r)
+		lines := Lines(r.Seen)
+		e.T.Check(r.OK == 3 && lines[c.want] == 3, "%s: 3 connections on line %s (lines %s, errors %v)", c.label, c.want, Describe(lines), r.Errors)
 	}
+}
+
+func writeFile(path, body string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(body), mode)
 }
 
 const flatpakApps = "com.netswitch.TestA com.netswitch.TestB"

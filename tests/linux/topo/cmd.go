@@ -5,6 +5,7 @@ package topo
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -126,14 +127,18 @@ func (p *Process) Done() <-chan struct{} { return p.done }
 // Err is how the process ended, once Done is closed.
 func (p *Process) Err() error { return p.err }
 
-// Stop kills the process and waits for it.
-func (p *Process) Stop() {
+// Stop kills the process and waits for it, and says if it couldn't.
+func (p *Process) Stop() error {
 	if p.Cmd.Process != nil {
-		_ = p.Cmd.Process.Kill()
+		if err := p.Cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("killing %s: %w", p.Name, err)
+		}
 	}
 	select {
 	case <-p.done:
+		return nil
 	case <-time.After(5 * time.Second):
+		return fmt.Errorf("%s didn't exit within 5 s of SIGKILL", p.Name)
 	}
 }
 
@@ -170,13 +175,11 @@ func StartLogged(ctx context.Context, name, logPath, ready string, timeout time.
 		case <-p.done:
 			return nil, fmt.Errorf("%s exited before it was ready (%v): %s", name, p.err, lastLines(data, 10))
 		case <-ctx.Done():
-			p.Stop()
-			return nil, ctx.Err()
+			return nil, errors.Join(ctx.Err(), p.Stop())
 		case <-time.After(50 * time.Millisecond):
 		}
 		if time.Now().After(deadline) {
-			p.Stop()
-			return nil, fmt.Errorf("%s wasn't ready within %s: %s", name, timeout, lastLines(data, 10))
+			return nil, errors.Join(fmt.Errorf("%s wasn't ready within %s: %s", name, timeout, lastLines(data, 10)), p.Stop())
 		}
 	}
 }

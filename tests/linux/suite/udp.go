@@ -66,8 +66,13 @@ func fiftyDestinations(e *Env) {
 	for _, addr := range topo.ManyServers() {
 		dests = append(dests, To(addr, wire.PortUDPEcho))
 	}
+	// charlie keeps its socket open until every check below is done: an
+	// engine that drops a session as soon as its socket closes (5.3's destroy
+	// notifications) would otherwise list none by the time they're counted.
+	release := e.NewRelease("burst")
+	burst := e.Start(Run{App: "charlie", Args: append([]string{"udpburst", "--to", strings.Join(dests, ","), "--wait", "5000"}, release.Arg()...)})
 	var r app.BurstResult
-	e.RunJSON(Run{App: "charlie", Args: []string{"udpburst", "--to", strings.Join(dests, ","), "--wait", "5000"}}, &r)
+	burst.WaitHeld(e, "", 30*time.Second, &r)
 	holder.Stop()
 	e.T.Require(r.Sent == 50 && len(r.SendErrors) == 0, "all 50 first datagrams were sent (%d, errors %v)", r.Sent, r.SendErrors)
 	e.T.Check(r.SpreadMS < 5, "they left within %.2f ms of each other (at once: under 5 ms)", r.SpreadMS)
@@ -90,13 +95,16 @@ func fiftyDestinations(e *Env) {
 		dsts[rec.Dst], srcs[rec.Src] = true, true
 	}
 	e.T.Check(len(arrived) == 50 && len(dsts) == 50 && len(srcs) == 1, "the servers recorded 50 datagrams to 50 different addresses from one source (%d datagrams, %d addresses, %d sources)", len(arrived), len(dsts), len(srcs))
+	e.T.Require(burst.Running(), "charlie still holds its socket while the sessions are counted")
 	sessions := 0
 	for _, f := range e.Flows() {
 		if f.Protocol == "udp" && int(f.Source.Port()) == r.LocalPort {
 			sessions++
 		}
 	}
-	e.T.Check(sessions == 1, "the engine has exactly one UDP session for charlie's socket (it lists %d)", sessions)
+	e.T.Check(sessions == 1, "the engine has exactly one UDP session for charlie's open socket (it lists %d)", sessions)
+	release.Open(e)
+	burst.Wait(e, 30*time.Second)
 }
 
 func firstKeys(m map[string]int, n int) string {

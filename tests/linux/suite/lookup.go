@@ -49,9 +49,10 @@ func addLookup(r *registry) {
 type phase struct {
 	label string
 	r     app.TCPResult
-	// lookups is the engine's own histogram for the phase (1.0), from stats
-	// read just before and after it.
-	lookups engine.Histogram
+	// The engine's own lookup counters for the phase (1.0), from stats read
+	// just before and after it.
+	lookups, misses uint64
+	lookupTime      time.Duration
 }
 
 func lookupGate(e *Env, scoped bool) {
@@ -81,10 +82,8 @@ func lookupGate(e *Env, scoped bool) {
 		}
 		e.RunJSON(Run{App: "bravo", Cgroup: appScope, Args: append([]string{"tcp", "--to", whoami, "--timeout", "5000"}, args...), Timeout: 3 * time.Minute}, &p.r)
 		if session != nil {
-			var err error
-			if p.lookups, err = stats().LookupLatency.Sub(before.LookupLatency); err != nil {
-				e.T.Fatalf("lookup histogram: %v", err)
-			}
+			after := stats()
+			p.lookups, p.misses, p.lookupTime = after.LookupCount-before.LookupCount, after.LookupMisses-before.LookupMisses, after.LookupTime-before.LookupTime
 		}
 		e.T.Logf("%s: %d ok, errors %v, connect p50 %.2f p95 %.2f max %.2f ms", label, p.r.OK, p.r.Errors, p.r.Connect.P50, p.r.Connect.P95, p.r.Connect.Max)
 		return p
@@ -112,20 +111,25 @@ func lookupGate(e *Env, scoped bool) {
 		verdicts = append(verdicts, fmt.Sprintf("%s: owner found for %.1f%%", p.label, 100*found))
 	}
 	for _, p := range phases {
-		if session != nil {
-			// The engine's own measurements, for exactly this phase.
-			n := p.lookups.Total()
-			p95, known := p.lookups.Quantile(0.95)
-			e.T.Check(n >= gateConnections, "the engine recorded %d lookups %s (at least %d)", n, p.label, gateConnections)
-			ok = ok && known && float64(p95.Microseconds())/1000 < gateLatencyMS
-			verdicts = append(verdicts, fmt.Sprintf("%s: engine p95 %v over %d lookups (known %v)", p.label, p95, n, known))
-			continue
-		}
-		// The baseline reports no lookup timings. Estimate: what the open
-		// files add to connection setup.
+		// p95 from outside, the same way for every engine: what the open
+		// files add to connection setup. The engine's stats give only a total
+		// time (5.10), so they can't give a p95.
 		extra := p.r.Connect.P95 - control.r.Connect.P50
 		ok = ok && extra < gateLatencyMS
 		verdicts = append(verdicts, fmt.Sprintf("%s: estimated %.2f ms (setup p95 %.2f minus %.2f without the files)", p.label, extra, p.r.Connect.P95, control.r.Connect.P50))
+		if session != nil {
+			// 1.0's own counters for exactly this phase: every connection
+			// was looked up, and owners were found as the servers saw.
+			e.T.Check(p.lookups >= gateConnections, "the engine counted %d lookups %s (at least %d)", p.lookups, p.label, gateConnections)
+			found := 1.0
+			mean := time.Duration(0)
+			if p.lookups > 0 {
+				found = 1 - float64(p.misses)/float64(p.lookups)
+				mean = p.lookupTime / time.Duration(p.lookups)
+			}
+			ok = ok && found >= gateFound && float64(mean.Microseconds())/1000 < gateLatencyMS
+			verdicts = append(verdicts, fmt.Sprintf("%s: engine found %.1f%% of %d owners, mean %v", p.label, 100*found, p.lookups, mean))
+		}
 	}
 	e.T.Expect(ok, "with %d open files, each phase finds the owner for at least %.1f%% and keeps p95 lookup under %.0f ms (%s)",
 		gateFiles, 100*gateFound, gateLatencyMS, strings.Join(verdicts, "; "))

@@ -34,8 +34,9 @@ import (
 const AppsDir = "/opt/nsapps"
 
 // The test apps. alpha is never pinned; bravo is pinned to line b and charlie
-// to line c by default; delta and foxtrot are free for cases to use.
-var AppNames = []string{"alpha", "bravo", "charlie", "delta", "foxtrot"}
+// to line c by default; the rest are free for cases to use (the overload
+// cases need many apps at once).
+var AppNames = []string{"alpha", "bravo", "charlie", "delta", "foxtrot", "golf", "hotel", "india", "juliett", "kilo"}
 
 // AppPath is where an app's program is.
 func AppPath(name string) string { return filepath.Join(AppsDir, name, "nsapp") }
@@ -56,6 +57,9 @@ type Config struct {
 	// CgroupRoot is the cgroup v2 folder delegated to the harness; cases
 	// create their scopes in it.
 	CgroupRoot string
+	// QUIC is the QUIC fixture (tests/quicfixture) installed as an app, at
+	// QUICApp; "" when the run has none.
+	QUIC string
 }
 
 // Env is one running case's world.
@@ -67,6 +71,7 @@ type Env struct {
 	engCfg engine.Config
 	// Before is the PC's routing state before the engine first started.
 	Before topo.Snapshot
+	sharedDir string // SharedDir, once made
 }
 
 type caseFunc func(e *Env)
@@ -88,6 +93,12 @@ func (r *registry) add(id, title string, label harness.Label, spec string, timeo
 func (r *registry) defect(id, title, defect, spec string, timeout time.Duration, fn caseFunc) {
 	r.add(id, title, harness.BaselineDefect, spec, timeout, fn)
 	r.cases[len(r.cases)-1].Defect = defect
+}
+
+// pending adds a gate the suite can't check yet: waits says what it needs.
+// It never runs; on 1.0 it fails the run until it's written.
+func (r *registry) pending(id, title, spec, waits string) {
+	r.cases = append(r.cases, &harness.Case{ID: id, Title: title, Label: harness.Pending, Spec: spec, Waits: waits})
 }
 
 // Each file of cases registers itself, with its place in the run order.
@@ -121,13 +132,16 @@ func (r *registry) setup(t *harness.T) *Env {
 			err := e.Eng.Stop(ctx)
 			t.Check(err == nil, "the engine stops cleanly after the case (%v)", err)
 		}
-		var health error
+		var health, down error
 		if e.Net != nil {
 			health = e.Net.Healthy()
-			e.Net.Down(ctx)
+			down = e.Net.Down(ctx)
 		}
 		if health != nil {
 			t.Fatalf("the topology's servers didn't last the case: %v", health)
+		}
+		if down != nil {
+			t.Fatalf("the network didn't come down cleanly: %v", down)
 		}
 		if left := topo.Leftovers(); len(left) > 0 {
 			t.Fatalf("namespaces left after the case: %v", left)
@@ -432,11 +446,13 @@ func (b *Bg) WaitOutput(e *Env, want string, timeout time.Duration) {
 	b.WaitLine(e, want, timeout)
 }
 
-// WaitLine waits for an output line starting with prefix and returns it.
+// WaitLine waits for a complete output line starting with prefix and returns
+// it. A line still being written (no newline yet) doesn't count.
 func (b *Bg) WaitLine(e *Env, prefix string, timeout time.Duration) string {
 	deadline := time.Now().Add(timeout)
 	for {
-		for _, line := range strings.Split(b.stdout.String(), "\n") {
+		lines := strings.Split(b.stdout.String(), "\n")
+		for _, line := range lines[:len(lines)-1] {
 			if strings.HasPrefix(line, prefix) {
 				return line
 			}
@@ -449,6 +465,45 @@ func (b *Bg) WaitLine(e *Env, prefix string, timeout time.Duration) string {
 		if time.Now().After(deadline) {
 			e.T.Fatalf("%s didn't print %q within %s", b.r.name(), prefix, timeout)
 		}
+	}
+}
+
+// WaitHeld waits for what an app prints before it holds its sockets for a
+// release barrier, decodes it into out, and checks the app is still holding.
+// The line is "<label> {json}", or with label "" the JSON alone.
+func (b *Bg) WaitHeld(e *Env, label string, timeout time.Duration, out any) {
+	prefix := "{"
+	if label != "" {
+		prefix = label + " "
+	}
+	line := b.WaitLine(e, prefix, timeout)
+	if label != "" {
+		line = strings.TrimPrefix(line, prefix)
+	}
+	if err := json.Unmarshal([]byte(line), out); err != nil {
+		e.T.Fatalf("%s printed no JSON result (%q): %v: %s", b.r.name(), label, err, truncate([]byte(line), 300))
+	}
+	if !b.Running() {
+		e.T.Fatalf("%s exited instead of holding its sockets until released: %v: %s", b.r.name(), b.err, strings.TrimSpace(b.stderr.String()))
+	}
+}
+
+// Release is a release barrier: a file the case creates when an app may let
+// go of what it holds.
+type Release string
+
+// NewRelease makes a release barrier's path in the case's shared folder.
+func (e *Env) NewRelease(name string) Release {
+	return Release(filepath.Join(e.SharedDir(), "release-"+name))
+}
+
+// Arg is the barrier as an app's --release-file argument.
+func (r Release) Arg() []string { return []string{"--release-file", string(r)} }
+
+// Open lets the apps waiting on the barrier go.
+func (r Release) Open(e *Env) {
+	if err := os.WriteFile(string(r), nil, 0o644); err != nil {
+		e.T.Fatalf("release %s: %v", r, err)
 	}
 }
 
@@ -559,6 +614,27 @@ func (e *Env) WaitFlow(timeout time.Duration, match func(engine.Flow) bool) (eng
 	}
 }
 
+// WaitNoFlow polls the engine's flows until none matches, for up to timeout,
+// and reports whether they all went.
+func (e *Env) WaitNoFlow(timeout time.Duration, match func(engine.Flow) bool) ([]engine.Flow, bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		var left []engine.Flow
+		for _, f := range e.Flows() {
+			if match(f) {
+				left = append(left, f)
+			}
+		}
+		if len(left) == 0 {
+			return nil, true
+		}
+		if time.Now().After(deadline) || e.Ctx().Err() != nil {
+			return left, false
+		}
+		e.Sleep(100 * time.Millisecond)
+	}
+}
+
 // Stream is a long TCP connection's result.
 type Stream = app.StreamResult
 
@@ -617,9 +693,15 @@ func (e *Env) Cgroup(name string) string {
 }
 
 // SharedDir is a folder every test user can write, for files apps exchange.
+// It's made fresh once per case.
 func (e *Env) SharedDir() string {
+	if e.sharedDir != "" {
+		return e.sharedDir
+	}
 	dir := filepath.Join(os.TempDir(), "nsaccept-"+e.T.ID())
-	_ = os.RemoveAll(dir)
+	if err := os.RemoveAll(dir); err != nil {
+		e.T.Fatalf("shared dir: %v", err)
+	}
 	if err := os.MkdirAll(dir, 0o777); err != nil {
 		e.T.Fatalf("shared dir: %v", err)
 	}
@@ -627,5 +709,6 @@ func (e *Env) SharedDir() string {
 		e.T.Fatalf("shared dir: %v", err)
 	}
 	e.T.Cleanup(func() { _ = os.RemoveAll(dir) })
+	e.sharedDir = dir
 	return dir
 }

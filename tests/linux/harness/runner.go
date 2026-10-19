@@ -30,7 +30,10 @@ type Case struct {
 	Label Label
 	// Defect names the known baseline defect a baseline-defect case's one
 	// Expect assertion checks for. Only baseline-defect cases have one.
-	Defect  string
+	Defect string
+	// Waits says what a pending gate needs before it can be checked. Only
+	// pending cases have one, and they have no Run.
+	Waits   string
 	Spec    string // the SYSTEM-DESIGN.md sections it checks, e.g. "5.3"
 	Timeout time.Duration
 	Run     func(t *T)
@@ -49,8 +52,14 @@ func Validate(cases []*Case) error {
 			return fmt.Errorf("case id %q is used twice", c.ID)
 		case !c.Label.Valid():
 			return fmt.Errorf("case %s has no valid label (%q)", c.ID, c.Label)
-		case c.Title == "" || c.Run == nil:
-			return fmt.Errorf("case %s needs a title and a Run function", c.ID)
+		case c.Title == "":
+			return fmt.Errorf("case %s needs a title", c.ID)
+		case c.Label == Pending && (c.Waits == "" || c.Run != nil):
+			return fmt.Errorf("pending case %s must say what it waits for and have no Run function", c.ID)
+		case c.Label != Pending && c.Run == nil:
+			return fmt.Errorf("case %s needs a Run function", c.ID)
+		case c.Label != Pending && c.Waits != "":
+			return fmt.Errorf("case %s says what it waits for but isn't labelled pending", c.ID)
 		case c.Label == BaselineDefect && c.Defect == "":
 			return fmt.Errorf("baseline-defect case %s must name its defect", c.ID)
 		case c.Label != BaselineDefect && c.Defect != "":
@@ -236,11 +245,24 @@ func Run(ctx context.Context, cases []*Case, report *Report, opts Options) *Repo
 }
 
 func runCase(parent context.Context, c *Case, opts Options) (CaseResult, string) {
-	result := CaseResult{ID: c.ID, Title: c.Title, Label: c.Label, Defect: c.Defect, Spec: c.Spec}
+	result := CaseResult{ID: c.ID, Title: c.Title, Label: c.Label, Defect: c.Defect, Waits: c.Waits, Spec: c.Spec}
 	console := opts.Console
 	if c.Label == Requires10 && opts.Kind == Baseline {
 		result.Outcome = NotRun
 		fmt.Fprintf(console, "--- SKIP   %s [%s] %s: %s\n", c.ID, c.Label, c.Title, Explain(NotRun))
+		return result, ""
+	}
+	if c.Label == Pending {
+		result.Outcome, _ = Decide(c.Label, opts.Kind, false, Tally{})
+		verb := map[Outcome]string{PendingGate: "PENDING", GateMissing: "FAIL"}[result.Outcome]
+		fmt.Fprintf(console, "--- %-6s %s [%s] %s: %s\n           waits for: %s\n", verb, c.ID, c.Label, c.Title, Explain(result.Outcome), c.Waits)
+		if opts.GitHub {
+			kind := "notice"
+			if result.Outcome.FailsJob() {
+				kind = "error"
+			}
+			fmt.Fprintf(console, "::%s title=%s::%s: waits for %s\n", kind, annotationEscape(c.ID), annotationEscape(Explain(result.Outcome)), annotationEscape(c.Waits))
+		}
 		return result, ""
 	}
 	dir := filepath.Join(opts.OutDir, "cases", c.ID)

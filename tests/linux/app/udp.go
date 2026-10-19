@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -429,6 +430,7 @@ func runUDPBurst(args []string) (any, error) {
 	fs := flag.NewFlagSet("udpburst", flag.ContinueOnError)
 	to := fs.String("to", "", "echo servers ip:port,...")
 	wait := fs.Int("wait", 3000, "ms to wait for the replies")
+	releaseFile := fs.String("release-file", "", "print the result, then keep the socket open until this file exists")
 	if err := parse(fs, args); err != nil {
 		return nil, err
 	}
@@ -516,9 +518,15 @@ func runUDPBurst(args []string) (any, error) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	// The socket, and so its session, stays open until the case releases it.
+	mu.Lock()
+	result := r
+	result.Replies = slices.Clone(r.Replies)
+	mu.Unlock()
+	out, err := holdUntil(*releaseFile, result)
 	_ = conn.Close()
 	<-done
-	return r, nil
+	return out, err
 }
 
 // FloodResult is the udpflood mode's answer.
@@ -530,17 +538,22 @@ type FloodResult struct {
 	Silent     int            `json:"silent"`
 	OpenErrors map[string]int `json:"openErrors"`
 	SendErrors map[string]int `json:"sendErrors"`
+	// RefusedAt is when each refusal arrived (Unix ms), with --times.
+	RefusedAt []int64 `json:"refusedAt,omitempty"`
 }
 
 // runUDPFlood opens many UDP sockets (each a new session to the engine), sends
 // one datagram on each, then sees which are answered, refused (ICMP
-// unreachable) or ignored. All sockets stay open until the end.
+// unreachable) or ignored. All sockets stay open until the end, or with
+// --release-file until the case releases them.
 func runUDPFlood(args []string) (any, error) {
 	fs := flag.NewFlagSet("udpflood", flag.ContinueOnError)
 	to := fs.String("to", "", "echo servers ip:port,...; socket i uses server i mod n")
 	sockets := fs.Int("sockets", 1000, "sockets")
 	rate := fs.Int("rate", 2000, "first datagrams per second")
 	timeout := fs.Int("timeout", 3000, "ms to wait for answers after the last datagram")
+	times := fs.Bool("times", false, "record when each refusal arrived")
+	release := fs.String("release-file", "", "print the result, then keep every socket open until this file exists")
 	if err := parse(fs, args); err != nil {
 		return nil, err
 	}
@@ -594,11 +607,14 @@ func runUDPFlood(args []string) (any, error) {
 				r.Answered++
 			case "ECONNREFUSED":
 				r.Refused++
+				if *times {
+					r.RefusedAt = append(r.RefusedAt, nowMS())
+				}
 			default:
 				r.Silent++
 			}
 		}()
 	}
 	wg.Wait()
-	return r, nil
+	return holdUntil(*release, r)
 }

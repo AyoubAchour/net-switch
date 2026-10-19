@@ -190,6 +190,28 @@ func waitFile(path string, timeout time.Duration) error {
 	}
 }
 
+// ReleaseTimeout bounds how long a mode holds its sockets for a case that
+// never releases them (the case's own cleanup kills the app sooner).
+const ReleaseTimeout = 10 * time.Minute
+
+// holdUntil is the release barrier: with release set, it prints the result
+// at once and returns only when that file exists, so whatever the mode still
+// holds open (its sockets) stays alive while the case checks the engine. The
+// result is then already printed. Without release it hands the result back
+// for Main to print.
+func holdUntil(release string, result any) (any, error) {
+	if release == "" {
+		return result, nil
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		return nil, err
+	}
+	if err := waitFile(release, ReleaseTimeout); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
 // reuseAddr lets a socket bind a port another socket used a moment ago.
 func reuseAddr(network, address string, c syscall.RawConn) error {
 	return socketOptions("")(network, address, c)

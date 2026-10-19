@@ -25,11 +25,16 @@ const (
 	PortBulk    = 7004 // TCP: "GET n" sends n bytes; "PUT n" + n bytes gets their SHA-256
 	PortPoke    = 7005 // UDP: "poke <token>" is answered from another host (see PokeFrom)
 	PortPokeSrc = 7006 // the port the third host answers pokes from
-	PortHTTP    = 8080 // HTTP: the body is the source address; /slow?ms=N waits first
-	PortDNS     = 53
-	PortSTUN1   = 3478
-	PortSTUN2   = 3479
-	PortProbe   = 443 // TCP on the line-check operators' addresses (1.1.1.1, 8.8.8.8, 9.9.9.9)
+	PortHold    = 7008 // TCP: accepts and holds the connection, sending nothing
+	// PortBlackhole: the fake internet drops every TCP packet to this port,
+	// so a connection there never gets past its handshake.
+	PortBlackhole = 7009
+	PortHTTP      = 8080 // HTTP: the body is the source address; /slow?ms=N waits first
+	PortDNS       = 53
+	PortSTUN1     = 3478
+	PortSTUN2     = 3479
+	PortProbe     = 443  // TCP on the line-check operators' addresses (1.1.1.1, 8.8.8.8, 9.9.9.9)
+	PortQUIC      = 4433 // UDP: the QUIC cases' own server (tests/quicfixture)
 )
 
 // EchoReply is the UDP echo answer for a datagram from src.

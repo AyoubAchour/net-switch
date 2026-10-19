@@ -26,6 +26,7 @@ type CaseResult struct {
 	Title      string   `json:"title"`
 	Label      Label    `json:"label"`
 	Defect     string   `json:"defect,omitempty"`
+	Waits      string   `json:"waits,omitempty"`
 	Spec       string   `json:"spec,omitempty"`
 	Outcome    Outcome  `json:"outcome"`
 	DurationMS int64    `json:"durationMs"`
@@ -39,6 +40,9 @@ type CaseResult struct {
 func (r CaseResult) Detail() string {
 	if r.Error != "" {
 		return r.Error
+	}
+	if r.Waits != "" {
+		return "waits for " + r.Waits
 	}
 	for _, check := range r.Checks {
 		if !check.OK && !check.Defect {
@@ -141,7 +145,7 @@ func (r *Report) WriteMarkdown(w io.Writer) {
 		}
 		fmt.Fprintf(w, "%s\n\n", strings.Join(parts, " · "))
 	}
-	order := []Outcome{Pass, KnownDefect, NotRun, Fail, NotReproduced, Error}
+	order := []Outcome{Pass, KnownDefect, NotRun, PendingGate, Fail, NotReproduced, GateMissing, Error}
 	var counts []string
 	for _, o := range order {
 		if n := r.Totals[o]; n > 0 {

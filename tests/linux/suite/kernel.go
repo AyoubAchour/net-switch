@@ -35,7 +35,8 @@ func addKernel(r *registry) {
 		"exclude_interface is fixed at start, so a bridge created later sends its traffic through the engine", "5.5", 0,
 		func(e *Env) { containers(e, true) })
 	r.defect("routes.default-route-removed", "A line that loses its default route refuses its apps at once, sends nothing, and recovers when the route returns",
-		"sing-box binds the line's interface and, with no route, treats the destination as on-link: the app waits about 3 s on ARP before it's refused", "5.5", 0, defaultRouteRemoved)
+		"sing-box binds the line's interface and, with no route, treats the destination as on-link: the app waits about 3 s on ARP before it's refused, "+
+			"and a SYN the app retransmits in that wait can be dialed again as a new, owner-less connection on the main line (seen in about half the runs)", "5.5", 0, defaultRouteRemoved)
 	r.add("routes.uplink-down", "A line whose router loses the internet: its apps' connections fail without ever looking connected, other lines carry on, and it recovers without a restart", harness.Parity, "5.2, 5.5", 0, uplinkDown)
 	r.add("routes.address-change", "A line's address changes mid-flow: other lines' flows stay, new flows use the new address", harness.Parity, "5.5, 5.7", 0, addressChange)
 	r.defect("flows.address-removed-closes-its-flows", "Flows from a removed address are closed promptly",
@@ -102,15 +103,18 @@ func oldConnections(e *Env, profile engine.Profile) {
 	bravo.WaitJSON(e, 30*time.Second, &sb)
 	bound.WaitJSON(e, 30*time.Second, &sbound)
 	e.T.Check(sa.Connected && sb.Connected && sbound.Connected, "all three connections were up before start")
-	survived := func(s Stream, want engine.LineID) bool {
-		lines := StreamLines(s)
-		return s.ClosedAt == 0 && s.MaxGapMS < 2000 && s.Pongs > 0 && lines[want] == s.Pongs
-	}
+	// Mandatory: every answer a connection got came over the line it started
+	// on. Only staying open is what the product config's defect breaks.
+	onLine := func(s Stream, want engine.LineID) bool { return StreamLines(s)[want] == s.Pongs }
+	e.T.Check(onLine(sa, "a") && onLine(sb, "a") && onLine(sbound, "b"),
+		"every answer came over each connection's own line: alpha a (%s), bravo a (%s), delta b (%s)",
+		Describe(StreamLines(sa)), Describe(StreamLines(sb)), Describe(StreamLines(sbound)))
+	alive := func(s Stream) bool { return s.ClosedAt == 0 && s.MaxGapMS < 2000 && s.Pongs > 0 }
 	describe := func(s Stream) string {
-		return fmt.Sprintf("lines %s, longest silence %d ms, closed %q", Describe(StreamLines(s)), s.MaxGapMS, s.CloseErr)
+		return fmt.Sprintf("%d pongs, longest silence %d ms, closed %q", s.Pongs, s.MaxGapMS, s.CloseErr)
 	}
-	ok := survived(sa, "a") && survived(sb, "a") && survived(sbound, "b")
-	text := "connections from before start keep running on their lines: alpha on a (%s), bravo on a (%s), delta bound to b's interface on b (%s)"
+	ok := alive(sa) && alive(sb) && alive(sbound)
+	text := "connections from before start keep running: alpha (%s), bravo (%s), delta bound to b's interface (%s)"
 	if profile == engine.ProfileProduct {
 		e.T.Expect(ok, text, describe(sa), describe(sb), describe(sbound))
 	} else {
@@ -247,13 +251,26 @@ func defaultRouteRemoved(e *Env) {
 	e.T.Require(left == "", "within 5 s no routing table has a default route through b any more (%s)", left)
 	from := time.Now().UnixMilli()
 	r := e.TCP("bravo", AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "3", "--timeout", "8000")
+	// Anything a refusal set off has half a second to reach the servers.
+	e.Sleep(500 * time.Millisecond)
 	to := time.Now().UnixMilli()
-	leaked := Select(e.Records(), func(rec inet.Record) bool { return rec.Kind == "tcp" && rec.T >= from && rec.T <= to })
+	arrived := Select(e.Records(), func(rec inet.Record) bool { return rec.Kind == "tcp" && rec.T >= from && rec.T <= to })
+	byLine := RecordLines(arrived)
+	// Mandatory, whatever the engine: bravo never gets a connection, and
+	// nothing gets out over b (the line with no route) or anywhere but the
+	// main line. With bravo never connected, an arrival over the main line
+	// can only be a connection the engine opened by itself, with no owner:
+	// that is the named defect, measured below with the slow refusal that
+	// lets it happen.
+	e.T.Check(r.OK == 0 && handshakes(r) == 0,
+		"with no default route on b, none of bravo's 3 connections completes, not even its handshake (completed %d, handshakes %d, errors %v)", r.OK, handshakes(r), r.Errors)
+	e.T.Check(len(arrived) == byLine["a"],
+		"while bravo was refused nothing reached the internet over line b, line c or any other way (arrivals by line %s)", Describe(byLine))
 	e.ExpectTCP("alpha while b has no default route", "alpha", AsUser, "a", topo.Server4, 3)
 	e.ExpectTCP("charlie while b has no default route", "charlie", AsUser, "c", topo.Server4, 3)
-	e.T.Expect(r.OK == 0 && r.FailedMS.Max < 1000 && len(leaked) == 0,
-		"with no default route on b, bravo's new connections are refused within 1 s and none reaches the internet (connected %d, slowest failure %.0f ms, errors %v, arrived at servers %d)",
-		r.OK, r.FailedMS.Max, r.Errors, len(leaked))
+	e.T.Expect(r.FailedMS.Max < 1000 && byLine["a"] == 0,
+		"bravo's connections are refused within 1 s, before any SYN retransmission can be dialed again on the main line (slowest refusal %.0f ms, errors %v, owner-less connections that reached the server over a: %d)",
+		r.FailedMS.Max, r.Errors, byLine["a"])
 	if err := e.Net.AddDefault(e.Ctx(), "b"); err != nil {
 		e.T.Fatalf("%v", err)
 	}
@@ -267,12 +284,7 @@ func uplinkDown(e *Env) {
 		e.T.Fatalf("%v", err)
 	}
 	r := e.TCP("bravo", AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "2", "--concurrency", "2", "--timeout", "15000")
-	connected := 0
-	for _, a := range r.Attempts {
-		if a.Connected {
-			connected++
-		}
-	}
+	connected := handshakes(r)
 	e.T.Check(r.OK == 0 && connected == 0 && r.FailedMS.Max <= 12000,
 		"bravo's connections over a line that reaches nothing fail without the handshake ever completing, within the 10 s dial deadline (completed handshakes %d, slowest failure %.0f ms, errors %v)",
 		connected, r.FailedMS.Max, r.Errors)
@@ -284,6 +296,18 @@ func uplinkDown(e *Env) {
 	var s Stream
 	alpha.WaitJSON(e, 40*time.Second, &s)
 	e.CheckStreamSurvived("alpha's stream throughout", s, "a")
+}
+
+// handshakes counts the attempts whose TCP handshake completed, whatever
+// happened next.
+func handshakes(r app.TCPResult) int {
+	n := 0
+	for _, a := range r.Attempts {
+		if a.Connected {
+			n++
+		}
+	}
+	return n
 }
 
 // retryLine waits until an app's connections land on a line again, then
@@ -621,11 +645,17 @@ func bigUDP(e *Env) {
 		// first big datagram while it learns the path. Then every one counts.
 		e.UDP("charlie", AsUser, "--to", To(server, wire.PortUDPEcho), "--count", "3", "--size", "1400", "--interval", "200")
 		u := e.UDP("charlie", AsUser, "--to", To(server, wire.PortUDPEcho), "--count", "6", "--size", "1400", "--interval", "200")
-		lines := Lines(u.Seen)
-		ok = ok && u.Received == u.Sent && lines["c"] == u.Received
-		got = append(got, fmt.Sprintf("%s: %d of %d answered, lines %s, errors %v", server, u.Received, u.Sent, Describe(lines), u.SendErrors))
+		e.Sleep(300 * time.Millisecond)
+		arrived := Select(e.Records(), Tagged("udp", u.Token))
+		// Mandatory: whatever gets through goes over charlie's line, as the
+		// app and the server both see it. Only getting through is the defect.
+		lines, serverLines := Lines(u.Seen), RecordLines(arrived)
+		e.T.Check(lines["c"] == u.Received && serverLines["c"] == len(arrived),
+			"every 1400-byte datagram to %s that got through went over line c (answers %s, server records %s)", server, Describe(lines), Describe(serverLines))
+		ok = ok && u.Received == u.Sent && len(arrived) == u.Sent
+		got = append(got, fmt.Sprintf("%s: %d of %d answered, %d recorded by the server, errors %v", server, u.Received, u.Sent, len(arrived), u.SendErrors))
 	}
-	e.T.Expect(ok, "1400-byte datagrams without DF over a 1280-byte path all get through once the path is known, all on c (%s)", strings.Join(got, "; "))
+	e.T.Expect(ok, "1400-byte datagrams without DF over a 1280-byte path all get through once the path is known (%s)", strings.Join(got, "; "))
 }
 
 func dfTooBig(e *Env) {
@@ -643,9 +673,13 @@ func dfTooBig(e *Env) {
 		u := e.UDP("charlie", AsUser, "--to", To(server, wire.PortUDPEcho), "--connect", "--df", "--count", "6", "--size", "1400", "--interval", "300")
 		told := u.SendErrors["EMSGSIZE"] + u.RecvErrors["EMSGSIZE"]
 		e.Sleep(500 * time.Millisecond)
-		escaped := len(Select(e.Records(), Tagged("udp", u.Token)))
-		ok = ok && told > 0 && escaped == 0
-		got = append(got, fmt.Sprintf("%s: EMSGSIZE %d times, %d of %d reached the server", server, told, escaped, u.Sent))
+		escaped := Select(e.Records(), Tagged("udp", u.Token))
+		// Mandatory: a datagram the app marked don't-fragment never gets
+		// past the smaller hop, fragmented or whole.
+		e.T.Check(len(escaped) == 0, "none of the %d 1400-byte don't-fragment datagrams to %s got past the 1280-byte path (%d reached the server, lines %s)",
+			u.Sent, server, len(escaped), Describe(RecordLines(escaped)))
+		ok = ok && told > 0
+		got = append(got, fmt.Sprintf("%s: EMSGSIZE %d times for %d sent", server, told, u.Sent))
 	}
-	e.T.Expect(ok, "1400-byte don't-fragment datagrams over a 1280-byte path are reported too big and none gets out (%s)", strings.Join(got, "; "))
+	e.T.Expect(ok, "the app is told its 1400-byte don't-fragment datagrams are too big for the 1280-byte path (%s)", strings.Join(got, "; "))
 }

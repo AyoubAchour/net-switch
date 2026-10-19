@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -182,18 +183,40 @@ type HoldResult struct {
 	FailedMS    Stats          `json:"failedMs"`
 	StillOpen   int            `json:"stillOpen"` // established connections still open when the hold ended
 	LocalPorts  []int          `json:"localPorts"`
+	// With --window: the attempts refused (ECONNREFUSED or ECONNRESET) within
+	// that many ms of starting, and the attempts with no outcome yet at that
+	// point (in flight then, whatever happened later).
+	WindowMS      int `json:"windowMs,omitempty"`
+	RefusedWithin int `json:"refusedWithin"`
+	PendingAt     int `json:"pendingAt"`
 }
 
-// runTCPHold opens many connections to the stream server and keeps them open
-// (a connection storm, or many flows to list). Once every attempt is done it
-// prints "holding <n>", holds for --hold ms, then reports.
+// Held is one held connection as the app sees it.
+type Held struct {
+	Local  string `json:"local"`
+	Remote string `json:"remote"`
+}
+
+// HeldList is tcphold's "held {...}" line, with --tuples.
+type HeldList struct {
+	Established int    `json:"established"`
+	Conns       []Held `json:"conns"`
+}
+
+// runTCPHold opens many connections and keeps them open (a connection storm,
+// or many flows to list). Once every attempt is done it prints "holding <n>"
+// (and with --tuples a "held {...}" line listing them), holds them for --hold
+// ms or, with --release-file, until the case releases them, then reports.
 func runTCPHold(args []string) (any, error) {
 	fs := flag.NewFlagSet("tcphold", flag.ContinueOnError)
-	to := fs.String("to", "", "stream server ip:port")
+	to := fs.String("to", "", "servers ip:port[,...], used in turn")
 	count := fs.Int("count", 100, "connections")
 	concurrency := fs.Int("concurrency", 100, "attempts at once")
 	timeout := fs.Int("timeout", 5000, "ms per attempt")
-	hold := fs.Int("hold", 5000, "ms to keep them open")
+	hold := fs.Int("hold", 5000, "ms to keep them open (without --release-file)")
+	release := fs.String("release-file", "", "keep them open until this file exists")
+	tuples := fs.Bool("tuples", false, "print the held connections' addresses")
+	window := fs.Int("window", 0, "classify attempts by what had happened this many ms after each started")
 	if err := parse(fs, args); err != nil {
 		return nil, err
 	}
@@ -201,7 +224,7 @@ func runTCPHold(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := HoldResult{Count: *count, Errors: map[string]int{}}
+	r := HoldResult{Count: *count, Errors: map[string]int{}, WindowMS: *window}
 	var mu sync.Mutex
 	var conns []net.Conn
 	var connect, failed []float64
@@ -211,17 +234,30 @@ func runTCPHold(args []string) (any, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for int(next.Add(1)-1) < *count {
+			for {
+				i := int(next.Add(1) - 1)
+				if i >= *count {
+					return
+				}
 				start := time.Now()
-				conn, err := net.DialTimeout("tcp", list[0].String(), time.Duration(*timeout)*time.Millisecond)
+				conn, err := net.DialTimeout("tcp", list[i%len(list)].String(), time.Duration(*timeout)*time.Millisecond)
 				ms := msSince(start)
+				code := Code(err)
 				mu.Lock()
 				if err != nil {
-					r.Errors[Code(err)]++
+					r.Errors[code]++
 					failed = append(failed, ms)
 				} else {
 					conns = append(conns, conn)
 					connect = append(connect, ms)
+				}
+				if *window > 0 {
+					switch {
+					case ms >= float64(*window):
+						r.PendingAt++
+					case code == "ECONNREFUSED" || code == "ECONNRESET":
+						r.RefusedWithin++
+					}
 				}
 				mu.Unlock()
 			}
@@ -231,7 +267,24 @@ func runTCPHold(args []string) (any, error) {
 	r.Established = len(conns)
 	r.Connect, r.FailedMS = Summarise(connect), Summarise(failed)
 	fmt.Printf("holding %d\n", r.Established)
-	time.Sleep(time.Duration(*hold) * time.Millisecond)
+	if *tuples {
+		list := HeldList{Established: len(conns), Conns: make([]Held, 0, len(conns))}
+		for _, conn := range conns {
+			list.Conns = append(list.Conns, Held{Local: addrString(conn.LocalAddr()), Remote: addrString(conn.RemoteAddr())})
+		}
+		line, err := json.Marshal(list)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Printf("held %s\n", line)
+	}
+	if *release != "" {
+		if err := waitFile(*release, ReleaseTimeout); err != nil {
+			return nil, err
+		}
+	} else {
+		time.Sleep(time.Duration(*hold) * time.Millisecond)
+	}
 	buf := make([]byte, 1)
 	for _, conn := range conns {
 		_ = conn.SetReadDeadline(time.Now().Add(time.Millisecond))
@@ -244,6 +297,14 @@ func runTCPHold(args []string) (any, error) {
 		conn.Close()
 	}
 	return r, nil
+}
+
+// addrString is an address as "ip:port", with IPv4-mapped IPv6 unmapped.
+func addrString(a net.Addr) string {
+	if ap, err := netip.ParseAddrPort(a.String()); err == nil {
+		return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()).String()
+	}
+	return a.String()
 }
 
 // ReuseResult is the reuse mode's answer.

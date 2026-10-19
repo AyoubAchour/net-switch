@@ -306,8 +306,7 @@ func (d *Driver) launch(ctx context.Context) error {
 			}
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
-			d.kill()
-			return fmt.Errorf("sing-box didn't come up within 20 s: %s", d.tail(15))
+			return errors.Join(fmt.Errorf("sing-box didn't come up within 20 s: %s", d.tail(15)), d.kill())
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -488,28 +487,34 @@ func (d *Driver) Stop(ctx context.Context) error {
 	d.endReconcile()
 	var stopErr error
 	if d.running() {
-		_ = d.cmd.Process.Signal(syscall.SIGTERM)
+		if err := d.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			stopErr = fmt.Errorf("signalling sing-box: %w", err)
+		}
 		select {
 		case <-d.done:
 		case <-time.After(5 * time.Second):
-			d.kill()
-			stopErr = errors.New("sing-box didn't stop within 5 s of SIGTERM and was killed")
+			stopErr = errors.Join(stopErr, errors.New("sing-box didn't stop within 5 s of SIGTERM and was killed"), d.kill())
 		}
 	}
 	d.closeLog()
 	return errors.Join(stopErr, d.removeOwn(ctx))
 }
 
-func (d *Driver) kill() {
+// kill SIGKILLs sing-box and waits for it to be gone.
+func (d *Driver) kill() error {
 	if d.cmd != nil && d.cmd.Process != nil {
-		_ = d.cmd.Process.Kill()
+		if err := d.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("killing sing-box: %w", err)
+		}
 	}
 	if d.done != nil {
 		select {
 		case <-d.done:
 		case <-time.After(5 * time.Second):
+			return errors.New("sing-box didn't exit within 5 s of SIGKILL")
 		}
 	}
+	return nil
 }
 
 func (d *Driver) closeLog() {
@@ -527,12 +532,12 @@ func (d *Driver) Crash() error {
 		return errors.New("sing-box isn't running")
 	}
 	d.endReconcile()
-	d.kill()
+	err := d.kill()
 	d.closeLog()
-	if d.running() {
-		return errors.New("sing-box survived SIGKILL")
+	if err == nil && d.running() {
+		err = errors.New("sing-box survived SIGKILL")
 	}
-	return nil
+	return err
 }
 
 // Cleanup implements engine.Driver: what Net Switch on Linux would run after

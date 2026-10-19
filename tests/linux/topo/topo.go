@@ -23,15 +23,18 @@ package topo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
+	"github.com/AyoubAchour/net-switch/tests/linux/wire"
 )
 
 // Namespaces.
@@ -172,7 +175,9 @@ func Up(ctx context.Context, self, dir string) (*Net, error) {
 		return nil, err
 	}
 	n := &Net{R: NewRunner(logFile), dir: dir, self: self}
-	n.Down(ctx)
+	if err := n.Down(ctx); err != nil {
+		return n, fmt.Errorf("clearing what an earlier case left: %w", err)
+	}
 	if err := n.build(ctx); err != nil {
 		return n, err
 	}
@@ -227,6 +232,12 @@ func (n *Net) build(ctx context.Context) error {
 		inet = append(inet, fmt.Sprintf("addr add %s/32 dev srv0", addr))
 	}
 	if err := r.Batch(ctx, INET, inet); err != nil {
+		return err
+	}
+	// A black hole: every TCP packet to this port on any server is dropped,
+	// so a connection there stays in its handshake until someone gives up.
+	blackhole := fmt.Sprintf("table inet nsblackhole {\n chain input {\n  type filter hook input priority 0; policy accept;\n  tcp dport %d drop\n }\n}\n", wire.PortBlackhole)
+	if err := r.Nft(ctx, INET, blackhole); err != nil {
 		return err
 	}
 
@@ -333,30 +344,73 @@ func (n *Net) Healthy() error {
 	return nil
 }
 
-// Down stops every process in the namespaces and deletes them. It's safe to
+// Down stops every process in the namespaces and deletes them, and reports
+// whatever it couldn't do. A namespace's name going away doesn't prove its
+// processes exited (a process keeps its namespace alive after the name is
+// deleted), so every process in each namespace is killed and waited for
+// before the name goes, and the name is checked gone afterwards. It's safe to
 // call on a half-built or already removed topology.
-func (n *Net) Down(ctx context.Context) {
+func (n *Net) Down(ctx context.Context) error {
+	var errs []error
 	for _, proc := range n.procs {
-		proc.Stop()
+		errs = append(errs, proc.Stop())
 	}
 	n.procs = nil
 	for _, ns := range allNamespaces {
 		if _, err := os.Stat("/run/netns/" + ns); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, err)
+			}
 			continue
 		}
-		if out, err := n.R.Run(ctx, "ip", "netns", "pids", ns); err == nil {
-			for _, field := range strings.Fields(out) {
-				if pid, err := strconv.Atoi(field); err == nil && pid > 1 {
-					if proc, err := os.FindProcess(pid); err == nil {
-						_ = proc.Kill()
-					}
-				}
-			}
+		if err := n.killAll(ctx, ns); err != nil {
+			errs = append(errs, err)
 		}
-		_, _ = n.R.Run(ctx, "ip", "netns", "del", ns)
+		if _, err := n.R.Run(ctx, "ip", "netns", "del", ns); err != nil {
+			errs = append(errs, fmt.Errorf("deleting namespace %s: %w", ns, err))
+		} else if _, err := os.Stat("/run/netns/" + ns); !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("namespace %s is still there after ip netns del (%v)", ns, err))
+		}
 	}
 	// Give the kernel a moment to release the interfaces.
 	time.Sleep(200 * time.Millisecond)
+	return errors.Join(errs...)
+}
+
+// killAll kills every process in a namespace and waits until none is left.
+func (n *Net) killAll(ctx context.Context, ns string) error {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		out, err := n.R.Run(ctx, "ip", "netns", "pids", ns)
+		if err != nil {
+			return fmt.Errorf("listing the processes in %s: %w", ns, err)
+		}
+		var pids []int
+		for _, field := range strings.Fields(out) {
+			pid, err := strconv.Atoi(field)
+			if err != nil || pid <= 1 {
+				return fmt.Errorf("ip netns pids %s printed %q", ns, field)
+			}
+			pids = append(pids, pid)
+		}
+		if len(pids) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			var who []string
+			for _, pid := range pids {
+				exe, _ := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+				who = append(who, fmt.Sprintf("%d %s", pid, exe))
+			}
+			return fmt.Errorf("processes still in namespace %s 10 s after SIGKILL: %s", ns, strings.Join(who, ", "))
+		}
+		for _, pid := range pids {
+			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				return fmt.Errorf("killing pid %d in %s: %w", pid, ns, err)
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // Leftovers lists namespaces of ours that still exist (after Down: none).

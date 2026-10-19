@@ -5,8 +5,9 @@
 //
 //   - singbox: the baseline, sing-box as today's app configures it, plus the
 //     Linux changes the feasibility spike found (LINUX-PLAN.md section 0).
-//   - nsengine: netswitch-engine, 1.0's own engine (a stub until the engine
-//     speaks its control protocol).
+//   - nsengine: netswitch-engine, 1.0's own engine. It speaks
+//     internal/engine/protocol; the driver is a stub until the engine binary
+//     serves that protocol on a control socket.
 //
 // The suite plays the control service: it picks lines, pins apps, points
 // lanes and closes flows through a Driver, and judges the engine only by what
@@ -17,9 +18,6 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -36,7 +34,8 @@ var ErrNotImplemented = errors.New("not implemented by this engine driver")
 type LineID string
 
 // Line is one internet connection, by the interface it's on in the engine's
-// network namespace. The engine finds its addresses and gateways itself.
+// network namespace. A driver finds what its engine needs from the interface
+// (1.0's revisions carry each line's addresses).
 type Line struct {
 	ID        LineID
 	Interface string
@@ -110,8 +109,9 @@ type Flow struct {
 	Destination netip.AddrPort
 	Lane        LineID // the lane (selector) it was decided by
 	Line        LineID // the physical line carrying it
-	Revision    int64  // the policy revision it was admitted under (1.0)
-	Epoch       uint64 // the engine epoch it was admitted in (1.0)
+	Revision    uint64 // the policy revision it was admitted under (1.0)
+	Epoch       uint64 // the control epoch it was admitted in (1.0)
+	Point       uint64 // the admission's place in the apply order (1.0)
 	Started     time.Time
 	Up, Down    int64
 }
@@ -181,52 +181,65 @@ type Driver interface {
 	LogPath() string
 }
 
-// Revision identifies a policy revision. Control picks n and the hash and
-// persists both before sending (3.3).
+// --- 1.0's control protocol (5.10), as internal/engine/protocol speaks it ---
+
+// Revision is a policy revision: Control's number n and the hash of the
+// revision's config as the engine checks it. The engine refuses a revision
+// whose hash doesn't match its config, so only a driver can compute it; cases
+// send n and a Config and read the hash back from the acknowledgement.
 type Revision struct {
-	N    int64
+	N    uint64
 	Hash string
 }
 
-// RevisionHash is the hash a control service would give cfg: SHA-256 of its
-// JSON (Go encodes map keys in order, so it's stable).
-func RevisionHash(cfg Config) string {
-	data, err := json.Marshal(cfg)
-	if err != nil {
-		panic(err) // Config has only plain fields
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
+// Applied is a revision in effect in this engine instance. Point is its
+// apply point: closeFlows' startedBefore takes it, and flows admitted before
+// it have a smaller Point.
+type Applied struct {
+	Revision
+	Point uint64
 }
 
-// Ack is the engine's acknowledgement of start or apply.
-type Ack struct {
-	Applied Revision
-	// ApplyPoint marks when the revision took effect in this engine
-	// instance; closeFlows' startedBefore takes it.
-	ApplyPoint uint64
-}
+// RefusalCode classifies a refusal the protocol defines, as opposed to a
+// failure. Cases test codes, never message text.
+type RefusalCode string
 
-// Refusal codes the protocol defines (2, 3.3, 5.10).
 const (
-	RefusedStale         = "stale-revision"    // a lower n than the loaded one
-	RefusedConflict      = "revision-conflict" // the same n with another hash
-	RefusedFenced        = "fenced"            // a newer controller attached
-	RefusedWrongInstance = "wrong-instance"    // the command named another engine instance
-	RefusedLapsing       = "lapsing"           // lease-lapse cleanup has begun
-	RefusedEmptySelector = "empty-selector"
+	// RefusedFenced: the command isn't from the attached controller: another
+	// engine instance, an older epoch, or no attach at all.
+	RefusedFenced RefusalCode = "fenced"
+	// RefusedLapsed: the lease expired or the engine is stopping.
+	RefusedLapsed RefusalCode = "lapsed"
+	// RefusedAttach: attach was refused (another instance, an epoch that
+	// Control tried to pick, or cleanup under way).
+	RefusedAttach RefusalCode = "attach-refused"
+	// RefusedStale: a lower n than the revision in effect.
+	RefusedStale RefusalCode = "stale-revision"
+	// RefusedConflict: the same n with another hash.
+	RefusedConflict RefusalCode = "revision-conflict"
+	// RefusedInvalidRevision: n 0, or a hash that isn't the config's.
+	RefusedInvalidRevision RefusalCode = "invalid-revision"
+	// RefusedOperationConflict: an operation id reused with other arguments.
+	RefusedOperationConflict RefusalCode = "operation-conflict"
+	// RefusedSelector: not exactly one closure condition (an empty selector
+	// included), or one Control handles itself.
+	RefusedSelector RefusalCode = "invalid-selector"
+	// RefusedCapacity: a budget of section 5.9 is exhausted.
+	RefusedCapacity RefusalCode = "capacity"
+	// RefusedNotRunning: routing isn't running.
+	RefusedNotRunning RefusalCode = "not-running"
 )
 
 // Refusal is a refusal the protocol defines, as opposed to a failure.
 type Refusal struct {
-	Code    string
-	Message string
+	Code    RefusalCode
+	Message string // the engine's own words
 }
 
 func (r *Refusal) Error() string { return fmt.Sprintf("refused (%s): %s", r.Code, r.Message) }
 
-// RefusedWith reports whether err is the protocol refusal code.
-func RefusedWith(err error, code string) bool {
+// RefusedWith reports whether err is a refusal with that code.
+func RefusedWith(err error, code RefusalCode) bool {
 	var r *Refusal
 	return errors.As(err, &r) && r.Code == code
 }
@@ -236,11 +249,10 @@ type Hello struct {
 	Version      string
 	InstanceID   string
 	Capabilities []string
-	// AppliedRevision is the last revision the engine persisted: history only
-	// after a restart (3.3).
-	AppliedRevision *Revision
-	// LoadedRevision is the revision in effect now: nil until start.
-	LoadedRevision *Revision
+	// Epoch is the newest epoch the engine has handed out (0: none yet).
+	Epoch uint64
+	// Applied is the revision in effect in this instance: nil until start.
+	Applied *Applied
 }
 
 // FlowPage is one page of flows{cursor}; Next is "" on the last page.
@@ -263,8 +275,18 @@ type Totals struct {
 
 // ProbeResult is probe's answer (4.5).
 type ProbeResult struct {
-	Outcome string // "ok", "lineFailed" or "engineUnavailable"
-	RTT     time.Duration
+	OK      bool
+	Latency time.Duration
+	Error   string
+}
+
+// Prediction is predict's answer: a pinned app's line (and whether it's
+// blocked), or, for an unpinned app while combining, the share each line
+// gets.
+type Prediction struct {
+	Line         LineID
+	Distribution map[LineID]float64
+	Blocked      bool
 }
 
 // Fault is a test-only fault in a 1.0 test build.
@@ -286,76 +308,36 @@ type FaultAck struct {
 	Description string
 }
 
-// Histogram is a latency histogram: Counts[i] observations at or under
-// BoundsMicros[i], and Counts[len(BoundsMicros)] above the last bound.
-type Histogram struct {
-	BoundsMicros []int64
-	Counts       []int64
-}
-
-// Total is the number of observations.
-func (h Histogram) Total() int64 {
-	var n int64
-	for _, c := range h.Counts {
-		n += c
-	}
-	return n
-}
-
-// Sub is the histogram of observations made since prev (same bounds).
-func (h Histogram) Sub(prev Histogram) (Histogram, error) {
-	if len(prev.Counts) == 0 {
-		return h, nil
-	}
-	if len(prev.Counts) != len(h.Counts) || len(prev.BoundsMicros) != len(h.BoundsMicros) {
-		return Histogram{}, errors.New("histograms with different buckets")
-	}
-	out := Histogram{BoundsMicros: h.BoundsMicros, Counts: make([]int64, len(h.Counts))}
-	for i := range h.Counts {
-		if out.Counts[i] = h.Counts[i] - prev.Counts[i]; out.Counts[i] < 0 {
-			return Histogram{}, errors.New("a histogram count went down")
-		}
-	}
-	return out, nil
-}
-
-// Quantile is the upper bound of the bucket holding quantile q; ok is false
-// when it lies above the last bound or there are no observations.
-func (h Histogram) Quantile(q float64) (time.Duration, bool) {
-	total := h.Total()
-	if total == 0 {
-		return 0, false
-	}
-	want := int64(float64(total)*q + 0.999999)
-	var seen int64
-	for i, c := range h.Counts {
-		seen += c
-		if seen >= want {
-			if i >= len(h.BoundsMicros) {
-				return 0, false
-			}
-			return time.Duration(h.BoundsMicros[i]) * time.Microsecond, true
-		}
-	}
-	return 0, false
-}
-
-// Stats are the engine counters the suite reads (5.6, 5.10).
+// Stats are the engine's counters and gauges (5.6, 5.9, 5.10).
 type Stats struct {
-	// LookupLatency is every owner lookup since the engine started.
-	LookupLatency   Histogram
-	LookupMisses    int64
-	LookupAmbiguous int64
-	// Admitted is the combining counter k: new flows and UDP sessions
-	// admitted (5.4).
-	Admitted int64
-	// Raw keeps every counter the engine sent.
-	Raw map[string]float64
+	// Gauges: what's in use now.
+	Flows, Handshakes, UDP, Unknown, UnknownUDP, TimeWait int64
+	// Byte budgets in use (5.9).
+	TCPBytes, PendingBytes, SnapshotBytes int64
+	// Counters since the engine started.
+	Admitted       uint64 // the combining counter k: flows admitted (5.4)
+	Rejected       uint64
+	DroppedNotices uint64 // rejection notices over the rate limit
+	EventsDropped  uint64
+	// Owner lookups (5.6): how many, how many found no owner or several, and
+	// the time they took in total.
+	LookupCount, LookupMisses, LookupAmbiguous uint64
+	LookupTime                                 time.Duration
+	// Counters reports every other counter the engine sent, by name.
+	Counters map[string]uint64
+}
+
+// LookupMean is the mean owner lookup time (0 without lookups).
+func (s Stats) LookupMean() time.Duration {
+	if s.LookupCount == 0 {
+		return 0
+	}
+	return s.LookupTime / time.Duration(s.LookupCount)
 }
 
 // Controller is one attached control session (2, 5.10). The engine hands out
-// its epoch (5.9), and every command carries {instance id, epoch}: a command
-// from a fenced session, or for another instance, is refused.
+// its epoch at attach (5.9); Control never picks one. Every command carries
+// {instance id, epoch}, and the engine refuses one from a fenced session.
 type Controller interface {
 	InstanceID() string
 	Epoch() uint64
@@ -364,17 +346,19 @@ type Controller interface {
 	// SetAutoRenew turns the session's background renewal (every 5 s) on or
 	// off; off lets the 30 s lease lapse.
 	SetAutoRenew(on bool)
-	Start(ctx context.Context, rev Revision, cfg Config) (Ack, error)
-	Apply(ctx context.Context, rev Revision, cfg Config) (Ack, error)
+	// Start and Apply send revision n of cfg; the driver computes the hash
+	// the engine checks, and the acknowledgement carries it.
+	Start(ctx context.Context, n uint64, cfg Config) (Applied, error)
+	Apply(ctx context.Context, n uint64, cfg Config) (Applied, error)
 	Stop(ctx context.Context) error
 	Flows(ctx context.Context, cursor string) (FlowPage, error)
 	Totals(ctx context.Context) (Totals, error)
 	// CloseFlows is closeFlows{opId, selector, startedBefore}; startedBefore
 	// 0 means no cutoff.
 	CloseFlows(ctx context.Context, opID string, sel Selector, startedBefore uint64) (CloseResult, error)
-	// Probe is probe{opId, line, operator}; kind is "quick" (TCP) or "full".
-	Probe(ctx context.Context, opID string, line LineID, operator, kind string) (ProbeResult, error)
-	Predict(ctx context.Context, app App) (map[LineID]float64, error)
+	// Probe is probe{opId, line, operator} (4.5).
+	Probe(ctx context.Context, opID string, line LineID, operator string) (ProbeResult, error)
+	Predict(ctx context.Context, app App) (Prediction, error)
 	Stats(ctx context.Context) (Stats, error)
 	InjectFault(ctx context.Context, f Fault) (FaultAck, error)
 }

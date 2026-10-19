@@ -41,6 +41,8 @@ func TestDecide(t *testing.T) {
 		{Requires10, V1, false, Tally{Checks: 1}, Pass},
 		{Requires10, V1, false, Tally{}, Error},
 		{Requires10, V1, false, Tally{Checks: 1, Failed: 1}, Fail},
+		{Pending, Baseline, false, Tally{}, PendingGate},
+		{Pending, V1, false, Tally{}, GateMissing},
 	}
 	for _, c := range cases {
 		got, _ := Decide(c.label, c.kind, c.harnessErr, c.tally)
@@ -48,12 +50,12 @@ func TestDecide(t *testing.T) {
 			t.Errorf("Decide(%s, %s, err=%v, %+v) = %s, want %s", c.label, c.kind, c.harnessErr, c.tally, got, c.want)
 		}
 	}
-	for _, o := range []Outcome{Fail, NotReproduced, Error} {
+	for _, o := range []Outcome{Fail, NotReproduced, Error, GateMissing} {
 		if !o.FailsJob() {
 			t.Errorf("%s must fail the job", o)
 		}
 	}
-	for _, o := range []Outcome{Pass, KnownDefect, NotRun} {
+	for _, o := range []Outcome{Pass, KnownDefect, NotRun, PendingGate} {
 		if o.FailsJob() {
 			t.Errorf("%s must not fail the job", o)
 		}
@@ -65,6 +67,7 @@ func TestValidate(t *testing.T) {
 	good := []*Case{
 		{ID: "a.b-c", Title: "x", Label: Parity, Run: ok},
 		{ID: "d", Title: "x", Label: BaselineDefect, Defect: "the freeze", Run: ok},
+		{ID: "e", Title: "x", Label: Pending, Waits: "a test hook"},
 	}
 	if err := Validate(good); err != nil {
 		t.Fatal(err)
@@ -74,8 +77,12 @@ func TestValidate(t *testing.T) {
 		{{ID: "a", Title: "x", Label: "flaky", Run: ok}},
 		{{ID: "a", Title: "x", Label: Parity, Run: ok}, {ID: "a", Title: "y", Label: Parity, Run: ok}},
 		{{ID: "a", Label: Parity, Run: ok}},
+		{{ID: "a", Title: "x", Label: Parity}},
 		{{ID: "a", Title: "x", Label: BaselineDefect, Run: ok}},
 		{{ID: "a", Title: "x", Label: Parity, Defect: "named", Run: ok}},
+		{{ID: "a", Title: "x", Label: Pending}},
+		{{ID: "a", Title: "x", Label: Pending, Waits: "a hook", Run: ok}},
+		{{ID: "a", Title: "x", Label: Parity, Waits: "a hook", Run: ok}},
 	}
 	for i, cases := range bad {
 		if Validate(cases) == nil {
@@ -194,6 +201,21 @@ func TestBaselineDefectsKeepJobGreen(t *testing.T) {
 	v1 := run(t, V1, defect("d", func(t *T) { t.Check(true, "prerequisite"); t.Expect(false, "defect") }))
 	if !v1.JobFailed {
 		t.Fatal("a baseline defect must fail the job on 1.0")
+	}
+}
+
+func TestPendingGates(t *testing.T) {
+	gate := func() *Case { return &Case{ID: "g", Title: "g", Label: Pending, Waits: "an owner-lookup test hook"} }
+	baseline := run(t, Baseline, gate(), &Case{ID: "p", Title: "p", Label: Parity, Run: func(t *T) { t.Check(true, "ok") }})
+	if baseline.JobFailed || baseline.Cases[0].Outcome != PendingGate {
+		t.Fatalf("a pending gate is recorded on the baseline without failing it: %s, job failed %v", baseline.Cases[0].Outcome, baseline.JobFailed)
+	}
+	if !strings.Contains(baseline.Cases[0].Detail(), "owner-lookup test hook") {
+		t.Errorf("a pending gate's detail must say what it waits for, got %q", baseline.Cases[0].Detail())
+	}
+	v1 := run(t, V1, gate(), &Case{ID: "p", Title: "p", Label: Parity, Run: func(t *T) { t.Check(true, "ok") }})
+	if !v1.JobFailed || v1.Cases[0].Outcome != GateMissing {
+		t.Fatalf("a pending gate must fail a 1.0 run: %s, job failed %v", v1.Cases[0].Outcome, v1.JobFailed)
 	}
 }
 

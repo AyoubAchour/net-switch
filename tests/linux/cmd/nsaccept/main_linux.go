@@ -85,6 +85,9 @@ func listMain() error {
 		if c.Defect != "" {
 			fmt.Printf("%-48s defect: %s\n", "", c.Defect)
 		}
+		if c.Waits != "" {
+			fmt.Printf("%-48s waits for: %s\n", "", c.Waits)
+		}
 	}
 	return nil
 }
@@ -145,6 +148,7 @@ func fetchMain(args []string) error {
 
 type options struct {
 	engine, enginePath, expect, node, repo, out string
+	quic                                        string
 	uid, gid                                    int
 	run, labels                                 string
 	github                                      bool
@@ -159,6 +163,7 @@ func runMain(args []string) int {
 	fs.StringVar(&o.node, "node", "node", "Node.js, to run the app's config generator (sing-box)")
 	fs.StringVar(&o.repo, "repo", repoRoot(), "the checkout")
 	fs.StringVar(&o.out, "out", "acceptance-out", "folder for the report and logs")
+	fs.StringVar(&o.quic, "quic", "", "the QUIC fixture (tests/quicfixture), for the QUIC cases")
 	fs.IntVar(&o.uid, "app-uid", envInt("SUDO_UID", -1), "the desktop user apps run as")
 	fs.IntVar(&o.gid, "app-gid", envInt("SUDO_GID", -1), "and their group")
 	fs.StringVar(&o.run, "run", "", "only cases whose id matches this regular expression")
@@ -224,6 +229,13 @@ func run(o options, report *harness.Report) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	// The overload cases hold tens of thousands of connections at once: the
+	// engine, the apps and the servers all inherit this limit.
+	const nofile = 1 << 20
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: nofile, Max: nofile}); err != nil {
+		return 1, fmt.Errorf("raising the open-file limit to %d: %w", nofile, err)
+	}
+	report.System["nofile"] = strconv.Itoa(nofile)
 	describeSystem(report)
 	harnessExe := harness.Executable{Role: "harness", Name: "nsaccept", Path: self, Version: goVersion()}
 	if harnessExe.SHA256, err = harness.FileSHA256(self); err != nil {
@@ -263,6 +275,16 @@ func run(o options, report *harness.Report) (int, error) {
 	if err := installApps(self); err != nil {
 		return 1, err
 	}
+	quicApp := ""
+	if o.quic != "" {
+		exe, err := installQUIC(ctx, o.quic)
+		if err != nil {
+			return 1, fmt.Errorf("the QUIC fixture: %w", err)
+		}
+		report.Executables = append(report.Executables, exe)
+		fmt.Printf("QUIC fixture: %s %s\n  path   %s\n  sha256 %s\n", exe.Name, exe.Version, exe.Path, exe.SHA256)
+		quicApp = suite.QUICApp
+	}
 	if left := topo.Leftovers(); len(left) > 0 {
 		return 1, fmt.Errorf("namespaces from an earlier run are still there: %v", left)
 	}
@@ -273,7 +295,7 @@ func run(o options, report *harness.Report) (int, error) {
 	}
 	report.System["cgroup"] = cgroups
 	fixtures := &suite.Fixtures{}
-	cases := suite.Cases(suite.Config{Self: self, Driver: drv, Users: users, Fixtures: fixtures, CgroupRoot: cgroups})
+	cases := suite.Cases(suite.Config{Self: self, Driver: drv, Users: users, Fixtures: fixtures, CgroupRoot: cgroups, QUIC: quicApp})
 	if err := harness.Validate(cases); err != nil {
 		return 1, err
 	}
@@ -448,6 +470,50 @@ func prepareUsers(uid, gid int) (suite.Users, error) {
 		return users, fmt.Errorf("the second user %s needs its own uid (got %d)", other, users.OtherUID)
 	}
 	return users, nil
+}
+
+// installQUIC copies the QUIC fixture to where the QUIC cases run it as an
+// app, and identifies it for the report.
+func installQUIC(ctx context.Context, src string) (harness.Executable, error) {
+	exe := harness.Executable{Role: "fixture", Name: "nsquic", Path: suite.QUICApp}
+	if err := installFile(src, suite.QUICApp); err != nil {
+		return exe, err
+	}
+	var err error
+	if exe.SHA256, err = harness.FileSHA256(suite.QUICApp); err != nil {
+		return exe, err
+	}
+	out, err := exec.CommandContext(ctx, suite.QUICApp, "version").Output()
+	if err != nil {
+		return exe, fmt.Errorf("%s version: %w", suite.QUICApp, err)
+	}
+	exe.Version = strings.TrimSpace(string(out))
+	return exe, nil
+}
+
+// installFile copies a program into place, readable and runnable by all.
+func installFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(out, in)
+	if cerr := out.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 // installApps copies this program to each app's folder.
