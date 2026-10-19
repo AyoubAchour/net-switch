@@ -38,6 +38,7 @@ type fdWindow struct {
 	start      uint64
 	next       int64
 	high       int64 // end of the sequentially indexed range; tail probes cannot advance it
+	extent     int64 // largest descriptor observed, including tail probes
 	lastFD     int64
 	tailProbed bool
 	observed   time.Time
@@ -432,6 +433,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				window = fdWindow{start: h.start, lastFD: -1, scanning: window.scanning}
 			}
 			window.lastFD = fd
+			window.extent = max(window.extent, fd)
 			window.observed = time.Now()
 			o.windows[h.pid] = window
 			o.mu.Unlock()
@@ -590,6 +592,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}
 		maxFD := window.high
+		maxSeen := window.extent
 		advancing := false
 		visit := func(names []string) error {
 			for _, fd := range names {
@@ -602,8 +605,11 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 						return err
 					}
 				}
-				if number, err := strconv.ParseInt(fd, 10, 64); err == nil && advancing {
-					maxFD = max(maxFD, number)
+				if number, err := strconv.ParseInt(fd, 10, 64); err == nil {
+					maxSeen = max(maxSeen, number)
+					if advancing {
+						maxFD = max(maxFD, number)
+					}
 				}
 				got, err := os.Readlink(dir + "/" + fd)
 				if err != nil || !strings.HasPrefix(got, "socket:[") || !strings.HasSuffix(got, "]") {
@@ -635,6 +641,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			defer o.mu.Unlock()
 			if current := o.windows[pid]; current.start == start {
 				current.high = max(current.high, maxFD)
+				current.extent = max(current.extent, maxSeen)
 				current.observed = time.Now()
 				o.windows[pid] = current
 			}
@@ -643,7 +650,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			// A burst of refused connections closes and reuses descriptors
 			// below the high-water mark. Inspect that recent range before a
 			// full fallback walk; a lone lastFD hint misses concurrent holes.
-			end := max(window.high, window.lastFD)
+			end := window.extent
 			if _, err := f.Seek(max(0, end-1023)+2, 0); err == nil {
 				names, _ := f.Readdirnames(1024)
 				if err := visit(names); err != nil {
@@ -652,7 +659,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 			return nil
 		}
-		if complete && canIndex && window.lastFD >= 128 {
+		if complete && canIndex && window.extent >= 128 {
 			if err := recentRange(); err != nil {
 				return err
 			}
@@ -703,7 +710,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					return nil
 				}
 			}
-			if canIndex && window.lastFD >= 128 && len(recent) > 0 && recent[0] == pid {
+			if canIndex && window.extent >= 128 && len(recent) > 0 && recent[0] == pid {
 				if err := recentRange(); err != nil {
 					return err
 				}
@@ -721,6 +728,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					current := o.windows[pid]
 					if current.start == start {
 						current.tailProbed = true
+						current.extent = max(current.extent, tail)
 						o.windows[pid] = current
 					}
 					o.mu.Unlock()
