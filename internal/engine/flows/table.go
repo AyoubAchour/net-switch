@@ -46,6 +46,9 @@ type Totals struct {
 	Lines map[string]Bytes `json:"lines"`
 }
 type Gauges struct {
+	// Non-cumulative buckets: 100 us wide through 20 ms, then overflow.
+	// Histograms can be subtracted across a cold-socket test phase.
+	LookupHistogram                                                                                   [201]uint64
 	UDPReadBytes                                                                                      int64
 	DoubleReleases                                                                                    uint64
 	TimeWait                                                                                          int
@@ -151,6 +154,14 @@ func (t *Table) Predict(app string) (policy.Prediction, error) {
 		return policy.Prediction{}, ErrStopped
 	}
 	return t.policy.Predict(app), nil
+}
+
+func (t *Table) EchoLine(ipv6 bool) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.policy == nil { return "", ErrStopped }
+	d, err := t.policy.Decide(platform.Owner{}, 0, ipv6, 0)
+	return d.Line, err
 }
 
 func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, error) {
@@ -527,6 +538,7 @@ func (t *Table) Lookup(d time.Duration, err error, owner platform.Owner) {
 	defer t.mu.Unlock()
 	t.gauges.LookupCount++
 	t.gauges.LookupNanoseconds += uint64(max(d, 0))
+	t.gauges.LookupHistogram[min(int(max(d, 0)/(100*time.Microsecond)), 200)]++
 	if err != nil || owner.AppID == "" {
 		t.gauges.LookupMisses++
 	}

@@ -14,6 +14,8 @@ func main() {
 		fmt.Println("netswitchctl", buildinfo.String())
 		return
 	}
-	fmt.Fprintln(os.Stderr, "usage: netswitchctl version")
-	os.Exit(2)
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "netswitchctl:", err)
+		os.Exit(1)
+	}
 }

@@ -205,8 +205,12 @@ func (s *Session) Stats(ctx context.Context) (engine.Stats, error) {
 
 // InjectFault implements engine.Controller. The protocol has no test hooks
 // yet (see the package comment).
-func (s *Session) InjectFault(context.Context, engine.Fault) (engine.FaultAck, error) {
-	return engine.FaultAck{}, notYet("test faults")
+func (s *Session) InjectFault(ctx context.Context, f engine.Fault) (engine.FaultAck, error) {
+	r := s.request("testFault")
+	r.Fault, _ = json.Marshal(f)
+	var ack engine.FaultAck
+	err := s.d.do(ctx, r, &ack)
+	return ack, err
 }
 
 // --- translations between the suite's types and main's -------------------
@@ -250,7 +254,7 @@ func (d *Driver) revision(ctx context.Context, n uint64, cfg engine.Config) (pol
 		if err != nil {
 			return policy.Revision{}, fmt.Errorf("line %s's addresses: %w", l.ID, err)
 		}
-		lines = append(lines, platform.Line{ID: string(l.ID), Addresses: addrs})
+		lines = append(lines, platform.Line{ID: string(l.ID), Interface: l.Interface, Addresses: addrs})
 	}
 	c := wireConfig(cfg, lines)
 	return policy.Revision{N: n, Hash: policy.Hash(c), Config: c}, nil
@@ -328,7 +332,8 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		Admitted: g.Admitted, Rejected: g.Rejected, DroppedNotices: g.DroppedNotices, TimeWaitSkipped: g.TimeWaitSkipped,
 		EventsDropped: top.EventsDropped + g.EventsDropped,
 		LookupCount:   g.LookupCount, LookupMisses: g.LookupMisses, LookupAmbiguous: g.LookupAmbiguous,
-		LookupTime: time.Duration(g.LookupNanoseconds),
-		Counters:   counters,
+		LookupTime:      time.Duration(g.LookupNanoseconds),
+		LookupHistogram: g.LookupHistogram,
+		Counters:        counters,
 	}, nil
 }
