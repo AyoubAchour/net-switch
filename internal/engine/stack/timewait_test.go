@@ -173,29 +173,35 @@ func TestTimeWaitBlockedAndBudgetReuse(t *testing.T) {
 	limits.Flows = 1
 	limits.TimeWait = 1
 	p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+	p.phase = "initial connection"
 	p.open(1000)
 	p.upload([]byte("first"))
 	p.closeActive()
 	// TIME_WAIT frees the only flow slot even for a different tuple. Keep
 	// that replacement live to verify a genuine flow-cap rejection too.
 	p.port++
+	p.phase = "different tuple after final ACK"
 	p.open(500)
 	p.upload([]byte("different tuple"))
 	p.port++
+	p.phase = "intentional flow-cap rejection"
 	p.inject(p.packet(500, 0, header.TCPFlagSyn, []byte("syn data")))
 	h := p.read(time.Second)
 	for h != nil && h.DestinationPort() != p.port {
 		h = p.read(time.Second)
 	}
 	if h == nil || !h.Flags().Contains(header.TCPFlagRst) || h.AckNumber() != 509 {
-		t.Fatal("budget SYN/data reset missing")
+		t.Fatal("budget SYN/data reset missing", p.diagnostics())
 	}
 	p.port--
+	p.phase = "close with full TIME_WAIT pool"
 	p.closeActive() // Full TIME_WAIT pool: this one closes silently.
 	p.port--
+	p.phase = "reuse original tuple after final ACK"
 	p.open(1000)
 	p.upload([]byte("second"))
 	p.closeActive()
+	p.phase = "intentional blocked-line rejection"
 	p.config.Blocked = []string{"B"}
 	if _, err := p.table.Apply(policy.Revision{N: 2, Hash: policy.Hash(p.config), Config: p.config}); err != nil {
 		t.Fatal(err)
@@ -203,7 +209,7 @@ func TestTimeWaitBlockedAndBudgetReuse(t *testing.T) {
 	p.inject(p.packet(1000, 0, header.TCPFlagSyn, nil))
 	h = p.read(time.Second)
 	if h == nil || !h.Flags().Contains(header.TCPFlagRst) {
-		t.Fatal("blocked reuse did not reset")
+		t.Fatal("blocked reuse did not reset", p.diagnostics())
 	}
 	if p.dials.Load() != 3 || p.table.Stats().Admitted != 3 {
 		t.Fatal("rejected SYN advanced k or dialed")

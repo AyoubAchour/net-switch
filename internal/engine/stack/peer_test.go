@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net/netip"
 	"sync"
@@ -62,6 +63,8 @@ type peer struct {
 	config             policy.Config
 	port               uint16
 	forward            *ntcp.Forwarder
+	phase              string
+	lastSent           []byte
 }
 
 func newPeer(t *testing.T, timestamps bool) *peer {
@@ -117,6 +120,7 @@ func (p *peer) packet(seq, ack uint32, flags header.TCPFlags, payload []byte) []
 }
 
 func (p *peer) inject(b []byte) {
+	p.lastSent = b
 	pkt := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b)})
 	p.link.InjectInbound(ipv4.ProtocolNumber, pkt)
 	pkt.DecRef()
@@ -152,17 +156,39 @@ func (p *peer) wait(flags header.TCPFlags) header.TCP {
 			break
 		}
 		if h.Flags().Contains(header.TCPFlagRst) {
-			p.t.Fatalf("unexpected RST, waiting for %v", flags)
+			p.t.Fatalf("unexpected RST, waiting for %v; reply=%s; %s", flags, segmentDescription(h), p.diagnostics())
 		}
 		if h.Flags().Contains(flags) {
 			return h
 		}
 	}
-	p.t.Fatalf("timed out waiting for TCP flags %v", flags)
+	p.t.Fatalf("timed out waiting for TCP flags %v; %s", flags, p.diagnostics())
 	return nil
 }
 
+func segmentDescription(h header.TCP) string {
+	return fmt.Sprintf("%d->%d flags=%v seq=%d ack=%d data=%d", h.SourcePort(), h.DestinationPort(), h.Flags(), h.SequenceNumber(), h.AckNumber(), len(h)-int(h.DataOffset()))
+}
+
+func (p *peer) diagnostics() string {
+	states := make(map[uint16]string)
+	for _, port := range []uint16{p.port - 1, p.port, p.port + 1} {
+		id := gv.TransportEndpointID{LocalAddress: remoteAddr, LocalPort: 443, RemoteAddress: appAddr, RemotePort: port}
+		states[port] = "unregistered"
+		if ep, ok := p.stack.FindTransportEndpoint(header.IPv4ProtocolNumber, tcp.ProtocolNumber, id, ns.NIC).(*tcp.Endpoint); ok {
+			states[port] = tcp.EndpointState(ep.State()).String()
+		}
+	}
+	last := "none"
+	if p.lastSent != nil {
+		ip := header.IPv4(p.lastSent)
+		last = segmentDescription(header.TCP(p.lastSent[ip.HeaderLength():]))
+	}
+	return fmt.Sprintf("phase=%q port=%d peer seq=%d ack=%d last sent=%s states=%v table=%+v dials=%d forward rejected=%d invalid=%d dial failed=%d stack resets=%d", p.phase, p.port, p.seq, p.ack, last, states, p.table.Stats(), p.dials.Load(), p.forward.Rejected.Load(), p.forward.Invalid.Load(), p.forward.DialFailed.Load(), p.stack.Stats().TCP.ResetsSent.Value())
+}
+
 func (p *peer) open(seq uint32) time.Duration {
+	p.t.Helper()
 	return p.openWith(seq, p.inject)
 }
 
