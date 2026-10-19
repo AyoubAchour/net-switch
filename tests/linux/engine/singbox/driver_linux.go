@@ -77,6 +77,9 @@ type Driver struct {
 	own [][]string
 	// Rules sing-box added at start, as `ip rule show` lines, per family.
 	engineRules map[string][]string
+	// The control-side reconciler (see reconcile), stopped before teardown.
+	stopReconcile context.CancelFunc
+	reconciling   sync.WaitGroup
 }
 
 // New makes the driver.
@@ -182,6 +185,15 @@ func (d *Driver) Start(ctx context.Context, env engine.Env, cfg engine.Config) e
 	}
 	if err := d.launch(ctx); err != nil {
 		return errors.Join(err, d.removeOwn(ctx))
+	}
+	if cfg.Profile == engine.ProfileLinux {
+		rctx, cancel := context.WithCancel(context.Background())
+		d.stopReconcile = cancel
+		d.reconciling.Add(1)
+		go func() {
+			defer d.reconciling.Done()
+			d.reconcile(rctx)
+		}()
 	}
 	after, err := d.rules(ctx)
 	if err != nil {
@@ -473,6 +485,7 @@ func (d *Driver) CloseFlows(ctx context.Context, sel engine.Selector) (engine.Cl
 func (d *Driver) Stop(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.endReconcile()
 	var stopErr error
 	if d.running() {
 		_ = d.cmd.Process.Signal(syscall.SIGTERM)
@@ -513,6 +526,7 @@ func (d *Driver) Crash() error {
 	if !d.running() {
 		return errors.New("sing-box isn't running")
 	}
+	d.endReconcile()
 	d.kill()
 	d.closeLog()
 	if d.running() {
@@ -708,6 +722,71 @@ func (d *Driver) addLinuxRouting(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (d *Driver) endReconcile() {
+	if d.stopReconcile != nil {
+		d.stopReconcile()
+		d.reconciling.Wait()
+		d.stopReconcile = nil
+	}
+}
+
+// reconcile is control-side work the baseline needs and today's app has no
+// Linux version of: it keeps each line's table in step with the system's
+// default routes (twice a second), so a line whose default route goes away
+// has none in its table either (SYSTEM-DESIGN.md 5.5 asks the same of 1.0).
+// Without it, the table's copy would keep a line working that the system
+// considers gone; that would be this emulation's doing, not sing-box's.
+func (d *Driver) reconcile(ctx context.Context) {
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		for _, family := range []string{"-4", "-6"} {
+			text, err := d.ip(ctx, "-j", family, "route", "show", "table", "all", "default")
+			if err != nil {
+				continue
+			}
+			var routes []struct {
+				Dev     string `json:"dev"`
+				Gateway string `json:"gateway"`
+				Table   string `json:"table"`
+			}
+			if json.Unmarshal([]byte(text), &routes) != nil {
+				continue
+			}
+			for i, l := range d.cfg.Lines {
+				table := strconv.Itoa(lineTableBase + i + 1)
+				gateway, inMain, inTable := "", false, false
+				for _, r := range routes {
+					if r.Dev != l.Interface {
+						continue
+					}
+					switch r.Table {
+					case "", "main":
+						gateway, inMain = r.Gateway, true
+					case table:
+						inTable = true
+					}
+				}
+				switch {
+				case !inMain && inTable:
+					if _, err := d.ip(ctx, family, "route", "del", "default", "table", table); err == nil {
+						d.logf("control: line %s lost its %s default route; removed it from table %s", l.ID, family, table)
+					}
+				case inMain && !inTable && gateway != "":
+					if _, err := d.ip(ctx, family, "route", "replace", "default", "via", gateway, "dev", l.Interface, "table", table); err == nil {
+						d.logf("control: line %s has a %s default route again; restored it in table %s", l.ID, family, table)
+					}
+				}
+			}
+		}
+	}
 }
 
 // bridges lists bridge interfaces (container and VM networks) to exclude.

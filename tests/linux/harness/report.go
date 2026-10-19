@@ -25,6 +25,7 @@ type CaseResult struct {
 	ID         string   `json:"id"`
 	Title      string   `json:"title"`
 	Label      Label    `json:"label"`
+	Defect     string   `json:"defect,omitempty"`
 	Spec       string   `json:"spec,omitempty"`
 	Outcome    Outcome  `json:"outcome"`
 	DurationMS int64    `json:"durationMs"`
@@ -33,14 +34,19 @@ type CaseResult struct {
 	Error      string   `json:"error,omitempty"`
 }
 
-// Detail is the most useful single line about a result: the harness error, or
-// the first failed check.
+// Detail is the most useful single line about a result: the harness error,
+// the first failed mandatory check, or the failed defect assertion.
 func (r CaseResult) Detail() string {
 	if r.Error != "" {
 		return r.Error
 	}
 	for _, check := range r.Checks {
-		if !check.OK {
+		if !check.OK && !check.Defect {
+			return check.Message
+		}
+	}
+	for _, check := range r.Checks {
+		if check.Defect && (!check.OK || r.Outcome == NotReproduced) {
 			return check.Message
 		}
 	}
@@ -157,8 +163,11 @@ func (r *Report) WriteMarkdown(w io.Writer) {
 			outcome = "**" + outcome + "**"
 		}
 		detail := c.Detail()
-		if c.Outcome == Pass && len(c.Notes) > 0 {
+		switch {
+		case c.Outcome == Pass && len(c.Notes) > 0:
 			detail = c.Notes[0]
+		case c.Outcome == KnownDefect:
+			detail = "**" + c.Defect + ".** " + detail
 		}
 		fmt.Fprintf(w, "| `%s` | %s | %s | %.1fs | %s |\n", c.ID, c.Label, outcome, float64(c.DurationMS)/1000, mdCell(detail))
 	}

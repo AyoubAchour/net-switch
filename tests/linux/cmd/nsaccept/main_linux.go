@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/AyoubAchour/net-switch/tests/linux/app"
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
@@ -75,8 +76,15 @@ func usage() {
 }
 
 func listMain() error {
-	for _, c := range suite.Cases(suite.Config{}) {
+	cases := suite.Cases(suite.Config{})
+	if err := harness.Validate(cases); err != nil {
+		return err
+	}
+	for _, c := range cases {
 		fmt.Printf("%-48s %-16s %-14s %s\n", c.ID, c.Label, c.Spec, c.Title)
+		if c.Defect != "" {
+			fmt.Printf("%-48s defect: %s\n", "", c.Defect)
+		}
 	}
 	return nil
 }
@@ -259,7 +267,8 @@ func run(o options, report *harness.Report) (int, error) {
 		return 1, fmt.Errorf("namespaces from an earlier run are still there: %v", left)
 	}
 
-	cases := suite.Cases(suite.Config{Self: self, Driver: drv, Users: users})
+	fixtures := &suite.Fixtures{}
+	cases := suite.Cases(suite.Config{Self: self, Driver: drv, Users: users, Fixtures: fixtures})
 	if err := harness.Validate(cases); err != nil {
 		return 1, err
 	}
@@ -269,6 +278,25 @@ func run(o options, report *harness.Report) (int, error) {
 	}
 	if len(selected) == 0 {
 		return 1, errors.New("no case matches the filters")
+	}
+	var ids []string
+	for _, c := range selected {
+		ids = append(ids, c.ID)
+	}
+	if suite.NeedsFixtures(ids) {
+		// Downloads and builds happen here, once, outside any case's time.
+		fmt.Println("provisioning the identity fixtures (Snap, Flatpak, AppImage)")
+		started := time.Now()
+		fx, err := suite.Provision(ctx, self, func(format string, args ...any) { fmt.Printf("  "+format+"\n", args...) })
+		if err != nil {
+			return 1, fmt.Errorf("provisioning the identity fixtures: %w", err)
+		}
+		*fixtures = *fx
+		for key, value := range fx.Recorded {
+			report.System[key] = value
+			fmt.Printf("  %s: %s\n", key, value)
+		}
+		fmt.Printf("  done in %s\n", time.Since(started).Round(time.Second))
 	}
 	fmt.Printf("running %d of %d cases\n\n", len(selected), len(cases))
 	harness.Run(ctx, selected, report, harness.Options{

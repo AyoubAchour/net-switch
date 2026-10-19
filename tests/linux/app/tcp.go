@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,6 +32,9 @@ type Attempt struct {
 	Port      int     `json:"port,omitempty"`
 	At        int64   `json:"at"` // Unix ms when it started
 	Retries   int     `json:"retries,omitempty"`
+	// Connected: the handshake completed (an engine that completes it before
+	// its own dial succeeds shows connections that then fail).
+	Connected bool `json:"connected,omitempty"`
 }
 
 // TCPResult is the tcp mode's answer.
@@ -62,6 +66,7 @@ func whoamiOnce(i int, to netip.AddrPort, local netip.AddrPort, dev string, time
 		return a
 	}
 	defer conn.Close()
+	a.Connected = true
 	if ap, err := netip.ParseAddrPort(conn.LocalAddr().String()); err == nil {
 		a.Port = int(ap.Port())
 	}
@@ -126,6 +131,9 @@ func runTCP(args []string) (any, error) {
 		}
 		local = netip.AddrPortFrom(addr, 0)
 	}
+	if *waitFor != "" {
+		fmt.Printf("waiting pid:%d\n", os.Getpid())
+	}
 	if err := waitFile(*waitFor, 60*time.Second); err != nil {
 		return nil, err
 	}
@@ -151,6 +159,79 @@ func runTCP(args []string) (any, error) {
 	}
 	wg.Wait()
 	return summariseAttempts(attempts, time.Since(started), started.UnixMilli()), nil
+}
+
+// HoldResult is the tcphold mode's answer.
+type HoldResult struct {
+	Count       int            `json:"count"`
+	Established int            `json:"established"`
+	Errors      map[string]int `json:"errors"`
+	Connect     Stats          `json:"connectMs"`
+	FailedMS    Stats          `json:"failedMs"`
+	StillOpen   int            `json:"stillOpen"` // established connections still open when the hold ended
+	LocalPorts  []int          `json:"localPorts"`
+}
+
+// runTCPHold opens many connections to the stream server and keeps them open
+// (a connection storm, or many flows to list). Once every attempt is done it
+// prints "holding <n>", holds for --hold ms, then reports.
+func runTCPHold(args []string) (any, error) {
+	fs := flag.NewFlagSet("tcphold", flag.ContinueOnError)
+	to := fs.String("to", "", "stream server ip:port")
+	count := fs.Int("count", 100, "connections")
+	concurrency := fs.Int("concurrency", 100, "attempts at once")
+	timeout := fs.Int("timeout", 5000, "ms per attempt")
+	hold := fs.Int("hold", 5000, "ms to keep them open")
+	if err := parse(fs, args); err != nil {
+		return nil, err
+	}
+	list, err := targets(*to)
+	if err != nil {
+		return nil, err
+	}
+	r := HoldResult{Count: *count, Errors: map[string]int{}}
+	var mu sync.Mutex
+	var conns []net.Conn
+	var connect, failed []float64
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range max(1, min(*concurrency, *count)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for int(next.Add(1)-1) < *count {
+				start := time.Now()
+				conn, err := net.DialTimeout("tcp", list[0].String(), time.Duration(*timeout)*time.Millisecond)
+				ms := msSince(start)
+				mu.Lock()
+				if err != nil {
+					r.Errors[Code(err)]++
+					failed = append(failed, ms)
+				} else {
+					conns = append(conns, conn)
+					connect = append(connect, ms)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	r.Established = len(conns)
+	r.Connect, r.FailedMS = Summarise(connect), Summarise(failed)
+	fmt.Printf("holding %d\n", r.Established)
+	time.Sleep(time.Duration(*hold) * time.Millisecond)
+	buf := make([]byte, 1)
+	for _, conn := range conns {
+		_ = conn.SetReadDeadline(time.Now().Add(time.Millisecond))
+		if _, err := conn.Read(buf); Code(err) == "TIMEOUT" {
+			r.StillOpen++
+		}
+		if ap, err := netip.ParseAddrPort(conn.LocalAddr().String()); err == nil {
+			r.LocalPorts = append(r.LocalPorts, int(ap.Port()))
+		}
+		conn.Close()
+	}
+	return r, nil
 }
 
 // ReuseResult is the reuse mode's answer.

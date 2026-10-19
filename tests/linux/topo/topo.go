@@ -114,6 +114,14 @@ var (
 	Server6b = a("2001:db8:100:1::11")
 )
 
+// ProbeTargets are the line-check operators' addresses (SYSTEM-DESIGN.md 4.5),
+// answering TCP on port 443 inside the fake internet for 1.0's quick checks.
+var ProbeTargets = map[string]netip.Addr{
+	"cloudflare": a("1.1.1.1"),
+	"google":     a("8.8.8.8"),
+	"quad9":      a("9.9.9.9"),
+}
+
 // ManyServers are 50 more addresses running the UDP echo and whoami, for
 // spreading flows over many destinations.
 func ManyServers() []netip.Addr {
@@ -215,6 +223,9 @@ func (n *Net) build(ctx context.Context) error {
 	for _, addr := range []netip.Addr{Server6, Server6b} {
 		inet = append(inet, fmt.Sprintf("addr add %s/128 dev srv0 nodad", addr))
 	}
+	for _, addr := range ProbeTargets {
+		inet = append(inet, fmt.Sprintf("addr add %s/32 dev srv0", addr))
+	}
 	if err := r.Batch(ctx, INET, inet); err != nil {
 		return err
 	}
@@ -304,6 +315,23 @@ func (n *Net) startServers(ctx context.Context) error {
 
 // InetDir is where the fake internet writes what it observed.
 func (n *Net) InetDir() string { return filepath.Join(n.dir, "inet") }
+
+// EventsPath is the fake internet's record of everything that reached it.
+func (n *Net) EventsPath() string { return filepath.Join(n.dir, "inet", "events.jsonl") }
+
+// Healthy reports an error if any of the topology's servers has stopped (the
+// fake internet stops itself when it can't record what it saw).
+func (n *Net) Healthy() error {
+	for _, proc := range n.procs {
+		select {
+		case <-proc.Done():
+			data, _ := os.ReadFile(proc.logPath)
+			return fmt.Errorf("%s stopped (%v): %s", proc.Name, proc.Err(), lastLines(data, 5))
+		default:
+		}
+	}
+	return nil
+}
 
 // Down stops every process in the namespaces and deletes them. It's safe to
 // call on a half-built or already removed topology.

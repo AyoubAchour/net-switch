@@ -29,6 +29,7 @@ const (
 	PortDNS     = 53
 	PortSTUN1   = 3478
 	PortSTUN2   = 3479
+	PortProbe   = 443 // TCP on the line-check operators' addresses (1.1.1.1, 8.8.8.8, 9.9.9.9)
 )
 
 // EchoReply is the UDP echo answer for a datagram from src.

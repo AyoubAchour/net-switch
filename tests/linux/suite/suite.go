@@ -34,8 +34,8 @@ import (
 const AppsDir = "/opt/nsapps"
 
 // The test apps. alpha is never pinned; bravo is pinned to line b and charlie
-// to line c by default; delta is free for cases to use.
-var AppNames = []string{"alpha", "bravo", "charlie", "delta"}
+// to line c by default; delta and foxtrot are free for cases to use.
+var AppNames = []string{"alpha", "bravo", "charlie", "delta", "foxtrot"}
 
 // AppPath is where an app's program is.
 func AppPath(name string) string { return filepath.Join(AppsDir, name, "nsapp") }
@@ -51,6 +51,8 @@ type Config struct {
 	Self   string // this program, for "serve" and "exec"
 	Driver engine.Driver
 	Users  Users
+	// Fixtures are filled in by Provision before the identity cases run.
+	Fixtures *Fixtures
 }
 
 // Env is one running case's world.
@@ -76,6 +78,13 @@ func (r *registry) add(id, title string, label harness.Label, spec string, timeo
 		ID: id, Title: title, Label: label, Spec: spec, Timeout: timeout,
 		Run: func(t *harness.T) { fn(r.setup(t)) },
 	})
+}
+
+// defect adds a baseline-defect case: defect names the known baseline defect
+// its one Expect assertion checks for.
+func (r *registry) defect(id, title, defect, spec string, timeout time.Duration, fn caseFunc) {
+	r.add(id, title, harness.BaselineDefect, spec, timeout, fn)
+	r.cases[len(r.cases)-1].Defect = defect
 }
 
 // Each file of cases registers itself, with its place in the run order.
@@ -104,13 +113,18 @@ func Cases(cfg Config) []*harness.Case {
 func (r *registry) setup(t *harness.T) *Env {
 	e := &Env{T: t, Eng: r.cfg.Driver, cfg: r.cfg}
 	t.Cleanup(func() {
+		ctx := t.Context()
 		if e.Eng.Running() {
-			if err := e.Eng.Stop(context.Background()); err != nil {
-				t.Logf("stopping the engine after the case: %v", err)
-			}
+			err := e.Eng.Stop(ctx)
+			t.Check(err == nil, "the engine stops cleanly after the case (%v)", err)
 		}
+		var health error
 		if e.Net != nil {
-			e.Net.Down(context.Background())
+			health = e.Net.Healthy()
+			e.Net.Down(ctx)
+		}
+		if health != nil {
+			t.Fatalf("the topology's servers didn't last the case: %v", health)
 		}
 		if left := topo.Leftovers(); len(left) > 0 {
 			t.Fatalf("namespaces left after the case: %v", left)
@@ -313,10 +327,17 @@ func truncate(b []byte, n int) string {
 	return s
 }
 
+// lastLine is a program's last non-empty output line: its JSON result (modes
+// may print progress lines such as "ready ..." before it).
+func lastLine(data []byte) []byte {
+	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+	return bytes.TrimSpace(lines[len(lines)-1])
+}
+
 // RunJSON runs a program and decodes its JSON result into out.
 func (e *Env) RunJSON(r Run, out any) {
 	data := e.Exec(r)
-	if err := json.Unmarshal(bytes.TrimSpace(data), out); err != nil {
+	if err := json.Unmarshal(lastLine(data), out); err != nil {
 		e.T.Fatalf("%s printed no JSON result: %v: %s", r.name(), err, truncate(data, 300))
 	}
 }
@@ -398,23 +419,43 @@ func (b *Bg) Wait(e *Env, timeout time.Duration) []byte {
 // WaitJSON waits and decodes the result.
 func (b *Bg) WaitJSON(e *Env, timeout time.Duration, out any) {
 	data := b.Wait(e, timeout)
-	if err := json.Unmarshal(bytes.TrimSpace(data), out); err != nil {
+	if err := json.Unmarshal(lastLine(data), out); err != nil {
 		e.T.Fatalf("%s printed no JSON result: %v: %s", b.r.name(), err, truncate(data, 300))
 	}
 }
 
 // WaitOutput waits until the program has printed want, or stops the case.
 func (b *Bg) WaitOutput(e *Env, want string, timeout time.Duration) {
+	b.WaitLine(e, want, timeout)
+}
+
+// WaitLine waits for an output line starting with prefix and returns it.
+func (b *Bg) WaitLine(e *Env, prefix string, timeout time.Duration) string {
 	deadline := time.Now().Add(timeout)
-	for !bytes.Contains(b.stdout.Bytes(), []byte(want)) {
+	for {
+		for _, line := range strings.Split(b.stdout.String(), "\n") {
+			if strings.HasPrefix(line, prefix) {
+				return line
+			}
+		}
 		select {
 		case <-b.done:
-			e.T.Fatalf("%s exited before printing %q: %v: %s", b.r.name(), want, b.err, strings.TrimSpace(b.stderr.String()))
+			e.T.Fatalf("%s exited before printing %q: %v: %s", b.r.name(), prefix, b.err, strings.TrimSpace(b.stderr.String()))
 		case <-time.After(20 * time.Millisecond):
 		}
 		if time.Now().After(deadline) {
-			e.T.Fatalf("%s didn't print %q within %s", b.r.name(), want, timeout)
+			e.T.Fatalf("%s didn't print %q within %s", b.r.name(), prefix, timeout)
 		}
+	}
+}
+
+// Running reports whether the program hasn't exited yet.
+func (b *Bg) Running() bool {
+	select {
+	case <-b.done:
+		return false
+	default:
+		return true
 	}
 }
 

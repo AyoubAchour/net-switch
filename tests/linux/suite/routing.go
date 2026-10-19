@@ -26,6 +26,8 @@ func addRouting(r *registry) {
 	r.add("closeflows.reconnect", "Reconnect closes an app's flows that aren't on its lane target", harness.Parity, "4.6", 0, closeReconnect)
 	r.add("ipv6.not-allowed-rejected-fast", "Public IPv6 is refused at once while IPv6 isn't allowed; link-local IPv6 still works", harness.Parity, "5.4", 0, ipv6Rejected)
 	r.add("ipv6.routed-per-line", "With IPv6 allowed, IPv6 TCP and UDP take each app's line", harness.Parity, "5.4, 5.5", 0, ipv6PerLine)
+	r.defect("flows.ipv6-off-closes-only-ipv6", "Turning IPv6 off closes the IPv6 flows and only them",
+		"today's app restarts the engine to change IPv6, which closes every flow", "5.7", 0, ipv6Off)
 	r.add("icmp.echo-follows-main-lane", "Ping (IPv4 and IPv6) reaches the server over the main line's lane target, with real replies", harness.Parity, "5.4, 5.8", 0, icmpEcho)
 	r.add("dns.queries-per-line", "DNS over UDP and TCP leaves on each app's line", harness.Parity, "5.4", 0, dnsPerLine)
 }
@@ -187,35 +189,46 @@ func ipv6PerLine(e *Env) {
 	e.ExpectTCP("alpha IPv4 still works", "alpha", AsUser, "a", topo.Server4, 3)
 }
 
+func ipv6Off(e *Env) {
+	cfg := e.DefaultConfig()
+	cfg.Policy.IPv6 = true
+	e.StartEngine(cfg)
+	v4 := e.StartStream("bravo", AsUser, 10*time.Second)
+	v6 := e.Start(Run{App: "bravo", Args: []string{"stream", "--to", To(topo.Server6, wire.PortStream), "--duration", "10000", "--interval", "100"}})
+	for _, server := range []netip.Addr{topo.Server4, topo.Server6} {
+		_, ok := e.WaitFlow(3*time.Second, func(f engine.Flow) bool {
+			return f.App == AppPath("bravo") && f.Destination.Addr() == server && f.Destination.Port() == wire.PortStream
+		})
+		e.T.Require(ok, "the engine lists bravo's stream to %s before IPv6 is turned off", server)
+	}
+	p := cfg.Policy
+	p.IPv6 = false
+	off := time.Now().UnixMilli()
+	e.Apply(p)
+	var s4, s6 Stream
+	v4.WaitJSON(e, 20*time.Second, &s4)
+	v6.WaitJSON(e, 20*time.Second, &s6)
+	e.T.Check(s4.Connected && s6.Connected, "both streams were up before (IPv4 %v, IPv6 %v)", s4.Connected, s6.Connected)
+	lines4 := StreamLines(s4)
+	e.T.Expect(s6.ClosedAt != 0 && s6.ClosedAt-off <= 2000 && s4.ClosedAt == 0 && s4.MaxGapMS < 2000 && lines4["b"] == s4.Pongs,
+		"turning IPv6 off closes bravo's IPv6 stream within 2 s (%s) and leaves its IPv4 stream on b (%s, pongs %d, longest silence %d ms)",
+		closedAfter(s6, off), closedAfter(s4, off), s4.Pongs, s4.MaxGapMS)
+	r := e.TCP("bravo", AsUser, "--to", To(topo.Server6, wire.PortWhoami), "--count", "3", "--timeout", "5000")
+	e.T.Check(r.OK == 0 && r.FailedMS.Max < 1000, "new IPv6 connections are refused at once now (connected %d, slowest failure %.0f ms)", r.OK, r.FailedMS.Max)
+	e.ExpectTCP("bravo's IPv4 still uses b", "bravo", AsUser, "b", topo.Server4, 3)
+}
+
 // pingVia pings dst and checks the replies, and that the server saw every
 // request arrive from line want.
 func (e *Env) pingVia(label string, dst netip.Addr, want engine.LineID) {
 	var r app.PingResult
 	e.RunJSON(Run{App: "alpha", Args: []string{"ping", "--to", dst.String(), "--count", "3", "--interval", "100"}}, &r)
-	path := e.Net.InetDir() + "/icmp.jsonl"
-	recs, _ := inet.WaitRecords(e.Ctx(), path, 3*time.Second, func(recs []inet.Record) bool {
-		return len(matching(recs, r.Token)) >= r.Sent
+	recs, _ := e.WaitRecords(3*time.Second, func(recs []inet.Record) bool {
+		return len(Select(recs, Tagged("icmp", r.Token))) >= r.Sent
 	})
-	got := map[engine.LineID]int{}
-	for _, rec := range matching(recs, r.Token) {
-		id := topo.LineOfText(rec.Src)
-		if id == "" {
-			id = "?"
-		}
-		got[id]++
-	}
+	got := RecordLines(Select(recs, Tagged("icmp", r.Token)))
 	e.T.Check(r.Received == 3 && got[want] == 3 && len(got) == 1,
 		"%s: %d of 3 replies, the server saw the requests from lines %s (want 3 from %s; errors %v)", label, r.Received, Describe(got), want, r.Errors)
-}
-
-func matching(recs []inet.Record, token string) []inet.Record {
-	var out []inet.Record
-	for _, rec := range recs {
-		if strings.HasPrefix(rec.Data, "T:"+token+":") {
-			out = append(out, rec)
-		}
-	}
-	return out
 }
 
 func icmpEcho(e *Env) {

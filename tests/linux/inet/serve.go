@@ -2,12 +2,17 @@
 
 // Package inet is the fake internet's servers (role "inet") and the home
 // routers' own pages (role "lan"). Every service tells the client the source
-// address it saw; the UDP echo and ICMP observer also log what they saw, so a
-// case can check traffic that never got an answer.
+// address it saw, and the inet role also records, independently of any
+// client, everything that reaches it: each TCP connection accepted, each UDP
+// datagram (with its size), each DNS query, STUN request and ICMP echo. Cases
+// use those records to prove what did or didn't get out. A record that can't
+// be written stops the server, which fails the case: evidence is never
+// silently lost.
 package inet
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -25,19 +30,25 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/tests/linux/topo"
 	"github.com/AyoubAchour/net-switch/tests/linux/wire"
 )
 
-// Record is one observation in udp.jsonl or icmp.jsonl.
+// EventsFile is where the inet role records what reached it.
+const EventsFile = "events.jsonl"
+
+// Record is one observation.
 type Record struct {
-	T    int64  `json:"t"` // Unix ms
-	Kind string `json:"kind"`
-	Src  string `json:"src"`
-	Dst  string `json:"dst,omitempty"`
-	Data string `json:"data"`
+	T     int64  `json:"t"`    // Unix ms
+	Kind  string `json:"kind"` // tcp, udp, dns, stun, poke, icmp
+	Src   string `json:"src"`  // what the server saw: ip or ip:port
+	Dst   string `json:"dst,omitempty"`
+	Len   int    `json:"len,omitempty"` // UDP payload bytes
+	Proto string `json:"proto,omitempty"`
+	Data  string `json:"data,omitempty"` // payload prefix, query name...
 }
 
 type recorder struct {
@@ -50,18 +61,16 @@ func (r *recorder) add(rec Record) {
 		return
 	}
 	rec.T = time.Now().UnixMilli()
-	line, _ := json.Marshal(rec)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	_, _ = r.f.Write(append(line, '\n'))
-}
-
-func newRecorder(dir, name string) (*recorder, error) {
-	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return nil, err
+	line, err := json.Marshal(rec)
+	if err == nil {
+		r.mu.Lock()
+		_, err = r.f.Write(append(line, '\n'))
+		r.mu.Unlock()
 	}
-	return &recorder{f: f}, nil
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "recording failed, stopping: %v\n", err)
+		os.Exit(3)
+	}
 }
 
 func prefix(b []byte, n int) string {
@@ -75,37 +84,35 @@ func prefix(b []byte, n int) string {
 func Main(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	role := fs.String("role", "inet", `"inet" (the internet) or "lan" (a home router's own pages)`)
-	out := fs.String("out", "", "folder for udp.jsonl and icmp.jsonl (role inet)")
+	out := fs.String("out", "", "folder for events.jsonl (role inet)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	var errs []error
 	switch *role {
 	case "lan":
-		errs = append(errs, serveTCP(":"+strconv.Itoa(wire.PortWhoami), whoami), serveHTTP(":"+strconv.Itoa(wire.PortHTTP)))
+		errs = append(errs, serveTCP(":"+strconv.Itoa(wire.PortWhoami), nil, whoami), serveHTTP(":"+strconv.Itoa(wire.PortHTTP), nil))
 	case "inet":
 		if *out == "" {
 			return errors.New("serve --role inet needs --out")
 		}
-		udpLog, err := newRecorder(*out, "udp.jsonl")
+		f, err := os.OpenFile(filepath.Join(*out, EventsFile), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			return err
 		}
-		icmpLog, err := newRecorder(*out, "icmp.jsonl")
-		if err != nil {
-			return err
-		}
+		rec := &recorder{f: f}
 		errs = append(errs,
-			serveTCP(":"+strconv.Itoa(wire.PortWhoami), whoami),
-			serveTCP(":"+strconv.Itoa(wire.PortStream), stream),
-			serveTCP(":"+strconv.Itoa(wire.PortBulk), bulk),
-			serveTCP(":"+strconv.Itoa(wire.PortDNS), dnsTCP),
-			serveHTTP(":"+strconv.Itoa(wire.PortHTTP)),
+			serveTCP(":"+strconv.Itoa(wire.PortWhoami), rec, whoami),
+			serveTCP(":"+strconv.Itoa(wire.PortStream), rec, stream),
+			serveTCP(":"+strconv.Itoa(wire.PortBulk), rec, bulk),
+			serveTCP(":"+strconv.Itoa(wire.PortDNS), rec, dnsTCP(rec)),
+			serveTCP(":"+strconv.Itoa(wire.PortProbe), rec, func(net.Conn) {}),
+			serveHTTP(":"+strconv.Itoa(wire.PortHTTP), rec),
 		)
 		echoAddrs := append([]netip.Addr{topo.Server4, topo.Server4b, topo.Third4, topo.Server6, topo.Server6b}, topo.ManyServers()...)
 		for _, addr := range echoAddrs {
 			errs = append(errs, serveUDP(netip.AddrPortFrom(addr, wire.PortUDPEcho), func(c *net.UDPConn, src netip.AddrPort, b []byte) {
-				udpLog.add(Record{Kind: "udp", Src: src.String(), Dst: c.LocalAddr().String(), Data: prefix(b, 80)})
+				rec.add(Record{Kind: "udp", Src: src.String(), Dst: c.LocalAddr().String(), Len: len(b), Data: prefix(b, 80)})
 				_, _ = c.WriteToUDPAddrPort(wire.EchoReply(src, b), src)
 			}))
 		}
@@ -113,17 +120,17 @@ func Main(args []string) error {
 			addr netip.Addr
 			port uint16
 		}{{topo.Server4, wire.PortSTUN1}, {topo.Server4b, wire.PortSTUN2}, {topo.Server6, wire.PortSTUN1}, {topo.Server6b, wire.PortSTUN2}} {
-			errs = append(errs, serveUDP(netip.AddrPortFrom(s.addr, s.port), stun))
+			errs = append(errs, serveUDP(netip.AddrPortFrom(s.addr, s.port), stun(rec)))
 		}
 		for _, addr := range []netip.Addr{topo.Server4, topo.Server6} {
-			errs = append(errs, serveUDP(netip.AddrPortFrom(addr, wire.PortDNS), dnsUDP))
+			errs = append(errs, serveUDP(netip.AddrPortFrom(addr, wire.PortDNS), dnsUDP(rec)))
 		}
 		third, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(topo.Third4, wire.PortPokeSrc)))
 		errs = append(errs, err)
 		if err == nil {
-			errs = append(errs, serveUDP(netip.AddrPortFrom(topo.Server4, wire.PortPoke), poker(third)))
+			errs = append(errs, serveUDP(netip.AddrPortFrom(topo.Server4, wire.PortPoke), poker(rec, third)))
 		}
-		errs = append(errs, observeICMP("ip4:icmp", "0.0.0.0", 8, icmpLog), observeICMP("ip6:ipv6-icmp", "::", 128, icmpLog))
+		errs = append(errs, observeICMP("ip4:icmp", "0.0.0.0", 8, rec), observeICMP("ip6:ipv6-icmp", "::", 128, rec))
 	default:
 		return fmt.Errorf("unknown role %q", *role)
 	}
@@ -134,8 +141,37 @@ func Main(args []string) error {
 	select {}
 }
 
-func serveTCP(addr string, handle func(net.Conn)) error {
+func addrString(a net.Addr) string {
+	if ap, err := netip.ParseAddrPort(a.String()); err == nil {
+		return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port()).String()
+	}
+	return a.String()
+}
+
+// recordingListener records every connection it accepts.
+type recordingListener struct {
+	net.Listener
+	rec *recorder
+}
+
+func (l recordingListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err == nil {
+		l.rec.add(Record{Kind: "tcp", Src: addrString(conn.RemoteAddr()), Dst: addrString(conn.LocalAddr())})
+	}
+	return conn, err
+}
+
+func listen(addr string, rec *recorder) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
+	if err != nil || rec == nil {
+		return ln, err
+	}
+	return recordingListener{ln, rec}, nil
+}
+
+func serveTCP(addr string, rec *recorder, handle func(net.Conn)) error {
+	ln, err := listen(addr, rec)
 	if err != nil {
 		return err
 	}
@@ -203,34 +239,39 @@ func bulk(conn net.Conn) {
 	}
 }
 
-func dnsTCP(conn net.Conn) {
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-	src, err := netip.ParseAddrPort(conn.RemoteAddr().String())
-	if err != nil {
-		return
-	}
-	for {
-		var size [2]byte
-		if _, err := io.ReadFull(conn, size[:]); err != nil {
-			return
-		}
-		msg := make([]byte, binary.BigEndian.Uint16(size[:]))
-		if _, err := io.ReadFull(conn, msg); err != nil {
-			return
-		}
-		q, err := wire.ParseDNSQuery(msg)
+func dnsName(q wire.DNSQuery) string { return fmt.Sprintf("%s/%d", q.Name, q.Type) }
+
+func dnsTCP(rec *recorder) func(net.Conn) {
+	return func(conn net.Conn) {
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+		src, err := netip.ParseAddrPort(conn.RemoteAddr().String())
 		if err != nil {
 			return
 		}
-		answer := wire.DNSAnswer(q, src.Addr(), 0)
-		if _, err := conn.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(answer))), answer...)); err != nil {
-			return
+		for {
+			var size [2]byte
+			if _, err := io.ReadFull(conn, size[:]); err != nil {
+				return
+			}
+			msg := make([]byte, binary.BigEndian.Uint16(size[:]))
+			if _, err := io.ReadFull(conn, msg); err != nil {
+				return
+			}
+			q, err := wire.ParseDNSQuery(msg)
+			if err != nil {
+				return
+			}
+			rec.add(Record{Kind: "dns", Proto: "tcp", Src: addrString(conn.RemoteAddr()), Dst: addrString(conn.LocalAddr()), Data: dnsName(q)})
+			answer := wire.DNSAnswer(q, src.Addr(), 0)
+			if _, err := conn.Write(append(binary.BigEndian.AppendUint16(nil, uint16(len(answer))), answer...)); err != nil {
+				return
+			}
 		}
 	}
 }
 
-func serveHTTP(addr string) error {
-	ln, err := net.Listen("tcp", addr)
+func serveHTTP(addr string, rec *recorder) error {
+	ln, err := listen(addr, rec)
 	if err != nil {
 		return err
 	}
@@ -261,6 +302,18 @@ func serveUDP(addr netip.AddrPort, handle func(c *net.UDPConn, src netip.AddrPor
 	if err != nil {
 		return fmt.Errorf("listen udp %s: %w", addr, err)
 	}
+	// 4 MiB, past net.core.rmem_max (the server runs as root): an overload
+	// case must measure the engine, not datagrams lost at the server.
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var serr error
+	if err := raw.Control(func(fd uintptr) {
+		serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUFFORCE, 4<<20)
+	}); err != nil || serr != nil {
+		return fmt.Errorf("receive buffer for %s: %v %v", addr, err, serr)
+	}
 	go func() {
 		buf := make([]byte, 65536)
 		for {
@@ -269,47 +322,54 @@ func serveUDP(addr netip.AddrPort, handle func(c *net.UDPConn, src netip.AddrPor
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			handle(conn, netip.AddrPortFrom(src.Addr().Unmap(), src.Port()), append([]byte(nil), buf[:n]...))
+			handle(conn, netip.AddrPortFrom(src.Addr().Unmap(), src.Port()), bytes.Clone(buf[:n]))
 		}
 	}()
 	return nil
 }
 
-func stun(c *net.UDPConn, src netip.AddrPort, b []byte) {
-	txid, err := wire.ParseSTUNRequest(b)
-	if err != nil {
-		return
+func stun(rec *recorder) func(c *net.UDPConn, src netip.AddrPort, b []byte) {
+	return func(c *net.UDPConn, src netip.AddrPort, b []byte) {
+		txid, err := wire.ParseSTUNRequest(b)
+		if err != nil {
+			return
+		}
+		rec.add(Record{Kind: "stun", Src: src.String(), Dst: c.LocalAddr().String(), Len: len(b)})
+		_, _ = c.WriteToUDPAddrPort(wire.STUNResponse(txid, src), src)
 	}
-	_, _ = c.WriteToUDPAddrPort(wire.STUNResponse(txid, src), src)
 }
 
-func dnsUDP(c *net.UDPConn, src netip.AddrPort, b []byte) {
-	q, err := wire.ParseDNSQuery(b)
-	if err != nil {
-		return
+func dnsUDP(rec *recorder) func(c *net.UDPConn, src netip.AddrPort, b []byte) {
+	return func(c *net.UDPConn, src netip.AddrPort, b []byte) {
+		q, err := wire.ParseDNSQuery(b)
+		if err != nil {
+			return
+		}
+		rec.add(Record{Kind: "dns", Proto: "udp", Src: src.String(), Dst: c.LocalAddr().String(), Data: dnsName(q)})
+		limit := 512
+		if q.EDNS > 512 {
+			limit = min(int(q.EDNS), 4096)
+		}
+		_, _ = c.WriteToUDPAddrPort(wire.DNSAnswer(q, src.Addr(), limit), src)
 	}
-	limit := 512
-	if q.EDNS > 512 {
-		limit = min(int(q.EDNS), 4096)
-	}
-	_, _ = c.WriteToUDPAddrPort(wire.DNSAnswer(q, src.Addr(), limit), src)
 }
 
 // poker answers "poke <token>" on its own socket, and also sends the token to
 // the same address from a host the client never contacted.
-func poker(third *net.UDPConn) func(c *net.UDPConn, src netip.AddrPort, b []byte) {
+func poker(rec *recorder, third *net.UDPConn) func(c *net.UDPConn, src netip.AddrPort, b []byte) {
 	return func(c *net.UDPConn, src netip.AddrPort, b []byte) {
 		token, ok := strings.CutPrefix(string(b), "poke ")
 		if !ok {
 			return
 		}
+		rec.add(Record{Kind: "poke", Src: src.String(), Dst: c.LocalAddr().String(), Data: token})
 		_, _ = c.WriteToUDPAddrPort([]byte("ack "+src.String()), src)
 		_, _ = third.WriteToUDPAddrPort([]byte("poke "+token+" from "+third.LocalAddr().String()), src)
 	}
 }
 
-// observeICMP logs echo requests (type want) the namespace receives.
-func observeICMP(network, addr string, want byte, log *recorder) error {
+// observeICMP records echo requests (type want) the namespace receives.
+func observeICMP(network, addr string, want byte, rec *recorder) error {
 	conn, err := net.ListenPacket(network, addr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", network, err)
@@ -325,45 +385,53 @@ func observeICMP(network, addr string, want byte, log *recorder) error {
 			if n < 8 || buf[0] != want {
 				continue
 			}
-			log.add(Record{Kind: "icmp", Src: from.String(), Data: prefix(buf[8:n], 80)})
+			rec.add(Record{Kind: "icmp", Src: from.String(), Len: n - 8, Data: prefix(buf[8:n], 80)})
 		}
 	}()
 	return nil
 }
 
-// ReadRecords reads a .jsonl log the inet role wrote.
+// ReadRecords reads the events the inet role wrote. Strict: the file must
+// exist, and every complete line must parse; only a final line still being
+// written (no newline yet) is left for the next read.
 func ReadRecords(path string) ([]Record, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
+		return nil, fmt.Errorf("the fake internet's records: %w", err)
+	}
+	if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
+		data = data[:i+1]
+	} else {
+		data = nil
 	}
 	var out []Record
-	for _, line := range strings.Split(string(data), "\n") {
-		if strings.TrimSpace(line) == "" {
+	for n, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		if line == "" {
 			continue
 		}
 		var rec Record
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue // a line being written right now
+			return nil, fmt.Errorf("%s line %d is malformed: %w", path, n+1, err)
 		}
 		out = append(out, rec)
 	}
 	return out, nil
 }
 
-// WaitRecords polls a log until match finds what it wants or the time is up.
-func WaitRecords(ctx context.Context, path string, timeout time.Duration, match func([]Record) bool) ([]Record, bool) {
+// WaitRecords polls the records until match finds what it wants or the time
+// is up. A read error ends it at once.
+func WaitRecords(ctx context.Context, path string, timeout time.Duration, match func([]Record) bool) ([]Record, bool, error) {
 	deadline := time.Now().Add(timeout)
 	for {
-		recs, _ := ReadRecords(path)
+		recs, err := ReadRecords(path)
+		if err != nil {
+			return nil, false, err
+		}
 		if match(recs) {
-			return recs, true
+			return recs, true, nil
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
-			return recs, false
+			return recs, false, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}

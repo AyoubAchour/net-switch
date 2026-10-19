@@ -113,10 +113,11 @@ func (r *Runner) Nft(ctx context.Context, ns, script string) error {
 
 // Process is a background program the topology started; Down stops it.
 type Process struct {
-	Name string
-	Cmd  *exec.Cmd
-	done chan struct{}
-	err  error
+	Name    string
+	Cmd     *exec.Cmd
+	done    chan struct{}
+	err     error
+	logPath string
 }
 
 // Done is closed when the process exits.
@@ -150,7 +151,7 @@ func StartLogged(ctx context.Context, name, logPath, ready string, timeout time.
 		logFile.Close()
 		return nil, fmt.Errorf("start %s: %w", name, err)
 	}
-	p := &Process{Name: name, Cmd: cmd, done: make(chan struct{})}
+	p := &Process{Name: name, Cmd: cmd, done: make(chan struct{}), logPath: logPath}
 	go func() {
 		p.err = cmd.Wait()
 		logFile.Close()

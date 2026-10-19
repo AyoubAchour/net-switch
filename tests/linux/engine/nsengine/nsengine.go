@@ -11,21 +11,33 @@
 //     `netswitch-engine run --socket <path> --state-dir <dir>`, with the
 //     journal (3.3) in the state dir and the socket mode 0600. The driver
 //     runs it with `ip netns exec`, as it does sing-box.
-//  2. The control socket's framing and messages: hello (version, instance id,
-//     capabilities, appliedRevision), attach{epoch}/renew, start{revision},
-//     apply{revision} acknowledged with appliedRevision, stop.
-//  3. start's revision carrying everything engine.Config has: lines by
-//     interface name in priority order, pins by identity (engine.App.Key:
-//     "snap:", "flatpak:", "appimage:" or a path), combining shares, the
-//     blocked set, IPv6, and lanes.
-//  4. flows{cursor} with id, app {path, id}, pid, protocol, source,
-//     destination, selected lane, physical line, revision, bytes; totals.
-//  5. closeFlows{opId, selector, startedBefore?} with the selectors in
-//     engine.Selector, answering {closed, failed, gone}.
-//  6. predict{app}, and stats with the lookup counters (p95 latency, misses,
-//     ambiguous owners) and the combining counter k.
-//  7. Test hooks, only in test builds: drop or delay sock_diag UDP destroy
-//     notifications (5.3), so the 1 s reconciliation bound can be checked.
+//  2. The control socket's framing and messages, with every refusal typed
+//     (engine.Refusal codes: stale-revision, revision-conflict, fenced,
+//     wrong-instance, lapsing, empty-selector):
+//     - hello: version, instance id, capabilities, appliedRevision (history)
+//     and the loaded revision (nil until start);
+//     - attach, answered with the epoch the engine hands out (5.9), fencing
+//     the previous session; renew; a 30 s lease, renewed every 5 s; every
+//     command carrying {instanceId, epoch};
+//     - start{revision} and apply{revision} with the caller's n and hash,
+//     acknowledged with appliedRevision and the apply point;
+//     - stop, graceful and idempotent.
+//  3. A revision carrying everything engine.Config has: lines by interface
+//     name in priority order, pins by identity (engine.App.Key: "snap:",
+//     "flatpak:", "appimage:" or a path), combining shares, the blocked set,
+//     IPv6, and lanes (and a way to point lanes alone).
+//  4. flows{cursor} paged, each flow with id, epoch, start, app {path, id},
+//     pid, protocol, source, destination, selected lane, physical line,
+//     revision and bytes; totals per app and line including closed flows.
+//  5. closeFlows{opId, selector, startedBefore} with the selectors in
+//     engine.Selector, answering {closed, failed, gone}; repeating an opId
+//     returns the recorded result.
+//  6. probe{opId, line, operator} with a quick (TCP) kind; predict{app};
+//     stats with a lookup-latency histogram (fixed buckets), lookup misses,
+//     ambiguous owners and the combining counter k.
+//  7. Test hooks, only in test builds, acknowledged when active: the
+//     "udp-destroy-notifications" fault, dropping or delaying sock_diag UDP
+//     destroy notifications (5.3).
 //  8. Cleanup after a crash: `netswitchctl cleanup --engine --state-dir <dir>`
 //     reading the same journal, as ExecStopPost runs it.
 package nsengine
@@ -66,6 +78,9 @@ func (d *Driver) Kind() harness.EngineKind { return harness.V1 }
 // Prepare records the binary's version and hash, then reports that the
 // driver can't run cases yet.
 func (d *Driver) Prepare(ctx context.Context) error {
+	if _, err := os.Stat(d.exe.Path); err != nil {
+		return err
+	}
 	sum, err := harness.FileSHA256(d.exe.Path)
 	if err != nil {
 		return err
@@ -76,9 +91,6 @@ func (d *Driver) Prepare(ctx context.Context) error {
 		return fmt.Errorf("netswitch-engine version: %w", err)
 	}
 	d.exe.Version = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "netswitch-engine"))
-	if _, err := os.Stat(d.exe.Path); err != nil {
-		return err
-	}
 	return notYet("control protocol")
 }
 
@@ -116,21 +128,14 @@ func (d *Driver) Running() bool { return false }
 // LogPath implements engine.Driver.
 func (d *Driver) LogPath() string { return "" }
 
-// Revision implements engine.V1.
-func (d *Driver) Revision(context.Context) (int64, string, error) { return 0, "", notYet("hello") }
+// Hello implements engine.V1.
+func (d *Driver) Hello(context.Context) (engine.Hello, error) { return engine.Hello{}, notYet("hello") }
 
-// CloseFlowsBefore implements engine.V1.
-func (d *Driver) CloseFlowsBefore(context.Context, string, engine.Selector, int64) (engine.CloseResult, error) {
-	return engine.CloseResult{}, notYet("closeFlows startedBefore")
-}
+// Attach implements engine.V1.
+func (d *Driver) Attach(context.Context) (engine.Controller, error) { return nil, notYet("attach") }
 
-// Predict implements engine.V1.
-func (d *Driver) Predict(context.Context, engine.App) (map[engine.LineID]float64, error) {
-	return nil, notYet("predict")
-}
+// Session implements engine.V1; there's none until the protocol exists.
+func (d *Driver) Session() engine.Controller { return nil }
 
-// Stats implements engine.V1.
-func (d *Driver) Stats(context.Context) (engine.Stats, error) { return engine.Stats{}, notYet("stats") }
-
-// InjectFault implements engine.V1.
-func (d *Driver) InjectFault(context.Context, string) error { return notYet("test hooks") }
+// WaitExit implements engine.V1.
+func (d *Driver) WaitExit(context.Context) error { return notYet("wait for exit") }

@@ -18,6 +18,15 @@ import (
 	"time"
 )
 
+// The modes below hand sockets between processes. Each one that holds a
+// socket before connecting it prints a line
+//
+//	ready socket:<inode> pid:<pid>
+//
+// once the hand-off is complete, then waits for --wait-file. The harness
+// checks which processes hold the socket (and their cgroups) in between, so
+// the connection happens exactly in the state the case describes.
+
 // FDResult is the answer of the modes that connect a socket made elsewhere.
 type FDResult struct {
 	Seen      string  `json:"seen,omitempty"`
@@ -25,6 +34,7 @@ type FDResult struct {
 	ConnectMS float64 `json:"connectMs"`
 	Pid       int     `json:"pid"`
 	Uid       int     `json:"uid"`
+	Inode     uint64  `json:"inode"`
 }
 
 func tcpSocket(v6 bool) (int, error) {
@@ -33,6 +43,20 @@ func tcpSocket(v6 bool) (int, error) {
 		family = syscall.AF_INET6
 	}
 	return syscall.Socket(family, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+}
+
+func inode(fd int) uint64 {
+	var st syscall.Stat_t
+	if syscall.Fstat(fd, &st) != nil {
+		return 0
+	}
+	return st.Ino
+}
+
+// ready announces a held socket, then waits for the go-ahead.
+func ready(fd int, wait string) error {
+	fmt.Printf("ready socket:%d pid:%d\n", inode(fd), os.Getpid())
+	return waitFile(wait, 60*time.Second)
 }
 
 func sockaddr(ap netip.AddrPort) syscall.Sockaddr {
@@ -45,7 +69,7 @@ func sockaddr(ap netip.AddrPort) syscall.Sockaddr {
 // connectFD connects a blocking TCP socket and reads the whoami answer. It
 // takes ownership of fd.
 func connectFD(fd int, to netip.AddrPort, timeout time.Duration) FDResult {
-	r := FDResult{Pid: os.Getpid(), Uid: os.Getuid()}
+	r := FDResult{Pid: os.Getpid(), Uid: os.Getuid(), Inode: inode(fd)}
 	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
 	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
 	start := time.Now()
@@ -79,14 +103,17 @@ func connectFD(fd int, to netip.AddrPort, timeout time.Duration) FDResult {
 	return r
 }
 
-// presocketConnect creates the socket first, waits, then connects it: the
-// socket's cgroup is where the process was when it was created.
+// presocketConnect creates the socket, announces it, waits, then connects
+// it: the socket's cgroup is where the process was when it was created.
 func presocketConnect(to netip.AddrPort, wait string, timeout time.Duration) (any, error) {
+	if wait == "" {
+		return nil, usageError{errors.New("--presocket needs --wait-file")}
+	}
 	fd, err := tcpSocket(to.Addr().Is6())
 	if err != nil {
 		return nil, err
 	}
-	if err := waitFile(wait, 60*time.Second); err != nil {
+	if err := ready(fd, wait); err != nil {
 		syscall.Close(fd)
 		return nil, err
 	}
@@ -97,12 +124,16 @@ func runConnectFD(args []string) (any, error) {
 	fs := flag.NewFlagSet("connect-fd", flag.ContinueOnError)
 	fd := fs.Int("fd", 3, "inherited socket")
 	to := fs.String("to", "", "whoami server ip:port")
+	wait := fs.String("wait-file", "", "connect once this file exists")
 	timeout := fs.Int("timeout", 5000, "ms")
 	if err := parse(fs, args); err != nil {
 		return nil, err
 	}
 	list, err := targets(*to)
 	if err != nil {
+		return nil, err
+	}
+	if err := waitFile(*wait, 60*time.Second); err != nil {
 		return nil, err
 	}
 	return connectFD(*fd, list[0], time.Duration(*timeout)*time.Millisecond), nil
@@ -119,6 +150,7 @@ func runFDPassSend(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	ino := inode(fd)
 	var conn *net.UnixConn
 	deadline := time.Now().Add(15 * time.Second)
 	for {
@@ -138,17 +170,23 @@ func runFDPassSend(args []string) (any, error) {
 		syscall.Close(fd)
 		return nil, err
 	}
-	// From here only the receiver holds the socket.
-	syscall.Close(fd)
-	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	// Only once our copy is closed may the receiver use it.
+	if err := syscall.Close(fd); err != nil {
+		return nil, err
+	}
+	if _, err := conn.Write([]byte("closed\n")); err != nil {
+		return nil, err
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	reply, _ := io.ReadAll(conn)
-	return map[string]any{"sent": true, "reply": strings.TrimSpace(string(reply)), "pid": os.Getpid(), "uid": os.Getuid()}, nil
+	return map[string]any{"sent": true, "inode": ino, "reply": strings.TrimSpace(string(reply)), "pid": os.Getpid(), "uid": os.Getuid()}, nil
 }
 
 func runFDPassRecv(args []string) (any, error) {
 	fs := flag.NewFlagSet("fdpass-recv", flag.ContinueOnError)
 	path := fs.String("unix", "", "socket to listen on")
 	to := fs.String("to", "", "whoami server ip:port")
+	wait := fs.String("wait-file", "", "connect once this file exists")
 	timeout := fs.Int("timeout", 5000, "ms")
 	if err := parse(fs, args); err != nil {
 		return nil, err
@@ -185,16 +223,39 @@ func runFDPassRecv(args []string) (any, error) {
 	if err != nil || len(fds) == 0 {
 		return nil, fmt.Errorf("no socket arrived: %v", err)
 	}
+	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	line, err := readLine(conn)
+	if err != nil || line != "closed" {
+		return nil, fmt.Errorf("the sender never said it closed its copy (%q, %v)", line, err)
+	}
+	if err := ready(fds[0], *wait); err != nil {
+		return nil, err
+	}
 	r := connectFD(fds[0], list[0], time.Duration(*timeout)*time.Millisecond)
 	_, _ = conn.Write([]byte("done"))
 	return r, nil
 }
 
+func readLine(conn net.Conn) (string, error) {
+	var b [1]byte
+	var line []byte
+	for {
+		if _, err := conn.Read(b[:]); err != nil {
+			return string(line), err
+		}
+		if b[0] == '\n' {
+			return string(line), nil
+		}
+		line = append(line, b[0])
+	}
+}
+
 func runShareExec(args []string) (any, error) {
 	fs := flag.NewFlagSet("share-exec", flag.ContinueOnError)
 	to := fs.String("to", "", "whoami server ip:port")
-	child := fs.String("child", "", "program to start; it's run as <child> app connect-fd --fd 3 --to <to>")
+	child := fs.String("child", "", "program to start; it's run as <child> app connect-fd --fd 3 --to <to> --wait-file <wait>")
 	keep := fs.Bool("keep", true, "keep our copy of the socket open while the child connects")
+	wait := fs.String("wait-file", "", "the child connects once this file exists")
 	if err := parse(fs, args); err != nil {
 		return nil, err
 	}
@@ -202,30 +263,40 @@ func runShareExec(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if *child == "" {
-		return nil, usageError{errors.New("--child is required")}
+	if *child == "" || *wait == "" {
+		return nil, usageError{errors.New("--child and --wait-file are required")}
 	}
 	fd, err := tcpSocket(list[0].Addr().Is6())
 	if err != nil {
 		return nil, err
 	}
+	ino := inode(fd)
 	f := os.NewFile(uintptr(fd), "socket")
-	defer f.Close()
-	cmd := exec.Command(*child, "app", "connect-fd", "--fd", "3", "--to", list[0].String())
+	cmd := exec.Command(*child, "app", "connect-fd", "--fd", "3", "--to", list[0].String(), "--wait-file", *wait)
 	cmd.ExtraFiles = []*os.File{f}
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
+		f.Close()
 		return nil, err
 	}
+	// The child holds the socket from its start; drop ours first if asked.
 	if !*keep {
 		f.Close()
 	}
-	if err := cmd.Wait(); err != nil {
+	fmt.Printf("ready socket:%d pid:%d child:%d keep:%v\n", ino, os.Getpid(), cmd.Process.Pid, *keep)
+	err = cmd.Wait()
+	f.Close()
+	if err != nil {
 		return nil, fmt.Errorf("child: %w", err)
 	}
-	return json.RawMessage(bytes.TrimSpace(out.Bytes())), nil
+	return json.RawMessage(lastLine(out.Bytes())), nil
+}
+
+func lastLine(b []byte) []byte {
+	lines := bytes.Split(bytes.TrimSpace(b), []byte("\n"))
+	return bytes.TrimSpace(lines[len(lines)-1])
 }
 
 func runSpawn(args []string) (any, error) {
@@ -243,5 +314,5 @@ func runSpawn(args []string) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("child: %w", err)
 	}
-	return json.RawMessage(bytes.TrimSpace(out)), nil
+	return json.RawMessage(lastLine(out)), nil
 }

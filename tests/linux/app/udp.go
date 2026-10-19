@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -370,15 +371,20 @@ func runSTUN(args []string) (any, error) {
 		if err != nil {
 			return nil, usageError{err}
 		}
+		// The acknowledgement and the poke arrive in either order; wait for
+		// each on its own, resending the request while either is missing.
 		tok := token()
 		deadline := time.Now().Add(time.Duration(*wait) * time.Millisecond)
-		for try := 0; try < 3 && !r.Poked && time.Now().Before(deadline); try++ {
+		for try := 0; try < 3 && !(r.Acked && r.Poked) && time.Now().Before(deadline); try++ {
 			if _, err := conn.WriteToUDPAddrPort([]byte("poke "+tok), pokeAt); err != nil {
 				r.Errors["poke"] = Code(err)
 				break
 			}
 			step := time.Now().Add(time.Duration(*wait/3) * time.Millisecond)
-			for !r.Poked && time.Now().Before(step) {
+			if step.After(deadline) {
+				step = deadline
+			}
+			for !(r.Acked && r.Poked) && time.Now().Before(step) {
 				_ = conn.SetReadDeadline(step)
 				n, from, err := conn.ReadFromUDPAddrPort(buf)
 				if err != nil {
@@ -395,5 +401,204 @@ func runSTUN(args []string) (any, error) {
 			}
 		}
 	}
+	return r, nil
+}
+
+// BurstReply is one answered first datagram.
+type BurstReply struct {
+	Index int    `json:"i"`    // which destination it was sent to
+	From  string `json:"from"` // the reply's source as the app saw it
+	Seen  string `json:"seen"` // the source the server saw
+}
+
+// BurstResult is the udpburst mode's answer.
+type BurstResult struct {
+	Token      string         `json:"token"`
+	LocalPort  int            `json:"localPort"`
+	Sent       int            `json:"sent"`
+	SpreadMS   float64        `json:"spreadMs"` // from the first send to the last
+	To         []string       `json:"to"`
+	Replies    []BurstReply   `json:"replies"`
+	SendErrors map[string]int `json:"sendErrors"`
+}
+
+// runUDPBurst sends the first datagram to every destination at once from one
+// socket: one goroutine per destination, released together, so they reach
+// the engine while it's still deciding the new session.
+func runUDPBurst(args []string) (any, error) {
+	fs := flag.NewFlagSet("udpburst", flag.ContinueOnError)
+	to := fs.String("to", "", "echo servers ip:port,...")
+	wait := fs.Int("wait", 3000, "ms to wait for the replies")
+	if err := parse(fs, args); err != nil {
+		return nil, err
+	}
+	list, err := targets(*to)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := udpSocket(list[0].Addr().Is6(), 0, false)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	r := BurstResult{Token: token(), LocalPort: conn.LocalAddr().(*net.UDPAddr).Port, SendErrors: map[string]int{}, Replies: []BurstReply{}}
+	for _, t := range list {
+		r.To = append(r.To, t.String())
+	}
+	var mu sync.Mutex
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 65536)
+		for {
+			n, from, err := conn.ReadFromUDPAddrPort(buf)
+			if err != nil {
+				return
+			}
+			seen, body, err := wire.ParseEchoReply(buf[:n])
+			if err != nil {
+				continue
+			}
+			fields := strings.Split(strings.TrimSpace(string(body)), ":")
+			if len(fields) != 4 || fields[0] != "T" || fields[1] != r.Token {
+				continue
+			}
+			var i int
+			if _, err := fmt.Sscan(fields[3], &i); err != nil {
+				continue
+			}
+			mu.Lock()
+			r.Replies = append(r.Replies, BurstReply{Index: i, From: netip.AddrPortFrom(from.Addr().Unmap(), from.Port()).String(), Seen: seen.String()})
+			mu.Unlock()
+		}
+	}()
+	var first, last atomic.Int64
+	first.Store(1 << 62)
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, target := range list {
+		msg := payload(r.Token, 0, i, 0)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-release
+			now := time.Now().UnixMicro()
+			_, err := conn.WriteToUDPAddrPort(msg, target)
+			for {
+				if old := first.Load(); now >= old || first.CompareAndSwap(old, now) {
+					break
+				}
+			}
+			for {
+				if old := last.Load(); now <= old || last.CompareAndSwap(old, now) {
+					break
+				}
+			}
+			mu.Lock()
+			r.Sent++
+			if err != nil {
+				r.SendErrors[Code(err)]++
+			}
+			mu.Unlock()
+		}()
+	}
+	time.Sleep(50 * time.Millisecond) // every sender is parked on the release
+	close(release)
+	wg.Wait()
+	r.SpreadMS = round(float64(last.Load()-first.Load()) / 1000)
+	deadline := time.Now().Add(time.Duration(*wait) * time.Millisecond)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		got := len(r.Replies)
+		mu.Unlock()
+		if got >= len(list) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	_ = conn.Close()
+	<-done
+	return r, nil
+}
+
+// FloodResult is the udpflood mode's answer.
+type FloodResult struct {
+	Sockets    int            `json:"sockets"`
+	Opened     int            `json:"opened"`
+	Answered   int            `json:"answered"`
+	Refused    int            `json:"refused"`
+	Silent     int            `json:"silent"`
+	OpenErrors map[string]int `json:"openErrors"`
+	SendErrors map[string]int `json:"sendErrors"`
+}
+
+// runUDPFlood opens many UDP sockets (each a new session to the engine), sends
+// one datagram on each, then sees which are answered, refused (ICMP
+// unreachable) or ignored. All sockets stay open until the end.
+func runUDPFlood(args []string) (any, error) {
+	fs := flag.NewFlagSet("udpflood", flag.ContinueOnError)
+	to := fs.String("to", "", "echo servers ip:port,...; socket i uses server i mod n")
+	sockets := fs.Int("sockets", 1000, "sockets")
+	rate := fs.Int("rate", 2000, "first datagrams per second")
+	timeout := fs.Int("timeout", 3000, "ms to wait for answers after the last datagram")
+	if err := parse(fs, args); err != nil {
+		return nil, err
+	}
+	list, err := targets(*to)
+	if err != nil {
+		return nil, err
+	}
+	r := FloodResult{Sockets: *sockets, OpenErrors: map[string]int{}, SendErrors: map[string]int{}}
+	tok := token()
+	var conns []net.Conn
+	for i := range *sockets {
+		c, err := net.Dial("udp", list[i%len(list)].String())
+		if err != nil {
+			r.OpenErrors[Code(err)]++
+			continue
+		}
+		conns = append(conns, c)
+	}
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	r.Opened = len(conns)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sending := time.Duration(len(conns)) * time.Second / time.Duration(max(1, *rate))
+	deadline := time.Now().Add(sending + time.Duration(*timeout)*time.Millisecond)
+	tick := time.Second / time.Duration(max(1, *rate))
+	next := time.Now()
+	for i, c := range conns {
+		if wait := time.Until(next); wait > 0 {
+			time.Sleep(wait)
+		}
+		next = next.Add(tick)
+		if _, err := c.Write(payload(tok, 0, i, 0)); err != nil {
+			mu.Lock()
+			r.SendErrors[Code(err)]++
+			mu.Unlock()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 2048)
+			_ = c.SetReadDeadline(deadline)
+			_, err := c.Read(buf)
+			mu.Lock()
+			defer mu.Unlock()
+			switch Code(err) {
+			case "":
+				r.Answered++
+			case "ECONNREFUSED":
+				r.Refused++
+			default:
+				r.Silent++
+			}
+		}()
+	}
+	wg.Wait()
 	return r, nil
 }

@@ -13,32 +13,39 @@ import (
 
 func TestDecide(t *testing.T) {
 	cases := []struct {
-		label         Label
-		kind          EngineKind
-		harnessErr    bool
-		checks, fails int
-		want          Outcome
+		label      Label
+		kind       EngineKind
+		harnessErr bool
+		tally      Tally
+		want       Outcome
 	}{
-		{Parity, Baseline, false, 3, 0, Pass},
-		{Parity, Baseline, false, 3, 1, Fail},
-		{Parity, V1, false, 3, 1, Fail},
-		{Parity, Baseline, true, 3, 0, Error},
-		{Parity, Baseline, false, 0, 0, Error},
-		{BaselineDefect, Baseline, false, 2, 1, KnownDefect},
-		{BaselineDefect, Baseline, false, 2, 0, NotReproduced},
-		{BaselineDefect, Baseline, true, 2, 1, Error},
-		{BaselineDefect, V1, false, 2, 0, Pass},
-		{BaselineDefect, V1, false, 2, 1, Fail},
-		{Requires10, Baseline, false, 0, 0, NotRun},
-		{Requires10, Baseline, true, 0, 0, NotRun},
-		{Requires10, V1, false, 1, 0, Pass},
-		{Requires10, V1, false, 0, 0, Error},
-		{Requires10, V1, false, 1, 1, Fail},
+		{Parity, Baseline, false, Tally{Checks: 3}, Pass},
+		{Parity, Baseline, false, Tally{Checks: 3, Failed: 1}, Fail},
+		{Parity, V1, false, Tally{Checks: 3, Failed: 1}, Fail},
+		{Parity, Baseline, true, Tally{Checks: 3}, Error},
+		{Parity, Baseline, false, Tally{}, Error},
+		{Parity, Baseline, false, Tally{Checks: 1, Expects: 1}, Error},
+		// The defect reproduces and every mandatory check passes.
+		{BaselineDefect, Baseline, false, Tally{Checks: 2, Expects: 1, ExpectFailed: 1}, KnownDefect},
+		// A failed prerequisite or invariant is never waived.
+		{BaselineDefect, Baseline, false, Tally{Checks: 2, Failed: 1, Expects: 1, ExpectFailed: 1}, Fail},
+		{BaselineDefect, Baseline, false, Tally{Checks: 2, Failed: 1}, Fail},
+		{BaselineDefect, Baseline, false, Tally{Checks: 2, Expects: 1}, NotReproduced},
+		{BaselineDefect, Baseline, false, Tally{Checks: 2}, Error},
+		{BaselineDefect, Baseline, false, Tally{Expects: 2, ExpectFailed: 2}, Error},
+		{BaselineDefect, Baseline, true, Tally{Expects: 1, ExpectFailed: 1}, Error},
+		{BaselineDefect, V1, false, Tally{Checks: 2, Expects: 1}, Pass},
+		{BaselineDefect, V1, false, Tally{Checks: 2, Expects: 1, ExpectFailed: 1}, Fail},
+		{Requires10, Baseline, false, Tally{}, NotRun},
+		{Requires10, Baseline, true, Tally{}, NotRun},
+		{Requires10, V1, false, Tally{Checks: 1}, Pass},
+		{Requires10, V1, false, Tally{}, Error},
+		{Requires10, V1, false, Tally{Checks: 1, Failed: 1}, Fail},
 	}
 	for _, c := range cases {
-		got := Decide(c.label, c.kind, c.harnessErr, c.checks, c.fails)
+		got, _ := Decide(c.label, c.kind, c.harnessErr, c.tally)
 		if got != c.want {
-			t.Errorf("Decide(%s, %s, err=%v, %d checks, %d failed) = %s, want %s", c.label, c.kind, c.harnessErr, c.checks, c.fails, got, c.want)
+			t.Errorf("Decide(%s, %s, err=%v, %+v) = %s, want %s", c.label, c.kind, c.harnessErr, c.tally, got, c.want)
 		}
 	}
 	for _, o := range []Outcome{Fail, NotReproduced, Error} {
@@ -55,7 +62,11 @@ func TestDecide(t *testing.T) {
 
 func TestValidate(t *testing.T) {
 	ok := func(*T) {}
-	if err := Validate([]*Case{{ID: "a.b-c", Title: "x", Label: Parity, Run: ok}}); err != nil {
+	good := []*Case{
+		{ID: "a.b-c", Title: "x", Label: Parity, Run: ok},
+		{ID: "d", Title: "x", Label: BaselineDefect, Defect: "the freeze", Run: ok},
+	}
+	if err := Validate(good); err != nil {
 		t.Fatal(err)
 	}
 	bad := [][]*Case{
@@ -63,6 +74,8 @@ func TestValidate(t *testing.T) {
 		{{ID: "a", Title: "x", Label: "flaky", Run: ok}},
 		{{ID: "a", Title: "x", Label: Parity, Run: ok}, {ID: "a", Title: "y", Label: Parity, Run: ok}},
 		{{ID: "a", Label: Parity, Run: ok}},
+		{{ID: "a", Title: "x", Label: BaselineDefect, Run: ok}},
+		{{ID: "a", Title: "x", Label: Parity, Defect: "named", Run: ok}},
 	}
 	for i, cases := range bad {
 		if Validate(cases) == nil {
@@ -97,6 +110,10 @@ func outcomes(r *Report) map[string]Outcome {
 	return m
 }
 
+func defect(id string, run func(*T)) *Case {
+	return &Case{ID: id, Title: id, Label: BaselineDefect, Defect: "a known defect", Run: run}
+}
+
 func TestRunOutcomes(t *testing.T) {
 	var order []string
 	cases := []*Case{
@@ -105,13 +122,29 @@ func TestRunOutcomes(t *testing.T) {
 			t.Require(false, "stops here")
 			t.Check(true, "never reached")
 		}},
-		{ID: "defect", Title: "d", Label: BaselineDefect, Run: func(t *T) { t.Check(false, "the 60 s freeze") }},
-		{ID: "undetected", Title: "u", Label: BaselineDefect, Run: func(t *T) { t.Check(true, "no freeze seen") }},
+		defect("reproduced", func(t *T) {
+			t.Require(true, "the stream was up first")
+			t.Expect(false, "the 60 s freeze")
+			t.Check(true, "the other lines were fine")
+		}),
+		// The review's case: a prerequisite fails before the defect assertion.
+		defect("prerequisite-failed", func(t *T) {
+			t.Require(false, "bravo's first stream never used line b")
+			t.Expect(false, "never reached")
+		}),
+		defect("unrelated-failure", func(t *T) {
+			t.Expect(false, "the defect")
+			t.Check(false, "an invariant broke too")
+		}),
+		defect("undetected", func(t *T) { t.Expect(true, "no freeze seen") }),
+		defect("two-assertions", func(t *T) { t.Expect(false, "one"); t.Expect(false, "two") }),
+		defect("no-assertion", func(t *T) { t.Check(true, "only a prerequisite") }),
+		{ID: "parity-expect", Title: "x", Label: Parity, Run: func(t *T) { t.Expect(false, "not allowed here") }},
 		{ID: "later", Title: "l", Label: Requires10, Run: func(t *T) { panic("must not run on the baseline") }},
-		{ID: "broken", Title: "b", Label: BaselineDefect, Run: func(t *T) {
-			t.Check(false, "looks like the defect")
+		defect("broken", func(t *T) {
+			t.Expect(false, "looks like the defect")
 			t.Fatalf("but the namespace never came up")
-		}},
+		}),
 		{ID: "panics", Title: "x", Label: Parity, Run: func(t *T) { panic("boom") }},
 		{ID: "empty", Title: "e", Label: Parity, Run: func(t *T) {}},
 		{ID: "cleanups", Title: "c", Label: Parity, Run: func(t *T) {
@@ -122,8 +155,10 @@ func TestRunOutcomes(t *testing.T) {
 	}
 	report := run(t, Baseline, cases...)
 	want := map[string]Outcome{
-		"pass": Pass, "fail": Fail, "defect": KnownDefect, "undetected": NotReproduced,
-		"later": NotRun, "broken": Error, "panics": Error, "empty": Error, "cleanups": Error,
+		"pass": Pass, "fail": Fail, "reproduced": KnownDefect, "prerequisite-failed": Fail,
+		"unrelated-failure": Fail, "undetected": NotReproduced, "two-assertions": Error,
+		"no-assertion": Error, "parity-expect": Error, "later": NotRun, "broken": Error,
+		"panics": Error, "empty": Error, "cleanups": Error,
 	}
 	got := outcomes(report)
 	for id, o := range want {
@@ -141,19 +176,22 @@ func TestRunOutcomes(t *testing.T) {
 		if c.ID == "fail" && len(c.Checks) != 1 {
 			t.Errorf("Require must stop the case; got %d checks", len(c.Checks))
 		}
+		if c.ID == "prerequisite-failed" && c.Detail() != "bravo's first stream never used line b" {
+			t.Errorf("the failed prerequisite must be the reported detail, got %q", c.Detail())
+		}
 	}
 }
 
 func TestBaselineDefectsKeepJobGreen(t *testing.T) {
 	report := run(t, Baseline,
 		&Case{ID: "p", Title: "p", Label: Parity, Run: func(t *T) { t.Check(true, "ok") }},
-		&Case{ID: "d", Title: "d", Label: BaselineDefect, Run: func(t *T) { t.Check(false, "defect") }},
+		defect("d", func(t *T) { t.Check(true, "prerequisite"); t.Expect(false, "defect") }),
 		&Case{ID: "r", Title: "r", Label: Requires10, Run: func(t *T) {}},
 	)
 	if report.JobFailed {
 		t.Fatalf("parity passes, a reproduced defect and a 1.0-only case must leave the job green: %+v", report.Totals)
 	}
-	v1 := run(t, V1, &Case{ID: "d", Title: "d", Label: BaselineDefect, Run: func(t *T) { t.Check(false, "defect") }})
+	v1 := run(t, V1, defect("d", func(t *T) { t.Check(true, "prerequisite"); t.Expect(false, "defect") }))
 	if !v1.JobFailed {
 		t.Fatal("a baseline defect must fail the job on 1.0")
 	}
@@ -166,6 +204,34 @@ func TestTimeout(t *testing.T) {
 	}})
 	if got := report.Cases[0].Outcome; got != Error || !strings.Contains(report.Cases[0].Error, "timed out") {
 		t.Fatalf("got %s (%s), want a timeout error", got, report.Cases[0].Error)
+	}
+	if len(report.Problems) != 0 {
+		t.Fatal("a case that stops when it times out mustn't abort the run")
+	}
+}
+
+func TestStuckCaseAbortsRun(t *testing.T) {
+	grace, cleanup := timeoutGrace, cleanupTimeout
+	timeoutGrace, cleanupTimeout = 50*time.Millisecond, 50*time.Millisecond
+	defer func() { timeoutGrace, cleanupTimeout = grace, cleanup }()
+	block := make(chan struct{})
+	defer close(block)
+	report := run(t, Baseline,
+		&Case{ID: "stuck", Title: "s", Label: Parity, Timeout: 20 * time.Millisecond, Run: func(t *T) {
+			t.Check(true, "started")
+			<-block // ignores its context
+		}},
+		&Case{ID: "next", Title: "n", Label: Parity, Run: func(t *T) { t.Check(true, "ok") }},
+	)
+	if len(report.Cases) != 1 || len(report.Problems) == 0 || !report.JobFailed {
+		t.Fatalf("a case that won't stop must abort the run: %d cases, problems %v", len(report.Cases), report.Problems)
+	}
+	stuckCleanup := run(t, Baseline, &Case{ID: "c", Title: "c", Label: Parity, Run: func(t *T) {
+		t.Check(true, "ran")
+		t.Cleanup(func() { <-block })
+	}}, &Case{ID: "next", Title: "n", Label: Parity, Run: func(t *T) { t.Check(true, "ok") }})
+	if len(stuckCleanup.Cases) != 1 || stuckCleanup.Cases[0].Outcome != Error || len(stuckCleanup.Problems) == 0 {
+		t.Fatalf("a cleanup that won't finish must fail the case and abort the run: %+v", stuckCleanup.Problems)
 	}
 }
 

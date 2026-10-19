@@ -16,14 +16,21 @@ import (
 // DefaultTimeout bounds a case that doesn't set its own.
 const DefaultTimeout = 120 * time.Second
 
-// After a case times out, it gets this long to notice before the run moves on.
-const timeoutGrace = 15 * time.Second
+// After a case times out, it gets this long to notice before the run gives up
+// on it; each cleanup gets cleanupTimeout. Variables so tests can shorten them.
+var (
+	timeoutGrace   = 15 * time.Second
+	cleanupTimeout = 90 * time.Second
+)
 
 // Case is one acceptance case.
 type Case struct {
-	ID      string // stable, dotted: "udp.stun-same-mapping"
-	Title   string
-	Label   Label
+	ID    string // stable, dotted: "udp.stun-same-mapping"
+	Title string
+	Label Label
+	// Defect names the known baseline defect a baseline-defect case's one
+	// Expect assertion checks for. Only baseline-defect cases have one.
+	Defect  string
 	Spec    string // the SYSTEM-DESIGN.md sections it checks, e.g. "5.3"
 	Timeout time.Duration
 	Run     func(t *T)
@@ -44,16 +51,22 @@ func Validate(cases []*Case) error {
 			return fmt.Errorf("case %s has no valid label (%q)", c.ID, c.Label)
 		case c.Title == "" || c.Run == nil:
 			return fmt.Errorf("case %s needs a title and a Run function", c.ID)
+		case c.Label == BaselineDefect && c.Defect == "":
+			return fmt.Errorf("baseline-defect case %s must name its defect", c.ID)
+		case c.Label != BaselineDefect && c.Defect != "":
+			return fmt.Errorf("case %s names a defect but isn't labelled baseline-defect", c.ID)
 		}
 		seen[c.ID] = true
 	}
 	return nil
 }
 
-// Check is one behavioural check a case made.
+// Check is one assertion a case made.
 type Check struct {
 	OK      bool   `json:"ok"`
 	Message string `json:"message"`
+	// Defect marks the baseline-defect case's one Expect assertion.
+	Defect bool `json:"defect,omitempty"`
 }
 
 // T is a running case. Like testing.T, Require and Fatalf stop the case and
@@ -94,9 +107,9 @@ func (t *T) write(prefix, text string) {
 	defer t.mu.Unlock()
 	stamp := time.Now().UTC().Format("15:04:05.000")
 	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
-		fmt.Fprintf(t.console, "    %-5s %s\n", prefix, line)
+		fmt.Fprintf(t.console, "    %-6s %s\n", prefix, line)
 		if t.log != nil {
-			fmt.Fprintf(t.log, "%s %-5s %s\n", stamp, prefix, line)
+			fmt.Fprintf(t.log, "%s %-6s %s\n", stamp, prefix, line)
 		}
 	}
 }
@@ -113,7 +126,8 @@ func (t *T) Note(format string, args ...any) {
 	t.write("note", text)
 }
 
-// Check records a behavioural check and reports whether it passed.
+// Check records a mandatory assertion and reports whether it passed. A failed
+// check fails the case on every engine and under every label.
 func (t *T) Check(ok bool, format string, args ...any) bool {
 	text := fmt.Sprintf(format, args...)
 	t.mu.Lock()
@@ -127,24 +141,37 @@ func (t *T) Check(ok bool, format string, args ...any) bool {
 	return ok
 }
 
-// Require is Check, and stops the case when the check fails. Use it when the
-// rest of the case depends on this check.
+// Require is Check, and stops the case when the check fails. Use it for
+// prerequisites the rest of the case depends on.
 func (t *T) Require(ok bool, format string, args ...any) {
 	if !t.Check(ok, format, args...) {
 		runtime.Goexit()
 	}
 }
 
+// Expect is a baseline-defect case's one defect assertion: what 1.0 must do
+// and the baseline is known not to. It doesn't stop the case, so mandatory
+// checks after it still run.
+func (t *T) Expect(ok bool, format string, args ...any) bool {
+	text := fmt.Sprintf(format, args...)
+	t.mu.Lock()
+	t.checks = append(t.checks, Check{OK: ok, Message: text, Defect: true})
+	t.mu.Unlock()
+	switch {
+	case ok:
+		t.write("ok", text)
+	case t.kind == Baseline && t.c.Label == BaselineDefect:
+		t.write("defect", text)
+	default:
+		t.write("FAIL", text)
+	}
+	return ok
+}
+
 // Fatalf records that the harness couldn't do its job and stops the case. It
 // fails the run whatever the case's label.
 func (t *T) Fatalf(format string, args ...any) {
-	text := fmt.Sprintf(format, args...)
-	t.mu.Lock()
-	if t.harnessErr == "" {
-		t.harnessErr = text
-	}
-	t.mu.Unlock()
-	t.write("ERROR", text)
+	t.markError(fmt.Sprintf(format, args...))
 	runtime.Goexit()
 }
 
@@ -182,20 +209,25 @@ type Options struct {
 	Progress func(*Report)
 }
 
-// Run runs the cases in order and returns the report.
+// Run runs the cases in order and returns the report. A case or cleanup that
+// won't stop aborts the run: whatever it's still doing would corrupt the next
+// case.
 func Run(ctx context.Context, cases []*Case, report *Report, opts Options) *Report {
 	if opts.Console == nil {
 		opts.Console = os.Stdout
 	}
 	report.Kind = opts.Kind
-	for _, c := range cases {
-		result := runCase(ctx, c, opts)
+	for i, c := range cases {
+		result, stuck := runCase(ctx, c, opts)
 		report.Cases = append(report.Cases, result)
+		if stuck != "" {
+			report.Fail("run aborted after %s, with %d cases not run: %s", c.ID, len(cases)-i-1, stuck)
+		}
 		report.finish()
 		if opts.Progress != nil {
 			opts.Progress(report)
 		}
-		if ctx.Err() != nil {
+		if stuck != "" || ctx.Err() != nil {
 			break
 		}
 	}
@@ -203,19 +235,18 @@ func Run(ctx context.Context, cases []*Case, report *Report, opts Options) *Repo
 	return report
 }
 
-func runCase(parent context.Context, c *Case, opts Options) CaseResult {
-	result := CaseResult{ID: c.ID, Title: c.Title, Label: c.Label, Spec: c.Spec}
+func runCase(parent context.Context, c *Case, opts Options) (CaseResult, string) {
+	result := CaseResult{ID: c.ID, Title: c.Title, Label: c.Label, Defect: c.Defect, Spec: c.Spec}
 	console := opts.Console
 	if c.Label == Requires10 && opts.Kind == Baseline {
 		result.Outcome = NotRun
-		fmt.Fprintf(console, "--- SKIP  %s [%s] %s: %s\n", c.ID, c.Label, c.Title, Explain(NotRun))
-		return result
+		fmt.Fprintf(console, "--- SKIP   %s [%s] %s: %s\n", c.ID, c.Label, c.Title, Explain(NotRun))
+		return result, ""
 	}
 	dir := filepath.Join(opts.OutDir, "cases", c.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		result.Outcome = Error
-		result.Error = err.Error()
-		return result
+		result.Outcome, result.Error = Error, err.Error()
+		return result, ""
 	}
 	timeout := c.Timeout
 	if timeout <= 0 {
@@ -225,9 +256,8 @@ func runCase(parent context.Context, c *Case, opts Options) CaseResult {
 	defer cancel()
 	log, err := os.Create(filepath.Join(dir, "case.log"))
 	if err != nil {
-		result.Outcome = Error
-		result.Error = err.Error()
-		return result
+		result.Outcome, result.Error = Error, err.Error()
+		return result, ""
 	}
 	defer log.Close()
 	t := &T{ctx: ctx, kind: opts.Kind, c: c, dir: dir, console: console, log: log}
@@ -235,9 +265,13 @@ func runCase(parent context.Context, c *Case, opts Options) CaseResult {
 	if opts.GitHub {
 		fmt.Fprintf(console, "::group::%s [%s] %s\n", c.ID, c.Label, c.Title)
 	} else {
-		fmt.Fprintf(console, "=== RUN   %s [%s] %s\n", c.ID, c.Label, c.Title)
+		fmt.Fprintf(console, "=== RUN    %s [%s] %s\n", c.ID, c.Label, c.Title)
+	}
+	if c.Defect != "" {
+		t.write("", "known baseline defect: "+c.Defect)
 	}
 	started := time.Now()
+	var stuck []string
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -258,11 +292,12 @@ func runCase(parent context.Context, c *Case, opts Options) CaseResult {
 		select {
 		case <-done:
 		case <-time.After(timeoutGrace):
-			t.markError("the case did not stop after its timeout; continuing without it")
+			t.markError("the case did not stop after its timeout")
+			stuck = append(stuck, "the case did not stop after its timeout")
 		}
 	}
 	// Cleanups and After run with a fresh deadline: the case's may be spent.
-	cleanupCtx, cleanupCancel := context.WithTimeout(parent, 60*time.Second)
+	cleanupCtx, cleanupCancel := context.WithTimeout(parent, cleanupTimeout)
 	defer cleanupCancel()
 	t.mu.Lock()
 	cleanups := t.cleanups
@@ -271,10 +306,14 @@ func runCase(parent context.Context, c *Case, opts Options) CaseResult {
 	t.mu.Unlock()
 	onPanic := func(p any) { t.markError(fmt.Sprintf("panic in cleanup: %v", p)) }
 	for i := len(cleanups) - 1; i >= 0; i-- {
-		runIsolated(cleanups[i], onPanic)
+		if !runIsolated(cleanups[i], onPanic, cleanupTimeout) {
+			t.markError("a cleanup did not finish within " + cleanupTimeout.String())
+			stuck = append(stuck, "a cleanup did not finish")
+		}
 	}
-	if opts.After != nil {
-		runIsolated(func() { opts.After(t) }, onPanic)
+	if opts.After != nil && !runIsolated(func() { opts.After(t) }, onPanic, cleanupTimeout) {
+		t.markError("the after-case step did not finish within " + cleanupTimeout.String())
+		stuck = append(stuck, "the after-case step did not finish")
 	}
 
 	t.mu.Lock()
@@ -282,15 +321,26 @@ func runCase(parent context.Context, c *Case, opts Options) CaseResult {
 	result.Notes = append([]string(nil), t.notes...)
 	result.Error = t.harnessErr
 	t.mu.Unlock()
-	failed := 0
+	var tally Tally
 	for _, check := range result.Checks {
-		if !check.OK {
-			failed++
+		switch {
+		case check.Defect:
+			tally.Expects++
+			if !check.OK {
+				tally.ExpectFailed++
+			}
+		default:
+			tally.Checks++
+			if !check.OK {
+				tally.Failed++
+			}
 		}
 	}
-	result.Outcome = Decide(c.Label, opts.Kind, result.Error != "", len(result.Checks), failed)
-	if result.Outcome == Error && result.Error == "" {
-		result.Error = "the case made no checks"
+	var why string
+	result.Outcome, why = Decide(c.Label, opts.Kind, result.Error != "", tally)
+	if result.Error == "" && why != "" {
+		result.Error = why
+		t.write("ERROR", why)
 	}
 	result.DurationMS = time.Since(started).Milliseconds()
 
@@ -307,15 +357,15 @@ func runCase(parent context.Context, c *Case, opts Options) CaseResult {
 		case result.Outcome.FailsJob():
 			fmt.Fprintf(console, "::error title=%s::%s: %s\n", annotationEscape(c.ID), annotationEscape(Explain(result.Outcome)), annotationEscape(result.Detail()))
 		case result.Outcome == KnownDefect:
-			fmt.Fprintf(console, "::notice title=%s::known baseline defect: %s\n", annotationEscape(c.ID), annotationEscape(result.Detail()))
+			fmt.Fprintf(console, "::notice title=%s::known baseline defect (%s): %s\n", annotationEscape(c.ID), annotationEscape(c.Defect), annotationEscape(result.Detail()))
 		}
 	}
-	return result
+	return result, strings.Join(stuck, "; ")
 }
 
 // runIsolated runs fn in its own goroutine, so a Fatalf (Goexit) or a panic in
-// a cleanup ends only that cleanup.
-func runIsolated(fn func(), onPanic func(any)) {
+// a cleanup ends only that cleanup. It reports whether fn finished in time.
+func runIsolated(fn func(), onPanic func(any), timeout time.Duration) bool {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -326,7 +376,12 @@ func runIsolated(fn func(), onPanic func(any)) {
 		}()
 		fn()
 	}()
-	<-done
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 func annotationEscape(text string) string {

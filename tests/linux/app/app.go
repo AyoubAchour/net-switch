@@ -30,6 +30,9 @@ type mode struct {
 var modes = map[string]mode{
 	"tcp":         {runTCP, "TCP connections to whoami servers"},
 	"reuse":       {runReuse, "TCP connections again and again from one source port"},
+	"tcphold":     {runTCPHold, "many TCP connections held open at once"},
+	"udpburst":    {runUDPBurst, "first datagrams to many destinations at once, from one socket"},
+	"udpflood":    {runUDPFlood, "one datagram on each of thousands of UDP sockets"},
 	"stream":      {runStream, "one long TCP connection, pinging"},
 	"bulk":        {runBulk, "a hashed TCP download or upload"},
 	"http":        {runHTTP, "one HTTP GET; the body is the source the server saw"},
