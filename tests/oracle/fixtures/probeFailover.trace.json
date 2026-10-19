@@ -1,0 +1,5694 @@
+{
+  "version": 1,
+  "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+  "name": "probeFailover",
+  "scenario": {
+    "steps": [
+      {
+        "kind": "tick",
+        "ms": 1000
+      },
+      {
+        "kind": "probes",
+        "value": {
+          "a1": false
+        }
+      },
+      {
+        "kind": "tick",
+        "ms": 30000
+      },
+      {
+        "kind": "http",
+        "method": "GET",
+        "route": "/api/state"
+      },
+      {
+        "kind": "probes",
+        "value": {
+          "a1": 25
+        }
+      },
+      {
+        "kind": "tick",
+        "ms": 11000
+      },
+      {
+        "kind": "http",
+        "method": "GET",
+        "route": "/api/state"
+      }
+    ]
+  },
+  "entries": [
+    {
+      "seq": 0,
+      "direction": "input",
+      "kind": "initial-files",
+      "value": {
+        "settings": {
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "guid": null,
+              "label": "Ethernet",
+              "kind": "wired",
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "guid": null,
+              "label": "Wi-Fi",
+              "kind": "wifi",
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "seq": 1,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/package.json",
+        "ok": true
+      }
+    },
+    {
+      "seq": 2,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 1,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 3,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "mkdir",
+        "file": "/oracle/data",
+        "ok": true
+      }
+    },
+    {
+      "seq": 4,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 2,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 5,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "mkdir",
+        "file": "/oracle/data",
+        "ok": true
+      }
+    },
+    {
+      "seq": 6,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 3,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 7,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/data/settings.json",
+        "ok": true
+      }
+    },
+    {
+      "seq": 8,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 4,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 9,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/data/windows-undo.json",
+        "ok": false,
+        "code": "ENOENT"
+      }
+    },
+    {
+      "seq": 10,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 5,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 11,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "line readings come from PowerShell: the native helper is not built (npm run build:helper)"
+      }
+    },
+    {
+      "seq": 12,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "network readings come from PowerShell and route.exe: the native helper is not built"
+      }
+    },
+    {
+      "seq": 13,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/data/usage.json",
+        "ok": false,
+        "code": "ENOENT"
+      }
+    },
+    {
+      "seq": 14,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 6,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 15,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 16,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 7,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 17,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/server.json.oracle-2.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 18,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 8,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 19,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/server.json",
+        "bytes": 135,
+        "sha256": "52089863a5f54837074069cc1721ef8803356bc7e5a67352e41b0d98809a2556",
+        "text": "{\"port\":47821,\"token\":\"010101010101010101010101010101010101010101010101\",\"pid\":123,\"mode\":\"tun\",\"startedAt\":\"2026-10-19T12:00:00.000Z\"}"
+      }
+    },
+    {
+      "seq": 20,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/server.json.oracle-2.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 21,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 9,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 22,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "started on port 47821 (mode tun, elevated true)"
+      }
+    },
+    {
+      "seq": 23,
+      "direction": "output",
+      "kind": "console",
+      "value": {
+        "text": "Net Switch is running at http://127.0.0.1:47821/#token=010101010101010101010101010101010101010101010101"
+      }
+    },
+    {
+      "seq": 24,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 25,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 10,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 26,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 27,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 11,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 28,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 29,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 12,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 30,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/usage.json.oracle-3.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 31,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 13,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 32,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "routing starting"
+      }
+    },
+    {
+      "seq": 33,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/data/engine.pid",
+        "ok": false,
+        "code": "ENOENT"
+      }
+    },
+    {
+      "seq": 34,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 14,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 35,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/usage.json",
+        "bytes": 112,
+        "sha256": "a63c8aaee00711e913b366a81fcc9f5208e6138067a1ea0b172a53b4c7d04a49",
+        "text": "{\"lines\":{\"a1\":{\"bytes\":0,\"periodStart\":1790812800000},\"b2\":{\"bytes\":0,\"periodStart\":1790812800000}},\"peaks\":{}}"
+      }
+    },
+    {
+      "seq": 36,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/usage.json.oracle-3.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 37,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 15,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 38,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/apps-a1.json.oracle-5.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 39,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 16,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 40,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/apps-a1.json",
+        "bytes": 125,
+        "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+        "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+      }
+    },
+    {
+      "seq": 41,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/apps-a1.json.oracle-5.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 42,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 17,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 43,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/apps-b2.json.oracle-6.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 44,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 18,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 45,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/apps-b2.json",
+        "bytes": 125,
+        "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+        "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+      }
+    },
+    {
+      "seq": 46,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/apps-b2.json.oracle-6.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 47,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 19,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 48,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/share-b2.json.oracle-7.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 49,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 20,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 50,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/share-b2.json",
+        "bytes": 79,
+        "sha256": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476"
+      }
+    },
+    {
+      "seq": 51,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/share-b2.json.oracle-7.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 52,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 21,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 53,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/cut-b2.json.oracle-8.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 54,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 22,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 55,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/cut-b2.json",
+        "bytes": 125,
+        "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+        "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+      }
+    },
+    {
+      "seq": 56,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/cut-b2.json.oracle-8.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 57,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 23,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 58,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readdir",
+        "file": "/oracle/data",
+        "ok": false,
+        "code": "ERR_INVALID_ARG_TYPE"
+      }
+    },
+    {
+      "seq": 59,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 24,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 60,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/engine-config.json",
+        "bytes": 2753,
+        "sha256": "e738c4ac5f352f0ed12443e624cabccf1e5a6a83d8c0eff1e9e135de117fb289",
+        "text": "{\n  \"log\": {\n    \"level\": \"warn\",\n    \"timestamp\": true\n  },\n  \"dns\": {\n    \"servers\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"local\"\n      }\n    ]\n  },\n  \"inbounds\": [\n    {\n      \"type\": \"tun\",\n      \"tag\": \"tun-in\",\n      \"interface_name\": \"NetSwitch\",\n      \"address\": [\n        \"198.18.0.1/30\",\n        \"fdfe:dcba:9876::1/126\"\n      ],\n      \"mtu\": 9000,\n      \"auto_route\": true,\n      \"strict_route\": false,\n      \"route_exclude_address\": [\n        \"10.0.0.0/8\",\n        \"172.16.0.0/12\",\n        \"192.168.0.0/16\",\n        \"169.254.0.0/16\",\n        \"224.0.0.0/4\",\n        \"255.255.255.255/32\",\n        \"fc00::/7\",\n        \"fe80::/10\",\n        \"ff00::/8\"\n      ],\n      \"dns_mode\": \"disabled\",\n      \"stack\": \"gvisor\"\n    }\n  ],\n  \"outbounds\": [\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-a1\",\n      \"bind_interface\": \"Ethernet\"\n    },\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-b2\",\n      \"bind_interface\": \"Wi-Fi\"\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-a1\",\n      \"outbounds\": [\n        \"line-a1\",\n        \"line-b2\"\n      ],\n      \"default\": \"line-a1\",\n      \"interrupt_exist_connections\": false\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-b2\",\n      \"outbounds\": [\n        \"line-b2\",\n        \"line-a1\"\n      ],\n      \"default\": \"line-b2\",\n      \"interrupt_exist_connections\": false\n    }\n  ],\n  \"route\": {\n    \"rules\": [\n      {\n        \"ip_version\": 6,\n        \"action\": \"reject\",\n        \"no_drop\": true\n      },\n      {\n        \"rule_set\": \"cut-b2\",\n        \"action\": \"reject\"\n      },\n      {\n        \"rule_set\": \"apps-a1\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-a1\"\n      },\n      {\n        \"rule_set\": \"apps-b2\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-b2\"\n      },\n      {\n        \"rule_set\": \"share-b2\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-b2\"\n      }\n    ],\n    \"rule_set\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-a1.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"share-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/share-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"cut-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/cut-b2.json\"\n      }\n    ],\n    \"final\": \"lane-a1\",\n    \"auto_detect_interface\": true,\n    \"find_process\": true,\n    \"default_domain_resolver\": \"local\"\n  },\n  \"experimental\": {\n    \"clash_api\": {\n      \"external_controller\": \"127.0.0.1:49000\",\n      \"secret\": \"040404040404040404040404040404040404040404040404\"\n    }\n  }\n}"
+      }
+    },
+    {
+      "seq": 61,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/engine-config.json",
+        "ok": true
+      }
+    },
+    {
+      "seq": 62,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 25,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 63,
+      "direction": "output",
+      "kind": "spawn",
+      "value": {
+        "exe": "/oracle/engine/sing-box.exe",
+        "args": [
+          "run",
+          "-c",
+          "/oracle/data/engine-config.json",
+          "--disable-color"
+        ]
+      }
+    },
+    {
+      "seq": 64,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/engine.pid",
+        "bytes": 3,
+        "sha256": "b3a8e0e1f9ab1bfe3a36f231f676f78bb30a519d2b21e6c530c0eee8ebb4a5d0",
+        "text": "456"
+      }
+    },
+    {
+      "seq": 65,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/engine.pid",
+        "ok": true
+      }
+    },
+    {
+      "seq": 66,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 26,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 67,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/version",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 68,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/version",
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "seq": 69,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 27,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 70,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "routing on"
+      }
+    },
+    {
+      "seq": 71,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/lane-a1",
+        "method": "PUT",
+        "body": {
+          "name": "line-a1"
+        }
+      }
+    },
+    {
+      "seq": 72,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/proxies/lane-a1",
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "seq": 73,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 28,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 74,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 75,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 200,
+        "body": {
+          "delay": 18
+        }
+      }
+    },
+    {
+      "seq": 76,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 29,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 77,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "Ethernet's apps now use Ethernet"
+      }
+    },
+    {
+      "seq": 78,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/lane-b2",
+        "method": "PUT",
+        "body": {
+          "name": "line-b2"
+        }
+      }
+    },
+    {
+      "seq": 79,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/proxies/lane-b2",
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "seq": 80,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 30,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 81,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-b2/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 82,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-b2/delay",
+        "status": 200,
+        "body": {
+          "delay": 18
+        }
+      }
+    },
+    {
+      "seq": 83,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 31,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 84,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "Wi-Fi's apps now use Wi-Fi"
+      }
+    },
+    {
+      "seq": 85,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411201000
+      }
+    },
+    {
+      "seq": 86,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 87,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 32,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 88,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 89,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 33,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 90,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 91,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 92,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 34,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 93,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411201000
+      }
+    },
+    {
+      "seq": 94,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411201000
+      }
+    },
+    {
+      "seq": 95,
+      "direction": "input",
+      "kind": "probes",
+      "value": {
+        "a1": false
+      }
+    },
+    {
+      "seq": 96,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411202000
+      }
+    },
+    {
+      "seq": 97,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 98,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 35,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 99,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 100,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 36,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 101,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 102,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 103,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 37,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 104,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411202000
+      }
+    },
+    {
+      "seq": 105,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411203000
+      }
+    },
+    {
+      "seq": 106,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 107,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 38,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 108,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 109,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 39,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 110,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 111,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 112,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 40,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 113,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411203000
+      }
+    },
+    {
+      "seq": 114,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411204000
+      }
+    },
+    {
+      "seq": 115,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 116,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 41,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 117,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 118,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 42,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 119,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 120,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 121,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 43,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 122,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411204000
+      }
+    },
+    {
+      "seq": 123,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411205000
+      }
+    },
+    {
+      "seq": 124,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 125,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 44,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 126,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411205000
+      }
+    },
+    {
+      "seq": 127,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 128,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 45,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 129,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 130,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 46,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 131,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 132,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 133,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 47,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 134,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411205000
+      }
+    },
+    {
+      "seq": 135,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411206000
+      }
+    },
+    {
+      "seq": 136,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 137,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 48,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 138,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 139,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 49,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 140,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 141,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 142,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 50,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 143,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411206000
+      }
+    },
+    {
+      "seq": 144,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411207000
+      }
+    },
+    {
+      "seq": 145,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 146,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 51,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 147,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 148,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 52,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 149,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 150,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 151,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 53,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 152,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411207000
+      }
+    },
+    {
+      "seq": 153,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411208000
+      }
+    },
+    {
+      "seq": 154,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 155,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 54,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 156,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 157,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 55,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 158,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 159,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 160,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 56,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 161,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411208000
+      }
+    },
+    {
+      "seq": 162,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411209000
+      }
+    },
+    {
+      "seq": 163,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 164,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 57,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 165,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 166,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 58,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 167,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 168,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 169,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 59,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 170,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411209000
+      }
+    },
+    {
+      "seq": 171,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411210000
+      }
+    },
+    {
+      "seq": 172,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 173,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 60,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 174,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411210000
+      }
+    },
+    {
+      "seq": 175,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 176,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 61,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 177,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 178,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 62,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 179,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 180,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 181,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 63,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 182,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411210000
+      }
+    },
+    {
+      "seq": 183,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411211000
+      }
+    },
+    {
+      "seq": 184,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 185,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 64,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 186,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 187,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 65,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 188,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 189,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 190,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 66,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 191,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411211000
+      }
+    },
+    {
+      "seq": 192,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411212000
+      }
+    },
+    {
+      "seq": 193,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 194,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 67,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 195,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 196,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 68,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 197,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 198,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 199,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 69,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 200,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411212000
+      }
+    },
+    {
+      "seq": 201,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411213000
+      }
+    },
+    {
+      "seq": 202,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 203,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 70,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 204,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 205,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 71,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 206,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 207,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 208,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 72,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 209,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411213000
+      }
+    },
+    {
+      "seq": 210,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411214000
+      }
+    },
+    {
+      "seq": 211,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 212,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 73,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 213,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 214,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 74,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 215,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 216,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 217,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 75,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 218,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411214000
+      }
+    },
+    {
+      "seq": 219,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411215000
+      }
+    },
+    {
+      "seq": 220,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 221,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 76,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 222,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411215000
+      }
+    },
+    {
+      "seq": 223,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 224,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 77,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 225,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 226,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 78,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 227,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 228,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 503,
+        "body": {
+          "delay": false
+        }
+      }
+    },
+    {
+      "seq": 229,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 79,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 230,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-b2/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 231,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-b2/delay",
+        "status": 200,
+        "body": {
+          "delay": 18
+        }
+      }
+    },
+    {
+      "seq": 232,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 80,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 233,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 234,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 503,
+        "body": {
+          "delay": false
+        }
+      }
+    },
+    {
+      "seq": 235,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 81,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 236,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 237,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 238,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 82,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 239,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "Ethernet didn't reach the internet in a test"
+      }
+    },
+    {
+      "seq": 240,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411215000
+      }
+    },
+    {
+      "seq": 241,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411216000
+      }
+    },
+    {
+      "seq": 242,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 243,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 83,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 244,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 245,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 84,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 246,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 247,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 248,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 85,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 249,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411216000
+      }
+    },
+    {
+      "seq": 250,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411217000
+      }
+    },
+    {
+      "seq": 251,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 252,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 86,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 253,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 254,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 87,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 255,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 256,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 257,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 88,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 258,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411217000
+      }
+    },
+    {
+      "seq": 259,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411218000
+      }
+    },
+    {
+      "seq": 260,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 261,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 89,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 262,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 263,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 90,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 264,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 265,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 266,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 91,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 267,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411218000
+      }
+    },
+    {
+      "seq": 268,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411219000
+      }
+    },
+    {
+      "seq": 269,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 270,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 92,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 271,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 272,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 93,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 273,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 274,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 275,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 94,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 276,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411219000
+      }
+    },
+    {
+      "seq": 277,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411220000
+      }
+    },
+    {
+      "seq": 278,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 279,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 95,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 280,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411220000
+      }
+    },
+    {
+      "seq": 281,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 282,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 503,
+        "body": {
+          "delay": false
+        }
+      }
+    },
+    {
+      "seq": 283,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 96,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 284,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 285,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 503,
+        "body": {
+          "delay": false
+        }
+      }
+    },
+    {
+      "seq": 286,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 97,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 287,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 288,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 98,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 289,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 290,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 99,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 291,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 292,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 293,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 100,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 294,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411220000
+      }
+    },
+    {
+      "seq": 295,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411221000
+      }
+    },
+    {
+      "seq": 296,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 297,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 101,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 298,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 299,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 102,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 300,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 301,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 302,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 103,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 303,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411221000
+      }
+    },
+    {
+      "seq": 304,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411222000
+      }
+    },
+    {
+      "seq": 305,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 306,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 104,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 307,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 308,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 105,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 309,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 310,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 311,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 106,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 312,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411222000
+      }
+    },
+    {
+      "seq": 313,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411223000
+      }
+    },
+    {
+      "seq": 314,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 315,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 107,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 316,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 317,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 108,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 318,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 319,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 320,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 109,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 321,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411223000
+      }
+    },
+    {
+      "seq": 322,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411224000
+      }
+    },
+    {
+      "seq": 323,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 324,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 110,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 325,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 326,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 111,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 327,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 328,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 329,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 112,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 330,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411224000
+      }
+    },
+    {
+      "seq": 331,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411225000
+      }
+    },
+    {
+      "seq": 332,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 333,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 113,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 334,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411225000
+      }
+    },
+    {
+      "seq": 335,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 336,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 503,
+        "body": {
+          "delay": false
+        }
+      }
+    },
+    {
+      "seq": 337,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 114,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 338,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 339,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 503,
+        "body": {
+          "delay": false
+        }
+      }
+    },
+    {
+      "seq": 340,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 115,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 341,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 342,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 116,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 343,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 344,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 117,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 345,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 346,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 347,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 118,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 348,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411225000
+      }
+    },
+    {
+      "seq": 349,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411226000
+      }
+    },
+    {
+      "seq": 350,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "Ethernet is down (no internet)"
+      }
+    },
+    {
+      "seq": 351,
+      "direction": "output",
+      "kind": "event",
+      "value": {
+        "id": "090909090909",
+        "at": 1792411226000,
+        "kind": "down",
+        "lineId": "a1",
+        "text": "Ethernet is down: it doesn’t reach the internet."
+      }
+    },
+    {
+      "seq": 352,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 353,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 119,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 354,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 355,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 120,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 356,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/lane-a1",
+        "method": "PUT",
+        "body": {
+          "name": "line-b2"
+        }
+      }
+    },
+    {
+      "seq": 357,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/proxies/lane-a1",
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "seq": 358,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 121,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 359,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "Ethernet's apps now use Wi-Fi"
+      }
+    },
+    {
+      "seq": 360,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 361,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 362,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 122,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 363,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411226000
+      }
+    },
+    {
+      "seq": 364,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411227000
+      }
+    },
+    {
+      "seq": 365,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 366,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 123,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 367,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 368,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 124,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 369,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 370,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 371,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 125,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 372,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411227000
+      }
+    },
+    {
+      "seq": 373,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411228000
+      }
+    },
+    {
+      "seq": 374,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 375,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 126,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 376,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 377,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 127,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 378,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 379,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 380,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 128,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 381,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411228000
+      }
+    },
+    {
+      "seq": 382,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411229000
+      }
+    },
+    {
+      "seq": 383,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 384,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 129,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 385,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 386,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 130,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 387,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 388,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 389,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 131,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 390,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411229000
+      }
+    },
+    {
+      "seq": 391,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411230000
+      }
+    },
+    {
+      "seq": 392,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 393,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 132,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 394,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411230000
+      }
+    },
+    {
+      "seq": 395,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 396,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 503,
+        "body": {
+          "delay": false
+        }
+      }
+    },
+    {
+      "seq": 397,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 133,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 398,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 399,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 503,
+        "body": {
+          "delay": false
+        }
+      }
+    },
+    {
+      "seq": 400,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 134,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 401,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 402,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 135,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 403,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 404,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 136,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 405,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-b2/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 406,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-b2/delay",
+        "status": 200,
+        "body": {
+          "delay": 18
+        }
+      }
+    },
+    {
+      "seq": 407,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 137,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 408,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 409,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 410,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 138,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 411,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411230000
+      }
+    },
+    {
+      "seq": 412,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411231000
+      }
+    },
+    {
+      "seq": 413,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 414,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 139,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 415,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 416,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 140,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 417,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 418,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 419,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 141,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 420,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411231000
+      }
+    },
+    {
+      "seq": 421,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411231000
+      }
+    },
+    {
+      "seq": 422,
+      "direction": "input",
+      "kind": "http",
+      "value": {
+        "method": "GET",
+        "route": "/api/state",
+        "headers": {}
+      }
+    },
+    {
+      "seq": 423,
+      "direction": "output",
+      "kind": "api",
+      "value": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": true,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": false,
+            "active": false,
+            "mode": "auto"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": false,
+              "problem": "no internet",
+              "ping": null,
+              "connections": 0,
+              "carrying": false,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Wi-Fi",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            }
+          ],
+          "candidates": [],
+          "apps": [],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411226000,
+              "kind": "down",
+              "lineId": "a1",
+              "text": "Ethernet is down: it doesn’t reach the internet."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": true,
+            "probeTargets": [
+              "1.1.1.1:443",
+              "8.8.8.8:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 424,
+      "direction": "input",
+      "kind": "probes",
+      "value": {
+        "a1": 25
+      }
+    },
+    {
+      "seq": 425,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411232000
+      }
+    },
+    {
+      "seq": 426,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 427,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 142,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 428,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 429,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 143,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 430,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 431,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 432,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 144,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 433,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411232000
+      }
+    },
+    {
+      "seq": 434,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411233000
+      }
+    },
+    {
+      "seq": 435,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 436,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 145,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 437,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 438,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 146,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 439,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 440,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 441,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 147,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 442,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411233000
+      }
+    },
+    {
+      "seq": 443,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411234000
+      }
+    },
+    {
+      "seq": 444,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 445,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 148,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 446,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 447,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 149,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 448,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 449,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 450,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 150,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 451,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411234000
+      }
+    },
+    {
+      "seq": 452,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411235000
+      }
+    },
+    {
+      "seq": 453,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 454,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 151,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 455,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411235000
+      }
+    },
+    {
+      "seq": 456,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 457,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 200,
+        "body": {
+          "delay": 25
+        }
+      }
+    },
+    {
+      "seq": 458,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 152,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 459,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 460,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 200,
+        "body": {
+          "delay": 25
+        }
+      }
+    },
+    {
+      "seq": 461,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 153,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 462,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 463,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 154,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 464,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 465,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 155,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 466,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 467,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 468,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 156,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 469,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411235000
+      }
+    },
+    {
+      "seq": 470,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411236000
+      }
+    },
+    {
+      "seq": 471,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 472,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 157,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 473,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 474,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 158,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 475,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 476,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 477,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 159,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 478,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411236000
+      }
+    },
+    {
+      "seq": 479,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411237000
+      }
+    },
+    {
+      "seq": 480,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 481,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 160,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 482,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 483,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 161,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 484,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 485,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 486,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 162,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 487,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411237000
+      }
+    },
+    {
+      "seq": 488,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411238000
+      }
+    },
+    {
+      "seq": 489,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 490,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 163,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 491,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 492,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 164,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 493,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 494,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 495,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 165,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 496,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411238000
+      }
+    },
+    {
+      "seq": 497,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411239000
+      }
+    },
+    {
+      "seq": 498,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 499,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 166,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 500,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 501,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 167,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 502,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 503,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 504,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 168,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 505,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411239000
+      }
+    },
+    {
+      "seq": 506,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411240000
+      }
+    },
+    {
+      "seq": 507,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 508,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 169,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 509,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411240000
+      }
+    },
+    {
+      "seq": 510,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 511,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 200,
+        "body": {
+          "delay": 25
+        }
+      }
+    },
+    {
+      "seq": 512,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 170,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 513,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 514,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 200,
+        "body": {
+          "delay": 25
+        }
+      }
+    },
+    {
+      "seq": 515,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 171,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 516,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 517,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 172,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 518,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 519,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 173,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 520,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 521,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 522,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 174,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 523,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411240000
+      }
+    },
+    {
+      "seq": 524,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411241000
+      }
+    },
+    {
+      "seq": 525,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "Ethernet is up again"
+      }
+    },
+    {
+      "seq": 526,
+      "direction": "output",
+      "kind": "event",
+      "value": {
+        "id": "0a0a0a0a0a0a",
+        "at": 1792411241000,
+        "kind": "up",
+        "lineId": "a1",
+        "text": "Ethernet is back."
+      }
+    },
+    {
+      "seq": 527,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 528,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 175,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 529,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 530,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 176,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 531,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/lane-a1",
+        "method": "PUT",
+        "body": {
+          "name": "line-a1"
+        }
+      }
+    },
+    {
+      "seq": 532,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/proxies/lane-a1",
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "seq": 533,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 177,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 534,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "Ethernet's apps now use Ethernet"
+      }
+    },
+    {
+      "seq": 535,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 536,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 537,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 178,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 538,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411241000
+      }
+    },
+    {
+      "seq": 539,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411242000
+      }
+    },
+    {
+      "seq": 540,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 541,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 179,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 542,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Wi-Fi",
+        "value": null
+      }
+    },
+    {
+      "seq": 543,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 180,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 544,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/connections",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 545,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/connections",
+        "status": 200,
+        "body": {
+          "connections": []
+        }
+      }
+    },
+    {
+      "seq": 546,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 181,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 547,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411242000
+      }
+    },
+    {
+      "seq": 548,
+      "direction": "input",
+      "kind": "clock-tick",
+      "value": {
+        "now": 1792411242000
+      }
+    },
+    {
+      "seq": 549,
+      "direction": "input",
+      "kind": "http",
+      "value": {
+        "method": "GET",
+        "route": "/api/state",
+        "headers": {}
+      }
+    },
+    {
+      "seq": 550,
+      "direction": "output",
+      "kind": "api",
+      "value": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": true,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": false,
+            "active": false,
+            "mode": "auto"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 25,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Wi-Fi",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            }
+          ],
+          "candidates": [],
+          "apps": [],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411226000,
+              "kind": "down",
+              "lineId": "a1",
+              "text": "Ethernet is down: it doesn’t reach the internet."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411241000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": true,
+            "probeTargets": [
+              "1.1.1.1:443",
+              "8.8.8.8:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    }
+  ]
+}

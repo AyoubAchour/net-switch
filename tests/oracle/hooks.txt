@@ -36,3 +36,8 @@ export const oracleHooks = {
     }
   },
 };
+const pushEvent = events.push;
+events.push = function (...items) {
+  for (const item of items) globalThis.oracleEvent?.(item);
+  return pushEvent.apply(this, items);
+};

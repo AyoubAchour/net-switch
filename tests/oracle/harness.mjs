@@ -12,15 +12,23 @@ const root = new URL('../../', import.meta.url);
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const forbidden = (name) => () => { throw new Error(`Oracle forbids host ${name}`); };
 
-export async function oracle({ initial = {}, mode = 'tun', importOnly = false } = {}) {
+export async function oracle({ initial = {}, mode = 'tun', importOnly = false, trace = null, environment: suppliedEnvironment = {} } = {}) {
   assert.ok(vm.SourceTextModule, 'Run with --experimental-vm-modules');
   const outputs = [];
   const files = new Map([['/oracle/package.json', await readFile(new URL('package.json', root), 'utf8')],
     ['/oracle/data/settings.json', JSON.stringify(initial)]]);
-  const environment = { now: Date.UTC(2026, 9, 19, 12), adapters: [], interfaces: {}, rates: {}, counters: {}, connections: [], policy: 1 };
+  const environment = { now: Date.UTC(2026, 9, 19, 12), adapters: [], interfaces: {}, rates: {}, counters: {}, connections: [], probes: {}, policy: 1 };
+  Object.assign(environment, clone(suppliedEnvironment));
   let sequence = 0;
   let httpHandler;
-  const emit = (kind, value) => outputs.push({ kind, ...clone(value) });
+  const emit = (kind, value) => { outputs.push({ kind, ...clone(value) }); trace?.('output', kind, clone(value)); };
+  let operation = 0;
+  const complete = (kind, value) => {
+    const id = ++operation;
+    trace?.('input', kind, clone(value));
+    trace?.('input', 'completion', { id, kind });
+    return value;
+  };
   const fileWrite = (name, text) => {
     const bytes = Buffer.from(text);
     files.set(name, bytes.toString());
@@ -49,12 +57,27 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
     readdir: async (dir) => [...files.keys()].filter((name) => path.posix.dirname(name) === dir).map(path.posix.basename),
     stat: async (name) => { if (!files.has(name)) throw missing(); return { size: Buffer.byteLength(files.get(name)), mtimeMs: 0 }; },
   };
+  if (trace) {
+    for (const [name, operation] of Object.entries(fs)) {
+      fs[name] = async (...args) => {
+        try {
+          const value = await operation(...args);
+          complete('file-completion', { operation: name, file: args[0], ok: true });
+          return value;
+        } catch (error) {
+          complete('file-completion', { operation: name, file: args[0], ok: false, code: error.code ?? null });
+          throw error;
+        }
+      };
+    }
+  }
   const timers = [];
   class ClockDate extends Date {
     constructor(...args) { super(...(args.length ? args : [environment.now])); }
     static now() { return environment.now; }
   }
   const context = vm.createContext({ Buffer, URL, AbortSignal, Date: ClockDate,
+    oracleEvent: (event) => trace?.('output', 'event', clone(event)),
     structuredClone: (value) => vm.runInContext(`JSON.parse(${JSON.stringify(JSON.stringify(value))})`, context),
     setTimeout: (run, ms) => { const timer = { run, at: environment.now + ms, unref() { return this; } }; timers.push(timer); return timer; },
     clearTimeout: (timer) => { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1); },
@@ -66,9 +89,13 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
     fetch: async (url, options = {}) => {
       const route = new URL(url).pathname;
       emit('engine', { route, method: options.method ?? 'GET', ...(options.body ? { body: JSON.parse(options.body) } : {}) });
-      const body = route === '/connections' ? { connections: environment.connections }
-        : route.endsWith('/delay') ? { delay: 18 } : {};
-      return { ok: true, status: 200, json: async () => clone(body) };
+      const probe = route.endsWith('/delay');
+      const lineId = probe ? decodeURIComponent(route.split('/')[2]).slice(5) : null;
+      const answer = environment.probes[lineId] ?? 18;
+      const status = probe && answer === false ? 503 : 200;
+      const body = route === '/connections' ? { connections: environment.connections } : probe ? { delay: answer } : {};
+      complete(probe ? 'probe-result' : 'engine-reply', { route, status, body });
+      return { ok: status === 200, status, json: async () => clone(body) };
     },
   });
   const socket = () => Object.assign(new EventEmitter(), {
@@ -83,7 +110,7 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
   const platform = {
     appPath: windowsAppPath, engineFileName: 'sing-box.exe', noAppPath: 'C:\\NetSwitch\\no-app-selected.exe',
     tunOptions: () => ({}), requiredEngineFiles: () => [],
-    detectAdapters: async () => clone(environment.adapters), isElevated: async () => true,
+    detectAdapters: async () => complete('adapter-snapshot', clone(environment.adapters)), isElevated: async () => true,
     readDefaultRoutes: async () => Object.values(environment.interfaces).flat().filter((item) => item.family === 'IPv4').map((item) => ({ interfaceAddress: item.address })),
     readMinimizeConnectionsPolicy: async () => environment.policy,
     readMetrics: async () => [{ family: 'IPv4', automatic: true, metric: 25 }],
@@ -102,7 +129,8 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
   const mocks = new Map(Object.entries({
     'node:crypto': { createHash, timingSafeEqual, randomBytes: (size) => Buffer.alloc(size, ++sequence % 256), randomUUID: () => `oracle-${++sequence}` },
     'node:fs/promises': fs,
-    'node:fs': { appendFileSync: fileWrite, createReadStream: forbidden('read stream') },
+    'node:fs': { appendFileSync: fileWrite, createReadStream: forbidden('read stream'), existsSync: (name) => files.has(name) },
+    'node:readline': { createInterface: forbidden('readline') },
     'node:path': { default: path.posix },
     'node:url': { fileURLToPath: (url) => new URL(url).pathname },
     'node:events': { EventEmitter, once },
@@ -121,6 +149,7 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
     '/oracle/lib/platform/index.mjs': { platformFor: () => platform },
     '/oracle/lib/platform/windows-network.mjs': { restoreMetrics: async () => {}, restoreMinimizeConnectionsPolicy: async (value) => { environment.policy = value; } },
     '/oracle/lib/architecture.mjs': { nativeArchitecture: () => 'x64' },
+    '/oracle/lib/ps.mjs': { spawnPowerShell: forbidden('PowerShell') },
     '/oracle/lib/logfile.mjs': { createLog: () => ({ append: async (text) => emit('log', { text }), rotate: async () => {} }) },
     '/oracle/lib/monitor.mjs': { findHelper: () => null, LineMonitor: Monitor },
     '/oracle/lib/helper.mjs': { NetworkMonitor: Monitor, NetworkUpdates: class {}, quickProbe: async () => ({ ok: true, ms: 18 }), readNetworkOnce: forbidden('helper'), readPolicyOnce: async () => environment.policy },
@@ -137,7 +166,7 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
       }, { context, identifier: name });
     } else {
       assert.ok(name.startsWith('/oracle/'), `Unapproved import: ${name}`);
-      let source = await readFile(new URL(name.slice('/oracle/'.length), root), 'utf8');
+      let source = await readFile(new URL(name.slice('/oracle/'.length).replace('monitor-source.mjs', 'monitor.mjs'), root), 'utf8');
       // Observation hooks only; no existing statement is changed or skipped.
       if (name === '/oracle/server.mjs') {
         const hooks = await readFile(new URL('tests/oracle/hooks.txt', root), 'utf8');
@@ -158,6 +187,13 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
     return module.namespace;
   }
   Object.assign(platform, await evaluate('/oracle/lib/windows-undo.mjs'));
+  if (trace) {
+    const { LineMonitor } = await evaluate('/oracle/lib/monitor-source.mjs');
+    mocks.get('/oracle/lib/monitor.mjs').LineMonitor = class extends LineMonitor {
+      start() {} stop() {}
+      counters(alias) { const value = super.counters(alias); complete('counter-sample', { alias, value }); return value; }
+    };
+  }
   const { Engine } = await evaluate('/oracle/lib/engine.mjs');
   // Binary verification is covered by engine tests. No executable exists here.
   Engine.prototype.verifyEngineFiles = async () => {};
@@ -172,7 +208,25 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
       await settle();
       return instance;
     },
+    async advance(ms) {
+      assert.ok(Number.isFinite(ms) && ms >= 0);
+      const end = environment.now + ms;
+      for (let count = 0; ; count++) {
+        assert.ok(count < 10000, 'Timer loop did not settle');
+        timers.sort((a, b) => a.at - b.at);
+        if (!timers.length || timers[0].at > end) break;
+        const timer = timers.shift();
+        environment.now = timer.at;
+        trace?.('input', 'clock-tick', { now: environment.now });
+        timer.run();
+        await settle();
+      }
+      environment.now = end;
+      trace?.('input', 'clock-tick', { now: end });
+      await settle();
+    },
     async request(method, route, body, headers = {}) {
+      trace?.('input', 'http', { method, route, ...(body === undefined ? {} : { body: clone(body) }), headers });
       let response;
       const session = JSON.parse(files.get('/oracle/data/server.json') ?? files.get('/oracle/data-test/server.json'));
       const request = { method, url: route, headers: { host: `127.0.0.1:${session.port}`, 'x-token': session.token, ...headers },
@@ -182,6 +236,7 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
         end(text) { response.body = JSON.parse(text); },
       });
       await settle();
+      trace?.('output', 'api', clone(response));
       return clone(response);
     },
   };
