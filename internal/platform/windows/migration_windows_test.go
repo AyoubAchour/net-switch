@@ -1,6 +1,7 @@
 package winplatform
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,26 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+func TestLegacyACLHardeningDoesNotCertifyPublicMarker(t *testing.T) {
+	// Node 0.3.x sets every descendant's owner to BA and replaces its DACL.
+	// An attacker can plant this public payload before that legacy operation.
+	sd, err := windows.SecurityDescriptorFromString("O:BAD:(A;;FA;;;SY)(A;;FA;;;BA)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := directoryMarker{Identity: "known-directory-id", Target: `C:\ProgramData\Net Switch`, Nonce: strings.Repeat("ab", 32)}
+	b, _ := json.Marshal(m)
+	if _, trusted := parseDirectoryMarker(sd, b, "known-directory-id", `C:\ProgramData\Net Switch`, ""); trusted {
+		t.Fatal("legacy ACL hardening certified an attacker-planted marker without independent provenance")
+	}
+	if _, trusted := parseDirectoryMarker(sd, b, "known-directory-id", `C:\ProgramData\Net Switch`, "a-different-directory-id"); trusted {
+		t.Fatal("certificate for another object was accepted")
+	}
+	if _, trusted := parseDirectoryMarker(sd, b, "known-directory-id", `C:\ProgramData\Net Switch`, m.certificate()); !trusted {
+		t.Fatal("legitimate certified marker was refused")
+	}
+}
 
 const validUndo = `{"metrics":{"Wi-Fi":[{"family":"IPv6","automatic":false,"metric":25}]},"policy":{"value":-2147483648}}`
 

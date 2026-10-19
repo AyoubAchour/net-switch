@@ -119,6 +119,11 @@ comparison rules, not changes to the frozen Node files.
   transaction. Returned action errors keep Node's ordinary HTTP responses.
 - Accepted mutations, including setup, app/line actions and settings, belong to
   the service context; closing the browser does not cancel them, as in Node.
+- Machine-folder provenance is independent of the folder's files: Node 0.3.x
+  takes ownership of every descendant, so it can make a planted marker appear
+  admin-owned. A protected HKLM record now certifies the fresh directory ID for
+  its configured path. The file marker and that record must agree. Certification
+  is durable before quarantine, so a completed stage remains recoverable.
 
 `undo.json` adds six focused cases from the unchanged Node production source at
 `4e8b74a0513e6c0ecbaac0282df9e7fa11ea4128`, with only initial-file and failure

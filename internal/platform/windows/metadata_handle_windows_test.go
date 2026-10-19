@@ -7,17 +7,23 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/platform/worker"
 	"golang.org/x/sys/windows"
 )
 
-type metadataProof struct{ Target, Sentinel, UserSID string }
+type metadataProof struct {
+	Target, Sentinel, UserSID string
+	ForgeMarker               bool
+}
 type metadataAnswer struct {
-	Ready, Escaped bool
-	Error          string
+	Ready, Escaped    bool
+	CertificateDenied bool
+	Error             string
 }
 
 func TestMain(m *testing.M) {
@@ -40,13 +46,48 @@ func runMetadataProof() int {
 	if err != nil {
 		return 2
 	}
-	h, err := windows.CreateFile(p, windows.WRITE_DAC, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	access := uint32(windows.WRITE_DAC)
+	if input.ForgeMarker {
+		access |= windows.FILE_READ_ATTRIBUTES
+	}
+	h, err := windows.CreateFile(p, access, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
 		_ = encoder.Encode(metadataAnswer{Error: "open WRITE_DAC: " + err.Error()})
 		return 1
 	}
 	defer windows.CloseHandle(h)
-	if err := encoder.Encode(metadataAnswer{Ready: true}); err != nil {
+	if err := certifyDirectory(input.Target, "attacker-controlled"); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		_ = encoder.Encode(metadataAnswer{Error: fmt.Sprintf("Medium certificate attempt must be access denied: %v", err)})
+		return 1
+	}
+	if input.ForgeMarker {
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+			_ = encoder.Encode(metadataAnswer{Error: "read public directory ID: " + err.Error()})
+			return 1
+		}
+		identity := fmt.Sprintf("%08x:%08x%08x", info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow)
+		b, _ := json.Marshal(directoryMarker{Identity: identity, Target: input.Target, Nonce: strings.Repeat("ab", 32)})
+		sd, err := windows.SecurityDescriptorFromString("O:" + input.UserSID + "D:P(A;;FA;;;" + input.UserSID + ")")
+		if err != nil {
+			return 2
+		}
+		attributes := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+		name := filepath.Join(input.Target, directoryMarkerName)
+		path, _ := windows.UTF16PtrFromString(name)
+		marker, err := windows.CreateFile(path, windows.GENERIC_WRITE, windows.FILE_SHARE_READ, &attributes, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			_ = encoder.Encode(metadataAnswer{Error: "plant marker: " + err.Error()})
+			return 1
+		}
+		file := os.NewFile(uintptr(marker), name)
+		_, err = file.Write(b)
+		file.Close()
+		if err != nil {
+			return 1
+		}
+	}
+	if err := encoder.Encode(metadataAnswer{Ready: true, CertificateDenied: true}); err != nil {
 		return 1
 	}
 	var resume bool
@@ -98,16 +139,18 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
-		kind       string
-		quarantine bool
-		hideGrant  bool
+		kind        string
+		quarantine  bool
+		hideGrant   bool
+		forgeMarker bool
 	}{
-		{"root", false, false}, {"root", true, false},
-		{"child", false, false}, {"child", true, false},
-		{"nested-directory", false, false}, {"nested-directory", true, false},
-		{"root", true, true}, {"child", true, true}, {"nested-directory", true, true},
+		{"root", false, false, false}, {"root", true, false, false},
+		{"child", false, false, false}, {"child", true, false, false},
+		{"nested-directory", false, false, false}, {"nested-directory", true, false, false},
+		{"root", true, true, false}, {"child", true, true, false}, {"nested-directory", true, true, false},
+		{"root", false, true, true}, {"root", true, true, true},
 	} {
-		t.Run(fmt.Sprintf("%s/quarantine=%t/historical=%t", test.kind, test.quarantine, test.hideGrant), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/quarantine=%t/historical=%t/forged-marker=%t", test.kind, test.quarantine, test.hideGrant, test.forgeMarker), func(t *testing.T) {
 			kind := test.kind
 			root := filepath.Join(t.TempDir(), "machine")
 			if err := ProtectDirectory(root); err != nil {
@@ -115,6 +158,19 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			}
 			if test.hideGrant {
 				if err := os.Remove(filepath.Join(root, directoryMarkerName)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.forgeMarker {
+				// Model a legacy root: it has never received Go's independent
+				// certificate, even if Node later takes ownership of its files.
+				key, err := openDirectoryCertificates(true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = key.DeleteValue(directoryCertificateName(root))
+				key.Close()
+				if err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -138,7 +194,11 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			}
 			// CreateFile adds SYNCHRONIZE even for a metadata-only open. The
 			// fixture must grant it alongside WRITE_DAC to exercise retention.
-			setProofSecurity(t, target, user.User.Sid.String(), "0x00140000")
+			rights := "0x00140000"
+			if test.forgeMarker {
+				rights = "0x00140082" // also create a child and read the public ID
+			}
+			setProofSecurity(t, target, user.User.Sid.String(), rights)
 			before := fileSecurity(t, target)
 			rootBefore := fileSecurity(t, root)
 			p, err := worker.Start(exe, []string{"worker", "acl-proof"})
@@ -151,17 +211,34 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			stop := context.AfterFunc(ctx, func() { _ = p.Kill() })
 			defer stop()
 			encoder, decoder := json.NewEncoder(p.Input()), json.NewDecoder(p.Output())
-			if err := encoder.Encode(metadataProof{Target: target, Sentinel: sentinel, UserSID: user.User.Sid.String()}); err != nil {
+			if err := encoder.Encode(metadataProof{Target: target, Sentinel: sentinel, UserSID: user.User.Sid.String(), ForgeMarker: test.forgeMarker}); err != nil {
 				t.Fatal(err)
 			}
 			var ready metadataAnswer
-			if err := decoder.Decode(&ready); err != nil || !ready.Ready {
+			if err := decoder.Decode(&ready); err != nil || !ready.Ready || !ready.CertificateDenied {
 				t.Fatalf("Medium worker could not acquire the original grant: %+v %v", ready, err)
 			}
 			if test.hideGrant {
 				// The retained handle now has authority absent from today's ACL.
 				setProofSecurity(t, target, user.User.Sid.String(), "0x00100000")
 				before, rootBefore = fileSecurity(t, target), fileSecurity(t, root)
+			}
+			if test.forgeMarker {
+				name := filepath.Join(root, directoryMarkerName)
+				path, _ := windows.UTF16PtrFromString(name)
+				handle, err := windows.CreateFile(path, windows.READ_CONTROL|windows.WRITE_DAC|windows.WRITE_OWNER, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// This is the exact effect of Node's descendant ACL loop: a
+				// user-planted marker becomes BA-owned with admin-only grants.
+				empty, _ := windows.SecurityDescriptorFromString("O:BAD:")
+				err = setDirectorySecurity(handle, empty, false)
+				windows.CloseHandle(handle)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Log("Medium worker planted a matching marker; legacy hardening made it admin-owned; independent certification was denied")
 			}
 			blocked := false
 			if test.quarantine {

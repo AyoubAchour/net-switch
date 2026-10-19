@@ -23,13 +23,25 @@ const directoryMarkerName = ".control-directory-v1"
 
 type directoryMarker struct {
 	Identity, Target, Previous, Quarantine string
+	Nonce                                  string
 	Notes                                  []string
 }
 
+func newDirectoryMarker(identity, target, previous, quarantine string, notes []string) (directoryMarker, error) {
+	var nonce [32]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return directoryMarker{}, err
+	}
+	return directoryMarker{Identity: identity, Target: target, Previous: previous, Quarantine: quarantine, Nonce: hex.EncodeToString(nonce[:]), Notes: notes}, nil
+}
+
+func (m directoryMarker) certificate() string { return m.Identity + "|" + m.Nonce }
+
 // ProtectDirectory migrates legacy trees even when their current ACL looks
 // safe: tightening a DACL cannot revoke an old WRITE_DAC handle. Only a marker
-// owned by Administrators, bound to this fresh directory's identity, permits
-// reuse. The caller holds the single-instance lock throughout migration.
+// owned by Administrators, bound to this fresh directory's identity AND its
+// independent HKLM certificate, permits reuse. Node can launder a planted
+// file's ownership, but cannot certify it. The caller holds the instance lock.
 func ProtectDirectory(path string) error {
 	return protectDirectory(path, func(s string) { fmt.Fprintln(os.Stderr, s) }, nil)
 }
@@ -38,6 +50,10 @@ func protectDirectory(path string, log func(string), checkpoint func(string) err
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return err
+	}
+	certificate, err := directoryCertificate(path)
+	if err != nil {
+		return fmt.Errorf("read machine-folder provenance: %w", err)
 	}
 	var held []*os.File
 	defer func() {
@@ -199,13 +215,9 @@ func protectDirectory(path string, log func(string), checkpoint func(string) err
 			if err != nil {
 				return directoryMarker{}, false
 			}
-			if !trustedMarkerSecurity(sd) {
-				return directoryMarker{}, false
-			}
 			data, err := read(item)
-			var m directoryMarker
-			if err == nil && json.Unmarshal(data, &m) == nil && m.Identity == root.identity && m.Target == path {
-				return m, true
+			if err == nil {
+				return parseDirectoryMarker(sd, data, root.identity, path, certificate)
 			}
 		}
 		return directoryMarker{}, false
@@ -243,6 +255,11 @@ func protectDirectory(path string, log func(string), checkpoint func(string) err
 		m, ready := marker(staged, tree, trusted)
 		closeChildren(tree)
 		if ready && strings.HasPrefix(m.Quarantine, path+".untrusted-") && filepath.Dir(m.Quarantine) == filepath.Dir(path) {
+			// A previous certificate write may have become visible before its
+			// flush failed. Reaffirm durability before moving the original.
+			if err := certifyDirectory(path, m.certificate()); err != nil {
+				return err
+			}
 			old, err := open(path, access, windows.FILE_SHARE_READ)
 			if errors.Is(err, windows.ERROR_ACCESS_DENIED) && m.Previous == "" {
 				old, err = openDelete(path)
@@ -331,8 +348,15 @@ func protectDirectory(path string, log func(string), checkpoint func(string) err
 				}
 			}
 			if !migrated {
-				b, _ := json.Marshal(directoryMarker{Identity: root.identity, Target: path})
-				return writeFresh(path, directoryMarkerName, b)
+				m, err := newDirectoryMarker(root.identity, path, "", "", nil)
+				if err != nil {
+					return err
+				}
+				b, _ := json.Marshal(m)
+				if err := writeFresh(path, directoryMarkerName, b); err != nil {
+					return err
+				}
+				return certifyDirectory(path, m.certificate())
 			}
 			return nil
 		}
@@ -382,9 +406,15 @@ func protectDirectory(path string, log func(string), checkpoint func(string) err
 				}
 			}
 		}
-		m := directoryMarker{Identity: staged.identity, Target: path, Previous: root.identity, Quarantine: oldName, Notes: notes}
+		m, err := newDirectoryMarker(staged.identity, path, root.identity, oldName, notes)
+		if err != nil {
+			return err
+		}
 		b, _ := json.Marshal(m)
 		if err := writeFresh(stagePath, directoryMarkerName, b); err != nil {
+			return err
+		}
+		if err := certifyDirectory(path, m.certificate()); err != nil {
 			return err
 		}
 		if checkpoint != nil {
@@ -410,7 +440,21 @@ func protectDirectory(path string, log func(string), checkpoint func(string) err
 	}
 }
 
+func parseDirectoryMarker(sd *windows.SECURITY_DESCRIPTOR, data []byte, identity, target, certificate string) (directoryMarker, bool) {
+	var m directoryMarker
+	if trustedMarkerSecurity(sd) && json.Unmarshal(data, &m) == nil && m.Identity == identity && m.Target == target && len(m.Nonce) == 64 {
+		if _, err := hex.DecodeString(m.Nonce); err == nil && certificate == m.certificate() {
+			return m, true
+		}
+	}
+	return directoryMarker{}, false
+}
+
 func trustedMarkerSecurity(sd *windows.SECURITY_DESCRIPTOR) bool {
+	return trustedAdminSecurity(sd, 0x1f01ff)
+}
+
+func trustedAdminSecurity(sd *windows.SECURITY_DESCRIPTOR, access windows.ACCESS_MASK) bool {
 	owner, _, err := sd.Owner()
 	acl, _, aclErr := sd.DACL()
 	if err != nil || aclErr != nil || owner == nil || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || acl == nil || acl.AceCount != 2 {
@@ -419,7 +463,7 @@ func trustedMarkerSecurity(sd *windows.SECURITY_DESCRIPTOR) bool {
 	seen := map[string]bool{}
 	for i := uint32(0); i < 2; i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
-		if windows.GetAce(acl, i, &ace) != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != 0x1f01ff {
+		if windows.GetAce(acl, i, &ace) != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != access {
 			return false
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
