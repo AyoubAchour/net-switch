@@ -34,9 +34,15 @@ const dataDir = await mkdtemp(path.join(tmpdir(), 'net-switch-e2e-'));
 await recordServerAndEngine();
 let staleSystemPID = null;
 if (process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted') {
-  staleSystemPID = await runPowerShellJson(`$service = Get-CimInstance Win32_Service -Filter "StartName='LocalSystem' AND State='Running'" | Where-Object { $_.ProcessId -gt 0 -and (Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue).ProcessName -eq 'svchost' } | Select-Object -First 1
-if (-not $service) { throw 'No SYSTEM svchost available for stale PID proof' }
-[int]$service.ProcessId | ConvertTo-Json -Compress`);
+  // Get-Process reads the running token's owner directly. A CIM service scan
+  // can spend the whole deadline loading WMI on a cold ARM64 runner, and a
+  // configured service account is weaker evidence than the live identity.
+  staleSystemPID = await runPowerShellJson(`$ProgressPreference = 'SilentlyContinue'
+$system = (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18').Translate([Security.Principal.NTAccount]).Value
+$process = Get-Process -Name svchost -IncludeUserName -ErrorAction Stop | Where-Object { $_.UserName -eq $system } | Select-Object -First 1
+if (-not $process) { throw 'No running SYSTEM svchost available for stale PID proof' }
+[int]$process.Id | ConvertTo-Json -Compress`);
+  console.log(`SYSTEM svchost PID for stale-PID proof: ${staleSystemPID}`);
   await writeFile(path.join(dataDir, 'engine.pid'), String(staleSystemPID));
 }
 const server = launchServer(dataDir);
