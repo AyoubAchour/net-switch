@@ -1100,7 +1100,6 @@ func (e *Endpoint) resetConnectionLocked(err tcpip.Error) {
 	// Only send a reset if the connection is being aborted for a reason
 	// other than receiving a reset.
 	e.hardError = err
-	e.releaseClose()
 	switch err.(type) {
 	case *tcpip.ErrConnectionReset, *tcpip.ErrTimeout:
 	default:
@@ -1406,7 +1405,6 @@ func (e *Endpoint) handleSegmentLocked(s *segment) (cont bool, err tcpip.Error) 
 		}
 
 		e.snd.handleRcvdSegment(s)
-		e.releaseIfOnlyFIN(e.EndpointState())
 	}
 
 	return true, nil

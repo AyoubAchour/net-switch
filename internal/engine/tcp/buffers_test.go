@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
 	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -40,7 +39,7 @@ func TestHandleDuring65536FlowSweep(t *testing.T) {
 	defer func() { s.Close(); s.Wait(); l.Close() }()
 	control := &testfake.Controller{}
 	f := &Forwarder{ctx: context.Background(), stack: s, control: control, out: l, inFlight: 2,
-		pending: map[gv.TransportEndpointID]flowapi.Ticket{}, connections: map[gv.TransportEndpointID]*connection{}}
+		pending: map[gv.TransportEndpointID]*pendingOpen{}, connections: map[gv.TransportEndpointID]*connection{}}
 	// Upstream's zero-cap silent drop completes admission without a dial.
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 0, func(*gtcp.ForwarderRequest) { t.Error("unexpected dial") })
 	ep := &heldSweepEndpoint{entered: make(chan struct{}), release: make(chan struct{})}

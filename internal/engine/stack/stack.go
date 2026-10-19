@@ -79,6 +79,7 @@ func New(link OrderedLink, o Options) (*gv.Stack, error) {
 		{Destination: header.IPv4EmptySubnet, NIC: NIC},
 		{Destination: header.IPv6EmptySubnet, NIC: NIC},
 	})
-	link.SetAfterInbound(func() { tcp.DrainLocalClose(s) })
+	// Forwarders explicitly install the close fence before ingress starts.
+	link.SetAfterInbound(func() {})
 	return s, nil
 }

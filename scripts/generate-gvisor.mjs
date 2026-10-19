@@ -60,7 +60,7 @@ try {
     run('git', ['init', '--quiet'], staging);
     run('git', ['-c', 'core.autocrlf=false', 'add', '.'], staging);
   }
-  run('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'apply', '--unsafe-paths', '--whitespace=nowarn', path.join(root, 'third_party/gvisor-timewait.patch')], staging);
+  run('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'apply', ...(diffOnly ? ['--recount'] : []), '--unsafe-paths', '--whitespace=nowarn', path.join(root, 'third_party/gvisor-timewait.patch')], staging);
   if (diffOnly) {
     process.stdout.write(run('git', [
       '-c', 'core.autocrlf=false', '-c', 'core.eol=lf',

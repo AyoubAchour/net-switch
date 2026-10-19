@@ -353,6 +353,11 @@ jobs:
         env:
           NETSWITCH_TIMEWAIT_GATE: '1'
         run: go test -v -count=1 -run '^Test(TimeWait(ThousandPerSecondSuccess|SameTupleUnderLoad)|CloseAtCapUnderLoad)$' ./internal/engine/stack
+      - name: Measure other-flow latency during a closing 100 MB download
+        run: go test -run '^$' -bench '^BenchmarkCloseDownloadOtherFlow$' -benchtime=3x -count=1 ./internal/engine/stack
+      - name: Prove every close path fails without admission release
+        if: matrix.name == 'Linux x64'
+        run: node scripts/prove-close-release.mjs
       - name: Measure retained TIME_WAIT memory after payload buffers drain
         env:
           NETSWITCH_TIMEWAIT_PROFILE: timewait.pprof

@@ -35,6 +35,8 @@ func (l *orderedChannel) InjectInbound(protocol tcpip.NetworkProtocolNumber, p *
 
 type channelOut struct{ link *orderedChannel }
 
+func (o channelOut) SetAfterInbound(after func()) { o.link.SetAfterInbound(after) }
+
 func (o channelOut) Send(b []byte) bool {
 	p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b)})
 	defer p.DecRef()

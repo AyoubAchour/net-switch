@@ -27,7 +27,7 @@ type Forwarder struct {
 	ctx                           context.Context
 	cancel                        context.CancelFunc
 	mu                            sync.Mutex
-	pending                       map[stack.TransportEndpointID]flowapi.Ticket
+	pending                       map[stack.TransportEndpointID]*pendingOpen
 	wg                            sync.WaitGroup
 	forwarder                     *gtcp.Forwarder
 	stack                         *stack.Stack
@@ -41,12 +41,23 @@ type Forwarder struct {
 	Rejected, Invalid, DialFailed atomic.Uint64
 }
 
-func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Controller, owners platform.OwnerLookup, dialer platform.LineDialer, out flowapi.Output) *Forwarder {
+type orderedOutput interface {
+	flowapi.Output
+	SetAfterInbound(func())
+}
+
+func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Controller, owners platform.OwnerLookup, dialer platform.LineDialer, out orderedOutput) *Forwarder {
 	ctx, cancel := context.WithCancel(ctx)
-	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]flowapi.Ticket), connections: make(map[stack.TransportEndpointID]*connection), retired: make(map[*connection]struct{}), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
+	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]*pendingOpen), connections: make(map[stack.TransportEndpointID]*connection), retired: make(map[*connection]struct{}), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 2*inFlight, f.open)
 	s.SetTransportProtocolHandler(gtcp.ProtocolNumber, f.Handle)
 	gtcp.SetTimeWaitHandler(s, f.Handle)
+	drain := gtcp.SetLocalCloseFence(s, true)
+	out.SetAfterInbound(func() {
+		if ep := drain(); ep != nil {
+			f.finishClose(ep)
+		}
+	})
 	f.wg.Go(f.maintain)
 	return f
 }
@@ -69,8 +80,11 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		return true
 	}
 	if !h.Flags().Contains(header.TCPFlagSyn) || h.Flags()&(header.TCPFlagAck|header.TCPFlagRst|header.TCPFlagFin) != 0 {
-		return false
+		// A retained endpoint can be silently removed at its cap. Its final
+		// pure ACK needs no response; resetting it would undo that close.
+		return h.Flags() == header.TCPFlagAck && p.Data().Size() == 0
 	}
+	f.reclaimAtCapacity(nil)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c := f.connections[id]; c != nil {
@@ -122,7 +136,7 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		reject()
 		return true
 	}
-	f.pending[id] = ticket
+	f.pending[id] = &pendingOpen{ticket: ticket}
 	f.wg.Add(1)
 	dropped := f.stack.Stats().TCP.ForwardMaxInFlightDrop.Value()
 	if !f.forwarder.HandlePacket(id, p) || f.stack.Stats().TCP.ForwardMaxInFlightDrop.Value() != dropped {
@@ -138,8 +152,10 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	defer f.wg.Done()
 	id := r.ID()
 	f.mu.Lock()
-	ticket := f.pending[id]
+	pending := f.pending[id]
+	pending.request = r
 	f.mu.Unlock()
+	ticket := pending.ticket
 	owned := true
 	defer func() {
 		if owned {
@@ -148,20 +164,15 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	}()
 	// Complete exactly once, on every return path. Retain the deduplication
 	// entry until Complete has removed gVisor's own in-flight entry.
-	completed := false
 	complete := func(reset bool) {
-		if completed {
-			return
-		}
-		completed = true
-		r.Complete(reset)
-		f.mu.Lock()
-		delete(f.pending, id)
-		f.mu.Unlock()
+		f.complete(id, pending, reset)
 	}
 	owner := platform.Owner{}
 	defer func() {
-		if !completed {
+		if owned && closeAdmissionEnabled {
+			ticket.Retire()
+		}
+		if !pending.completed.Load() {
 			complete(f.control.AllowReject(owner.AppID))
 		}
 	}()
@@ -182,6 +193,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		owner = platform.Owner{}
 	}
 	cancelLookup()
+	f.reclaimAtCapacity(&owner)
 	decision, err := ticket.Resolve(owner)
 	if err != nil {
 		f.Rejected.Add(1)
@@ -204,31 +216,44 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		return
 	}
 	var wq waiter.Queue
-	ep, errTCP := r.CreateEndpointWithCloseHandler(&wq, ticket.Retire)
+	ep, errTCP := r.CreateEndpoint(&wq)
 	if errTCP != nil {
+		// TCP already handled the failed handshake. In particular an app RST
+		// must not receive another reset from admission during deferred cleanup.
+		complete(false)
 		return
+	}
+	abort := func() {
+		if closeAdmissionEnabled {
+			ticket.Retire()
+		}
+		ep.Abort()
 	}
 	closeEndpoint := sync.OnceFunc(ep.Close)
 	defer closeEndpoint()
-	stopApp := context.AfterFunc(ctx, ep.Abort)
+	stopApp := context.AfterFunc(ctx, abort)
 	defer stopApp()
 	if ctx.Err() != nil {
 		// The handshake succeeded; Abort owns the reset, not admission.
 		complete(false)
-		ep.Abort()
+		abort()
 		return
 	}
 	rx, tx := ticket.Buffers()
 	ep.SocketOptions().SetReceiveBufferSize(int64(rx), true)
 	ep.SocketOptions().SetSendBufferSize(int64(tx), true)
 	ep.SocketOptions().SetKeepAlive(true)
-	ep.(*gtcp.Endpoint).SetTimeWaitPolicy(ticket.TimeWait, ticket.EndTimeWait)
+	retain := ticket.TimeWait
+	if !closeAdmissionEnabled {
+		retain = func() bool { return true }
+	}
+	ep.(*gtcp.Endpoint).SetTimeWaitPolicy(retain, ticket.EndTimeWait)
 	c := &connection{id: id, ep: ep, ticket: ticket, last: time.Now(), done: make(chan struct{})}
 	f.mu.Lock()
 	if f.ctx.Err() != nil {
 		f.mu.Unlock()
 		complete(false)
-		ep.Abort()
+		abort()
 		return
 	}
 	f.connections[id] = c
@@ -238,17 +263,18 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	// must see either pending or connections, never a gap between them.
 	complete(false)
 	defer close(c.done)
-	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint}
+	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission}
 	if a, ok := remote.LocalAddr().(*net.TCPAddr); ok {
 		ticket.Established(a.AddrPort().Addr())
 	} else {
 		ticket.Established(netip.Addr{})
 	}
 	count := func(u, d uint64) { c.up.Add(u); c.down.Add(d); ticket.Add(u, d) }
-	if err := Splice(ctx, app, remote, count, ep.Abort); err != nil {
-		ep.Abort()
+	if err := Splice(ctx, app, remote, count, abort); err != nil {
+		abort()
 	}
 	app.Close()
+	c.releaseAdmission()
 	// TCP releases admission once both directions end and payload drains, or
 	// on reset/removal. Keep the ticket until removal and relay completion
 	// for final byte accounting.
@@ -263,7 +289,16 @@ func (f *Forwarder) Wait() { f.wg.Wait() }
 // Cancellation, splice errors and normal cleanup share this single owner.
 type onceCloseConn struct {
 	*gonet.TCPConn
-	close func()
+	close           func()
+	afterCloseWrite func()
 }
 
 func (c *onceCloseConn) Close() error { c.close(); return nil }
+
+func (c *onceCloseConn) CloseWrite() error {
+	err := c.TCPConn.CloseWrite()
+	if c.afterCloseWrite != nil {
+		c.afterCloseWrite()
+	}
+	return err
+}

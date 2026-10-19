@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
@@ -33,6 +34,7 @@ var remoteAddr = tcpip.AddrFrom4([4]byte{203, 0, 113, 7})
 type accepted struct {
 	conn        *testfake.Conn
 	relayClosed <-chan struct{}
+	sentEOF     <-chan struct{}
 }
 
 type observedRemote struct {
@@ -40,6 +42,14 @@ type observedRemote struct {
 	closed    chan struct{}
 	once      sync.Once
 	closeGate *atomic.Pointer[chan struct{}]
+	sentEOF   chan struct{}
+	eofOnce   sync.Once
+}
+
+func (c *observedRemote) CloseRead() error {
+	err := c.Conn.CloseRead()
+	c.eofOnce.Do(func() { close(c.sentEOF) })
+	return err
 }
 
 func (c *observedRemote) Close() error {
@@ -54,7 +64,7 @@ func (c *observedRemote) Close() error {
 // The peer is a wire-level TCP driver, so it can retain and replay exact old
 // segments, lose the final ACK and choose overlapping sequence spaces.
 type peer struct {
-	t                  *testing.T
+	t                  testing.TB
 	link               *ns.Link
 	stack              *gv.Stack
 	accepted           chan accepted
@@ -71,19 +81,68 @@ type peer struct {
 	lastSent           []byte
 	owners             *testfake.Owners
 	relayCloseGate     atomic.Pointer[chan struct{}]
+	fixedSendBuffer    int
+	setupGate          <-chan struct{}
+	setupEntered       chan struct{}
 }
 
-func newPeer(t *testing.T, timestamps bool) *peer {
+type peerControl struct {
+	*flows.Table
+	peer *peer
+}
+
+func (c peerControl) Begin(proto string, tuple platform.Tuple) (flowapi.Ticket, error) {
+	ticket, err := c.Table.Begin(proto, tuple)
+	if err != nil {
+		return ticket, err
+	}
+	if c.peer.fixedSendBuffer != 0 {
+		ticket = &fixedBufferTicket{Ticket: ticket, send: c.peer.fixedSendBuffer}
+	}
+	if c.peer.setupGate != nil {
+		ticket = &setupBufferTicket{Ticket: ticket, gate: c.peer.setupGate, entered: c.peer.setupEntered}
+	}
+	return ticket, nil
+}
+
+type setupBufferTicket struct {
+	flowapi.Ticket
+	gate    <-chan struct{}
+	entered chan<- struct{}
+}
+
+func (t *setupBufferTicket) Buffers() (int, int) {
+	t.entered <- struct{}{}
+	<-t.gate
+	return t.Ticket.Buffers()
+}
+
+// Reserve the benchmark's fixed buffer, then hide Grow/Shrink from the monitor
+// so it cannot resize the deliberately queued tail while the window is zero.
+type fixedBufferTicket struct {
+	flowapi.Ticket
+	send int
+}
+
+func (t *fixedBufferTicket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
+	d, err := t.Ticket.Resolve(owner)
+	if err == nil && !t.Ticket.(interface{ Grow(int, int) bool }).Grow(64<<10, t.send) {
+		return d, flows.ErrBudget
+	}
+	return d, err
+}
+
+func newPeer(t testing.TB, timestamps bool) *peer {
 	return newPeerOptions(t, timestamps, flows.Defaults(), ns.DefaultOptions())
 }
 
-func newPeerOptions(t *testing.T, timestamps bool, limits flows.Limits, options ns.Options) *peer {
+func newPeerOptions(t testing.TB, timestamps bool, limits flows.Limits, options ns.Options) *peer {
 	t.Helper()
 	l := ns.NewLink()
 	return newPeerLink(t, timestamps, limits, options, l, l)
 }
 
-func newPeerLink(t *testing.T, timestamps bool, limits flows.Limits, options ns.Options, l *ns.Link, endpoint ns.OrderedLink) *peer {
+func newPeerLink(t testing.TB, timestamps bool, limits flows.Limits, options ns.Options, l *ns.Link, endpoint ns.OrderedLink) *peer {
 	t.Helper()
 	s, err := ns.New(endpoint, options)
 	if err != nil {
@@ -99,14 +158,21 @@ func newPeerLink(t *testing.T, timestamps bool, limits flows.Limits, options ns.
 		p.dials.Add(1)
 		a, b := testfake.Pair()
 		closed := make(chan struct{})
-		p.accepted <- accepted{b, closed}
-		return &observedRemote{Conn: a, closed: closed, closeGate: &p.relayCloseGate}, nil
+		eof := make(chan struct{})
+		p.accepted <- accepted{conn: b, relayClosed: closed, sentEOF: eof}
+		return &observedRemote{Conn: a, closed: closed, closeGate: &p.relayCloseGate, sentEOF: eof}, nil
 	}}
 	p.owners = &testfake.Owners{Value: platform.Owner{AppID: "peer"}}
-	f := ntcp.New(context.Background(), s, limits.Handshakes, table, p.owners, d, l)
+	f := ntcp.New(context.Background(), s, limits.Handshakes, peerControl{Table: table, peer: p}, p.owners, d, l)
 	p.forward = f
 	t.Cleanup(func() { f.Stop(); s.Close(); s.Wait(); f.Wait(); l.Close() })
 	return p
+}
+
+func (p *peer) holdRelayCleanup() func() {
+	gate := make(chan struct{})
+	p.relayCloseGate.Store(&gate)
+	return sync.OnceFunc(func() { p.relayCloseGate.Store(nil); close(gate) })
 }
 
 func (p *peer) packet(seq, ack uint32, flags header.TCPFlags, payload []byte) []byte {
@@ -171,11 +237,11 @@ func (p *peer) wait(flags header.TCPFlags) header.TCP {
 		if h == nil {
 			break
 		}
-		if h.DestinationPort() != p.port {
-			continue // An old tuple's close packet cannot reject this connection.
-		}
 		if h.Flags().Contains(header.TCPFlagRst) {
 			p.t.Fatalf("unexpected RST, waiting for %v; reply=%s; %s", flags, segmentDescription(h), p.diagnostics())
+		}
+		if h.DestinationPort() != p.port {
+			continue // Old close traffic is harmless, but its resets are not.
 		}
 		if h.Flags().Contains(flags) {
 			return h

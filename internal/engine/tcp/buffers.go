@@ -27,6 +27,7 @@ func (f *Forwarder) maintain() {
 	defer tick.Stop()
 	defer func() {
 		for _, c := range f.connectionSnapshot() {
+			c.ticket.Retire()
 			c.ep.Abort()
 			<-c.done
 			c.ticket.Close()
@@ -70,6 +71,7 @@ func (f *Forwarder) sweep(now time.Time) {
 	for _, c := range f.connectionSnapshot() {
 		state := gtcp.EndpointState(c.ep.State())
 		if state == gtcp.StateClose || state == gtcp.StateError {
+			c.releaseAdmission()
 			select {
 			case <-c.done:
 				c.ticket.Close()
@@ -77,6 +79,9 @@ func (f *Forwarder) sweep(now time.Time) {
 			default:
 			}
 			continue
+		}
+		if state == gtcp.StateLastAck || state == gtcp.StateClosing {
+			c.releaseAdmission()
 		}
 		c.resize(now)
 	}

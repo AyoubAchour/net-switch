@@ -93,6 +93,7 @@ type protocol struct {
 	stack           *stack.Stack
 	timeWaitHandler atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
 	localClose      atomic.Pointer[Endpoint]                                                  `state:"nosave"`
+	localCloseEnabled atomic.Bool `state:"nosave"`
 
 	mu protocolRWMutex `state:"nosave"`
 
@@ -179,14 +180,21 @@ func (e *Endpoint) SetTimeWaitPolicy(enter func() bool, leave func()) {
 	e.timeWaitEnter, e.timeWaitLeave = enter, leave
 }
 
-// DrainLocalClose completes a queued FIN, reset or closing ACK through normal TCP
-// validation. Call after every DeliverNetworkPacket and before the next one,
-// from the single ordered ingress owner. Never call under demux or endpoint
-// locks. SetTimeWaitHandler enables this fence; hook-free stacks are unchanged.
-func DrainLocalClose(s *stack.Stack) {
-	ep := protocolFromStack(s).localClose.Swap(nil)
+// SetLocalCloseFence explicitly enables ordered close processing independently
+// of TIME_WAIT reuse. Cache the returned drain before starting ingress.
+func SetLocalCloseFence(s *stack.Stack, enabled bool) func() *Endpoint {
+	p := protocolFromStack(s)
+	p.localCloseEnabled.Store(enabled)
+	return p.drainLocalClose
+}
+
+// drainLocalClose finishes validated close work after demux locks are released.
+// Call after every DeliverNetworkPacket, before the next, from one ingress owner.
+// The returned endpoint can be inspected for admission accounting.
+func (p *protocol) drainLocalClose() *Endpoint {
+	ep := p.localClose.Swap(nil)
 	if ep == nil {
-		return
+		return nil
 	}
 	for {
 		ep.mu.Lock()
@@ -197,37 +205,24 @@ func DrainLocalClose(s *stack.Stack) {
 			handleConnectedLocked(ep)
 		default:
 			ep.mu.Unlock()
-			return
+			return ep
 		}
 		if ep.segmentQueue.empty() {
-			return
+			return ep
 		}
 	}
 }
 
-// releaseIfOnlyFIN keeps queued and retransmittable payload counted. Once
-// both directions have ended and only FIN remains, losing its last ACK must
-// not hold admission hostage. The endpoint still retransmits FIN normally.
-// +checklocks:e.mu
-func (e *Endpoint) releaseIfOnlyFIN(state EndpointState) {
-	if e.closeHandler == nil || (state != StateLastAck && state != StateClosing) {
-		return
-	}
-	for seg := e.snd.writeList.Front(); seg != nil; seg = seg.Next() {
-		if seg.payloadSize() != 0 {
-			return
-		}
-	}
-	e.releaseClose()
-}
-
-// releaseClose retires admission once no further network data can be sent.
-// It precedes reset output and cleanup; accounting may continue in the relay.
-// +checklocks:e.mu
-func (e *Endpoint) releaseClose() {
-	if release := e.closeHandler; release != nil {
-		e.closeHandler = nil
-		release()
+// CloseRetained silently removes a payload-free LAST_ACK/CLOSING endpoint when
+// the embedding application's retained-endpoint budget is exhausted.
+func (e *Endpoint) CloseRetained() {
+	e.LockUser()
+	defer e.UnlockUser()
+	state := e.EndpointState()
+	_, send := e.BufferUsage()
+	if (state == StateLastAck || state == StateClosing) && send <= 0 {
+		e.transitionToStateCloseLocked()
+		e.drainClosingSegmentQueue()
 	}
 }
 

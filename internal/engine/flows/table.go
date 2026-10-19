@@ -187,6 +187,17 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	return f, nil
 }
 
+// AtCapacity lets TCP reclaim completed endpoints before recording a rejection.
+// A nil owner checks Begin's limits; a known owner checks Resolve's limits.
+func (t *Table) AtCapacity(owner *platform.Owner) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if owner == nil {
+		return t.gauges.Flows >= t.limits.Flows || t.gauges.Handshakes >= t.limits.Handshakes
+	}
+	return t.apps[owner.AppID].flows >= t.limits.PerApp || (owner.AppID == "" && t.gauges.Unknown >= t.limits.Unknown)
+}
+
 type ticket struct {
 	accountMu                           sync.RWMutex
 	accountClosed                       bool
@@ -286,8 +297,9 @@ func (f *ticket) Shrink(receive, send int) {
 	t.gauges.TCPBytes -= delta
 }
 
-// TimeWait exchanges the live-flow reservation for a separate endpoint slot.
-// Called at the actual TCP transition, never by a delayed monitor sweep.
+// TimeWait exchanges live admission for a retained-endpoint slot. This includes
+// payload-free LAST_ACK/CLOSING endpoints as well as TIME_WAIT. A transition
+// between these states keeps the same reservation.
 // False means close this endpoint without a reset; it cannot reject a new flow.
 func (f *ticket) TimeWait() bool {
 	t := f.table
@@ -303,7 +315,7 @@ func (f *ticket) TimeWait() bool {
 		second := t.now().Unix()
 		if t.gauges.TimeWaitSkipped == 1 || second != t.timeWaitLogSecond {
 			t.timeWaitLogSecond = second
-			t.Emit(flowapi.Event{Type: "log", Message: "TIME_WAIT cap reached; closing without waiting", App: f.record.Owner.AppID})
+			t.Emit(flowapi.Event{Type: "log", Message: "retained TCP endpoint cap reached; closing without waiting", App: f.record.Owner.AppID})
 		}
 		return false
 	}

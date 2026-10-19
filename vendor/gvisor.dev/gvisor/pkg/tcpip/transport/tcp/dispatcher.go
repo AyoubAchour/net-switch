@@ -521,13 +521,13 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
 		return
 	}
 
-	// Record close work for the ordered ingress caller to finish after the
-	// demux read lock is released. FIN_WAIT_1 includes a queued simultaneous
-	// FIN whose final ACK has arrived before the processor handled that FIN.
+	// FIN_WAIT_1 ACKs can drive megabytes of download data. Leave those
+	// on the TCP processor; FINs themselves always fence the state change.
 	state := ep.EndpointState()
-	closingACK := s.flags.Contains(header.TCPFlagAck) && !s.flags.Contains(header.TCPFlagFin) && (state == StateLastAck || state == StateClosing || state == StateFinWait1)
-	if ep.protocol.timeWaitHandler.Load() != nil && (s.flags&(header.TCPFlagRst|header.TCPFlagFin) != 0 || closingACK) {
+	closingACK := s.flags.Contains(header.TCPFlagAck) && (state == StateLastAck || state == StateClosing)
+	if ep.protocol.localCloseEnabled.Load() && state != StateTimeWait && (s.flags&(header.TCPFlagRst|header.TCPFlagFin) != 0 || closingACK) {
 		ep.protocol.localClose.Store(ep)
+		return // The ingress owner processes this endpoint; no processor wakeup.
 	}
 
 	// Only wakeup the processor if endpoint lock is not held by a user

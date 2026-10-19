@@ -56,7 +56,7 @@ func (p *peer) endpoint() *tcp.Endpoint {
 	return ep
 }
 
-func closeSignal(t *testing.T, ch <-chan struct{}, what string) {
+func closeSignal(t testing.TB, ch <-chan struct{}, what string) {
 	t.Helper()
 	select {
 	case <-ch:
@@ -77,6 +77,8 @@ func (p *peer) receiveEOF() {
 // the race with admission deterministic, independent of the 250 ms sweep.
 func (p *peer) prepareFinalACK(simultaneous bool) []byte {
 	p.t.Helper()
+	ep := p.endpoint()
+	skipped := p.table.Stats().TimeWaitSkipped
 	if simultaneous {
 		p.current.conn.CloseWrite()
 		h := p.wait(header.TCPFlagFin)
@@ -94,7 +96,7 @@ func (p *peer) prepareFinalACK(simultaneous bool) []byte {
 		h := p.wait(header.TCPFlagFin)
 		p.ack = h.SequenceNumber() + 1
 	}
-	ep := p.endpoint()
+	closeSignal(p.t, p.current.sentEOF, "relay CloseWrite returned")
 	ep.LockUser()
 	state := tcp.EndpointState(ep.State())
 	ep.UnlockUser()
@@ -102,7 +104,7 @@ func (p *peer) prepareFinalACK(simultaneous bool) []byte {
 	if simultaneous {
 		want = tcp.StateClosing
 	}
-	if state != want {
+	if state != want && !(state == tcp.StateClose && p.table.Stats().TimeWaitSkipped > skipped) {
 		p.t.Fatalf("close state=%s want=%s", state, want)
 	}
 	return p.packet(p.seq, p.ack, header.TCPFlagAck, nil)
@@ -128,6 +130,8 @@ func TestCloseAdmission(t *testing.T) {
 				}
 				p.open(1000)
 				p.upload([]byte("old"))
+				releaseCleanup := p.holdRelayCleanup()
+				defer releaseCleanup()
 				old := p.current
 				var resume func()
 				switch path {
@@ -181,11 +185,19 @@ func TestCloseAdmission(t *testing.T) {
 				p.port++
 				p.open(500)
 				resume()
+				releaseCleanup()
 				old.conn.Close()
 				p.upload([]byte("replacement"))
 				p.closeActive()
 				if g := p.table.Stats(); g.Rejected != 0 || g.Admitted != 2 || p.dials.Load() != 2 {
 					t.Fatal("false close rejection", p.diagnostics())
+				}
+				wantResets := uint64(0)
+				if path == "remote_rst" || path == "policy" {
+					wantResets = 1
+				}
+				if got := p.stack.Stats().TCP.ResetsSent.Value(); got != wantResets {
+					t.Fatalf("stack resets=%d want=%d; %s", got, wantResets, p.diagnostics())
 				}
 			})
 		}
@@ -223,15 +235,13 @@ func TestCloseIdleAdmission(t *testing.T) {
 	if tcp.EndpointState(ep.State()) != tcp.StateError {
 		t.Fatal("idle did not time out", p.diagnostics())
 	}
-	if g := p.table.Stats(); g.Flows != 0 {
-		t.Error("idle timeout retained admission", p.diagnostics())
-	}
+	// Timer-driven closes are reclaimed at admission, before any rejection.
 	p.port++
 	p.open(500)
 	unblock()
 	p.upload([]byte("replacement"))
 	p.closeActive()
-	if p.table.Stats().Rejected != 0 {
+	if p.table.Stats().Rejected != 0 || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
 		t.Fatal(p.diagnostics())
 	}
 }
@@ -250,17 +260,17 @@ func TestCloseFINWithoutPolicy(t *testing.T) {
 			ep := p.endpoint()
 			ep.SetTimeWaitPolicy(nil, nil)
 			tcp.SetTimeWaitHandler(p.stack, nil)
+			tcp.SetLocalCloseFence(p.stack, false)
 			want := tcp.StateEstablished
 			if active {
 				p.current.conn.CloseWrite()
 				h := p.wait(header.TCPFlagFin)
 				p.ack = h.SequenceNumber() + 1
 				p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
-				// Process the ACK before freezing the subsequent FIN's writer.
-				// Re-enable the fence for this one packet, then unset it again.
-				tcp.SetTimeWaitHandler(p.stack, p.forward.Handle)
-				p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
-				tcp.SetTimeWaitHandler(p.stack, nil)
+				// A challenge RST drains the ACK without closing the endpoint.
+				tcp.SetLocalCloseFence(p.stack, true)
+				p.inject(p.packet(p.seq+1, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
+				tcp.SetLocalCloseFence(p.stack, false)
 				want = tcp.StateFinWait2
 			}
 			b := &finalACKBarrier{port: p.port, ack: p.seq + 1, entered: make(chan struct{}), release: make(chan struct{})}
@@ -381,6 +391,8 @@ func TestCloseRSTDuringHandshake(t *testing.T) {
 	limits := flows.Defaults()
 	limits.Flows = 1
 	p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+	releaseCleanup := p.holdRelayCleanup()
+	defer releaseCleanup()
 	p.seq = 1000
 	p.inject(p.packet(p.seq, 0, header.TCPFlagSyn, nil))
 	h := p.wait(header.TCPFlagSyn | header.TCPFlagAck)
@@ -397,9 +409,10 @@ func TestCloseRSTDuringHandshake(t *testing.T) {
 	defer old.conn.Close()
 	p.port++
 	p.openWith(500, func(syn []byte) { p.inject(syn); resume() })
+	releaseCleanup()
 	p.upload([]byte("replacement"))
 	p.closeActive()
-	if p.table.Stats().Rejected != 0 {
+	if p.table.Stats().Rejected != 0 || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
 		t.Fatal(p.diagnostics())
 	}
 }
@@ -416,12 +429,15 @@ func TestCloseBeforeFinalACK(t *testing.T) {
 			p := newPeerOptions(t, false, limits, ns.DefaultOptions())
 			p.open(1000)
 			p.upload([]byte("old"))
+			releaseCleanup := p.holdRelayCleanup()
+			defer releaseCleanup()
 			p.prepareFinalACK(simultaneous) // Lose the final ACK entirely.
 			if g := p.table.Stats(); g.Flows != 0 {
 				t.Error("a lost final ACK retained a payload-free flow", p.diagnostics())
 			}
 			p.port++
 			p.open(500)
+			releaseCleanup()
 			p.upload([]byte("replacement"))
 			p.closeActive()
 			if g := p.table.Stats(); g.Rejected != 0 || g.Admitted != 2 {
