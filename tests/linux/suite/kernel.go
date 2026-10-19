@@ -249,7 +249,7 @@ func defaultRouteRemoved(e *Env) {
 		e.Sleep(100 * time.Millisecond)
 	}
 	e.T.Require(left == "", "within 5 s no routing table has a default route through b any more (%s)", left)
-	from := time.Now().UnixMilli()
+	from := e.Mark()
 	r := e.TCP("bravo", AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "3", "--timeout", "8000")
 	// Anything a refusal set off has half a second to reach the servers.
 	e.Sleep(500 * time.Millisecond)

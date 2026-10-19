@@ -211,7 +211,7 @@ func cappedTCP(e *Env) {
 	e.ExpectTCP("charlie on an open line", "charlie", AsUser, "c", topo.Server4, 3)
 	accepted := Select(e.Records(), FromLine("tcp", "c", wire.PortWhoami, since, 0))
 	e.T.Require(len(accepted) == 3, "the server recorded charlie's 3 connections (%d)", len(accepted))
-	from := time.Now().UnixMilli()
+	from := e.Mark()
 	r := e.TCP("bravo", AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "150", "--concurrency", "10", "--timeout", "3000")
 	e.Sleep(500 * time.Millisecond)
 	dialed := Select(e.Records(), func(rec inet.Record) bool { return rec.Kind == "tcp" && rec.T >= from })

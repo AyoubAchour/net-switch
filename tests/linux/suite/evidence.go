@@ -51,6 +51,15 @@ func (e *Env) WaitRecords(timeout time.Duration, match func([]inet.Record) bool)
 	}
 }
 
+// Mark is a time (Unix ms) later than every record of traffic that has
+// already finished: a server records a connection before it answers it, so
+// once the app has its answer, the record is older than this. A "nothing got
+// out from now on" window starts here, not in the same millisecond.
+func (e *Env) Mark() int64 {
+	e.Sleep(2 * time.Millisecond)
+	return time.Now().UnixMilli()
+}
+
 // Select picks records.
 func Select(recs []inet.Record, keep func(inet.Record) bool) []inet.Record {
 	var out []inet.Record
