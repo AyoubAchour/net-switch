@@ -100,7 +100,9 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 	}
 	if r.Method == "stop" && s.stopping && r.Instance == s.Instance && r.Epoch == s.epoch {
 		err := s.runtime.Stop(ctx)
-		if err == nil { s.stopped = true }
+		if err == nil {
+			s.stopped = true
+		}
 		s.mu.Unlock()
 		return err == nil, err
 	}
@@ -266,6 +268,8 @@ func (s *Server) RunLease(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case event := <-s.table.Events():
+			s.Emit(event)
 		case <-tick.C:
 			if err := s.CheckLease(ctx); err != nil {
 				s.Emit(Event{Type: "fatal", Message: err.Error()})

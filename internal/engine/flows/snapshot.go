@@ -40,7 +40,7 @@ func (t *Table) Page(cursor string) (Page, error) {
 		for _, f := range t.flows {
 			if f.resolved {
 				count++
-				bytes += int64(unsafe.Sizeof(Record{})) + int64(len(f.record.Owner.Path) + len(f.record.Owner.AppID) + len(f.record.Owner.Generation))
+				bytes += int64(unsafe.Sizeof(Record{})) + int64(len(f.record.Owner.Path)+len(f.record.Owner.AppID)+len(f.record.Owner.Generation))
 			}
 		}
 		if count > t.limits.SnapshotEntries || bytes > t.limits.SnapshotBytes-t.gauges.SnapshotBytes {

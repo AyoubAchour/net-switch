@@ -18,8 +18,8 @@ import (
 )
 
 type runtimeFake struct {
-	table *flows.Table
-	stops atomic.Int64
+	table    *flows.Table
+	stops    atomic.Int64
 	failStop bool
 }
 
@@ -31,7 +31,10 @@ func (r *runtimeFake) Apply(_ context.Context, v policy.Revision) (policy.Applie
 }
 func (r *runtimeFake) Stop(context.Context) error {
 	r.stops.Add(1)
-	if r.failStop { r.failStop = false; return errors.New("cleanup failed") }
+	if r.failStop {
+		r.failStop = false
+		return errors.New("cleanup failed")
+	}
 	r.table.Unload()
 	r.table.CloseAll()
 	return nil
@@ -40,7 +43,9 @@ func (r *runtimeFake) Stop(context.Context) error {
 func TestFailedStopCanRetry(t *testing.T) {
 	s, runtime, req := setup(t)
 	runtime.failStop = true
-	if s.Handle(context.Background(), req("stop")).Error == "" { t.Fatal("cleanup failure acknowledged") }
+	if s.Handle(context.Background(), req("stop")).Error == "" {
+		t.Fatal("cleanup failure acknowledged")
+	}
 	call(t, s, req("stop"))
 }
 func revision(n uint64) policy.Revision {

@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 	"sync"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
@@ -157,7 +158,9 @@ func (e *Engine) fail(link *ns.Link, err error) {
 			return
 		}
 		e.lastError = err
-		e.stopLocked(context.Background())
+		cleanup := e.stopLocked(context.Background())
+		e.lastError = errors.Join(err, cleanup)
+		e.Table.Emit(flowapi.Event{Type: "fatal", Message: e.lastError.Error()})
 	}()
 }
 func (e *Engine) Apply(ctx context.Context, r policy.Revision) (policy.Applied, error) {
@@ -267,6 +270,7 @@ func (e *Engine) Stats() any {
 		s["udpInvalid"] = e.udp.Invalid.Load()
 		s["udpDropped"] = e.udp.Dropped.Load()
 		s["udpIdentityErrors"] = e.udp.IdentityErrors.Load()
+		s["udpOversize"] = e.udp.Oversize.Load()
 	}
 	return s
 }

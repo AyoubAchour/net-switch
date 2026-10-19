@@ -46,6 +46,7 @@ type Totals struct {
 	Lines map[string]Bytes `json:"lines"`
 }
 type Gauges struct {
+	EventsDropped                                                                                     uint64
 	Flows, Handshakes, UDP, Unknown, UnknownUDP                                                       int
 	TCPBytes, PendingBytes, SnapshotBytes                                                             int64
 	Rejected, DroppedNotices, Admitted, LookupCount, LookupMisses, LookupAmbiguous, LookupNanoseconds uint64
@@ -69,10 +70,12 @@ type Table struct {
 	rejectSecond         int64
 	rejectTotal          int
 	rejectApps           map[string]int
+	events               chan flowapi.Event
+	eventsDropped        atomic.Uint64
 }
 
 func New(l Limits, store StateStore) *Table {
-	return &Table{limits: l, now: time.Now, store: store, flows: map[uint64]*ticket{}, apps: map[string]counts{}, totals: Totals{Apps: map[string]Bytes{}, Lines: map[string]Bytes{}}, snapshots: map[uint64]*snapshot{}, rejectApps: map[string]int{}}
+	return &Table{limits: l, now: time.Now, store: store, flows: map[uint64]*ticket{}, apps: map[string]counts{}, totals: Totals{Apps: map[string]Bytes{}, Lines: map[string]Bytes{}}, snapshots: map[uint64]*snapshot{}, rejectApps: map[string]int{}, events: make(chan flowapi.Event, 64)}
 }
 func (t *Table) SetEpoch(epoch uint64) { t.mu.Lock(); t.epoch = epoch; t.mu.Unlock() }
 func (t *Table) Applied() *policy.Applied {
@@ -348,9 +351,34 @@ func (t *Table) AllowReject(app string) bool {
 	}
 	t.rejectTotal++
 	t.rejectApps[app]++
+	t.Emit(flowapi.Event{Type: "log", Message: "flow rejected", App: app})
 	return true
 }
-func (t *Table) Stats() Gauges { t.mu.Lock(); defer t.mu.Unlock(); return t.gauges }
+func (t *Table) Stats() Gauges {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	g := t.gauges
+	g.EventsDropped = t.eventsDropped.Load()
+	return g
+}
+
+func (t *Table) Events() <-chan flowapi.Event { return t.events }
+
+// No control lock or reader is allowed on the forwarding path.
+func (t *Table) Emit(event flowapi.Event) {
+	if len(event.Message) > 4096 {
+		event.Message = event.Message[:4096]
+	}
+	select {
+	case t.events <- event:
+	default:
+		t.eventsDropped.Add(1)
+	}
+}
+
+func (t *Table) LineError(line string, err error) {
+	t.Emit(flowapi.Event{Type: "lineError", Line: line, Message: err.Error()})
+}
 func (t *Table) Lookup(d time.Duration, err error, owner platform.Owner) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
