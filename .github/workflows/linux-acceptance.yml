@@ -84,6 +84,7 @@ jobs:
           node-version: ${{ steps.pins.outputs.node_version }}
           package-manager-cache: false
       - name: Build the harness
+        id: harness
         env:
           GOFLAGS: -mod=vendor
         run: |
@@ -95,6 +96,10 @@ jobs:
       # The QUIC fixture is its own module at a pinned quic-go, so QUIC never
       # enters Net Switch's go.mod or vendor/.
       - name: Check and build the QUIC fixture
+        id: quic
+        # A diagnostic run collects independent evidence even if a kernel
+        # regression failed. That failed step still makes the job fail.
+        if: ${{ (success() || inputs.profile) && steps.harness.outcome == 'success' }}
         working-directory: tests/quicfixture
         env:
           GOFLAGS: -mod=readonly
@@ -106,6 +111,7 @@ jobs:
       # In a transient scope with Delegate=yes: systemd lets a program create
       # cgroups only in a subtree delegated to it, and the lookup cases need some.
       - name: Run the acceptance suite as root
+        if: ${{ (success() || inputs.profile) && steps.harness.outcome == 'success' && steps.quic.outcome == 'success' }}
         env:
           RUN_FILTER: ${{ inputs.run }}
           PROFILE: ${{ inputs.profile }}
