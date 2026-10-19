@@ -1,10 +1,10 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { appendFileSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { createServer as createTcpServer } from 'node:net';
+import { randomBytes as defaultRandomBytes, timingSafeEqual } from 'node:crypto';
+import { appendFileSync as defaultAppendFileSync } from 'node:fs';
+import * as defaultFs from 'node:fs/promises';
+import { createServer as defaultHttpServer } from 'node:http';
+import { createServer as defaultTcpServer } from 'node:net';
 import path from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
+import { setTimeout as defaultDelay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { appKey, appPins, AppTracker, connectionLine, mergeRows, OutsideTracker, parseOutsideId } from './lib/apps.mjs';
 import { Engine, probeUrls } from './lib/engine.mjs';
@@ -13,8 +13,8 @@ import {
   LEGACY_KEYS,
   lineLabel,
   MAX_LABEL_LENGTH,
-  migrateSettings,
-  newLine,
+  migrateSettings as defaultMigrateSettings,
+  newLine as defaultNewLine,
   normalizeLines,
   pickFirstAdapter,
   placeWaitingApps,
@@ -24,9 +24,9 @@ import {
   validCap,
   withoutLegacyKeys,
 } from './lib/lines.mjs';
-import { createLog } from './lib/logfile.mjs';
-import { findHelper, LineMonitor } from './lib/monitor.mjs';
-import { NetworkMonitor, NetworkUpdates, quickProbe, readNetworkOnce, readPolicyOnce } from './lib/helper.mjs';
+import { createLog as defaultCreateLog } from './lib/logfile.mjs';
+import * as defaultMonitor from './lib/monitor.mjs';
+import * as defaultHelper from './lib/helper.mjs';
 import {
   describeFailure,
   effectiveMetric,
@@ -37,11 +37,33 @@ import {
   usableAddresses,
 } from './lib/network.mjs';
 import { platformFor } from './lib/platform/index.mjs';
-import { Settings, writeFileAtomic } from './lib/settings.mjs';
+import { Settings, writeFileAtomic as defaultWriteFileAtomic } from './lib/settings.mjs';
 import { UpdateChecker } from './lib/updates.mjs';
 import { Usage } from './lib/usage.mjs';
 
-const platform = platformFor();
+// Importing this module does no work. Each factory owns its state and queues.
+export async function createServer(options = {}) {
+const {
+  clock = { Date: globalThis.Date, setTimeout: globalThis.setTimeout, delay: defaultDelay },
+  fs = defaultFs,
+  rng = defaultRandomBytes,
+  platform = platformFor(),
+  process = globalThis.process,
+  createHttpServer = defaultHttpServer,
+  createTcpServer = defaultTcpServer,
+  createLog = defaultCreateLog,
+  appendFileSync = defaultAppendFileSync,
+  fetch = globalThis.fetch,
+} = options;
+const { Date, setTimeout, delay } = clock;
+const { mkdir, readFile, rm } = fs;
+const randomBytes = rng;
+const io = { fs, delay, Date, ...(options.rng ? { randomUUID: () => rng(16).toString('hex') } : {}) };
+const writeFileAtomic = (file, text) => defaultWriteFileAtomic(file, text, io);
+const migrateSettings = (values) => defaultMigrateSettings(values, rng);
+const newLine = (adapter, lines) => defaultNewLine(adapter, lines, rng);
+const { findHelper, LineMonitor } = { ...defaultMonitor, ...options.helper };
+const { NetworkMonitor, NetworkUpdates, quickProbe, readNetworkOnce, readPolicyOnce } = { ...defaultHelper, ...options.helper };
 const {
   allowSimultaneousConnections,
   applyCableAsMain,
@@ -172,6 +194,7 @@ if (instanceLock === null) {
 }
 
 const settings = new Settings(USER_DIR, {
+  io,
   onBackupError: (error) => log(`could not write the settings backup: ${error.message}`),
 });
 await settings.load();
@@ -183,6 +206,7 @@ if (settings.recovery) {
 // apart from the settings, which may be reset or shared, because this is the
 // only record of the person's own Windows settings.
 const windowsUndo = openUndoRecord(MACHINE_DIR, {
+  io,
   onBackupError: (error) => log(`could not write the Windows undo backup: ${error.message}`),
 });
 await windowsUndo.load();
@@ -192,7 +216,7 @@ await migrateLines();
 
 // Looks for a newer release, unless the person turned that off. Test mode
 // never checks: it runs beside a real copy, which already does.
-const updates = new UpdateChecker({
+const updates = options.updates ?? new UpdateChecker({
   platform,
   currentVersion: APP_VERSION,
   enabled: () => !testMode && settings.values.checkForUpdates,
@@ -210,7 +234,7 @@ function updateOffer() {
 const ENGINE_DIR = (testMode && argument('--engine-dir')) || path.join(ROOT, 'engine');
 const helperPath = findHelper(ROOT, undefined, platform);
 const networkMonitor = helperPath ? new NetworkMonitor({ helperPath, log, platform }) : null;
-const engine = new Engine({
+const engine = options.engine ?? new Engine({
   platform,
   singBoxPath: path.join(ENGINE_DIR, platform.engineFileName),
   dataDir: MACHINE_DIR,
@@ -289,7 +313,7 @@ const CARRYING_MIN_BYTES_PER_SECOND = 16 * 1024;
 // stale. Default routes come from the helper's latest reading, or from
 // route.exe when there is no fresh one. A failed reading says nothing about a
 // line's health.
-const readAddresses = usableAddresses;
+const readAddresses = options.readAddresses ?? usableAddresses;
 const readRoutes = networkMonitor ? () => networkMonitor.readDefaultRoutes() : readDefaultRoutes;
 
 // The quick line check: a TCP connection to a test address from the line's
@@ -327,6 +351,7 @@ function syncLanes() {
     lanes.set(
       id,
       new LaneSwitch({
+        now: Date.now,
         engine,
         lineId: id,
         getLines: () => settings.values.lines,
@@ -597,7 +622,7 @@ async function followAdapters() {
     if (!missingAdapters.has(line.id)) missingAdapters.set(line.id, new MissingAdapter());
     // Readings can come in bursts (one unplug sends several), so an adapter
     // counts as gone only after two readings 20 seconds apart.
-    const gone = missingAdapters.get(line.id).update(line.guid || line.alias, !found);
+    const gone = missingAdapters.get(line.id).update(line.guid || line.alias, !found, Date.now());
     if (found) {
       if (found.alias !== line.alias) {
         notes.push(`${line.label}'s adapter was renamed from ${line.alias} to ${found.alias}`);
@@ -671,7 +696,7 @@ function rebindIfNeeded() {
 // makes no difference.
 function ipv6Wanted() {
   const lines = settings.values.lines;
-  return settings.values.ipv6 !== 'off' && lines.length > 0 && lines.every((line) => hasGlobalIPv6(line.alias));
+  return settings.values.ipv6 !== 'off' && lines.length > 0 && lines.every((line) => (options.hasGlobalIPv6 ?? hasGlobalIPv6)(line.alias));
 }
 
 // In priority order, so the main line's apps are placed first.
@@ -1640,7 +1665,7 @@ const actions = {
 
 let port = PREFERRED_PORT;
 
-const server = createServer(async (request, response) => {
+const server = createHttpServer(async (request, response) => {
   try {
     const host = request.headers.host ?? '';
     const allowedHosts = [`127.0.0.1:${port}`, `localhost:${port}`];
@@ -1760,3 +1785,10 @@ if (!networkMonitor) every(nextScanDelay, refreshAdapters);
 every(1000, pollConnections);
 every(1000, superviseRouting);
 every(USAGE_SAVE_EVERY_MS, saveUsage);
+
+return { server, buildState, shutdown };
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  await createServer();
+}
