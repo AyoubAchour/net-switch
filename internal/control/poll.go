@@ -12,6 +12,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	"github.com/AyoubAchour/net-switch/internal/linehealth"
 	"github.com/AyoubAchour/net-switch/internal/lines"
 	"github.com/AyoubAchour/net-switch/internal/updates"
 	"github.com/AyoubAchour/net-switch/internal/usage"
@@ -103,7 +104,7 @@ func (c *Core) Poll(ctx context.Context) error {
 		}
 	}
 	c.lookupInfo(paths)
-	if err := c.finishClosures(ctx, gen); err != nil {
+	if err := c.laneQueue.Do(ctx, func() error { return c.finishClosures(ctx, gen) }); err != nil {
 		c.log("could not finish closure intents: %v", err)
 	}
 	c.scheduleProbes(ctx, connections)
@@ -144,7 +145,7 @@ func (c *Core) sampleLinesLocked(s engine.Snapshot) {
 		// each native snapshot once, with the same five-second read spacing.
 		if address && now-c.routesAt <= 30000 &&
 			(l.routeSnapshotAt == nil || c.routesAt > *l.routeSnapshotAt) &&
-			(l.routeReadAt == nil || now-*l.routeReadAt >= 5000) {
+			(l.routeReadAt == nil || now-*l.routeReadAt >= linehealth.RouteReadEveryMS) {
 			l.health.NoteRoute(ptr(route), c.routesAt)
 			l.routeReadAt = ptr(now)
 			l.routeSnapshotAt = ptr(c.routesAt)

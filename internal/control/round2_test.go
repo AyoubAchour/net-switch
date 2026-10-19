@@ -149,6 +149,33 @@ func TestJournalFailureCannotBlockLaneSwitch(t *testing.T) {
 	}
 }
 
+func TestFailedApplyReusesRevisionWhileClosureWaits(t *testing.T) {
+	c, e, _, files := testCore(t, map[string]any{"lines": testLines()})
+	c.sampleLinesLocked(e.Snapshot())
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	c.exhausted["b2"], c.closePending["b2"] = true, true
+	e.failure = errors.New("selector did not answer")
+	if err := c.closeExhausted(context.Background(), nil, c.generation); err == nil {
+		t.Fatal("missing injected failure")
+	}
+	number, writes := c.revision, len(files.writes)
+	for i := 0; i < 5; i++ {
+		_ = c.closeExhausted(context.Background(), nil, c.generation)
+	}
+	if c.revision != number || len(files.writes) != writes {
+		t.Fatalf("unchanged pending apply rewrote journal: revision %d -> %d, writes %d -> %d", number, c.revision, writes, len(files.writes))
+	}
+	e.failure = nil
+	if err := c.closeExhausted(context.Background(), nil, c.generation); err != nil {
+		t.Fatal(err)
+	}
+	if e.Snapshot().AppliedRevision != number {
+		t.Fatal("retry changed the original revision")
+	}
+}
+
 func TestClosureFailuresBackOffWithoutBlockingOthersOrRewritingRevision(t *testing.T) {
 	c, e, clock, files := testCore(t, map[string]any{"lines": testLines()})
 	c.sampleLinesLocked(e.Snapshot())

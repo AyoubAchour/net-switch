@@ -12,6 +12,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/linehealth"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -378,5 +379,5 @@ func network(once bool) error {
 	if once {
 		return emit()
 	}
-	return streamNetwork(changed, emit, 10*time.Second, 300*time.Millisecond)
+	return streamNetwork(changed, emit, time.Duration(linehealth.RouteReadEveryMS)*time.Millisecond, 300*time.Millisecond)
 }

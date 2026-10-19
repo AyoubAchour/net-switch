@@ -54,11 +54,18 @@ func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine
 		return engine.Revision{}, err
 	}
 	sum := sha256.Sum256(b)
+	hash := hex.EncodeToString(sum[:])
+	snapshot := c.op.Engine.Snapshot()
 	c.mu.Lock()
+	if previous := c.pendingRevision; previous != nil && c.pendingInstance == snapshot.Instance &&
+		snapshot.AppliedRevision < previous.Number && previous.Hash == hash && reflect.DeepEqual(c.closures, intents) {
+		c.mu.Unlock()
+		return *previous, nil
+	}
 	number := c.revision + 1
 	c.mu.Unlock()
-	revision := engine.Revision{Number: number, Hash: hex.EncodeToString(sum[:]), Policy: p}
-	applied := c.op.Engine.Snapshot().AppliedRevision
+	revision := engine.Revision{Number: number, Hash: hash, Policy: p}
+	applied := snapshot.AppliedRevision
 	for i := range intents {
 		if intents[i].Revision == 0 || (intents[i].Request.StartedBefore.IsZero() && intents[i].Revision > applied) {
 			intents[i].Revision = number
@@ -67,6 +74,7 @@ func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine
 	}
 	c.mu.Lock()
 	c.revision = number
+	c.pendingRevision, c.pendingInstance = &revision, snapshot.Instance
 	c.closures = append([]closureIntent{}, intents...)
 	c.mu.Unlock()
 	c.persistJournal()

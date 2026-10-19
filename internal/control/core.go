@@ -131,6 +131,8 @@ type Core struct {
 	lastUpdateFailure                            string
 	lastStatus                                   string
 	revision                                     uint64
+	pendingRevision                              *engine.Revision
+	pendingInstance                              string
 	closures                                     []closureIntent
 	closureRetries                               map[string]closureRetry
 	applyMu                                      sync.Mutex
