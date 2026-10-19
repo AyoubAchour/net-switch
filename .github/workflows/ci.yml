@@ -3,14 +3,12 @@ name: CI
 on:
   push:
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   engine:
-    if: github.event_name != 'workflow_dispatch'
     name: Windows ${{ matrix.arch }} / engine configs and TUN
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -66,7 +64,6 @@ jobs:
   # Net Switch 1.0, in progress: the Go code in the root module (cmd/, internal/).
   # Nothing here ships until 1.0; 0.3.x keeps building from the jobs below.
   go1:
-    if: github.event_name != 'workflow_dispatch'
     name: Go 1.0 / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -175,7 +172,6 @@ jobs:
           go test -run '^$' -fuzz '^FuzzProtocol$' -fuzztime 30s -parallel 2 ./internal/engine/protocol
 
   linux:
-    if: github.event_name != 'workflow_dispatch'
     name: Linux / Node ${{ matrix.node }} (shared code)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -194,7 +190,6 @@ jobs:
       - run: npm test
 
   linux-helper:
-    if: github.event_name != 'workflow_dispatch'
     name: Linux / helper build and shared tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -221,7 +216,6 @@ jobs:
       - run: go build ./...
 
   test:
-    if: github.event_name != 'workflow_dispatch'
     name: Windows / Node ${{ matrix.node }}
     runs-on: windows-latest
     timeout-minutes: 20
@@ -256,7 +250,6 @@ jobs:
         run: ./scripts/build-release.ps1 -SkipInstaller
 
   installer:
-    if: github.event_name != 'workflow_dispatch'
     name: Installer smoke test
     runs-on: windows-latest
     timeout-minutes: 30
@@ -275,7 +268,6 @@ jobs:
           ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-x64.exe"
 
   arm64:
-    if: github.event_name != 'workflow_dispatch'
     name: Windows ARM64 / tests and installer
     runs-on: windows-11-arm
     timeout-minutes: 30
@@ -330,36 +322,3 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           . ./scripts/build-common.ps1
           if ((Get-NativeArchitecture) -ne 'arm64') { throw 'Source engine download would use the wrong architecture.' }
-
-  tray-diagnostic:
-    if: github.event_name == 'workflow_dispatch'
-    name: Tray diagnostic / ${{ matrix.arch }} / ${{ matrix.sample }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: windows-11-arm
-            sample: 1
-          - arch: x64
-            runner: windows-latest
-            sample: 1
-    defaults:
-      run:
-        shell: powershell
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: '24'
-          architecture: ${{ matrix.arch }}
-          package-manager-cache: false
-      - run: ./scripts/build-helper.ps1
-      - name: Repeat fresh builds with and without the rest of the suite
-        run: |
-          node scripts/tray-diagnostic.mjs
-          exit $LASTEXITCODE
