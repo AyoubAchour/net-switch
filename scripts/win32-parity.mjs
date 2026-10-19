@@ -119,7 +119,7 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { args: { OLD: old.i
       const port = listener.address().port;
       const [expected, actual] = await Promise.all([windows.portHolder(port), native('port-holder', { port })]);
       assert.deepEqual(actual, expected);
-      const connected = once(listener, 'connection'); client = connect(port, '127.0.0.1'); [accepted] = await connected; await once(client, 'connect');
+      const connected = once(listener, 'connection'); client = connect(port, '127.0.0.1'); [accepted] = await connected; accepted.on('error', () => {}); client.on('error', () => {}); await once(client, 'connect');
       const tuple = await runPowerShellJson(`$c = Get-NetTCPConnection -LocalPort $env:NETSWITCH_PORT -RemotePort $env:NETSWITCH_REMOTE -State Established -ErrorAction Stop | Select-Object -First 1
 [pscustomobject]@{ local=[string]$c.LocalAddress; lport=[int]$c.LocalPort; remote=[string]$c.RemoteAddress; rport=[int]$c.RemotePort; pid=[int]$c.OwningProcess; created=$c.CreationTime.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress`, { args: { PORT: client.localPort, REMOTE: port } });
       assert.equal((await native('close-tcp', { connections: [{ ...tuple, pid: tuple.pid + 1000000 }] })).gone, 1);
@@ -131,16 +131,16 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { args: { OLD: old.i
       // accepting a coarse timestamp in native close could hit a reused socket.
       assert.equal(precise.created.slice(0, 19), tuple.created.slice(0, 19));
       assert.equal((await native('close-tcp', { connections: [{ ...precise, processStarted: '1900-01-01T00:00:00.0000000Z' }] })).gone, 1);
-      const closed = once(client, 'close'); client.on('error', () => {});
+      const closed = new Promise((resolve) => client.once('close', resolve));
       const nativeResult = await native('close-tcp', { connections: [precise] });
       assert.deepEqual(nativeResult, { closed: 1, failed: 0, gone: 0, codes: [] });
       await closed;
       assert.equal((await windows.closeTcpConnections([tuple])).gone, 1);
       accepted.destroy();
-      const connectedAgain = once(listener, 'connection'); client = connect(port, '127.0.0.1'); [accepted] = await connectedAgain; await once(client, 'connect');
+      const connectedAgain = once(listener, 'connection'); client = connect(port, '127.0.0.1'); [accepted] = await connectedAgain; accepted.on('error', () => {}); client.on('error', () => {}); await once(client, 'connect');
       const oldTuple = await runPowerShellJson(`$c = Get-NetTCPConnection -LocalPort $env:NETSWITCH_PORT -RemotePort $env:NETSWITCH_REMOTE -State Established -ErrorAction Stop | Select-Object -First 1
 [pscustomobject]@{ local=[string]$c.LocalAddress; lport=[int]$c.LocalPort; remote=[string]$c.RemoteAddress; rport=[int]$c.RemotePort; pid=[int]$c.OwningProcess; created=$c.CreationTime.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress`, { args: { PORT: client.localPort, REMOTE: port } });
-      const oldClosed = once(client, 'close'); client.on('error', () => {});
+      const oldClosed = new Promise((resolve) => client.once('close', resolve));
       assert.deepEqual(await windows.closeTcpConnections([oldTuple]), nativeResult);
       await oldClosed;
     } finally { client?.destroy(); accepted?.destroy(); await new Promise((resolve) => listener.close(resolve)); }
