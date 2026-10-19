@@ -66,8 +66,16 @@ Immediate TCP reuse records Winsock bind retries separately. A `close` event can
 arrive before Windows consumes the final ACK; the captured exchange showed a
 complete passive close and `EADDRINUSE` before any new SYN. Only that failed bind
 is retried, for at most 100 ms. Connected attempts and TCP timeouts are never
-retried, and the recorded latency includes the bind wait. Both the physical and
-TestISP baselines perform 1,000 immediate reuses before the engine starts.
+retried, and the recorded latency includes the bind wait. The physical-path
+baseline performs 1,000 immediate reuses before the engine starts.
+
+TestISP retains gVisor's default 60-second TIME_WAIT. Its 1,000-reuse prerequisite
+is `pending-shared-hook`, not a pass or a baseline CI failure, until the shared
+section 5.1 patch in [#29](https://github.com/AyoubAchour/net-switch/pull/29) lands.
+`configureTCPReuse` is the integration point; enabling it makes that probe a
+must-pass automatically. The `v1` profile fails while this gate is pending.
+Timeout zero was removed after a hosted ARM64 trace showed a lost final ACK,
+then a retransmitted FIN receiving RST. Increasing bind retries would hide it.
 
 Cap rejection has a mandatory closed-port baseline. Node's Windows libuv ignores
 UDP refusal errors, so this probe uses a native socket and explicitly enables

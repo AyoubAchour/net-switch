@@ -46,9 +46,6 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			return nil, netstackError{err}
 		}
 	}
-	// The harness must not add its own TIME_WAIT freeze to the engine under test.
-	wait := tcpip.TCPTimeWaitTimeoutOption(0)
-	s.SetTransportProtocolOption(tcp.ProtocolNumber, &wait)
 	forwarder := tcp.NewForwarder(s, 64*1024, 2048, func(request *tcp.ForwarderRequest) {
 		go func() {
 			id := request.ID()
@@ -83,6 +80,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			wg.Wait()
 		}()
 	})
+	g.tcpReuseHook = configureTCPReuse(s, forwarder)
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, forwarder.HandlePacket)
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, g.udpHandler(link))
 	go func() {
@@ -181,6 +179,12 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 		}
 	}()
 	return s, nil
+}
+
+func configureTCPReuse(s *stack.Stack, forwarder *tcp.Forwarder) bool {
+	// Keep gVisor's 60-second default. Enable the shared section 5.1 hook here
+	// after #29 lands, then return true to make 1,000 TestISP reuses mandatory.
+	return false
 }
 
 type netstackError struct{ err tcpip.Error }

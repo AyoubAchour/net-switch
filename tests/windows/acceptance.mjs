@@ -193,7 +193,11 @@ try {
     assert(samples.length === 1000 && samples.every((sample) => sample.outcome === 'closed'), `Physical reuse failed: ${JSON.stringify(samples)}`);
     return samples;
   });
-  await observe('gateway controlled port reuse baseline', 'parity', async () => {
+  if (!harness.testisp.tcpReuseHook) {
+    const reason = 'Section 5.1 / PR #29: TestISP keeps 60-second TIME_WAIT until the shared forwarder hook lands.';
+    report.results.push({ name: 'TestISP 1,000 rapid reuses', label: 'parity', status: 'pending-shared-hook', reason });
+    console.log(`PENDING-SHARED-HOOK [parity] TestISP 1,000 rapid reuses: ${reason}`);
+  } else await observe('gateway controlled port reuse baseline', 'parity', async () => {
     const samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000 });
     const failed = samples.find((sample) => sample.outcome !== 'closed');
     let sockets;
@@ -457,7 +461,7 @@ try {
   if (responder) { await writeFile(path.join(dir, 'target-observations.json'), JSON.stringify(responder.seen, null, 2)); await responder.close(); }
   output.end();
   await report.save(path.join(dir, 'report.json'));
-  if (options.profile === 'v1' && report.results.some((result) => ['deferred', 'blocked'].includes(result.status))) {
-    console.error('The v1 profile cannot pass while required gates are deferred or blocked.'); process.exitCode = 1;
+  if (options.profile === 'v1' && report.results.some((result) => ['deferred', 'blocked', 'pending-shared-hook'].includes(result.status))) {
+    console.error('The v1 profile cannot pass while required gates are deferred, blocked or pending the shared hook.'); process.exitCode = 1;
   }
 }

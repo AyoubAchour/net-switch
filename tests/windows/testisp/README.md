@@ -1,5 +1,11 @@
 # TestISP
 
+The gateway keeps gVisor's default 60-second TIME_WAIT. The acceptance suite's
+1,000 rapid TestISP reuses are `pending-shared-hook` until the section 5.1 patch
+in [#29](https://github.com/AyoubAchour/net-switch/pull/29) lands. The physical-path
+reuse baseline remains mandatory. `configureTCPReuse` is the shared hook seam;
+timeout zero is unsafe and is not used.
+
 TestISP is a separately observable virtual path sharing the runner's real uplink.
 It is not a physically separate uplink. Run it only on disposable GitHub-hosted
 Windows runners, never on a developer's PC or a self-hosted runner.

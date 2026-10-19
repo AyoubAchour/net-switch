@@ -73,15 +73,16 @@ type observations struct {
 }
 
 type gateway struct {
-	device   tun.Device
-	index    int
-	uplinkIP net.IP
-	mode     atomic.Int32 // 0 running, 1 paused, 2 dropping
-	stats    observations
-	targetMu sync.RWMutex
-	targets  map[string]string
-	done     chan struct{}
-	stop     sync.Once
+	tcpReuseHook bool
+	device       tun.Device
+	index        int
+	uplinkIP     net.IP
+	mode         atomic.Int32 // 0 running, 1 paused, 2 dropping
+	stats        observations
+	targetMu     sync.RWMutex
+	targets      map[string]string
+	done         chan struct{}
+	stop         sync.Once
 }
 
 func (g *gateway) close() { g.stop.Do(func() { close(g.done); g.device.Close() }) }
@@ -185,7 +186,7 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	ready := map[string]any{"pid": os.Getpid(), "index": adapter.Index, "alias": "TestISP", "address": "198.19.0.1", "control": "http://" + listener.Addr().String(), "uplinkIndex": *index, "uplinkIP": *ip}
+	ready := map[string]any{"pid": os.Getpid(), "index": adapter.Index, "alias": "TestISP", "address": "198.19.0.1", "control": "http://" + listener.Addr().String(), "uplinkIndex": *index, "uplinkIP": *ip, "tcpReuseHook": g.tcpReuseHook}
 	if err := writeJSON(*state, ready); err != nil {
 		return err
 	}
