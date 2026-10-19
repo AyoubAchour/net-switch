@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/apppath"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"golang.org/x/sys/unix"
 )
@@ -27,18 +28,29 @@ type holder struct {
 }
 
 var errForcedUnknown = errors.New("acceptance: unknown owner")
+
+type cachedHolders struct {
+	holders  []holder
+	observed time.Time
+}
+type fdWindow struct {
+	start uint64
+	next  int64
+}
 type Owners struct {
 	mu      sync.Mutex
 	cgroups map[uint64]string
 	recent  map[uint32][]uint32
-	cache   map[uint64][]holder
+	cache   map[uint64]cachedHolders
+	inodes  map[uint32][]holder
+	windows map[uint32]fdWindow
 	// Fault callbacks are assigned only by the acceptance build.
 	fault        func(context.Context) error
 	destroyFault func(context.Context, socketRow, func())
 }
 
 func NewOwners() *Owners {
-	return &Owners{cgroups: map[uint64]string{}, recent: map[uint32][]uint32{}, cache: map[uint64][]holder{}}
+	return &Owners{cgroups: map[uint64]string{}, recent: map[uint32][]uint32{}, cache: map[uint64]cachedHolders{}, inodes: map[uint32][]holder{}, windows: map[uint32]fdWindow{}}
 }
 
 // Work stops short of 10 ms to leave room for returning, timing and policy
@@ -72,7 +84,9 @@ func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (platform.Owner
 	unknown := false
 	if o.fault != nil {
 		if err := o.fault(ctx); err != nil {
-			if !errors.Is(err,errForcedUnknown) { return platform.Owner{}, err }
+			if !errors.Is(err, errForcedUnknown) {
+				return platform.Owner{}, err
+			}
 			unknown = true
 		}
 	}
@@ -96,10 +110,14 @@ func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (platform.Owner
 	if err != nil {
 		return platform.Owner{}, err
 	}
-	if unknown { return platform.Owner{Generation:r.generation()},nil }
+	if unknown {
+		return platform.Owner{Generation: r.generation()}, nil
+	}
 	owner, err := o.holders(ctx, r)
-	if err != nil { owner = platform.Owner{Generation:r.generation()} }
-	return owner,err
+	if err != nil {
+		owner = platform.Owner{Generation: r.generation()}
+	}
+	return owner, err
 }
 
 func processStart(pid uint32) (uint64, error) {
@@ -128,7 +146,7 @@ func processOwner(pid uint32) (platform.Owner, error) {
 		return platform.Owner{}, err
 	}
 	exe = strings.TrimSuffix(exe, " (deleted)")
-	id := exe
+	id := apppath.Normalize(exe, apppath.Linux)
 	// Flatpak's mount namespace metadata identifies apps that have identical
 	// /app/bin executable paths. It belongs to the holder, never to the socket.
 	if b, err := os.ReadFile(root + "root/.flatpak-info"); err == nil {
@@ -195,6 +213,9 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 			return nil
 		})
 		o.mu.Lock()
+		if len(o.cgroups) > 8192 {
+			clear(o.cgroups)
+		}
 		for id, path := range found {
 			o.cgroups[id] = path
 		}
@@ -224,15 +245,25 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		return platform.Owner{}, os.ErrNotExist
 	}
 	target := "socket:[" + strconv.FormatUint(uint64(r.inode), 10) + "]"
+	deadline, timed := ctx.Deadline()
+	expired := func() bool { return ctx.Err() != nil || (timed && !time.Now().Before(deadline)) }
 	var result platform.Owner
 	var found []holder
 	seen := map[uint32]bool{}
-	accept := func(pid uint32, fd string) error {
-		live, err := processOwner(pid)
-		if err != nil {
+	accept := func(h holder) error {
+		if expired() {
 			return nil
 		}
-		if got, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", pid, fd)); err != nil || got != target {
+		start, err := processStart(h.pid)
+		if err != nil || start != h.start {
+			return nil
+		}
+		got, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd))
+		if err != nil || got != target {
+			return nil
+		}
+		live, err := processOwner(h.pid)
+		if err != nil || live.StartTime != h.start {
 			return nil
 		}
 		if result.AppID != "" && result.AppID != live.AppID {
@@ -241,76 +272,185 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		if result.AppID == "" {
 			result = live
 		}
-		found = append(found, holder{pid, live.StartTime, fd})
+		for _, previous := range found {
+			if previous == h {
+				return nil
+			}
+		}
+		found = append(found, h)
+		seen[h.pid] = true
 		return nil
 	}
 	o.mu.Lock()
-	cached := append([]holder(nil), o.cache[r.cookie]...)
+	cached := append([]holder(nil), o.cache[r.cookie].holders...)
+	cached = append(cached, o.inodes[r.inode]...)
 	recent := append([]uint32(nil), o.recent[r.uid]...)
 	o.mu.Unlock()
-	// A cached inode association is evidence only after both the PID start time
-	// and its live fd are checked. Other holders are still searched for conflicts.
 	for _, h := range cached {
-		if ctx.Err() != nil {
-			break
-		}
-		if start, err := processStart(h.pid); err == nil && start == h.start {
-			if err := accept(h.pid, h.fd); err != nil {
-				return platform.Owner{}, err
-			}
+		if err := accept(h); err != nil {
+			return platform.Owner{}, err
 		}
 	}
+
+	// /proc's fd directory is seekable: its position is fd+2 (fs/proc/fd.c).
+	// Concurrent cold lookups share small rotating windows and index sockets
+	// seen along the way. The index is only a hint; accept rechecks the live fd
+	// and PID start time on every use. Regular files never enter the index.
 	var heavy []uint32
-	scan := func(pid uint32, limited bool) error {
-		if seen[pid] || ctx.Err() != nil {
+	scan := func(pid uint32, complete bool) error {
+		if seen[pid] || expired() {
 			return nil
 		}
 		seen[pid] = true
+		start, err := processStart(pid)
+		if err != nil {
+			return nil
+		}
 		dir := fmt.Sprintf("/proc/%d/fd", pid)
 		f, err := os.Open(dir)
 		if err != nil {
 			return nil
 		}
 		defer f.Close()
-		// Readdirnames avoids sorting thousands of regular files. Check a
-		// bounded slice per process first so one huge fd table cannot starve a
-		// cross-uid holder near the end of /proc.
-		count := 0
-		for ctx.Err() == nil {
-			fds, err := f.Readdirnames(64)
-			for _, fd := range fds {
-				if ctx.Err() != nil {
+		o.mu.Lock()
+		if len(o.windows) > 4096 {
+			clear(o.windows)
+		}
+		window := o.windows[pid]
+		if window.start != start {
+			window = fdWindow{start: start}
+		}
+		position := window.next
+		window.next += 64
+		o.windows[pid] = window
+		o.mu.Unlock()
+		if complete {
+			position = 0
+		}
+		if position > 0 {
+			if _, err := f.Seek(position, 0); err != nil {
+				return nil
+			}
+		}
+		remember := map[uint32]holder{}
+		visit := func(names []string) error {
+			for _, fd := range names {
+				if expired() {
 					break
 				}
-				got, e := os.Readlink(dir + "/" + fd)
-				if e == nil && got == target {
-					if e := accept(pid, fd); e != nil {
-						return e
+				got, err := os.Readlink(dir + "/" + fd)
+				if err != nil || !strings.HasPrefix(got, "socket:[") || !strings.HasSuffix(got, "]") {
+					continue
+				}
+				inode, err := strconv.ParseUint(got[8:len(got)-1], 10, 32)
+				if err != nil {
+					continue
+				}
+				h := holder{pid, start, fd}
+				remember[uint32(inode)] = h
+				if uint32(inode) == r.inode {
+					if err := accept(h); err != nil {
+						return err
 					}
 				}
 			}
-			count += len(fds)
-			if err != nil {
+			return nil
+		}
+		defer func() {
+			o.mu.Lock()
+			defer o.mu.Unlock()
+			if len(o.inodes) > 65536 {
+				clear(o.inodes)
+			}
+			for inode, h := range remember {
+				old := o.inodes[inode]
+				if !slices.Contains(old, h) && len(old) < 8 {
+					o.inodes[inode] = append(old, h)
+				}
+			}
+		}()
+		for !expired() {
+			names, readErr := f.Readdirnames(64)
+			if err := visit(names); err != nil {
+				return err
+			}
+			if len(found) > 0 && found[len(found)-1].pid == pid {
+				return nil
+			}
+			if readErr != nil {
+				o.mu.Lock()
+				if current := o.windows[pid]; current == window {
+					current.next = 0
+					o.windows[pid] = current
+				}
+				o.mu.Unlock()
 				break
 			}
-			if limited && count >= 256 {
+			if !complete {
 				heavy = append(heavy, pid)
+				// Descriptor passing and fork commonly reuse a small fd even
+				// while the creator's ordinary socket window is much higher.
+				if position > 0 {
+					if _, err := f.Seek(0, 0); err == nil {
+						names, _ := f.Readdirnames(16)
+						if err := visit(names); err != nil {
+							return err
+						}
+					}
+				}
 				break
 			}
 		}
 		return nil
 	}
-	groups := o.cgroupPIDs(ctx, r.cgroup)
-	for _, pids := range [][]uint32{recent, groups} {
-		for _, pid := range pids {
-			if err := scan(pid, true); err != nil {
-				return platform.Owner{}, err
+	finish := func() (platform.Owner, error) {
+		if result.AppID == "" {
+			if expired() {
+				return result, context.DeadlineExceeded
+			}
+			return result, os.ErrNotExist
+		}
+		result.Generation = r.generation()
+		o.mu.Lock()
+		if r.protocol == unix.IPPROTO_UDP {
+			o.cache[r.cookie] = cachedHolders{found, time.Now()}
+		}
+		newRecent := []uint32{result.PID}
+		for _, pid := range o.recent[r.uid] {
+			if pid != result.PID && len(newRecent) < 32 {
+				newRecent = append(newRecent, pid)
 			}
 		}
+		o.recent[r.uid] = newRecent
+		o.mu.Unlock()
+		return result, nil
 	}
+	// Search each tier for actual holders, then fall back only if it found
+	// none. A matching scope never supplies identity by itself.
+	groups := o.cgroupPIDs(ctx, r.cgroup)
+	ordered := make([]uint32, 0, len(groups))
+	for _, pid := range recent {
+		if slices.Contains(groups, pid) {
+			ordered = append(ordered, pid)
+		}
+	}
+	for _, pid := range groups {
+		if !slices.Contains(ordered, pid) {
+			ordered = append(ordered, pid)
+		}
+	}
+	for _, pid := range ordered {
+		if err := scan(pid, false); err != nil {
+			return platform.Owner{}, err
+		}
+	}
+	if result.AppID != "" {
+		return finish()
+	}
+
 	entries, _ := os.ReadDir("/proc")
 	var sameUID, other []uint32
-	for i := len(entries) - 1; i >= 0 && ctx.Err() == nil; i-- {
+	for i := len(entries) - 1; i >= 0 && !expired(); i-- {
 		e := entries[i]
 		pid, err := strconv.ParseUint(e.Name(), 10, 32)
 		if err != nil || seen[uint32(pid)] {
@@ -328,45 +468,62 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	}
 	slices.Sort(sameUID)
 	slices.Reverse(sameUID)
-	slices.Sort(other)
-	slices.Reverse(other)
-	for _, pids := range [][]uint32{sameUID, other} {
-		for _, pid := range pids {
-			if err := scan(pid, true); err != nil {
-				return platform.Owner{}, err
-			}
+	ordered = ordered[:0]
+	for _, pid := range recent {
+		if slices.Contains(sameUID, pid) {
+			ordered = append(ordered, pid)
 		}
 	}
-	for _, pid := range heavy {
-		delete(seen, pid)
+	for _, pid := range sameUID {
+		if !slices.Contains(ordered, pid) {
+			ordered = append(ordered, pid)
+		}
+	}
+	for _, pid := range ordered {
 		if err := scan(pid, false); err != nil {
 			return platform.Owner{}, err
 		}
 	}
-	if result.AppID == "" {
-		if ctx.Err() != nil {
-			return result, ctx.Err()
-		}
-		return result, os.ErrNotExist
+	if result.AppID != "" {
+		return finish()
 	}
-	result.Generation = r.generation()
+	slices.Sort(other)
+	slices.Reverse(other)
+	for _, pid := range other {
+		if err := scan(pid, false); err != nil {
+			return platform.Owner{}, err
+		}
+	}
+	if result.AppID != "" {
+		return finish()
+	}
+	// Other concurrent lookups may have found this new socket while scanning
+	// a neighbouring window. Check those hints before the remaining full scan.
 	o.mu.Lock()
-	if len(o.cache) >= 32768 {
-		clear(o.cache)
-	}
-	o.cache[r.cookie] = found
-	newRecent := []uint32{result.PID}
-	for _, pid := range o.recent[r.uid] {
-		if pid != result.PID && len(newRecent) < 32 {
-			newRecent = append(newRecent, pid)
+	hints := append([]holder(nil), o.inodes[r.inode]...)
+	o.mu.Unlock()
+	for _, h := range hints {
+		if err := accept(h); err != nil {
+			return platform.Owner{}, err
 		}
 	}
-	o.recent[r.uid] = newRecent
-	o.mu.Unlock()
-	return result, nil
+	if result.AppID != "" {
+		return finish()
+	}
+	for _, pid := range heavy {
+		delete(seen, pid)
+		if err := scan(pid, true); err != nil {
+			return platform.Owner{}, err
+		}
+		if result.AppID != "" {
+			return finish()
+		}
+	}
+	return finish()
 }
 
 func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip.AddrPort]platform.Owner, error) {
+	started := time.Now()
 	rows := map[int][]socketRow{}
 	for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
 		need := false
@@ -392,6 +549,21 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 			byPort[r.local.Port()] = append(byPort[r.local.Port()], r)
 		}
 	}
+	// Discard only dead cookies from a complete dump, and never a cache entry
+	// created while that dump was in progress. TCP lookups aren't retained.
+	live := map[uint64]bool{}
+	for _, familyRows := range rows {
+		for _, row := range familyRows {
+			live[row.cookie] = true
+		}
+	}
+	o.mu.Lock()
+	for cookie, cached := range o.cache {
+		if !live[cookie] && cached.observed.Before(started) {
+			delete(o.cache, cookie)
+		}
+	}
+	o.mu.Unlock()
 	out := make(map[netip.AddrPort]platform.Owner, len(keys))
 	processes := map[uint32]platform.Owner{}
 	checked := map[uint32]bool{}
@@ -404,14 +576,20 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 			continue
 		}
 		o.mu.Lock()
-		cached := append([]holder(nil), o.cache[r.cookie]...)
+		cached := append([]holder(nil), o.cache[r.cookie].holders...)
 		o.mu.Unlock()
 		var owner platform.Owner
-		if len(cached) == 0 { out[k] = platform.Owner{Generation:r.generation()}; continue }
+		if len(cached) == 0 {
+			out[k] = platform.Owner{Generation: r.generation()}
+			continue
+		}
 		// Reconcile every cookie, plus revalidate recorded holders. A changed
 		// holder is resolved afresh on the next datagram after closing the mapping.
 		for _, h := range cached {
-			if !checked[h.pid] { processes[h.pid], _ = processOwner(h.pid); checked[h.pid] = true }
+			if !checked[h.pid] {
+				processes[h.pid], _ = processOwner(h.pid)
+				checked[h.pid] = true
+			}
 			v := processes[h.pid]
 			if v.StartTime != h.start || v.AppID == "" {
 				continue

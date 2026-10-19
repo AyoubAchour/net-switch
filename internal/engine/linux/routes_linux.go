@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -127,7 +128,9 @@ func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 			return nil, err
 		}
 	}
-	if p.WrapTun != nil { return p.WrapTun(p.objects.tun), nil }
+	if p.WrapTun != nil {
+		return p.WrapTun(p.objects.tun), nil
+	}
 	return p.objects.tun, nil
 }
 
@@ -143,7 +146,9 @@ func allRules(ctx context.Context) ([]netlink.Rule, error) {
 		if err != nil {
 			return nil, err
 		}
-		for _,r := range rules { all = append(all,r.rule) }
+		for _, r := range rules {
+			all = append(all, r.rule)
+		}
 	}
 	return all, nil
 }
@@ -193,7 +198,15 @@ func (p *Platform) allocate(ctx context.Context, count int) error {
 
 func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	var replaced []string
+	defer func() {
+		p.mu.Unlock()
+		for _, id := range replaced {
+			if p.LineDown != nil {
+				p.LineDown(id)
+			}
+		}
+	}()
 	if len(lines) == 0 || len(lines) > 255 {
 		return errors.New("Linux routing needs 1–255 lines")
 	}
@@ -213,9 +226,7 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 		return err
 	}
 	for _, line := range lines {
-		if _, ok := next[line.ID]; ok {
-			continue
-		}
+		previous, existing := next[line.ID]
 		var match netlink.Link
 		for _, link := range links {
 			if line.Interface != "" {
@@ -239,7 +250,21 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 			}
 		}
 		if match == nil {
+			if existing {
+				continue
+			} // a down line still needs its failover lane
 			return fmt.Errorf("line %s: interface not found", line.ID)
+		}
+		if match.Attrs().Index == p.tunSpec.Index {
+			return errors.New("the TUN cannot be an egress line")
+		}
+		if existing {
+			if previous.Index != match.Attrs().Index || previous.Name != match.Attrs().Name {
+				replaced = append(replaced, line.ID)
+			}
+			previous.Index, previous.Name = match.Attrs().Index, match.Attrs().Name
+			next[line.ID] = previous
+			continue
 		}
 		n := len(next) + 1
 		if n > 255 {
@@ -251,7 +276,9 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 	p.lines = next
 	if err := p.reconcileLocked(ctx); err != nil {
 		p.lines = old
-		if p.capturing && p.Fatal != nil { go p.Fatal(fmt.Errorf("cannot reconcile line revision safely: %w",err)) }
+		if p.capturing && p.Fatal != nil {
+			go p.Fatal(fmt.Errorf("cannot reconcile line revision safely: %w", err))
+		}
 		return err
 	}
 	return nil
@@ -261,6 +288,32 @@ func (p *Platform) add(ctx context.Context, kind string, fp journal.Fingerprint)
 	key := kind + fp["object"]
 	if _, ok := p.owned[key]; ok {
 		return nil
+	}
+	if kind == "route" {
+		var next netlink.Route
+		if err := json.Unmarshal([]byte(fp["object"]), &next); err != nil {
+			return err
+		}
+		for previousKey, object := range p.owned {
+			if object.kind != "route" {
+				continue
+			}
+			var old netlink.Route
+			if err := json.Unmarshal([]byte(object.fp["object"]), &old); err != nil {
+				return err
+			}
+			if old.Family == next.Family && old.Table == next.Table && old.Priority == next.Priority && old.Tos == next.Tos && old.Dst.String() == next.Dst.String() {
+				if old.Type == unix.RTN_UNREACHABLE && next.Type != old.Type {
+					return errors.New("physical route collides with the reserved unreachable fallback")
+				}
+				if err := p.journal.Replace(ctx, kind, object.fp, fp); err != nil {
+					return err
+				}
+				delete(p.owned, previousKey)
+				p.owned[key] = ownedObject{kind, fp}
+				return nil
+			}
+		}
 	}
 	if err := p.journal.Create(ctx, kind, fp); err != nil {
 		return err
@@ -283,6 +336,15 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 	for _, l := range p.lines {
 		for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
 			r := netlink.Route{Family: fam, Table: l.Table, Dst: prefix(defaultCIDR(fam)), Type: unix.RTN_UNREACHABLE, Protocol: routeProtocol, Priority: int(^uint32(0))}
+			// Linux associates IPv6 reject routes with loopback. Record that
+			// index before creating it, so the live fingerprint matches cleanup.
+			if fam == unix.AF_INET6 {
+				lo, err := netlink.LinkByName("lo")
+				if err != nil {
+					return err
+				}
+				r.LinkIndex = lo.Attrs().Index
+			}
 			if err := keep("route", routeFP(p.objects, r)); err != nil {
 				return err
 			}

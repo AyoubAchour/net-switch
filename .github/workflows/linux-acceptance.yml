@@ -84,6 +84,9 @@ jobs:
         run: |
           go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
           go build -trimpath -tags acceptance -o "$RUNNER_TEMP/netswitch-engine" ./cmd/netswitch-engine
+          go test -c -o "$RUNNER_TEMP/linux-platform.test" ./internal/engine/linux
+      - name: Test Linux kernel interfaces and crash recovery in a private namespace
+        run: sudo unshare --net -- env NETSWITCH_ISOLATED_NETNS=1 "$RUNNER_TEMP/linux-platform.test" -test.v -test.run '^TestKernelPlatform$'
       # The QUIC fixture is its own module at a pinned quic-go, so QUIC never
       # enters Net Switch's go.mod or vendor/.
       - name: Check and build the QUIC fixture

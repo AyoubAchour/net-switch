@@ -30,7 +30,36 @@ type objectDriver struct {
 }
 
 func (d objectDriver) CleanupPriority() int {
-	switch d.kind { case "rule": return 0; case "route": return 1; case "address": return 2; case "tun": return 3; default: return 4 }
+	switch d.kind {
+	case "rule":
+		return 0
+	case "route":
+		return 1
+	case "address":
+		return 2
+	case "tun":
+		return 3
+	default:
+		return 4
+	}
+}
+
+func (d objectDriver) Replace(ctx context.Context, before, after journal.Fingerprint) error {
+	if d.kind != "route" {
+		return errors.New("only routes support atomic replacement")
+	}
+	live, found, err := d.Inspect(ctx, before)
+	if err != nil {
+		return err
+	}
+	if !found || !maps.Equal(live, before) {
+		return errors.New("route ownership changed before replacement")
+	}
+	var route netlink.Route
+	if err := json.Unmarshal([]byte(after["object"]), &route); err != nil {
+		return err
+	}
+	return netlink.RouteReplace(&route)
 }
 
 func (o *objects) fingerprint(v any) journal.Fingerprint {
@@ -111,7 +140,7 @@ func (d objectDriver) Inspect(ctx context.Context, f journal.Fingerprint) (journ
 			return nil, false, err
 		}
 		for _, r := range rules {
-			if len(r.extra)==0 && maps.Equal(ruleFP(d.o, r.rule), f) {
+			if len(r.extra) == 0 && maps.Equal(ruleFP(d.o, r.rule), f) {
 				return f, true, nil
 			}
 		}
