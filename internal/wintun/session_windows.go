@@ -305,17 +305,6 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		return 0, net.ErrClosed
 	}
 	var cancelEvent windows.Handle
-	if ctx.Done() != nil {
-		cancelEvent = s.cancelEvent
-		finished := make(chan struct{})
-		stop := context.AfterFunc(ctx, func() { windows.SetEvent(cancelEvent); close(finished) })
-		defer func() {
-			if !stop() {
-				<-finished
-				windows.ResetEvent(cancelEvent)
-			}
-		}()
-	}
 	spins := 0
 	for {
 		if err := ctx.Err(); err != nil {
@@ -346,9 +335,14 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		r := s.rings
 		placeholders, oversized := r.placeholders, r.oversized
 		n, err := r.read(buffers, sizes)
-		s.placeholders.Add(r.placeholders - placeholders)
-		s.oversized.Add(r.oversized - oversized)
-		s.dropped.Add(r.placeholders - placeholders + r.oversized - oversized)
+		if dropped := r.placeholders - placeholders; dropped != 0 {
+			s.placeholders.Add(dropped)
+			s.dropped.Add(dropped)
+		}
+		if dropped := r.oversized - oversized; dropped != 0 {
+			s.oversized.Add(dropped)
+			s.dropped.Add(dropped)
+		}
 		if errors.Is(err, ErrCorrupt) || errors.Is(err, ErrDisconnected) {
 			s.fail(err)
 			// Valid packets preceding the damaged entry remain ordered.
@@ -374,6 +368,21 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		// 0.14.1 TunSendNetBufferLists signals Send.TailMoved every time it
 		// publishes Tail. Send.Alertable is unused. Never reset this event:
 		// a signal between the empty check and Wait must remain pending.
+		// A ready batch needs no native wait or cancellation callback allocation.
+		// Install the callback only when parking, and join it before readMu is
+		// released so Close can safely destroy the event.
+		if cancelEvent == 0 && ctx.Done() != nil {
+			event := s.cancelEvent
+			cancelEvent = event
+			finished := make(chan struct{})
+			stop := context.AfterFunc(ctx, func() { windows.SetEvent(event); close(finished) })
+			defer func() {
+				if !stop() {
+					<-finished
+					windows.ResetEvent(event)
+				}
+			}()
+		}
 		handles := []windows.Handle{s.wake, s.rings.readEvent}
 		if cancelEvent != 0 {
 			handles = append(handles, cancelEvent)

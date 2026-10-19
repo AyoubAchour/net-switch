@@ -4,6 +4,7 @@ package wintun
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -304,6 +305,32 @@ func TestRingChecksumHandoff(t *testing.T) {
 	if s.RXChecksumVerified(testPacket()) {
 		t.Fatal("unverified protocol bypasses stack checks")
 	}
+}
+
+func TestRingReadyBatchDoesNotAllocate(t *testing.T) {
+	r, err := allocateRings(MinCapacity)
+	must(t, err)
+	defer r.close()
+	p := testPacket()
+	binary.LittleEndian.PutUint32(r.send.data(), uint32(len(p)))
+	copy(r.send.data()[4:], p)
+	r.send.store(4, aligned(uint32(len(p))+4))
+	s := &Session{rings: r}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	buffers, sizes := [][]byte{make([]byte, 9000)}, make([]int, 1)
+	allocs := testing.AllocsPerRun(1000, func() {
+		r.head = 0
+		r.send.store(0, 0)
+		n, err := s.ReadBatch(ctx, buffers, sizes)
+		if err != nil || n != 1 {
+			t.Fatalf("read %d: %v", n, err)
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("ready read allocated %.2f times", allocs)
+	}
+	t.Logf("1000 ready batches: %.0f allocations per batch", allocs)
 }
 
 func TestRingReopenBackoff(t *testing.T) {

@@ -233,6 +233,7 @@ func (f *fixture) startEcho(t *testing.T) {
 		for i := range buffers {
 			buffers[i] = make([]byte, MaxPacketSize)
 		}
+		out := make([][]byte, 0, len(buffers))
 		for {
 			n, err := f.io.ReadBatch(ctx, buffers, sizes)
 			if err != nil {
@@ -242,7 +243,7 @@ func (f *fixture) startEcho(t *testing.T) {
 				}
 				return
 			}
-			out := make([][]byte, 0, n)
+			out = out[:0]
 			for i := 0; i < n; i++ {
 				p := buffers[i][:sizes[i]]
 				if echoUDP(p) {
@@ -460,6 +461,17 @@ func TestWintunPingPong(t *testing.T) {
 				timings = append(timings, d)
 				if d > 50*time.Millisecond {
 					result.Over50MS++
+					var memory runtime.MemStats
+					runtime.ReadMemStats(&memory)
+					var stats any
+					if s, ok := f.io.(*Session); ok {
+						stats = s.Stats()
+					}
+					var pause uint64
+					if memory.NumGC != 0 {
+						pause = memory.PauseNs[(memory.NumGC-1)%256]
+					}
+					report(t, map[string]any{"test": "slow_round_trip", "arch": runtime.GOARCH, "mode": mode, "sequence": i, "ms": float64(d) / float64(time.Millisecond), "rescued": rescued, "gc_count": memory.NumGC, "last_gc_pause_ns": pause, "since_last_gc_ms": float64(time.Now().UnixNano()-int64(memory.LastGC)) / 1e6, "stats": stats})
 				}
 				if float64(d)/float64(time.Millisecond) > result.MaxMS {
 					result.MaxMS = float64(d) / float64(time.Millisecond)
