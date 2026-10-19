@@ -1,0 +1,29 @@
+{
+  "note": "Plain Linux tarballs of sing-box for the Linux acceptance suite's baseline. The suite runs the version packaging/versions.json pins (singBox.version) and fails if it isn't listed here. Sizes and SHA-256 are the GitHub release assets' size and digest fields. Only sing-box and LICENSE are extracted; the Linux build has no libcronet.so.",
+  "versions": {
+    "1.14.2": {
+      "amd64": {
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-amd64.tar.gz",
+        "size": 31680686,
+        "sha256": "a684484d7477d1437282ee411f4d131d0340aaad60a7868841ebd5d87dd8a0c6"
+      },
+      "arm64": {
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.2/sing-box-1.14.2-linux-arm64.tar.gz",
+        "size": 29102159,
+        "sha256": "b43a1fb1bda131c6653576741ce527eb2bdeab7c9308ca90ee8b972abb7e4a7f"
+      }
+    },
+    "1.14.3": {
+      "amd64": {
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-amd64.tar.gz",
+        "size": 31678266,
+        "sha256": "e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee"
+      },
+      "arm64": {
+        "url": "https://github.com/SagerNet/sing-box/releases/download/v1.14.3/sing-box-1.14.3-linux-arm64.tar.gz",
+        "size": 29110944,
+        "sha256": "29dae24d76bea3bc62d07dd3e60cfc12003de7debbd6b768df9be9c68360174e"
+      }
+    }
+  }
+}
