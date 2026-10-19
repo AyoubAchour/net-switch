@@ -43,7 +43,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			id := request.ID()
 			destination := net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort)))
 			g.record(destination)
-			remote, err := boundDialer(g.index, g.uplinkIP).DialContext(context.Background(), "tcp4", destination)
+			remote, err := boundDialer(g.index, g.uplinkIP).DialContext(context.Background(), "tcp4", g.backend(destination))
 			if err != nil {
 				g.failure(destination, err)
 				request.Complete(true)
@@ -73,18 +73,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 		}()
 	})
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, forwarder.HandlePacket)
-	udpForwarder := udp.NewForwarder(s, func(request *udp.ForwarderRequest) bool {
-		id := request.ID()
-		var queue waiter.Queue
-		endpoint, err := request.CreateEndpoint(&queue)
-		if err != nil {
-			g.failure("udp endpoint", netstackError{err})
-			return true
-		}
-		go g.relayUDP(gonet.NewUDPConn(&queue, endpoint), net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort))))
-		return true
-	})
-	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, g.udpHandler(link))
 	go func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -146,6 +135,10 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			if drop || n == 0 {
 				continue
 			}
+			// gVisor can answer echo locally. Only our controlled target is local;
+			// never manufacture a reply for a public host that we did not ping.
+			if n >= 20 && packet[0]>>4 == 4 && packet[9] == 1 && net.IP(packet[16:20]).String() != "198.19.128.2" { continue }
+			if n >= 40 && packet[0]>>4 == 6 && packet[6] == 58 { continue }
 			protocol := ipv4.ProtocolNumber
 			if packet[0]>>4 == 6 {
 				protocol = ipv6.ProtocolNumber
@@ -187,36 +180,8 @@ func (g *gateway) transferred(n int64, outgoing bool) {
 	}
 }
 
-func (g *gateway) relayUDP(local *gonet.UDPConn, destination string) {
-	defer local.Close()
-	g.record(destination)
-	dialer := &net.Dialer{Timeout: 5 * time.Second, LocalAddr: &net.UDPAddr{IP: g.uplinkIP}, Control: bindInterface(g.index)}
-	remote, err := dialer.Dial("udp4", destination)
-	if err != nil {
-		g.failure(destination, err)
-		return
-	}
-	defer remote.Close()
-	var wg sync.WaitGroup
-	copyPackets := func(dst, src net.Conn, outgoing bool) {
-		defer wg.Done()
-		packet := make([]byte, 65535)
-		for {
-			src.SetReadDeadline(time.Now().Add(30 * time.Second))
-			n, err := src.Read(packet)
-			if err != nil {
-				break
-			}
-			if _, err = dst.Write(packet[:n]); err != nil {
-				break
-			}
-			g.transferred(int64(n), outgoing)
-		}
-		local.Close()
-		remote.Close()
-	}
-	wg.Add(2)
-	go copyPackets(remote, local, true)
-	go copyPackets(local, remote, false)
-	wg.Wait()
+func (g *gateway) backend(destination string) string {
+	g.targetMu.RLock(); defer g.targetMu.RUnlock()
+	if address, ok := g.targets[destination]; ok { return address }
+	return destination
 }

@@ -8,6 +8,68 @@ permissions:
   contents: read
 
 jobs:
+  windows-acceptance:
+    name: Windows acceptance / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: ARM64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Build gateway and independent probe
+        run: |
+          go test ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build today's native helper
+        # The helper has its own module and its own dependency policy.
+        env:
+          GOFLAGS: -mod=readonly -p=2
+        run: ./scripts/build-helper.ps1
+      - name: Fetch the verified engine and signed Wintun DLL
+        run: |
+          ./scripts/fetch-engine.ps1
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
+      - name: Run acceptance against today's Node server and sing-box
+        run: |
+          node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry server.mjs --engine-exe engine/sing-box.exe --profile baseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Keep report, executable identities and traffic evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-acceptance-${{ matrix.arch }}
+          path: |
+            dist/windows-acceptance/**/*.json
+            dist/windows-acceptance/**/*.log*
+          retention-days: 14
+
   testisp:
     name: TestISP proof / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
