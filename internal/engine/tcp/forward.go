@@ -123,7 +123,17 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	ticket.SetCancel(cancel)
 	t := tuple(id)
 	lookup, cancelLookup := context.WithTimeout(ctx, 50*time.Millisecond)
-	owner, _ = f.owners.TCP(lookup, t)
+	lookupStart := time.Now()
+	var lookupErr error
+	owner, lookupErr = f.owners.TCP(lookup, t)
+	if observer, ok := f.control.(interface {
+		Lookup(time.Duration, error, platform.Owner)
+	}); ok {
+		observer.Lookup(time.Since(lookupStart), lookupErr, owner)
+	}
+	if lookupErr != nil {
+		owner = platform.Owner{}
+	}
 	cancelLookup()
 	decision, err := ticket.Resolve(owner)
 	if err != nil {

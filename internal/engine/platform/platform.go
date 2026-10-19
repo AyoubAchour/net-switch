@@ -11,6 +11,7 @@ import (
 )
 
 var ErrNotYet = errors.New("platform support not yet implemented")
+var ErrAmbiguous = errors.New("socket has ambiguous owners")
 
 type TunDevice interface {
 	ReadPacket(context.Context, []byte) (int, error)
