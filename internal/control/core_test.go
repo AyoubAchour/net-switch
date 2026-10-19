@@ -1,0 +1,475 @@
+package control
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/AyoubAchour/net-switch/internal/apps"
+	"github.com/AyoubAchour/net-switch/internal/engine"
+	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	"github.com/AyoubAchour/net-switch/internal/lines"
+	"github.com/AyoubAchour/net-switch/internal/settings"
+	"github.com/AyoubAchour/net-switch/internal/usage"
+)
+
+type memoryFiles struct {
+	mu   sync.Mutex
+	data map[string][]byte
+	fail bool
+}
+
+func (f *memoryFiles) ReadFile(p string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.data[p]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return append([]byte{}, b...), nil
+}
+func (f *memoryFiles) WriteFile(p string, b []byte, _ fs.FileMode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fail {
+		return errors.New("disk full")
+	}
+	f.data[p] = append([]byte{}, b...)
+	return nil
+}
+func (f *memoryFiles) Rename(a, b string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.data[a]
+	if !ok {
+		return fs.ErrNotExist
+	}
+	f.data[b] = v
+	delete(f.data, a)
+	return nil
+}
+func (f *memoryFiles) Remove(p string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.data, p)
+	return nil
+}
+
+type fakeClock struct {
+	mu sync.Mutex
+	at time.Time
+}
+
+func (f *fakeClock) Now() time.Time                       { f.mu.Lock(); defer f.mu.Unlock(); return f.at }
+func (f *fakeClock) After(time.Duration) <-chan time.Time { return make(chan time.Time) }
+func (f *fakeClock) advance(ms int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.at = f.at.Add(time.Duration(ms) * time.Millisecond)
+}
+
+type fakeEngine struct {
+	mu          sync.Mutex
+	s           engine.Snapshot
+	connections []engine.Connection
+	calls       []string
+	failure     error
+	beforeApply func(engine.Revision)
+	probe       func(engine.ProbeRequest) engine.ProbeResult
+}
+
+func (f *fakeEngine) Snapshot() engine.Snapshot { f.mu.Lock(); defer f.mu.Unlock(); return f.s }
+func (f *fakeEngine) Start(_ context.Context, p engine.Policy) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "start")
+	f.s.Status = "on"
+	f.s.Instance = "test-engine"
+	f.s.Policy = p
+	f.s.StartedWith = &p
+	f.s.StartedAt = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	return f.failure
+}
+func (f *fakeEngine) Stop(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "stop")
+	if f.failure == nil {
+		f.s.Status = "off"
+	}
+	return f.failure
+}
+func (f *fakeEngine) Apply(_ context.Context, r engine.Revision) (engine.Acknowledgement, error) {
+	if f.beforeApply != nil {
+		f.beforeApply(r)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "apply")
+	if f.failure != nil {
+		return engine.Acknowledgement{}, f.failure
+	}
+	f.s.Policy = r.Policy
+	f.s.AppliedRevision = r.Number
+	f.s.AppliedHash = r.Hash
+	return engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: f.s.Instance, AppliedAt: f.s.StartedAt}, nil
+}
+func (f *fakeEngine) CloseFlows(_ context.Context, r engine.CloseRequest) (engine.CloseResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, id := range r.ConnectionIDs {
+		f.calls = append(f.calls, "close:"+id)
+	}
+	return engine.CloseResult{Closed: len(r.ConnectionIDs)}, nil
+}
+func (f *fakeEngine) Connections(context.Context) ([]engine.Connection, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]engine.Connection{}, f.connections...), nil
+}
+func (f *fakeEngine) CloseConnection(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "close:"+id)
+	return nil
+}
+func (f *fakeEngine) Probe(_ context.Context, r engine.ProbeRequest) engine.ProbeResult {
+	if f.probe != nil {
+		return f.probe(r)
+	}
+	return engine.ProbeResult{Outcome: engine.OK, Delay: ptr(float64(18))}
+}
+
+type fakePlatform struct {
+	network map[string]any
+	calls   []string
+	mu      sync.Mutex
+}
+
+func (f *fakePlatform) Call(_ context.Context, name string, a map[string]any) (any, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, name)
+	switch name {
+	case "network":
+		return f.network, nil
+	case "elevated":
+		return true, nil
+	case "close-tcp":
+		n := 0
+		if tt, ok := a["connections"].([]*apps.Tuple); ok {
+			n = len(tt)
+		}
+		return map[string]any{"closed": float64(n), "failed": float64(0), "gone": float64(0), "codes": []any{}}, nil
+	case "installed-apps":
+		return []any{}, nil
+	}
+	return nil, nil
+}
+func (*fakePlatform) Stream(context.Context, string, func([]byte), func(error)) {}
+func testCore(t *testing.T, initial map[string]any) (*Core, *fakeEngine, *fakeClock, *memoryFiles) {
+	t.Helper()
+	files := &memoryFiles{data: map[string][]byte{}}
+	b, err := js.Marshal(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files.data[filepath.Join("/test", "settings.json")] = b
+	clock := &fakeClock{at: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
+	serial := 0
+	id := func() string { serial++; return fmt.Sprintf("%012x", serial) }
+	io := settings.Options{Files: files, Now: clock.Now, ID: id, Sleep: func(time.Duration) {}}
+	store := settings.New("/test", io)
+	if _, err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	undo := io
+	undo.FileName = "windows-undo.json"
+	undo.Defaults = map[string]any{"metrics": map[string]any{}, "policy": map[string]any{}}
+	us := settings.New("/test", undo)
+	if _, err := us.Load(); err != nil {
+		t.Fatal(err)
+	}
+	journal := io
+	journal.FileName = "control-journal.json"
+	journal.Defaults = map[string]any{"revision": float64(0), "closures": []any{}, "desired": map[string]any{}, "settings": map[string]any{}}
+	j := settings.New("/test", journal)
+	if _, err := j.Load(); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeEngine{s: engine.Snapshot{Status: "off", Instance: "test-engine", Policy: engine.Policy{}}}
+	p := &fakePlatform{}
+	c, err := New(context.Background(), Options{Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: time.UTC, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, Background: func(fn func()) { fn() }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.cancel)
+	return c, f, clock, files
+}
+func testLines() []lines.Line {
+	return []lines.Line{{ID: "a1", Alias: "Ethernet", Label: "Ethernet", Kind: ptr("wired"), Weight: 1}, {ID: "b2", Alias: "Wi-Fi", Label: "Wi-Fi", Kind: ptr("wifi"), Weight: 1}}
+}
+
+func TestCapsPersistBeforeApplyAndCloseOnlyAfterAck(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mainCap bool
+		want    string
+	}{{"moved secondary", false, "close:old-secondary"}, {"blocked secondary and main exception", true, "close:old-secondary"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			items := testLines()
+			items[1].Cap = &lines.Cap{Bytes: 100, Period: "day"}
+			if tc.mainCap {
+				items[0].Cap = &lines.Cap{Bytes: 100, Period: "day"}
+			}
+			c, e, clock, _ := testCore(t, map[string]any{"lines": items})
+			c.values["lines"] = items
+			for _, l := range c.lanes {
+				l.health.Up = ptr(true)
+				l.health.HadAddress = ptr(true)
+			}
+			if err := c.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			e.calls = nil
+			c.closePending["b2"] = true
+			c.exhausted["b2"] = true
+			if tc.mainCap {
+				c.closePending["a1"] = true
+				c.exhausted["a1"] = true
+			}
+			connections := []engine.Connection{{Connection: apps.Connection{ID: "old-secondary", Chains: []string{"line-b2"}}}, {Connection: apps.Connection{ID: "old-main", Chains: []string{"line-a1"}}}}
+			e.beforeApply = func(r engine.Revision) {
+				v := c.op.Journal.Values()
+				if uint64(js.Number(v["revision"])) != r.Number || len(array(v["closures"])) != 1 {
+					t.Fatal("revision and closure were not persisted before apply")
+				}
+				for _, call := range e.calls {
+					if strings.HasPrefix(call, "close:") {
+						t.Fatal("closed before acknowledgement")
+					}
+				}
+			}
+			clock.advance(1000)
+			if err := c.closeExhausted(context.Background(), connections, c.generation); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(e.calls, []string{"apply", tc.want}) {
+				t.Fatal(e.calls)
+			}
+			if len(array(c.op.Journal.Values()["closures"])) != 0 {
+				t.Fatal("acknowledged closure not completed")
+			}
+		})
+	}
+}
+func TestFailedApplyNeverClosesAndLeavesIntent(t *testing.T) {
+	c, e, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.exhausted["b2"] = true
+	c.closePending["b2"] = true
+	e.s.Status = "on"
+	e.failure = errors.New("reload failed")
+	err := c.closeExhausted(context.Background(), []engine.Connection{{Connection: apps.Connection{ID: "old", Chains: []string{"line-b2"}}}}, c.generation)
+	if err == nil {
+		t.Fatal("expected apply failure")
+	}
+	if !reflect.DeepEqual(e.calls, []string{"apply"}) {
+		t.Fatal(e.calls)
+	}
+	if len(array(c.op.Journal.Values()["closures"])) != 1 {
+		t.Fatal("lost retry intent")
+	}
+}
+func TestStaleProbeCannotChangeReplacementLane(t *testing.T) {
+	c, e, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	for _, l := range c.lanes {
+		l.health.Up = ptr(true)
+		l.health.HadAddress = ptr(true)
+	}
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pending := []func(){}
+	c.op.Background = func(f func()) { pending = append(pending, f) }
+	e.probe = func(engine.ProbeRequest) engine.ProbeResult { return engine.ProbeResult{Outcome: engine.LineFailed} }
+	c.scheduleProbes(context.Background(), nil)
+	c.lanes["a1"].generation++
+	for _, f := range pending {
+		f()
+	}
+	if c.lanes["a1"].health.Offline || c.lanes["a1"].health.ProbeFails != 0 {
+		t.Fatal("old probe changed current line")
+	}
+}
+func TestQueueFailureAndCancellationDoNotPoisonFollowingItems(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	q := newQueue(ctx)
+	if err := q.Do(ctx, func() error { return errors.New("failed") }); err == nil {
+		t.Fatal("missing failure")
+	}
+	canceled, stop := context.WithCancel(ctx)
+	stop()
+	if err := q.Do(canceled, func() error { t.Fatal("ran canceled task"); return nil }); err == nil {
+		t.Fatal("missing cancellation")
+	}
+	if err := q.Do(ctx, func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPBoundaryWithoutOpeningSocket(t *testing.T) {
+	c, _, _, _ := testCore(t, map[string]any{})
+	h := &HTTP{Core: c, Port: 47821, Token: strings.Repeat("a", 48)}
+	for _, tc := range []struct {
+		name, method, path, host, origin, token, body string
+		status                                        int
+	}{{"ping", "GET", "/api/ping", "127.0.0.1:47821", "", h.Token, "", 200}, {"host", "GET", "/api/ping", "evil.invalid", "", h.Token, "", 403}, {"origin", "POST", "/api/routing", "127.0.0.1:47821", "https://evil.invalid", h.Token, `{}`, 403}, {"token", "GET", "/api/state", "localhost:47821", "", "wrong", "", 401}, {"large", "POST", "/api/settings", "localhost:47821", "", h.Token, strings.Repeat(" ", 65537), 400}, {"invalid", "POST", "/api/settings", "localhost:47821", "", h.Token, "{", 400}, {"missing", "GET", "/api/missing", "localhost:47821", "", h.Token, "", 404}, {"ui", "GET", "/", "localhost:47821", "", "", "", 200}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			r.Host = tc.host
+			r.Header.Set("X-Token", tc.token)
+			r.Header.Set("Origin", tc.origin)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.status {
+				t.Fatalf("%d: %s", w.Code, w.Body.String())
+			}
+			if tc.name == "ui" && !strings.Contains(w.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+				t.Fatal("missing CSP")
+			}
+		})
+	}
+}
+
+type seededTracker struct{ rows []apps.Row }
+
+func (s *seededTracker) Reset()                                       {}
+func (s *seededTracker) Ingest([]apps.Connection, int64)              {}
+func (s *seededTracker) Snapshot(apps.Pins) []apps.Row                { return s.rows }
+func (s *seededTracker) LineRate(string) apps.Rate                    { return apps.Rate{} }
+func (s *seededTracker) ConnectionIDsOffLine(string, string) []string { return nil }
+
+func TestStateMatchesEveryFrozenTrayScenario(t *testing.T) {
+	input, err := os.ReadFile("../../tests/oracle/fixtures/tray-inputs.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scenarios map[string]json.RawMessage
+	if err := json.Unmarshal(input, &scenarios); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile("../../tests/oracle/fixtures/node.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frozen struct {
+		States map[string]struct {
+			Body json.RawMessage `json:"body"`
+		} `json:"states"`
+	}
+	if err := json.Unmarshal(b, &frozen); err != nil {
+		t.Fatal(err)
+	}
+	if len(scenarios) != len(frozen.States) {
+		t.Fatal("scenario count changed")
+	}
+	for name, raw := range scenarios {
+		t.Run(name, func(t *testing.T) {
+			c, e, clock, _ := testCore(t, map[string]any{})
+			v, err := js.Decode(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scenario := js.Object(v)
+			lineRaw, _ := json.Marshal(scenario["lines"])
+			var items []lines.Line
+			if err := json.Unmarshal(lineRaw, &items); err != nil {
+				t.Fatal(err)
+			}
+			c.values["lines"] = items
+			c.syncLanesLocked()
+			c.elevated = true
+			c.wanted = js.Object(scenario["routing"])["wanted"] == true
+			e.s.Status = js.Text(js.Object(scenario["routing"])["status"])
+			e.s.StartedWith = &engine.Policy{Lines: items}
+			e.s.Policy = engine.Policy{Lines: items, Combine: js.Object(scenario["combine"])["on"] == true, Shares: lines.Shares{}}
+			c.policy = float64(1)
+			for _, raw := range array(scenario["lines"]) {
+				v := js.Object(raw)
+				id := js.Text(v["id"])
+				l := c.lanes[id]
+				l.health.Up = ptr(v["connected"] == true)
+				if v["problem"] != nil {
+					l.health.Reason = ptr(js.Text(v["problem"]))
+				}
+				if v["ping"] != nil {
+					l.delay = ptr(js.Number(v["ping"]))
+				}
+				if v["target"] != nil {
+					l.target = ptr(js.Text(v["target"]))
+				}
+				c.connections[id] = int(js.Number(v["connections"]))
+				u := js.Object(v["usage"])
+				at, err := time.Parse(time.RFC3339Nano, js.Text(u["periodStart"]))
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.usage.Lines[id] = usage.Entry{Bytes: js.Number(u["bytes"]), PeriodStart: float64(at.UnixMilli())}
+				if v["exhausted"] == true {
+					c.exhausted[id] = true
+				}
+				if v["share"] != nil {
+					e.s.Policy.Shares = append(e.s.Policy.Shares, lines.Share{ID: id, Value: js.Number(v["share"])})
+				}
+				rate := js.Object(v["rate"])
+				c.meters[js.Text(v["alias"])] = meter{at: clock.Now().UnixMilli(), rate: &apps.Rate{Down: js.Number(rate["down"]), Up: js.Number(rate["up"])}}
+				c.adapters = append(c.adapters, map[string]any{"alias": v["alias"], "kind": v["kind"], "ssid": v["ssid"], "connected": v["connected"]})
+			}
+			tracker := &seededTracker{}
+			pins := apps.Pins{}
+			for _, raw := range array(scenario["apps"]) {
+				v := js.Object(raw)
+				path := js.Text(v["path"])
+				var pin *string
+				if v["line"] != nil {
+					pin = ptr(js.Text(v["line"]))
+					pins = append(pins, apps.Pin{Path: path, LineID: *pin})
+				}
+				home := items[0].ID
+				if pin != nil {
+					home = *pin
+				}
+				rate := js.Object(v["rate"])
+				tracker.rows = append(tracker.rows, apps.Row{Key: apps.AppKey(path), Path: path, Line: pin, Rate: apps.Rate{Down: js.Number(rate["down"]), Up: js.Number(rate["up"])}, LineDown: map[string]float64{home: js.Number(rate["down"])}, SortScore: js.Number(v["sortScore"]), Connections: map[string]int{}})
+			}
+			c.values["appLines"] = pins
+			c.tracker = tracker
+			actual, err := js.Marshal(c.State())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := js.Decode(actual)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := js.Decode(frozen.States[name].Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("state contract differs\ngot: %s\nwant: %s", actual, frozen.States[name].Body)
+			}
+		})
+	}
+}

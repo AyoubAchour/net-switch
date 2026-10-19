@@ -83,6 +83,20 @@ comparison rules, not changes to the frozen Node files.
 5. Network changes close only flows on the affected line/address.
 6. TIME_WAIT follows the validated new-engine behavior.
 
+### Milestone-one adapter limitation (owner decision, 2026-10-19)
+
+Control uses `apply revision -> acknowledgement` and persisted closure intents
+with `startedBefore` now. The temporary sing-box adapter retains Node's serial
+rule-file writes, per-file reloads and rollback. It waits the legacy 300 ms reload
+grace period, checks engine availability, and awaits selector PUT responses before
+acknowledging; sing-box exposes no atomic rule-set acknowledgement. This does not
+prove packet-level atomicity or that a stalled file watcher has reloaded. Closures
+must wait for the adapter acknowledgement. Golden file bytes remain unchanged.
+The real engine replaces this limitation with atomic revision application in
+milestones 3–4. It is not permission to discard failed applies or early closures
+from replay. Journal writes and settings-before-apply ordering are explicit 1.0
+outputs, separate from the frozen Node writes.
+
 Keep these in separate, explicitly named acceptance expectations. Do not edit
 Node goldens to make new behavior look like parity. The freeze, DNS drop and cap
 hang are `baseline-defect` packet-level gates; this fake-engine suite neither

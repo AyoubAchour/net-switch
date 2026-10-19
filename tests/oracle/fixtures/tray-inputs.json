@@ -1,0 +1,1697 @@
+{
+  "oneLine": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": false,
+      "active": false,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "on",
+      "wanted": true,
+      "error": null,
+      "measuring": true,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": false
+    },
+    "lines": [
+      {
+        "id": "k3f9",
+        "alias": "Ethernet",
+        "label": "Cable",
+        "kind": "wired",
+        "main": true,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "k3f9",
+        "rate": {
+          "down": 38912,
+          "up": 1234
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      }
+    ],
+    "candidates": [],
+    "apps": [
+      {
+        "key": "steam",
+        "path": "C:\\Apps\\Steam.exe",
+        "name": "Steam",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 2662400,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 2662400,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "firefox",
+        "path": "C:\\Apps\\Firefox.exe",
+        "name": "Firefox",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 655360,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 655360,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "discord",
+        "path": "C:\\Apps\\Discord.exe",
+        "name": "Discord",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 14336,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 14336,
+        "connections": {},
+        "outside": null
+      }
+    ],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  },
+  "twoLines": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": false,
+      "active": false,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "on",
+      "wanted": true,
+      "error": null,
+      "measuring": true,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": false
+    },
+    "lines": [
+      {
+        "id": "k3f9",
+        "alias": "Ethernet",
+        "label": "Cable",
+        "kind": "wired",
+        "main": true,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "k3f9",
+        "rate": {
+          "down": 38912,
+          "up": 1234
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "p2x1",
+        "alias": "Wi-Fi 2",
+        "label": "Wi-Fi stick",
+        "kind": "wifi",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 31,
+        "connections": 6,
+        "carrying": true,
+        "target": "p2x1",
+        "rate": {
+          "down": 936960,
+          "up": 50
+        },
+        "ssid": "Home",
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      }
+    ],
+    "candidates": [],
+    "apps": [
+      {
+        "key": "steam",
+        "path": "C:\\Apps\\Steam.exe",
+        "name": "Steam",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 2662400,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 2662400,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "firefox",
+        "path": "C:\\Apps\\Firefox.exe",
+        "name": "Firefox",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "p2x1",
+        "rate": {
+          "down": 655360,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 655360,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "discord",
+        "path": "C:\\Apps\\Discord.exe",
+        "name": "Discord",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 14336,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 14336,
+        "connections": {},
+        "outside": null
+      }
+    ],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  },
+  "fourLines": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": false,
+      "active": false,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "on",
+      "wanted": true,
+      "error": null,
+      "measuring": true,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": false
+    },
+    "lines": [
+      {
+        "id": "k3f9",
+        "alias": "Ethernet",
+        "label": "Cable",
+        "kind": "wired",
+        "main": true,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "k3f9",
+        "rate": {
+          "down": 38912,
+          "up": 1234
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "p2x1",
+        "alias": "Wi-Fi 2",
+        "label": "Wi-Fi stick",
+        "kind": "wifi",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 31,
+        "connections": 6,
+        "carrying": true,
+        "target": "p2x1",
+        "rate": {
+          "down": 936960,
+          "up": 50
+        },
+        "ssid": "Home",
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "ph01",
+        "alias": "Ethernet 3",
+        "label": "Phone",
+        "kind": "phone",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 54,
+        "connections": 6,
+        "carrying": true,
+        "target": "ph01",
+        "rate": {
+          "down": 122880,
+          "up": 8192
+        },
+        "ssid": null,
+        "metered": true,
+        "strict": false,
+        "cap": {
+          "bytes": 10737418240,
+          "period": "month"
+        },
+        "usage": {
+          "bytes": 6657199308.8,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "w2x9",
+        "alias": "Wi-Fi 3",
+        "label": "Wi-Fi stick 2",
+        "kind": "wifi",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 27,
+        "connections": 6,
+        "carrying": true,
+        "target": "w2x9",
+        "rate": {
+          "down": 307200,
+          "up": 20480
+        },
+        "ssid": "Upstairs",
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      }
+    ],
+    "candidates": [],
+    "apps": [
+      {
+        "key": "steam",
+        "path": "C:\\Apps\\Steam.exe",
+        "name": "Steam",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 2662400,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 2662400,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "firefox",
+        "path": "C:\\Apps\\Firefox.exe",
+        "name": "Firefox",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "p2x1",
+        "rate": {
+          "down": 655360,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 655360,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "discord",
+        "path": "C:\\Apps\\Discord.exe",
+        "name": "Discord",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 14336,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 14336,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "spotify",
+        "path": "C:\\Apps\\Spotify.exe",
+        "name": "Spotify",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "ph01",
+        "rate": {
+          "down": 163840,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 163840,
+        "connections": {},
+        "outside": null
+      }
+    ],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  },
+  "threeLines": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": false,
+      "active": false,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "on",
+      "wanted": true,
+      "error": null,
+      "measuring": true,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": false
+    },
+    "lines": [
+      {
+        "id": "k3f9",
+        "alias": "Ethernet",
+        "label": "Cable",
+        "kind": "wired",
+        "main": true,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "k3f9",
+        "rate": {
+          "down": 1153433.6,
+          "up": 45056
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "p2x1",
+        "alias": "Wi-Fi 2",
+        "label": "Wi-Fi stick",
+        "kind": "wifi",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 31,
+        "connections": 6,
+        "carrying": true,
+        "target": "p2x1",
+        "rate": {
+          "down": 2411724.8,
+          "up": 95232
+        },
+        "ssid": "Home",
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "ph01",
+        "alias": "Ethernet 3",
+        "label": "Phone",
+        "kind": "phone",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 54,
+        "connections": 6,
+        "carrying": true,
+        "target": "ph01",
+        "rate": {
+          "down": 122880,
+          "up": 8192
+        },
+        "ssid": null,
+        "metered": true,
+        "strict": false,
+        "cap": {
+          "bytes": 10737418240,
+          "period": "month"
+        },
+        "usage": {
+          "bytes": 6657199308.8,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      }
+    ],
+    "candidates": [],
+    "apps": [
+      {
+        "key": "steam",
+        "path": "C:\\Apps\\Steam.exe",
+        "name": "Steam",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "p2x1",
+        "rate": {
+          "down": 2662400,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 2662400,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "firefox",
+        "path": "C:\\Apps\\Firefox.exe",
+        "name": "Firefox",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 655360,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 655360,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "spotify",
+        "path": "C:\\Apps\\Spotify.exe",
+        "name": "Spotify",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "ph01",
+        "rate": {
+          "down": 163840,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 163840,
+        "connections": {},
+        "outside": null
+      }
+    ],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  },
+  "lineDown": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": false,
+      "active": false,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "on",
+      "wanted": true,
+      "error": null,
+      "measuring": true,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": false
+    },
+    "lines": [
+      {
+        "id": "k3f9",
+        "alias": "Ethernet",
+        "label": "Cable",
+        "kind": "wired",
+        "main": true,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "k3f9",
+        "rate": {
+          "down": 38912,
+          "up": 1234
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "p2x1",
+        "alias": "Wi-Fi 2",
+        "label": "Wi-Fi stick",
+        "kind": "wifi",
+        "main": false,
+        "connected": false,
+        "problem": "no internet",
+        "ping": null,
+        "connections": 0,
+        "carrying": false,
+        "target": "k3f9",
+        "rate": {
+          "down": 0,
+          "up": 0
+        },
+        "ssid": "Home",
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      }
+    ],
+    "candidates": [],
+    "apps": [
+      {
+        "key": "steam",
+        "path": "C:\\Apps\\Steam.exe",
+        "name": "Steam",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 2662400,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 2662400,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "firefox",
+        "path": "C:\\Apps\\Firefox.exe",
+        "name": "Firefox",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "p2x1",
+        "rate": {
+          "down": 655360,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 655360,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "discord",
+        "path": "C:\\Apps\\Discord.exe",
+        "name": "Discord",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 14336,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 14336,
+        "connections": {},
+        "outside": null
+      }
+    ],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  },
+  "mainDown": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": false,
+      "active": false,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "on",
+      "wanted": true,
+      "error": null,
+      "measuring": true,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": false
+    },
+    "lines": [
+      {
+        "id": "k3f9",
+        "alias": "Ethernet",
+        "label": "Cable",
+        "kind": "wired",
+        "main": true,
+        "connected": false,
+        "problem": "no address",
+        "ping": null,
+        "connections": 0,
+        "carrying": false,
+        "target": "p2x1",
+        "rate": {
+          "down": 0,
+          "up": 0
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "p2x1",
+        "alias": "Wi-Fi 2",
+        "label": "Wi-Fi stick",
+        "kind": "wifi",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 31,
+        "connections": 6,
+        "carrying": true,
+        "target": "p2x1",
+        "rate": {
+          "down": 936960,
+          "up": 50
+        },
+        "ssid": "Home",
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      }
+    ],
+    "candidates": [],
+    "apps": [
+      {
+        "key": "steam",
+        "path": "C:\\Apps\\Steam.exe",
+        "name": "Steam",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 2662400,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 2662400,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "firefox",
+        "path": "C:\\Apps\\Firefox.exe",
+        "name": "Firefox",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "p2x1",
+        "rate": {
+          "down": 655360,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 655360,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "discord",
+        "path": "C:\\Apps\\Discord.exe",
+        "name": "Discord",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 14336,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 14336,
+        "connections": {},
+        "outside": null
+      }
+    ],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  },
+  "capped": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": false,
+      "active": false,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "on",
+      "wanted": true,
+      "error": null,
+      "measuring": true,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": false
+    },
+    "lines": [
+      {
+        "id": "k3f9",
+        "alias": "Ethernet",
+        "label": "Cable",
+        "kind": "wired",
+        "main": true,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "k3f9",
+        "rate": {
+          "down": 38912,
+          "up": 1234
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "p2x1",
+        "alias": "Wi-Fi 2",
+        "label": "Wi-Fi stick",
+        "kind": "wifi",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 31,
+        "connections": 6,
+        "carrying": true,
+        "target": "p2x1",
+        "rate": {
+          "down": 936960,
+          "up": 50
+        },
+        "ssid": "Home",
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "ph01",
+        "alias": "Ethernet 3",
+        "label": "Phone",
+        "kind": "phone",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 54,
+        "connections": 6,
+        "carrying": false,
+        "target": "k3f9",
+        "rate": {
+          "down": 0,
+          "up": 0
+        },
+        "ssid": null,
+        "metered": true,
+        "strict": false,
+        "cap": {
+          "bytes": 10737418240,
+          "period": "month"
+        },
+        "usage": {
+          "bytes": 11059540787.2,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": true,
+        "weight": 1,
+        "share": null
+      }
+    ],
+    "candidates": [],
+    "apps": [
+      {
+        "key": "steam",
+        "path": "C:\\Apps\\Steam.exe",
+        "name": "Steam",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 2662400,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 2662400,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "firefox",
+        "path": "C:\\Apps\\Firefox.exe",
+        "name": "Firefox",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "p2x1",
+        "rate": {
+          "down": 655360,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 655360,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "discord",
+        "path": "C:\\Apps\\Discord.exe",
+        "name": "Discord",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 14336,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 14336,
+        "connections": {},
+        "outside": null
+      }
+    ],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  },
+  "combining": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": true,
+      "active": true,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "on",
+      "wanted": true,
+      "error": null,
+      "measuring": true,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": false
+    },
+    "lines": [
+      {
+        "id": "k3f9",
+        "alias": "Ethernet",
+        "label": "Cable",
+        "kind": "wired",
+        "main": true,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "k3f9",
+        "rate": {
+          "down": 38912,
+          "up": 1234
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": 0.4
+      },
+      {
+        "id": "p2x1",
+        "alias": "Wi-Fi 2",
+        "label": "Wi-Fi stick",
+        "kind": "wifi",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 31,
+        "connections": 6,
+        "carrying": true,
+        "target": "p2x1",
+        "rate": {
+          "down": 936960,
+          "up": 50
+        },
+        "ssid": "Home",
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": 0.6
+      }
+    ],
+    "candidates": [],
+    "apps": [
+      {
+        "key": "steam",
+        "path": "C:\\Apps\\Steam.exe",
+        "name": "Steam",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 2662400,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 2662400,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "firefox",
+        "path": "C:\\Apps\\Firefox.exe",
+        "name": "Firefox",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "p2x1",
+        "rate": {
+          "down": 655360,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 655360,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "discord",
+        "path": "C:\\Apps\\Discord.exe",
+        "name": "Discord",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "k3f9",
+        "rate": {
+          "down": 14336,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 14336,
+        "connections": {},
+        "outside": null
+      }
+    ],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  },
+  "checking": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": false,
+      "active": false,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "on",
+      "wanted": true,
+      "error": null,
+      "measuring": true,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": false
+    },
+    "lines": [
+      {
+        "id": "k3f9",
+        "alias": "Ethernet",
+        "label": "Cable",
+        "kind": "wired",
+        "main": true,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "k3f9",
+        "rate": {
+          "down": 38912,
+          "up": 1234
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "p2x1",
+        "alias": "Wi-Fi 2",
+        "label": "Wi-Fi stick",
+        "kind": "wifi",
+        "main": false,
+        "connected": false,
+        "problem": "checking",
+        "ping": null,
+        "connections": 0,
+        "carrying": false,
+        "target": "k3f9",
+        "rate": {
+          "down": 0,
+          "up": 0
+        },
+        "ssid": "Home",
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      }
+    ],
+    "candidates": [],
+    "apps": [
+      {
+        "key": "steam",
+        "path": "C:\\Apps\\Steam.exe",
+        "name": "Steam",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 2662400,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 2662400,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "firefox",
+        "path": "C:\\Apps\\Firefox.exe",
+        "name": "Firefox",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "p2x1",
+        "rate": {
+          "down": 655360,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 655360,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "discord",
+        "path": "C:\\Apps\\Discord.exe",
+        "name": "Discord",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 14336,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 14336,
+        "connections": {},
+        "outside": null
+      }
+    ],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  },
+  "longNames": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": false,
+      "active": false,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "on",
+      "wanted": true,
+      "error": null,
+      "measuring": true,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": false
+    },
+    "lines": [
+      {
+        "id": "l1",
+        "alias": "Realtek USB GbE Family Controller #2",
+        "label": "Fibre from the basement router",
+        "kind": "wired",
+        "main": true,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "l1",
+        "rate": {
+          "down": 123456789,
+          "up": 123456789
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "l2",
+        "alias": "Wi-Fi 2",
+        "label": "Wi-Fi stick on the upstairs network",
+        "kind": "wifi",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "l2",
+        "rate": {
+          "down": 38912,
+          "up": 1234
+        },
+        "ssid": "A very long network name indeed",
+        "metered": true,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "l3",
+        "alias": "Ethernet 3",
+        "label": "Ayoub’s phone on the unlimited weekend plan",
+        "kind": "phone",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "l3",
+        "rate": {
+          "down": 38912,
+          "up": 1234
+        },
+        "ssid": null,
+        "metered": true,
+        "strict": false,
+        "cap": {
+          "bytes": 10737418240,
+          "period": "day"
+        },
+        "usage": {
+          "bytes": 2684354560,
+          "periodStart": "2026-10-17T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      }
+    ],
+    "candidates": [],
+    "apps": [
+      {
+        "key": "microsoft edge webview2 helper for the company sign-in page",
+        "path": "C:\\Apps\\Microsoft Edge WebView2 helper for the company sign-in page.exe",
+        "name": "Microsoft Edge WebView2 helper for the company sign-in page",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "l2",
+        "rate": {
+          "down": 921600,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 921600,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "steam",
+        "path": "C:\\Apps\\Steam.exe",
+        "name": "Steam",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": null,
+        "rate": {
+          "down": 307200,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 307200,
+        "connections": {},
+        "outside": null
+      },
+      {
+        "key": "discord",
+        "path": "C:\\Apps\\Discord.exe",
+        "name": "Discord",
+        "hasIcon": false,
+        "switchable": true,
+        "reconnectable": true,
+        "line": "l3",
+        "rate": {
+          "down": 14336,
+          "up": 0
+        },
+        "lineDown": {},
+        "sortScore": 14336,
+        "connections": {},
+        "outside": null
+      }
+    ],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  },
+  "routingOff": {
+    "mode": "tun",
+    "elevated": true,
+    "version": "0.3.0",
+    "update": null,
+    "features": {
+      "reconnect": true,
+      "combine": true,
+      "lines": true
+    },
+    "combine": {
+      "on": false,
+      "active": false,
+      "mode": "auto"
+    },
+    "routing": {
+      "status": "off",
+      "wanted": false,
+      "error": null,
+      "measuring": false,
+      "proxyPort": null,
+      "retryAt": null,
+      "ipv6": null
+    },
+    "lines": [
+      {
+        "id": "k3f9",
+        "alias": "Ethernet",
+        "label": "Cable",
+        "kind": "wired",
+        "main": true,
+        "connected": true,
+        "problem": null,
+        "ping": 18,
+        "connections": 6,
+        "carrying": true,
+        "target": "k3f9",
+        "rate": {
+          "down": 38912,
+          "up": 1234
+        },
+        "ssid": null,
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      },
+      {
+        "id": "p2x1",
+        "alias": "Wi-Fi 2",
+        "label": "Wi-Fi stick",
+        "kind": "wifi",
+        "main": false,
+        "connected": true,
+        "problem": null,
+        "ping": 31,
+        "connections": 6,
+        "carrying": true,
+        "target": "p2x1",
+        "rate": {
+          "down": 936960,
+          "up": 50
+        },
+        "ssid": "Home",
+        "metered": false,
+        "strict": false,
+        "cap": null,
+        "usage": {
+          "bytes": 429496729.6,
+          "periodStart": "2026-10-01T00:00:00.000Z"
+        },
+        "exhausted": false,
+        "weight": 1,
+        "share": null
+      }
+    ],
+    "candidates": [],
+    "apps": [],
+    "events": [],
+    "settings": {
+      "autostart": null,
+      "checkForUpdates": true,
+      "probeTargets": [
+        "1.1.1.1:443",
+        "8.8.8.8:443"
+      ]
+    }
+  }
+}

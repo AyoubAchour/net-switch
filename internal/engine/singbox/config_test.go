@@ -53,7 +53,7 @@ func TestFrozenWindowsGoldenHashes(t *testing.T) {
 				name = fmt.Sprintf("%d-lines-combined", count)
 			}
 			t.Run(name, func(t *testing.T) {
-				shares := []lines.Shares{{{"aa", 1}}, {{"aa", .6}, {"bb", .4}}, {{"aa", .5}, {"bb", .3}, {"cc", .2}}}[count-1]
+				shares := []lines.Shares{{{ID: "aa", Value: 1}}, {{ID: "aa", Value: .6}, {ID: "bb", Value: .4}}, {{ID: "aa", Value: .5}, {ID: "bb", Value: .3}, {ID: "cc", Value: .2}}}[count-1]
 				p := engine.Policy{Lines: items[:count], Combine: combine, Shares: shares, Blocked: []string{items[count-1].ID}, AppLines: apps.Pins{
 					{Path: `C:\Apps\app-1.2.3\Browser.exe`, LineID: "aa"}, {Path: `C:\Games\game.exe`, LineID: "bb"}, {Path: `C:\Program Files\WindowsApps\Example_1.2.3_x64__publisher\App.exe`, LineID: "cc"},
 				}}
