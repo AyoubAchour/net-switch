@@ -490,6 +490,8 @@ type Endpoint struct {
 	timeWaitLeave func() `state:"nosave"`
 	// +checklocks:mu
 	timeWaitReserved bool
+	// +checklocks:mu
+	timeWaitSkipped bool
 
 	// userMSS if non-zero is the MSS value explicitly set by the user
 	// for this endpoint using the TCP_MAXSEG setsockopt.
@@ -789,6 +791,14 @@ func (e *Endpoint) TryLock() bool {
 //
 // +checklocks:e.mu
 func (e *Endpoint) setEndpointState(state EndpointState) {
+	// Release live admission before publishing TIME_WAIT or its final ACK.
+	// Defer a cap-driven close until the current segment is fully consumed.
+	if state == StateTimeWait && e.timeWaitEnter != nil {
+		enter := e.timeWaitEnter
+		e.timeWaitEnter = nil
+		e.timeWaitReserved = enter()
+		e.timeWaitSkipped = !e.timeWaitReserved
+	}
 	oldstate := EndpointState(e.state.Swap(uint32(state)))
 	switch state {
 	case StateEstablished:
