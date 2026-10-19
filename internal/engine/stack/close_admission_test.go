@@ -130,6 +130,7 @@ func TestCloseAdmission(t *testing.T) {
 				}
 				p.open(1000)
 				p.upload([]byte("old"))
+				oldEndpoint := p.endpoint()
 				if g := p.table.Stats(); g.Flows != 1 || g.Handshakes != 0 {
 					t.Fatal("old connection must occupy its slot before closing", g)
 				}
@@ -192,6 +193,11 @@ func TestCloseAdmission(t *testing.T) {
 				old.conn.Close()
 				p.upload([]byte("replacement"))
 				p.closeActive()
+				// The reset was visible before the paused writer returned. Its
+				// counter increments inside that endpoint's critical section;
+				// finish it only after proving replacement admission succeeded.
+				oldEndpoint.LockUser()
+				oldEndpoint.UnlockUser()
 				if g := p.table.Stats(); g.Rejected != 0 || g.Admitted != 2 || p.dials.Load() != 2 {
 					t.Fatal("false close rejection", p.diagnostics())
 				}
