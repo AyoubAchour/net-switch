@@ -1,0 +1,222 @@
+//go:build windows
+
+package main
+
+import (
+	"context"
+	"io"
+	"log"
+	"net"
+	"strconv"
+	"sync"
+	"time"
+
+	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
+	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/icmp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/udp"
+	"gvisor.dev/gvisor/pkg/waiter"
+)
+
+func (g *gateway) startStack() (*stack.Stack, error) {
+	s := stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6}})
+	link := channel.New(1024, 1500, "")
+	if err := s.CreateNIC(1, link); err != nil {
+		s.Close()
+		return nil, netstackError{err}
+	}
+	s.SetPromiscuousMode(1, true)
+	s.SetSpoofing(1, true)
+	s.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: 1}, {Destination: header.IPv6EmptySubnet, NIC: 1}})
+	// The harness must not add its own TIME_WAIT freeze to the engine under test.
+	wait := tcpip.TCPTimeWaitTimeoutOption(0)
+	s.SetTransportProtocolOption(tcp.ProtocolNumber, &wait)
+	forwarder := tcp.NewForwarder(s, 64*1024, 2048, func(request *tcp.ForwarderRequest) {
+		go func() {
+			id := request.ID()
+			destination := net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort)))
+			g.record(destination)
+			remote, err := boundDialer(g.index, g.uplinkIP).DialContext(context.Background(), "tcp4", destination)
+			if err != nil {
+				g.failure(destination, err)
+				request.Complete(true)
+				return
+			}
+			defer remote.Close()
+			var queue waiter.Queue
+			endpoint, terr := request.CreateEndpoint(&queue)
+			if terr != nil {
+				request.Complete(true)
+				g.failure(destination, netstackError{terr})
+				return
+			}
+			request.Complete(false)
+			local := gonet.NewTCPConn(&queue, endpoint)
+			defer local.Close()
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				n, _ := io.Copy(remote, local)
+				remote.(*net.TCPConn).CloseWrite()
+				g.transferred(n, true)
+			}()
+			go func() { defer wg.Done(); n, _ := io.Copy(local, remote); local.CloseWrite(); g.transferred(n, false) }()
+			wg.Wait()
+		}()
+	})
+	s.SetTransportProtocolHandler(tcp.ProtocolNumber, forwarder.HandlePacket)
+	udpForwarder := udp.NewForwarder(s, func(request *udp.ForwarderRequest) bool {
+		id := request.ID()
+		var queue waiter.Queue
+		endpoint, err := request.CreateEndpoint(&queue)
+		if err != nil {
+			g.failure("udp endpoint", netstackError{err})
+			return true
+		}
+		go g.relayUDP(gonet.NewUDPConn(&queue, endpoint), net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort))))
+		return true
+	})
+	s.SetTransportProtocolHandler(udp.ProtocolNumber, udpForwarder.HandlePacket)
+	go func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() { <-g.done; cancel() }()
+		for {
+			packet := link.ReadContext(ctx)
+			if packet == nil {
+				return
+			}
+			view := packet.ToView()
+			data := view.AsSlice()
+			if g.mode.Load() == 0 {
+				_, err := g.device.Write([][]byte{data}, 0)
+				g.stats.Lock()
+				if err != nil {
+					g.stats.TestISP.Errors++
+				} else {
+					g.stats.TestISP.PacketsOut++
+					g.stats.TestISP.BytesOut += uint64(len(data))
+				}
+				g.stats.Unlock()
+			}
+			view.Release()
+			packet.DecRef()
+		}
+	}()
+	go func() {
+		packet := make([]byte, 65535)
+		sizes := []int{0}
+		for {
+			if g.mode.Load() == 1 {
+				select {
+				case <-g.done:
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+				continue
+			}
+			_, err := g.device.Read([][]byte{packet}, sizes, 0)
+			if err != nil {
+				select {
+				case <-g.done:
+					return
+				default:
+					log.Print(err)
+					g.close()
+					return
+				}
+			}
+			n := sizes[0]
+			g.stats.Lock()
+			g.stats.TestISP.PacketsIn++
+			g.stats.TestISP.BytesIn += uint64(n)
+			drop := g.mode.Load() != 0
+			if drop {
+				g.stats.TestISP.Dropped++
+			}
+			g.stats.Unlock()
+			if drop || n == 0 {
+				continue
+			}
+			protocol := ipv4.ProtocolNumber
+			if packet[0]>>4 == 6 {
+				protocol = ipv6.ProtocolNumber
+			}
+			pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), packet[:n]...))})
+			link.InjectInbound(protocol, pkt)
+			pkt.DecRef()
+		}
+	}()
+	return s, nil
+}
+
+type netstackError struct{ err tcpip.Error }
+
+func (e netstackError) Error() string { return e.err.String() }
+
+func (g *gateway) record(destination string) {
+	g.stats.Lock()
+	defer g.stats.Unlock()
+	g.stats.TestISP.Connections++
+	g.stats.Uplink.Connections++
+	g.stats.Destinations[destination]++
+}
+
+func (g *gateway) failure(destination string, err error) {
+	log.Printf("relay %s: %v", destination, err)
+	g.stats.Lock()
+	g.stats.Uplink.Errors++
+	g.stats.Unlock()
+}
+
+func (g *gateway) transferred(n int64, outgoing bool) {
+	g.stats.Lock()
+	defer g.stats.Unlock()
+	if outgoing {
+		g.stats.Uplink.BytesOut += uint64(n)
+	} else {
+		g.stats.Uplink.BytesIn += uint64(n)
+	}
+}
+
+func (g *gateway) relayUDP(local *gonet.UDPConn, destination string) {
+	defer local.Close()
+	g.record(destination)
+	dialer := &net.Dialer{Timeout: 5 * time.Second, LocalAddr: &net.UDPAddr{IP: g.uplinkIP}, Control: bindInterface(g.index)}
+	remote, err := dialer.Dial("udp4", destination)
+	if err != nil {
+		g.failure(destination, err)
+		return
+	}
+	defer remote.Close()
+	var wg sync.WaitGroup
+	copyPackets := func(dst, src net.Conn, outgoing bool) {
+		defer wg.Done()
+		packet := make([]byte, 65535)
+		for {
+			src.SetReadDeadline(time.Now().Add(30 * time.Second))
+			n, err := src.Read(packet)
+			if err != nil {
+				break
+			}
+			if _, err = dst.Write(packet[:n]); err != nil {
+				break
+			}
+			g.transferred(int64(n), outgoing)
+		}
+		local.Close()
+		remote.Close()
+	}
+	wg.Add(2)
+	go copyPackets(remote, local, true)
+	go copyPackets(local, remote, false)
+	wg.Wait()
+}

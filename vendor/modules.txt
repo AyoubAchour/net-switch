@@ -1,0 +1,75 @@
+# github.com/google/btree v1.1.2
+## explicit; go 1.18
+github.com/google/btree
+# golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc
+## explicit; go 1.23.0
+golang.org/x/exp/constraints
+# golang.org/x/net v0.59.0
+## explicit; go 1.26.0
+golang.org/x/net/bpf
+golang.org/x/net/internal/iana
+golang.org/x/net/internal/socket
+golang.org/x/net/ipv4
+golang.org/x/net/ipv6
+# golang.org/x/sys v0.49.0
+## explicit; go 1.26.0
+golang.org/x/sys/cpu
+golang.org/x/sys/unix
+golang.org/x/sys/windows
+# golang.org/x/time v0.15.0
+## explicit; go 1.25.0
+golang.org/x/time/rate
+# golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
+## explicit; go 1.17
+golang.zx2c4.com/wintun
+# golang.zx2c4.com/wireguard v0.0.0-20261006164505-2631ce99a06f
+## explicit; go 1.23.1
+golang.zx2c4.com/wireguard/conn
+golang.zx2c4.com/wireguard/conn/winrio
+golang.zx2c4.com/wireguard/rwcancel
+golang.zx2c4.com/wireguard/tun
+# gvisor.dev/gvisor v0.0.0-20261017122056-1b7906fdee8c
+## explicit; go 1.27.2
+gvisor.dev/gvisor/pkg/atomicbitops
+gvisor.dev/gvisor/pkg/bits
+gvisor.dev/gvisor/pkg/buffer
+gvisor.dev/gvisor/pkg/context
+gvisor.dev/gvisor/pkg/cpuid
+gvisor.dev/gvisor/pkg/gohacks
+gvisor.dev/gvisor/pkg/goid
+gvisor.dev/gvisor/pkg/linewriter
+gvisor.dev/gvisor/pkg/log
+gvisor.dev/gvisor/pkg/rand
+gvisor.dev/gvisor/pkg/refs
+gvisor.dev/gvisor/pkg/sleep
+gvisor.dev/gvisor/pkg/state
+gvisor.dev/gvisor/pkg/state/wire
+gvisor.dev/gvisor/pkg/sync
+gvisor.dev/gvisor/pkg/sync/locking
+gvisor.dev/gvisor/pkg/tcpip
+gvisor.dev/gvisor/pkg/tcpip/adapters/gonet
+gvisor.dev/gvisor/pkg/tcpip/checksum
+gvisor.dev/gvisor/pkg/tcpip/hash/jenkins
+gvisor.dev/gvisor/pkg/tcpip/header
+gvisor.dev/gvisor/pkg/tcpip/header/parse
+gvisor.dev/gvisor/pkg/tcpip/internal/tcp
+gvisor.dev/gvisor/pkg/tcpip/link/channel
+gvisor.dev/gvisor/pkg/tcpip/network/hash
+gvisor.dev/gvisor/pkg/tcpip/network/internal/fragmentation
+gvisor.dev/gvisor/pkg/tcpip/network/internal/ip
+gvisor.dev/gvisor/pkg/tcpip/network/internal/multicast
+gvisor.dev/gvisor/pkg/tcpip/network/ipv4
+gvisor.dev/gvisor/pkg/tcpip/network/ipv6
+gvisor.dev/gvisor/pkg/tcpip/ports
+gvisor.dev/gvisor/pkg/tcpip/seqnum
+gvisor.dev/gvisor/pkg/tcpip/stack
+gvisor.dev/gvisor/pkg/tcpip/transport
+gvisor.dev/gvisor/pkg/tcpip/transport/icmp
+gvisor.dev/gvisor/pkg/tcpip/transport/internal/network
+gvisor.dev/gvisor/pkg/tcpip/transport/internal/noop
+gvisor.dev/gvisor/pkg/tcpip/transport/packet
+gvisor.dev/gvisor/pkg/tcpip/transport/raw
+gvisor.dev/gvisor/pkg/tcpip/transport/tcp
+gvisor.dev/gvisor/pkg/tcpip/transport/tcpconntrack
+gvisor.dev/gvisor/pkg/tcpip/transport/udp
+gvisor.dev/gvisor/pkg/waiter
