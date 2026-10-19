@@ -19,6 +19,9 @@ tray/bin/
 # Release build output.
 dist/
 
+# Net Switch 1.0 Go builds.
+/bin/
+
 node_modules/
 *.log
 *.pid
