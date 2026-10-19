@@ -324,6 +324,8 @@ func TestCloseKeepsQueuedDataCounted(t *testing.T) {
 			if simultaneous {
 				p.inject(p.packet(p.seq, p.ack, header.TCPFlagFin|header.TCPFlagAck, nil))
 				p.seq++
+				for p.wait(header.TCPFlagAck).AckNumber() != p.seq {
+				}
 			}
 			want := tcp.StateLastAck
 			if simultaneous {
@@ -358,6 +360,8 @@ func TestCloseKeepsQueuedDataCounted(t *testing.T) {
 			if g := p.table.Stats(); g.Flows != 1 {
 				t.Fatal("unacknowledged data under-counted", g)
 			}
+			p.stack.Pause()
+			defer p.stack.Resume()
 			p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 			if g := p.table.Stats(); g.Flows != 0 {
 				t.Fatal("final ACK did not retire", g)

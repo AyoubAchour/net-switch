@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: with a TIME_WAIT policy, ACK FIN after
-// releasing admission; otherwise keep upstream ACK order. Opt-in local SYN reuse.
+// Modified by Net Switch, 2026-10-19: a TIME_WAIT policy defers FIN ACK until
+// after reader notification and the close-state transition. Opt-in local SYN reuse.
 
 package tcp
 

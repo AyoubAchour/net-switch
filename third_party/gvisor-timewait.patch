@@ -402,15 +402,15 @@ index a3c8295..60026d7 100644
  func (*protocol) Number() tcpip.TransportProtocolNumber {
  	return ProtocolNumber
 diff --git a/pkg/tcpip/transport/tcp/rcv.go b/pkg/tcpip/transport/tcp/rcv.go
-index 6bb5252..33c0b34 100644
+index 6bb5252..34dda4f 100644
 --- a/pkg/tcpip/transport/tcp/rcv.go
 +++ b/pkg/tcpip/transport/tcp/rcv.go
 @@ -12,6 +12,9 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
-+// Modified by Net Switch, 2026-10-19: with a TIME_WAIT policy, ACK FIN after
-+// releasing admission; otherwise keep upstream ACK order. Opt-in local SYN reuse.
++// Modified by Net Switch, 2026-10-19: a TIME_WAIT policy defers FIN ACK until
++// after reader notification and the close-state transition. Opt-in local SYN reuse.
 +
  package tcp
  

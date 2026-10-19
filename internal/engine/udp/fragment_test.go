@@ -10,14 +10,13 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
-	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
 	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
 	gu "gvisor.dev/gvisor/pkg/tcpip/transport/udp"
 )
 
 func TestReorderedIPv4FragmentsValidateAfterReassembly(t *testing.T) {
 	n, _, sockets, _, _, _ := setup(t, &testfake.Owners{Value: owner})
-	link := channel.New(16, 9000, "")
+	link := ns.NewLink()
 	s, err := ns.New(link, ns.DefaultOptions())
 	if err != nil {
 		t.Fatal(err)
