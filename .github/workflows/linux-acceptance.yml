@@ -45,6 +45,28 @@ jobs:
         run: |
           sudo apt-get update -q
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends jq nftables iproute2 flatpak fuse3 squashfs-tools
+      - name: Read the pinned snap revisions
+        id: snaps
+        run: |
+          arch=$(dpkg --print-architecture)
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+          for name in core24 snapd; do
+            echo "$name=$(jq -er --arg arch "$arch" --arg name "$name" '.[$arch][$name].revision' tests/linux/suite/snap-inputs.json)" >> "$GITHUB_OUTPUT"
+          done
+      - name: Cache the pinned snaps and assertions
+        id: snap-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/snap-inputs
+          key: snap-inputs-v1-${{ steps.snaps.outputs.arch }}-core24-${{ steps.snaps.outputs.core24 }}-snapd-${{ steps.snaps.outputs.snapd }}
+      - name: Download missing snap inputs and verify their SHA-256
+        env:
+          CACHE_HIT: ${{ steps.snap-cache.outputs.cache-hit }}
+        run: |
+          echo "snap inputs cache hit: ${CACHE_HIT:-false}"
+          mode=verify
+          if [[ "$CACHE_HIT" != true ]]; then mode=fetch; fi
+          bash tests/linux/snap-inputs.sh "$mode" "$RUNNER_TEMP/snap-inputs"
       - name: Read the pinned Go and Node versions
         id: pins
         run: |
@@ -84,6 +106,7 @@ jobs:
         run: >-
           sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-${{ github.run_id }}-${{ strategy.job-index }}" --
           env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
+          "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs"
           "$RUNNER_TEMP/nsaccept" run --engine sing-box --engine-path /opt/sing-box/sing-box
           --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance"
           --quic "$RUNNER_TEMP/nsquic"

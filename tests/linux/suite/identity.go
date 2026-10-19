@@ -34,9 +34,9 @@ func addIdentity(r *registry) {
 // Fixtures are the packaged apps the identity cases run, provisioned once
 // before any case so building and installing never count against a case's
 // time. Each is built here around the harness's own test app, so what it
-// runs never moves: no store decides its content. The one outside input is
-// the Snap's base (and snapd's own snap), which the Snap Store supplies when
-// the runner lacks them; their revisions are recorded. These cases are
+// runs never moves: no store decides its content. The Snap's base and snapd
+// itself are pinned and cached before provisioning.
+// Both are recorded, and all Snap installs are offline. These cases are
 // required (SYSTEM-DESIGN.md 10), so a fixture that can't be provisioned
 // fails the run rather than skipping anything.
 type Fixtures struct {
@@ -96,10 +96,14 @@ func Provision(ctx context.Context, self string, logf func(string, ...any)) (*Fi
 		return nil, err
 	}
 
-	// Snap: the test app packed as a strict snap here, installed unsigned
-	// (so its revision reads x1, x2...). Its base comes from the Snap Store
-	// if the runner doesn't have it: a store that can't supply it fails the
-	// run, with snapd's own words.
+	// Snap: install the verified cached base before the locally packed app.
+	// Keep the store offline throughout the run; missing prerequisites fail.
+	baseRecord, err := installSnapInputs(ctx, host, logf)
+	if err != nil {
+		return nil, err
+	}
+	f.Recorded["fixture snap inputs"] = baseRecord
+	// The strict test snap is unsigned, so its revision reads x1, x2...
 	arch := map[string]string{"amd64": "amd64", "arm64": "arm64"}[runtime.GOARCH]
 	snapWork := filepath.Join(fixtureDir, "snap")
 	_ = os.RemoveAll(snapWork)
@@ -120,8 +124,8 @@ func Provision(ctx context.Context, self string, logf func(string, ...any)) (*Fi
 	if err != nil {
 		return nil, err
 	}
-	if _, err := host(6*time.Minute, 2, "snap", "install", "--dangerous", snapFile); err != nil {
-		return nil, fmt.Errorf("installing the test snap (its base %s comes from the Snap Store): %w", snapBase, err)
+	if _, err := host(3*time.Minute, 1, "snap", "install", "--dangerous", snapFile); err != nil {
+		return nil, fmt.Errorf("installing the test snap offline (core24 is cached; any attempt to fetch prerequisites from the store is forbidden): %w", err)
 	}
 	rev, err := os.Readlink(filepath.Join("/snap", snapName, "current"))
 	if err != nil {
@@ -137,7 +141,7 @@ func Provision(ctx context.Context, self string, logf func(string, ...any)) (*Fi
 	if err != nil {
 		return nil, err
 	}
-	f.Recorded["fixture snap base"] = strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(list), "\n", " | ")), " ")
+	f.Recorded["fixture snap installed"] = strings.Join(strings.Fields(strings.ReplaceAll(strings.TrimSpace(list), "\n", " | ")), " ")
 
 	// Flatpak: a runtime and two apps built here; nothing from Flathub. The
 	// runtime is a metadata file and ldconfig (flatpak runs it when an app
