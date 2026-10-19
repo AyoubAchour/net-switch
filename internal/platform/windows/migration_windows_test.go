@@ -81,8 +81,12 @@ func TestMachineFolderMigrationResumesAfterInterruption(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(root, "windows-undo.json"), []byte(validUndo), 0600); err != nil {
 				t.Fatal(err)
 			}
+			original, err := os.Stat(root)
+			if err != nil {
+				t.Fatal(err)
+			}
 			interrupted := errors.New("interrupted migration")
-			err := protectDirectory(root, func(s string) { t.Log(s) }, func(stage string) error {
+			err = protectDirectory(root, func(s string) { t.Log(s) }, func(stage string) error {
 				if stage == stopAt {
 					return interrupted
 				}
@@ -91,8 +95,35 @@ func TestMachineFolderMigrationResumesAfterInterruption(t *testing.T) {
 			if !errors.Is(err, interrupted) {
 				t.Fatal("fault did not execute", err)
 			}
+			staged, err := os.Stat(root + ".migrating")
+			if err != nil {
+				t.Fatal("pending stage never existed", err)
+			}
+			live, err := os.Stat(root)
+			if stopAt == "quarantined" {
+				if !os.IsNotExist(err) {
+					t.Fatal("fault did not leave the live root absent", err)
+				}
+			} else if err != nil || !os.SameFile(original, live) {
+				t.Fatal("staging replaced the old root before commit", err)
+			}
 			if err := ProtectDirectory(root); err != nil {
 				t.Fatal(err)
+			}
+			live, err = os.Stat(root)
+			if err != nil || !os.SameFile(staged, live) {
+				t.Fatal("recovery did not publish the staged directory", err)
+			}
+			if _, err := os.Stat(root + ".migrating"); !os.IsNotExist(err) {
+				t.Fatal("pending stage was not consumed", err)
+			}
+			old, err := filepath.Glob(root + ".untrusted-*")
+			if err != nil || len(old) != 1 {
+				t.Fatal("original tree was not quarantined once", old, err)
+			}
+			quarantined, err := os.Stat(old[0])
+			if err != nil || !os.SameFile(original, quarantined) {
+				t.Fatal("quarantine lost the original directory", err)
 			}
 			if b, err := os.ReadFile(filepath.Join(root, "windows-undo.json")); err != nil || string(b) != validUndo {
 				t.Fatal("interruption lost Undo", string(b), err)

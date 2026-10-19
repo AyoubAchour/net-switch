@@ -83,6 +83,11 @@ func TestExitOwnsPIDCleanupThroughConcurrentStop(t *testing.T) {
 			if files.deletes != 1 {
 				t.Fatalf("PID cleanup has %d owners", files.deletes)
 			}
+			if deletion.err == nil {
+				if _, err := files.ReadFile(filepath.Join("/test", "engine.pid")); err != fs.ErrNotExist {
+					t.Fatal("exit owner did not remove the pre-existing PID record", err)
+				}
+			}
 			warning := strings.Join(logs, "\n")
 			if deletion.err == fs.ErrPermission && (!strings.Contains(warning, "cleanup warning") || !strings.Contains(warning, "engine.pid")) {
 				t.Fatal("failed cleanup was not diagnosed", warning)
