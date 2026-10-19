@@ -236,6 +236,16 @@ func handleConnected(ep *Endpoint) {
 //
 // +checklocks:ep.mu
 func startTimeWait(ep *Endpoint) {
+	if enter := ep.timeWaitEnter; enter != nil {
+		ep.timeWaitEnter = nil
+		if !enter() {
+			ep.transitionToStateCloseLocked()
+			ep.drainClosingSegmentQueue()
+			ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
+			return
+		}
+		ep.timeWaitReserved = true
+	}
 	// Disable close timer as we are now entering real TIME_WAIT.
 	if ep.finWait2Timer != nil {
 		ep.finWait2Timer.Stop()
@@ -267,6 +277,7 @@ func handleTimeWait(ep *Endpoint) {
 	if reuseTW != nil {
 		localReuse := ep.protocol.timeWaitHandler.Load() != nil
 		if localReuse {
+			ep.localSynHandled.Store(true)
 			ep.segmentQueue.freeze()
 		}
 		ep.transitionToStateCloseLocked()

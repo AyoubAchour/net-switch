@@ -1196,6 +1196,22 @@ func (e *Endpoint) tryDeliverSegmentFromClosedEndpoint(s *segment) {
 //
 // +checklocksexclude:e.segmentQueue.mu
 func (e *Endpoint) drainClosingSegmentQueue() {
+	if handler := e.protocol.timeWaitHandler.Load(); handler != nil {
+		e.segmentQueue.freeze()
+		var syn *segment
+		for s := e.segmentQueue.dequeue(); s != nil; s = e.segmentQueue.dequeue() {
+			if s.flags.Contains(header.TCPFlagSyn) && s.flags&(header.TCPFlagAck|header.TCPFlagFin|header.TCPFlagRst) == 0 && e.localSynHandled.CompareAndSwap(false, true) {
+				syn = s
+			} else {
+				s.DecRef()
+			}
+		}
+		if syn != nil {
+			defer syn.DecRef()
+			(*handler)(e.TransportEndpointInfo.ID, syn.pkt)
+		}
+		return
+	}
 	for {
 		s := e.segmentQueue.dequeue()
 		if s == nil {

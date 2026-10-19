@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-10-19: close-time TIME_WAIT budget and queue freeze.
 package tcp
 
 import (
@@ -480,7 +481,14 @@ type Endpoint struct {
 	// segmentQueue is used to hand received segments to the protocol
 	// goroutine. Segments are queued as long as the queue is not full,
 	// and dropped when it is.
-	segmentQueue segmentQueue `state:"wait"`
+	segmentQueue    segmentQueue `state:"wait"`
+	localSynHandled atomicbitops.Bool
+	// +checklocks:mu
+	timeWaitEnter func() bool `state:"nosave"`
+	// +checklocks:mu
+	timeWaitLeave func() `state:"nosave"`
+	// +checklocks:mu
+	timeWaitReserved bool
 
 	// userMSS if non-zero is the MSS value explicitly set by the user
 	// for this endpoint using the TCP_MAXSEG setsockopt.
@@ -1196,6 +1204,9 @@ func (e *Endpoint) closePendingAcceptableConnectionsLocked() {
 // cleanupLocked frees all resources associated with the endpoint.
 // +checklocks:e.mu
 func (e *Endpoint) cleanupLocked() {
+	if e.protocol.timeWaitHandler.Load() != nil {
+		e.segmentQueue.freeze()
+	}
 	if e.snd != nil {
 		e.snd.resendTimer.cleanup()
 		e.snd.probeTimer.cleanup()
@@ -1258,6 +1269,11 @@ func (e *Endpoint) cleanupLocked() {
 		e.purgeReadQueue()
 	}
 	e.stack.CompleteTransportEndpointCleanup(e)
+	if e.timeWaitReserved && e.timeWaitLeave != nil {
+		e.timeWaitLeave()
+	}
+	e.timeWaitReserved = false
+	e.timeWaitEnter, e.timeWaitLeave = nil, nil
 	tcpip.DeleteDanglingEndpoint(e)
 }
 

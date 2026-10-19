@@ -1,15 +1,15 @@
 diff --git a/pkg/tcpip/transport/tcp/protocol.go b/pkg/tcpip/transport/tcp/protocol.go
 --- a/pkg/tcpip/transport/tcp/protocol.go
 +++ b/pkg/tcpip/transport/tcp/protocol.go
-@@ -12,6 +12,7 @@
+@@ -12,5 +12,7 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
 +// Modified by Net Switch, 2026-10-19: local-app TIME_WAIT and buffer accounting.
++
  // Package tcp contains the implementation of the TCP transport protocol.
  package tcp
- 
-@@ -21,6 +22,7 @@ import (
+@@ -21,6 +23,7 @@
  	"fmt"
  	"runtime"
  	"strings"
@@ -17,26 +17,32 @@ diff --git a/pkg/tcpip/transport/tcp/protocol.go b/pkg/tcpip/transport/tcp/proto
  	"time"
  
  	"gvisor.dev/gvisor/pkg/tcpip"
-@@ -87,7 +89,8 @@ const (
+@@ -87,6 +90,7 @@
  
  // +stateify savable
  type protocol struct {
--	stack *stack.Stack
 +	stack           *stack.Stack
 +	timeWaitHandler atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
+-	stack *stack.Stack
  
  	mu protocolRWMutex `state:"nosave"`
- 
-@@ -139,6 +142,31 @@ type protocol struct {
+@@ -139,6 +143,50 @@
  	tsOffsetSecret [16]byte `state:"nosave"`
  }
  
 +// SetTimeWaitHandler opts into reopening TIME_WAIT for any bare SYN. This is
 +// only safe for a local-app stack with ordered ingress: a host cannot reuse
 +// a tuple it still owns, and no old segment may arrive after the new SYN.
-+// The old endpoint closes and its queued segments are dropped, never reset.
-+// The handler runs after removal and receives a borrowed packet. Install it
-+// before capture starts; listeners retain their existing dispatch priority.
++// This applies to every TCP endpoint on s, not just forwarded connections.
++// All close paths freeze the old queue, hand off at most one bare SYN, and
++// silently drop the rest. The bool result is ignored: false also means drop.
++// The handler receives a borrowed packet after endpoint removal. It can run
++// on a TCP processor, timer, or closing goroutine, with the old endpoint locked:
++// it must not block or call methods that lock that endpoint. In particular,
++// waiting for relay completion here can deadlock the processor finishing it.
++// Deduplicate against SYNs reaching the default handler concurrently; gVisor's
++// Forwarder.HandlePacket already deduplicates its in-flight requests and is safe
++// to pass directly. Install before ingress; listeners keep dispatch priority.
 +func SetTimeWaitHandler(s *stack.Stack, handler func(stack.TransportEndpointID, *stack.PacketBuffer) bool) {
 +	p := protocolFromStack(s)
 +	if handler == nil {
@@ -44,6 +50,18 @@ diff --git a/pkg/tcpip/transport/tcp/protocol.go b/pkg/tcpip/transport/tcp/proto
 +	} else {
 +		p.timeWaitHandler.Store(&handler)
 +	}
++}
++
++// SetTimeWaitPolicy installs a per-endpoint close-time budget. enter runs once
++// before the TIME_WAIT timer starts; false closes silently instead. After a
++// successful enter, leave runs once on removal. Both run under the endpoint
++// lock and must not block or call endpoint methods. Install before shutdown.
++// A per-endpoint decision avoids changing the stack-wide 60-second protection
++// for other connections when only this closing connection exceeds the cap.
++func (e *Endpoint) SetTimeWaitPolicy(enter func() bool, leave func()) {
++	e.LockUser()
++	defer e.UnlockUser()
++	e.timeWaitEnter, e.timeWaitLeave = enter, leave
 +}
 +
 +// BufferUsage reports receive-segment memory (including out-of-order and
@@ -70,7 +88,7 @@ diff --git a/pkg/tcpip/transport/tcp/rcv.go b/pkg/tcpip/transport/tcp/rcv.go
  package tcp
  
  import (
-@@ -589,6 +590,10 @@ func (r *receiver) handleTimeWaitSegment(s *segment) (resetTimeWait bool, newSyn
+@@ -589,6 +590,10 @@
  
  	//    (2) returns to TIME-WAIT state if the SYN turns out
  	//      to be an old duplicate".
@@ -92,7 +110,30 @@ diff --git a/pkg/tcpip/transport/tcp/connect.go b/pkg/tcpip/transport/tcp/connec
  package tcp
  
  import (
-@@ -1542,6 +1543,11 @@ func (e *Endpoint) handleTimeWaitSegments() (extendTimeWait bool, reuseTW func()
+@@ -1195,6 +1196,22 @@
+ //
+ // +checklocksexclude:e.segmentQueue.mu
+ func (e *Endpoint) drainClosingSegmentQueue() {
++	if handler := e.protocol.timeWaitHandler.Load(); handler != nil {
++		e.segmentQueue.freeze()
++		var syn *segment
++		for s := e.segmentQueue.dequeue(); s != nil; s = e.segmentQueue.dequeue() {
++			if s.flags.Contains(header.TCPFlagSyn) && s.flags&(header.TCPFlagAck|header.TCPFlagFin|header.TCPFlagRst) == 0 && e.localSynHandled.CompareAndSwap(false, true) {
++				syn = s
++			} else {
++				s.DecRef()
++			}
++		}
++		if syn != nil {
++			defer syn.DecRef()
++			(*handler)(e.TransportEndpointInfo.ID, syn.pkt)
++		}
++		return
++	}
+ 	for {
+ 		s := e.segmentQueue.dequeue()
+ 		if s == nil {
+@@ -1542,6 +1559,11 @@
  				}
  			}
  		}
@@ -115,12 +156,30 @@ diff --git a/pkg/tcpip/transport/tcp/dispatcher.go b/pkg/tcpip/transport/tcp/dis
  package tcp
  
  import (
-@@ -264,9 +265,22 @@ func handleTimeWait(ep *Endpoint) {
+@@ -235,6 +236,16 @@
+ //
+ // +checklocks:ep.mu
+ func startTimeWait(ep *Endpoint) {
++	if enter := ep.timeWaitEnter; enter != nil {
++		ep.timeWaitEnter = nil
++		if !enter() {
++			ep.transitionToStateCloseLocked()
++			ep.drainClosingSegmentQueue()
++			ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
++			return
++		}
++		ep.timeWaitReserved = true
++	}
+ 	// Disable close timer as we are now entering real TIME_WAIT.
+ 	if ep.finWait2Timer != nil {
+ 		ep.finWait2Timer.Stop()
+@@ -264,9 +275,23 @@
  
  	extendTimeWait, reuseTW := ep.handleTimeWaitSegments()
  	if reuseTW != nil {
 +		localReuse := ep.protocol.timeWaitHandler.Load() != nil
 +		if localReuse {
++			ep.localSynHandled.Store(true)
 +			ep.segmentQueue.freeze()
 +		}
  		ep.transitionToStateCloseLocked()
@@ -132,10 +191,58 @@ diff --git a/pkg/tcpip/transport/tcp/dispatcher.go b/pkg/tcpip/transport/tcp/dis
 +			}
 +		}
  		ep.mu.Unlock()
--		ep.drainClosingSegmentQueue()
 +		if !localReuse {
 +			ep.drainClosingSegmentQueue()
 +		}
+-		ep.drainClosingSegmentQueue()
  		ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
  		reuseTW()
  		return
+diff --git a/pkg/tcpip/transport/tcp/endpoint.go b/pkg/tcpip/transport/tcp/endpoint.go
+--- a/pkg/tcpip/transport/tcp/endpoint.go
++++ b/pkg/tcpip/transport/tcp/endpoint.go
+@@ -12,6 +12,7 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++// Modified by Net Switch, 2026-10-19: close-time TIME_WAIT budget and queue freeze.
+ package tcp
+ 
+ import (
+@@ -480,7 +481,14 @@
+ 	// segmentQueue is used to hand received segments to the protocol
+ 	// goroutine. Segments are queued as long as the queue is not full,
+ 	// and dropped when it is.
++	segmentQueue    segmentQueue `state:"wait"`
++	localSynHandled atomicbitops.Bool
++	// +checklocks:mu
++	timeWaitEnter func() bool `state:"nosave"`
++	// +checklocks:mu
++	timeWaitLeave func() `state:"nosave"`
++	// +checklocks:mu
++	timeWaitReserved bool
+-	segmentQueue segmentQueue `state:"wait"`
+ 
+ 	// userMSS if non-zero is the MSS value explicitly set by the user
+ 	// for this endpoint using the TCP_MAXSEG setsockopt.
+@@ -1196,6 +1204,9 @@
+ // cleanupLocked frees all resources associated with the endpoint.
+ // +checklocks:e.mu
+ func (e *Endpoint) cleanupLocked() {
++	if e.protocol.timeWaitHandler.Load() != nil {
++		e.segmentQueue.freeze()
++	}
+ 	if e.snd != nil {
+ 		e.snd.resendTimer.cleanup()
+ 		e.snd.probeTimer.cleanup()
+@@ -1258,5 +1269,10 @@
+ 		e.purgeReadQueue()
+ 	}
+ 	e.stack.CompleteTransportEndpointCleanup(e)
++	if e.timeWaitReserved && e.timeWaitLeave != nil {
++		e.timeWaitLeave()
++	}
++	e.timeWaitReserved = false
++	e.timeWaitEnter, e.timeWaitLeave = nil, nil
+ 	tcpip.DeleteDanglingEndpoint(e)
+ }
