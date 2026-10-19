@@ -67,6 +67,7 @@ type observations struct {
 	TestISP      counters          `json:"testisp"`
 	Uplink       counters          `json:"uplink"`
 	Destinations map[string]uint64 `json:"destinations"`
+	UDPReplies   map[string]uint64 `json:"udpReplies"`
 }
 
 type gateway struct {
@@ -76,7 +77,7 @@ type gateway struct {
 	mode     atomic.Int32 // 0 running, 1 paused, 2 dropping
 	stats    observations
 	targetMu sync.RWMutex
-	targets map[string]string
+	targets  map[string]string
 	done     chan struct{}
 	stop     sync.Once
 }
@@ -120,14 +121,25 @@ func serve(args []string) error {
 	defer listener.Close()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /targets", func(w http.ResponseWriter, r *http.Request) {
-		var request struct { Ports []int `json:"ports"` }
-		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&request) != nil || len(request.Ports) > 8 { http.Error(w, "bad target ports", 400); return }
+		var request struct {
+			Ports []int `json:"ports"`
+		}
+		if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&request) != nil || len(request.Ports) > 8 {
+			http.Error(w, "bad target ports", 400)
+			return
+		}
 		targets := make(map[string]string)
 		for _, port := range request.Ports {
-			if port < 1024 || port > 65535 { http.Error(w, "invalid port", 400); return }
+			if port < 1024 || port > 65535 {
+				http.Error(w, "invalid port", 400)
+				return
+			}
 			targets[fmt.Sprintf("198.19.128.2:%d", port)] = net.JoinHostPort(g.uplinkIP.String(), fmt.Sprint(port))
+			targets[fmt.Sprintf("[2001:db8:198::2]:%d", port)] = net.JoinHostPort(g.uplinkIP.String(), fmt.Sprint(port))
 		}
-		g.targetMu.Lock(); g.targets = targets; g.targetMu.Unlock()
+		g.targetMu.Lock()
+		g.targets = targets
+		g.targetMu.Unlock()
 		json.NewEncoder(w).Encode(targets)
 	})
 	mux.HandleFunc("GET /stats", func(w http.ResponseWriter, r *http.Request) {

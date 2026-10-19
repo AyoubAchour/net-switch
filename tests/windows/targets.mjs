@@ -56,7 +56,9 @@ export async function targets(address) {
         const cookie = [0x21, 0x12, 0xa4, 0x42];
         for (let n = 0; n < 4; n++) response[28 + n] = ip[n] ^ cookie[n];
         socket.send(response, peer.port, peer.address);
-        if (i === 1) udp[2]?.send(Buffer.concat([Buffer.from('unsolicited:'), packet.subarray(8, 20)]), peer.port, peer.address);
+        if (i === 1) udp[2].send(Buffer.concat([Buffer.from('unsolicited:'), packet.subarray(8, 20)]), peer.port, peer.address, (error) => {
+          seen.push({ protocol: 'udp-unsolicited', from: udp[2].address().port, to: peer.port, error: error?.message ?? null });
+        });
       } else socket.send(packet, peer.port, peer.address);
     });
     udp.push(socket);

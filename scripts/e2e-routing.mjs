@@ -20,26 +20,20 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { connect as tlsConnect } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { killTree } from '../lib/ps.mjs';
+import { launchOptions, recordLaunch, serverCommand, verifyEngineProcess } from '../tests/windows/launch.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Windows names a program by its real path; Node may run through a link (nvm).
 const SELF = realpathSync.native(process.execPath);
 const TARGET = { host: '1.1.1.1', port: 443, path: '/cdn-cgi/trace' };
-const engineIndex = process.argv.indexOf('--engine-dir');
-const engineDir = engineIndex > 0 ? process.argv[engineIndex + 1] : null;
+const options = launchOptions();
+await recordLaunch(options);
 
 const dataDir = await mkdtemp(path.join(tmpdir(), 'net-switch-e2e-'));
+const [serverExe, serverArgs] = serverCommand(options, dataDir, { proxy: true });
 const server = spawn(
-  process.execPath,
-  [
-    path.join(ROOT, 'server.mjs'),
-    '--dev-proxy',
-    '--user-data',
-    dataDir,
-    '--machine-data',
-    dataDir,
-    ...(engineDir ? ['--engine-dir', engineDir] : []),
-  ],
+  serverExe,
+  serverArgs,
   { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
 );
 let serverOutput = '';
@@ -191,6 +185,7 @@ let failed = false;
 try {
   session = await until('the server starting', async () => JSON.parse(await readFile(path.join(dataDir, 'server.json'), 'utf8')), 60);
   let state = await routingOn();
+  await verifyEngineProcess(options, dataDir);
   check(state.lines.length === 1, `the first line is the adapter Windows uses (${state.lines[0]?.alias})`);
   const main = state.lines[0];
 

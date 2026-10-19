@@ -7,18 +7,27 @@ import { once } from 'node:events';
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
 import { Engine } from '../lib/engine.mjs';
 import { lineOutbound } from '../lib/apps.mjs';
+import { launchOptions, recordLaunch } from '../tests/windows/launch.mjs';
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
   throw new Error('TUN tests may run only on disposable GitHub-hosted Windows runners.');
 }
 const dir = path.resolve('dist/tun-test');
 await mkdir(dir, { recursive: true });
+const options = launchOptions();
+await recordLaunch({ ...options, entry: fileURLToPath(import.meta.url) }, path.join(dir, 'executables.json'));
+console.log('Launcher: direct Engine adapter test; no control server is launched here.');
+// This historical test directly exercises today's Engine adapter. A different
+// control executable must use acceptance.mjs; it must never silently test Node.
+assert.equal(options.server.toLowerCase(), process.execPath.toLowerCase(),
+  'Use tests/windows/acceptance.mjs to test a different control executable');
 // A distinct executable path exercises process discovery and app pinning.
 const clientExe = path.join(dir, 'test-app.exe');
 await copyFile(process.execPath, clientExe);
-const engine = new Engine({ singBoxPath: path.resolve('engine/sing-box.exe'), dataDir: dir, mode: 'tun' });
+const engine = new Engine({ singBoxPath: options.engine, dataDir: dir, mode: 'tun' });
 const report = [];
 function log(message) { console.log(message); report.push(message); }
 async function network(action, adapter) {
@@ -105,10 +114,9 @@ try {
   adapter = await network('inspect');
   log(`Physical adapter: ${JSON.stringify(adapter)}`);
   log(`PORT-REUSE direct baseline: ${JSON.stringify(await client('reuse'))}`);
-  const udpAvailable = new Set();
-  for (const size of [64, 1800]) {
-    try { log(`UDP direct baseline: ${JSON.stringify(await client('udp', { size }))}`); udpAvailable.add(size); }
-    catch (error) { log(`UDP ${size} unavailable before TUN (target/network limitation): ${error.message}`); }
+  const udpSizes = [64, 1800];
+  for (const size of udpSizes) {
+    log(`UDP direct baseline: ${JSON.stringify(await client('udp', { size }))}`);
   }
   // Hosted runners have one physical internet adapter. Two independently tagged
   // outbounds on that adapter let the Clash API prove which line was selected.
@@ -159,7 +167,7 @@ try {
   log(`ok - selector PUT ${elapsed.toFixed(1)} ms with 100 open connections; all old sockets reused, new connections use bb`);
   await client('close');
 
-  for (const size of udpAvailable) {
+  for (const size of udpSizes) {
     const result = await client('udp', { size });
     await routed([result], 'bb');
     log(`ok - UDP through TUN: ${JSON.stringify(result)}`);

@@ -7,7 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { launchOptions, recordLaunch, startServer, verifyEngineProcess } from './launch.mjs';
 import { BaselineDefect, Report } from './report.mjs';
 import { targets } from './targets.mjs';
-import { hostedOnly, run, startHarness, until } from './testisp/harness.mjs';
+import { hostedOnly, identity, run, startHarness, until } from './testisp/harness.mjs';
 
 hostedOnly();
 const options = launchOptions();
@@ -19,7 +19,8 @@ const report = new Report(options.profile);
 const output = createWriteStream(path.join(dir, 'server-output.log'));
 const clientExe = path.join(dir, 'acceptance-app.exe');
 await copyFile(process.execPath, clientExe);
-let harness, responder, server, worker, dnsAdapter, restoreDNS = false;
+let harness, responder, server, worker, dnsAdapter, quicServer, quic, restoreDNS = false;
+const quicExe = path.resolve('dist/windows-test/quicprobe.exe');
 let main, second;
 const pending = new Map();
 let serial = 0;
@@ -77,6 +78,32 @@ async function newPublicOn(line, count = 3) {
 
 async function publicBaseline() { return { direct: await harness.probe(harness.uplink), virtual: await harness.probe(harness.testisp) }; }
 
+async function targetFirewall(action) {
+  return run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.resolve('tests/windows/target-network.ps1'), '-Action', action], {
+    env: { ACCEPTANCE_CLIENT: clientExe, ACCEPTANCE_GATEWAY: path.resolve('dist/windows-test/testisp.exe'), ACCEPTANCE_TARGET: harness?.uplink.address ?? '',
+      ACCEPTANCE_UPLINK: String(harness?.uplink.index ?? ''), ACCEPTANCE_TESTISP: String(harness?.testisp.index ?? '') },
+  });
+}
+
+async function ping(host, source, size = 32, df = false) {
+  const args = [host.includes(':') ? '-6' : '-4', '-n', '1', '-w', '3000', '-l', String(size)];
+  if (source && host.includes(':')) args.push('-S', source);
+  if (df) args.push('-f');
+  args.push(host);
+  const result = await run('ping.exe', args, { timeout: 10_000 });
+  assert.match(result.stdout, /(?:time[=<]|TTL=)/i, 'Ping had no actual echo reply');
+  return result.stdout;
+}
+
+async function quicProbe(host, source, index) {
+  const port = quic.address.split(':').at(-1);
+  const args = ['--address', `${host}:${port}`, '--certificate', quic.certificate];
+  if (source) args.push('--source', source);
+  if (index) args.push('--interface', String(index));
+  const result = await run(quicExe, args, { timeout: 20_000 });
+  return JSON.parse(result.stdout);
+}
+
 async function start() {
   server = await startServer(options, dataDir, (chunk) => output.write(chunk));
   const state = await server.on();
@@ -90,7 +117,16 @@ try {
   dnsAdapter = await network('inspect');
   harness = await startHarness(path.join(dir, 'testisp'));
   responder = await targets(harness.uplink.address);
-  await harness.control('targets', { ports: [responder.direct.http, ...responder.direct.udp] });
+  await targetFirewall('allow');
+  await targetFirewall('ipv6');
+  await writeFile(path.join(dir, 'quic-executable.json'), JSON.stringify(await identity(quicExe), null, 2));
+  const quicState = path.join(dir, `quic-ready-${Date.now()}.json`);
+  quicServer = spawn(quicExe, ['--serve', '--address', `${harness.uplink.address}:0`, '--interface', String(harness.uplink.index), '--state', quicState], {
+    windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  quicServer.stdout.on('data', (chunk) => output.write(chunk)); quicServer.stderr.on('data', (chunk) => output.write(chunk));
+  quic = await until(async () => JSON.parse(await readFile(quicState, 'utf8')), 'controlled QUIC target ready');
+  await harness.control('targets', { ports: [responder.direct.http, ...responder.direct.udp, Number(quic.address.split(':').at(-1))] });
   worker = spawn(clientExe, [path.resolve('tests/windows/client.mjs')], { windowsHide: true, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
   worker.on('message', ({ id, result, error }) => {
     const entry = pending.get(id); if (!entry) return;
@@ -99,6 +135,10 @@ try {
   });
   worker.on('exit', (code) => { for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(new Error(`Client exited ${code}`)); } pending.clear(); });
   await report.test('both public egress baselines', 'parity', publicBaseline);
+  await report.test('real QUIC v1 baseline on both line addresses', 'parity', async () => ({
+    direct: await quicProbe(harness.uplink.address, harness.uplink.address, harness.uplink.index),
+    virtual: await quicProbe(responder.virtual.host, harness.testisp.address, harness.testisp.index),
+  }));
   await report.test('controlled HTTP reachable through both line addresses', 'parity', async () => {
     const direct = await client('open', { target: responder.direct }); await client('close');
     const before = await harness.control('stats');
@@ -116,7 +156,7 @@ try {
   await report.test('gateway preserves STUN mapping before engine starts', 'parity', async () => {
     const result = await client('udp', { target: responder.virtual, stun: true, localAddress: harness.testisp.address });
     assert.equal(new Set(result.mappings.map((item) => item.port)).size, 1, JSON.stringify(result));
-    assert(result.unsolicited, 'The gateway lost the third, uncontacted STUN sender');
+    assert(result.unsolicited, `The gateway lost the third, uncontacted STUN sender: ${JSON.stringify({ result, stats: await harness.control('stats'), target: responder.seen.slice(-5) })}`);
     return result;
   });
   const directReuse = await report.test('controlled port reuse baseline', 'parity', async () => {
@@ -124,7 +164,18 @@ try {
     assert.equal(samples.length, 20); assert(samples.every((sample) => sample.outcome === 'closed'), JSON.stringify(samples));
     return samples;
   });
+  await report.test('controlled ICMP v4/v6 baselines', 'parity', async () => ({
+    v4: await ping(responder.virtual.host, harness.testisp.address),
+    v6: await ping('2001:db8:198::2', '2001:db8:19::1'),
+  }));
+  const ipv6Target = { ...responder.virtual, host: '2001:db8:198::2' };
+  await report.test('controlled IPv6 TCP and UDP baselines', 'parity', async () => {
+    const tcp = await client('open', { target: { ...ipv6Target, source: '2001:db8:19::1' } }); await client('close');
+    const udp = await client('udp', { target: ipv6Target, localAddress: '2001:db8:19::1' });
+    return { tcp, udp };
+  });
   await writeFile(path.join(dataDir, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
+  await targetFirewall('capture');
   const initial = await start();
   main = initial.lines[0];
   assert.equal(main.alias, harness.uplink.alias, 'Default line is not the real uplink');
@@ -189,6 +240,30 @@ try {
     assert.equal(new Set(result.mappings.map((item) => item.port)).size, 1, JSON.stringify(result));
     assert(result.unsolicited, 'The app lost the third, uncontacted STUN sender');
     return result;
+  });
+  await report.test('real QUIC v1 through TUN has the right payload hash', 'parity', async () => {
+    await server.api('app-line', { path: quicExe, line: second.id }); await delay(500);
+    const before = await harness.control('stats');
+    const response = await quicProbe(responder.virtual.host);
+    const after = await harness.control('stats');
+    assert(after.testisp.bytesIn > before.testisp.bytesIn && after.testisp.bytesOut > before.testisp.bytesOut);
+    return { response, before, after };
+  });
+  await report.test('controlled IPv6 TCP and UDP through TUN', 'parity', async () => {
+    assert.equal((await server.api('state')).routing.ipv6, true, 'IPv6 capture was not enabled');
+    const tcp = await client('open', { target: ipv6Target });
+    const byLine = await counts(1); assert(byLine[second.id] >= 1); await client('close');
+    const udp = await client('udp', { target: ipv6Target }); return { tcp, udp, byLine };
+  });
+  await report.test('ICMP v4/v6 and 1400-byte MTU probes through TUN', 'parity', async () => {
+    await server.api('lines/order', { ids: [second.id, main.id] }); await server.on();
+    const before = await harness.control('stats');
+    const result = { v4: await ping(responder.virtual.host), v6: await ping(ipv6Target.host),
+      mtu4: await ping(responder.virtual.host, undefined, 1400, true), mtu6: await ping(ipv6Target.host, undefined, 1400) };
+    const after = await harness.control('stats');
+    assert(after.testisp.packetsIn >= before.testisp.packetsIn + 4, 'Echo replies did not reach the controlled path');
+    await server.api('lines/order', { ids: [main.id, second.id] }); await server.on();
+    return { result, before, after };
   });
   for (const gap of [0, 10, 100, 500]) {
     await report.test(`freeze gate: ${gap} ms port reuse`, 'baseline-defect', async () => {
@@ -292,8 +367,10 @@ try {
 } finally {
   if (restoreDNS) try { await network('dns-restore', dnsAdapter); } catch (error) { console.error(error); process.exitCode = 1; }
   if (worker?.exitCode === null && worker.connected) worker.disconnect();
+  if (quicServer?.exitCode === null) quicServer.kill();
   if (server?.child.exitCode === null) try { await server.quit(); } catch (error) { console.error(error); process.exitCode = 1; }
   if (harness) try { await harness.close(); } catch (error) { console.error(error); process.exitCode = 1; }
+  try { await targetFirewall('clean'); } catch (error) { console.error(error); process.exitCode = 1; }
   if (responder) { await writeFile(path.join(dir, 'target-observations.json'), JSON.stringify(responder.seen, null, 2)); await responder.close(); }
   output.end();
   await report.save(path.join(dir, 'report.json'));

@@ -47,6 +47,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/quicprobe.exe ./tests/windows/quicprobe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build today's native helper
         # The helper has its own module and its own dependency policy.
         env:
@@ -66,7 +68,8 @@ jobs:
         with:
           name: windows-acceptance-${{ matrix.arch }}
           path: |
-            dist/windows-acceptance/**/*.json
+            dist/windows-acceptance/*.json
+            dist/windows-acceptance/testisp/*.json
             dist/windows-acceptance/**/*.log*
           retention-days: 14
 

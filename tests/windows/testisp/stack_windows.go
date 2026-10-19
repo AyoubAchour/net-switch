@@ -137,8 +137,12 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			}
 			// gVisor can answer echo locally. Only our controlled target is local;
 			// never manufacture a reply for a public host that we did not ping.
-			if n >= 20 && packet[0]>>4 == 4 && packet[9] == 1 && net.IP(packet[16:20]).String() != "198.19.128.2" { continue }
-			if n >= 40 && packet[0]>>4 == 6 && packet[6] == 58 { continue }
+			if n >= 20 && packet[0]>>4 == 4 && packet[9] == 1 && net.IP(packet[16:20]).String() != "198.19.128.2" {
+				continue
+			}
+			if n >= 40 && packet[0]>>4 == 6 && packet[6] == 58 && net.IP(packet[24:40]).String() != "2001:db8:198::2" {
+				continue
+			}
 			protocol := ipv4.ProtocolNumber
 			if packet[0]>>4 == 6 {
 				protocol = ipv6.ProtocolNumber
@@ -181,7 +185,10 @@ func (g *gateway) transferred(n int64, outgoing bool) {
 }
 
 func (g *gateway) backend(destination string) string {
-	g.targetMu.RLock(); defer g.targetMu.RUnlock()
-	if address, ok := g.targets[destination]; ok { return address }
+	g.targetMu.RLock()
+	defer g.targetMu.RUnlock()
+	if address, ok := g.targets[destination]; ok {
+		return address
+	}
 	return destination
 }

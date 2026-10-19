@@ -50,7 +50,8 @@ async function open({ count = 1, target = publicTarget }) {
 }
 
 async function udp({ target, size = 64, stun = false, localAddress }) {
-  const socket = createSocket('udp4');
+  const v6 = target.host.includes(':');
+  const socket = createSocket(v6 ? 'udp6' : 'udp4');
   const transaction = randomBytes(12);
   const packet = stun ? Buffer.alloc(20) : randomBytes(size);
   if (stun) { packet.writeUInt16BE(1, 0); packet.writeUInt32BE(0x2112a442, 4); transaction.copy(packet, 8); }
@@ -82,7 +83,7 @@ async function udp({ target, size = 64, stun = false, localAddress }) {
           }
         } catch (error) { finish(reject, error); }
       });
-      socket.bind(0, localAddress ?? '0.0.0.0', () => {
+      socket.bind(0, localAddress ?? (v6 ? '::' : '0.0.0.0'), () => {
         for (const port of target.udp.slice(0, stun ? 2 : 1)) socket.send(packet, port, target.host);
       });
     });
