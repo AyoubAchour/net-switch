@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: opt-in local SYN reuse without ISN checks.
+// Modified by Net Switch, 2026-10-19: with a TIME_WAIT policy, ACK FIN after
+// releasing admission; otherwise keep upstream ACK order. Opt-in local SYN reuse.
 
 package tcp
 
@@ -251,6 +252,12 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
 	if s.flags.Contains(header.TCPFlagFin) {
 		r.RcvNxt++
 
+		// Send ACK immediately.
+		deferACK := r.ep.timeWaitEnter != nil
+		if !deferACK {
+			r.ep.snd.sendAck()
+		}
+
 		// Tell any readers that no more data will come.
 		r.closed = true
 		r.ep.readyToRead(nil)
@@ -272,9 +279,9 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
 			r.ep.setEndpointState(StateTimeWait)
 		}
 
-		// Publish the close transition and release admission before the app
-		// can observe this ACK and immediately open another connection.
-		r.ep.snd.sendAck()
+		if deferACK {
+			r.ep.snd.sendAck()
+		}
 
 		// Flush out any pending segments, except the very first one if
 		// it happens to be the one we're handling now because the

@@ -1,17 +1,72 @@
+diff --git a/pkg/tcpip/transport/tcp/accept.go b/pkg/tcpip/transport/tcp/accept.go
+index 57f21e1..b56676a 100644
+--- a/pkg/tcpip/transport/tcp/accept.go
++++ b/pkg/tcpip/transport/tcp/accept.go
+@@ -12,6 +12,8 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++// Modified by Net Switch, 2026-10-19: install close accounting before registration.
++
+ package tcp
+ 
+ import (
+@@ -240,7 +242,7 @@ func (l *listenContext) createConnectingEndpoint(s *segment, rcvdSynOpts header.
+ // modified.
+ //
+ // Precondition: if l.listenEP != nil, l.listenEP.mu must be locked.
+-func (l *listenContext) startHandshake(s *segment, opts header.TCPSynOptions, queue *waiter.Queue, owner tcpip.PacketOwner) (h *handshake, _ tcpip.Error) {
++func (l *listenContext) startHandshake(s *segment, opts header.TCPSynOptions, queue *waiter.Queue, owner tcpip.PacketOwner, onClose ...func()) (h *handshake, _ tcpip.Error) {
+ 	// Create new endpoint.
+ 	irs := s.sequenceNumber
+ 	isn := generateSecureISN(s.id, l.stack.Clock(), l.protocol.seqnumSecret)
+@@ -250,6 +252,9 @@ func (l *listenContext) startHandshake(s *segment, opts header.TCPSynOptions, qu
+ 	}
+ 
+ 	ep.owner = owner
++	if len(onClose) != 0 {
++		ep.closeHandler = onClose[0]
++	}
+ 
+ 	// listenEP is nil when listenContext is used by tcp.Forwarder.
+ 	deferAccept := time.Duration(0)
+@@ -309,12 +314,12 @@ func (l *listenContext) startHandshake(s *segment, opts header.TCPSynOptions, qu
+ // established endpoint is returned.
+ //
+ // Precondition: if l.listenEP != nil, l.listenEP.mu must be locked.
+-func (l *listenContext) performHandshake(s *segment, opts header.TCPSynOptions, queue *waiter.Queue, owner tcpip.PacketOwner) (*Endpoint, tcpip.Error) {
++func (l *listenContext) performHandshake(s *segment, opts header.TCPSynOptions, queue *waiter.Queue, owner tcpip.PacketOwner, onClose func()) (*Endpoint, tcpip.Error) {
+ 	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.WritableEvents)
+ 	queue.EventRegister(&waitEntry)
+ 	defer queue.EventUnregister(&waitEntry)
+ 
+-	h, err := l.startHandshake(s, opts, queue, owner)
++	h, err := l.startHandshake(s, opts, queue, owner, onClose)
+ 	if err != nil {
+ 		return nil, err
+ 	}
 diff --git a/pkg/tcpip/transport/tcp/connect.go b/pkg/tcpip/transport/tcp/connect.go
-index 62f42f4..89820c7 100644
+index 62f42f4..421468b 100644
 --- a/pkg/tcpip/transport/tcp/connect.go
 +++ b/pkg/tcpip/transport/tcp/connect.go
 @@ -12,6 +12,8 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
-+// Modified by Net Switch, 2026-10-19: send reopened TIME_WAIT SYNs to admission.
++// Modified by Net Switch, 2026-10-19: local SYN handoff and release before reset.
 +
  package tcp
  
  import (
-@@ -1195,6 +1197,21 @@ func (e *Endpoint) tryDeliverSegmentFromClosedEndpoint(s *segment) {
+@@ -1098,6 +1100,7 @@ func (e *Endpoint) resetConnectionLocked(err tcpip.Error) {
+ 	// Only send a reset if the connection is being aborted for a reason
+ 	// other than receiving a reset.
+ 	e.hardError = err
++	e.releaseClose()
+ 	switch err.(type) {
+ 	case *tcpip.ErrConnectionReset, *tcpip.ErrTimeout:
+ 	default:
+@@ -1195,6 +1198,21 @@ func (e *Endpoint) tryDeliverSegmentFromClosedEndpoint(s *segment) {
  //
  // +checklocksexclude:e.segmentQueue.mu
  func (e *Endpoint) drainClosingSegmentQueue() {
@@ -33,7 +88,7 @@ index 62f42f4..89820c7 100644
  	for {
  		s := e.segmentQueue.dequeue()
  		if s == nil {
-@@ -1537,11 +1554,18 @@ func (e *Endpoint) handleTimeWaitSegments() (extendTimeWait bool, reuseTW func()
+@@ -1537,11 +1555,18 @@ func (e *Endpoint) handleTimeWaitSegments() (extendTimeWait bool, reuseTW func()
  						}
  						// We explicitly do not DecRef the segment as it's still valid and
  						// being reflected to a listening endpoint.
@@ -53,19 +108,45 @@ index 62f42f4..89820c7 100644
  			extendTimeWait = true
  		}
 diff --git a/pkg/tcpip/transport/tcp/dispatcher.go b/pkg/tcpip/transport/tcp/dispatcher.go
-index d138e3b..4e07948 100644
+index d138e3b..593b46a 100644
 --- a/pkg/tcpip/transport/tcp/dispatcher.go
 +++ b/pkg/tcpip/transport/tcp/dispatcher.go
 @@ -12,6 +12,8 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
-+// Modified by Net Switch, 2026-10-19: skip TIME_WAIT silently when its close-time budget is full.
++// Modified by Net Switch, 2026-10-19: opt-in ordered close processing and TIME_WAIT cap.
 +
  package tcp
  
  import (
-@@ -235,6 +237,12 @@ func handleConnected(ep *Endpoint) {
+@@ -157,6 +159,12 @@ func handleConnecting(ep *Endpoint) {
+ 	if !ep.TryLock() {
+ 		return
+ 	}
++	handleConnectingLocked(ep)
++}
++
++// +checklocks:ep.mu
++// +checklocksrelease:ep.mu
++func handleConnectingLocked(ep *Endpoint) {
+ 	cleanup := func() {
+ 		ep.mu.Unlock()
+ 		ep.drainClosingSegmentQueue()
+@@ -202,6 +210,12 @@ func handleConnected(ep *Endpoint) {
+ 	if !ep.TryLock() {
+ 		return
+ 	}
++	handleConnectedLocked(ep)
++}
++
++// +checklocks:ep.mu
++// +checklocksrelease:ep.mu
++func handleConnectedLocked(ep *Endpoint) {
+ 
+ 	if !ep.EndpointState().connected() {
+ 		// If the endpoint has already transitioned out of a connected
+@@ -235,6 +249,12 @@ func handleConnected(ep *Endpoint) {
  //
  // +checklocks:ep.mu
  func startTimeWait(ep *Endpoint) {
@@ -78,26 +159,44 @@ index d138e3b..4e07948 100644
  	// Disable close timer as we are now entering real TIME_WAIT.
  	if ep.finWait2Timer != nil {
  		ep.finWait2Timer.Stop()
+@@ -501,6 +521,15 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
+ 		return
+ 	}
+ 
++	// Record close work for the ordered ingress caller to finish after the
++	// demux read lock is released. FIN_WAIT_1 includes a queued simultaneous
++	// FIN whose final ACK has arrived before the processor handled that FIN.
++	state := ep.EndpointState()
++	closingACK := s.flags.Contains(header.TCPFlagAck) && !s.flags.Contains(header.TCPFlagFin) && (state == StateLastAck || state == StateClosing || state == StateFinWait1)
++	if ep.protocol.timeWaitHandler.Load() != nil && (s.flags&(header.TCPFlagRst|header.TCPFlagFin) != 0 || closingACK) {
++		ep.protocol.localClose.Store(ep)
++	}
++
+ 	// Only wakeup the processor if endpoint lock is not held by a user
+ 	// goroutine as endpoint.UnlockUser will wake up the processor if the
+ 	// segment queue is not empty.
 diff --git a/pkg/tcpip/transport/tcp/endpoint.go b/pkg/tcpip/transport/tcp/endpoint.go
-index 788a2f2..705eb1e 100644
+index 788a2f2..70397f2 100644
 --- a/pkg/tcpip/transport/tcp/endpoint.go
 +++ b/pkg/tcpip/transport/tcp/endpoint.go
 @@ -12,6 +12,8 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
-+// Modified by Net Switch, 2026-10-19: close-time TIME_WAIT budget and single SYN handoff.
++// Modified by Net Switch, 2026-10-19: close admission, TIME_WAIT budget and SYN handoff.
 +
  package tcp
  
  import (
-@@ -480,7 +482,16 @@ type Endpoint struct {
+@@ -480,7 +482,18 @@ type Endpoint struct {
  	// segmentQueue is used to hand received segments to the protocol
  	// goroutine. Segments are queued as long as the queue is not full,
  	// and dropped when it is.
 -	segmentQueue segmentQueue `state:"wait"`
 +	segmentQueue    segmentQueue `state:"wait"`
 +	localSynHandled atomicbitops.Bool
++	// +checklocks:mu
++	closeHandler func() `state:"nosave"`
 +	// +checklocks:mu
 +	timeWaitEnter func() bool `state:"nosave"`
 +	// +checklocks:mu
@@ -109,7 +208,7 @@ index 788a2f2..705eb1e 100644
  
  	// userMSS if non-zero is the MSS value explicitly set by the user
  	// for this endpoint using the TCP_MAXSEG setsockopt.
-@@ -780,6 +791,14 @@ func (e *Endpoint) TryLock() bool {
+@@ -780,6 +793,14 @@ func (e *Endpoint) TryLock() bool {
  //
  // +checklocks:e.mu
  func (e *Endpoint) setEndpointState(state EndpointState) {
@@ -124,7 +223,15 @@ index 788a2f2..705eb1e 100644
  	oldstate := EndpointState(e.state.Swap(uint32(state)))
  	switch state {
  	case StateEstablished:
-@@ -1258,6 +1277,11 @@ func (e *Endpoint) cleanupLocked() {
+@@ -1196,6 +1217,7 @@ func (e *Endpoint) closePendingAcceptableConnectionsLocked() {
+ // cleanupLocked frees all resources associated with the endpoint.
+ // +checklocks:e.mu
+ func (e *Endpoint) cleanupLocked() {
++	e.releaseClose()
+ 	if e.snd != nil {
+ 		e.snd.resendTimer.cleanup()
+ 		e.snd.probeTimer.cleanup()
+@@ -1258,6 +1280,11 @@ func (e *Endpoint) cleanupLocked() {
  		e.purgeReadQueue()
  	}
  	e.stack.CompleteTransportEndpointCleanup(e)
@@ -136,8 +243,46 @@ index 788a2f2..705eb1e 100644
  	tcpip.DeleteDanglingEndpoint(e)
  }
  
+diff --git a/pkg/tcpip/transport/tcp/forwarder.go b/pkg/tcpip/transport/tcp/forwarder.go
+index 261a3b5..4604ced 100644
+--- a/pkg/tcpip/transport/tcp/forwarder.go
++++ b/pkg/tcpip/transport/tcp/forwarder.go
+@@ -12,6 +12,8 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++// Modified by Net Switch, 2026-10-19: opt-in close accounting before the handshake.
++
+ package tcp
+ 
+ import (
+@@ -147,6 +149,15 @@ func (r *ForwarderRequest) Complete(sendReset bool) {
+ // CreateEndpoint creates a TCP endpoint for the connection request, performing
+ // the 3-way handshake in the process.
+ func (r *ForwarderRequest) CreateEndpoint(queue *waiter.Queue) (tcpip.Endpoint, tcpip.Error) {
++	return r.CreateEndpointWithCloseHandler(queue, nil)
++}
++
++// CreateEndpointWithCloseHandler installs onClose before exposing the endpoint.
++// It runs once before reset output or removal, under the endpoint lock; it must
++// not block or call endpoint methods. TIME_WAIT admission remains a separate
++// policy. Use ordered ingress with SetTimeWaitHandler for synchronous RST and
++// final closing ACK processing. The ingress owner must call DrainLocalClose.
++func (r *ForwarderRequest) CreateEndpointWithCloseHandler(queue *waiter.Queue, onClose func()) (tcpip.Endpoint, tcpip.Error) {
+ 	r.mu.Lock()
+ 	defer r.mu.Unlock()
+ 
+@@ -162,7 +173,7 @@ func (r *ForwarderRequest) CreateEndpoint(queue *waiter.Queue) (tcpip.Endpoint,
+ 		TSVal:         r.synOptions.TSVal,
+ 		TSEcr:         r.synOptions.TSEcr,
+ 		SACKPermitted: r.synOptions.SACKPermitted,
+-	}, queue, nil)
++	}, queue, nil, onClose)
+ 	if err != nil {
+ 		return nil, err
+ 	}
 diff --git a/pkg/tcpip/transport/tcp/protocol.go b/pkg/tcpip/transport/tcp/protocol.go
-index a3c8295..fedc28b 100644
+index a3c8295..60026d7 100644
 --- a/pkg/tcpip/transport/tcp/protocol.go
 +++ b/pkg/tcpip/transport/tcp/protocol.go
 @@ -12,6 +12,8 @@
@@ -157,17 +302,18 @@ index a3c8295..fedc28b 100644
  	"time"
  
  	"gvisor.dev/gvisor/pkg/tcpip"
-@@ -87,7 +90,8 @@ const (
+@@ -87,7 +90,9 @@ const (
  
  // +stateify savable
  type protocol struct {
 -	stack *stack.Stack
 +	stack           *stack.Stack
 +	timeWaitHandler atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
++	localClose      atomic.Pointer[Endpoint]                                                  `state:"nosave"`
  
  	mu protocolRWMutex `state:"nosave"`
  
-@@ -139,6 +143,51 @@ type protocol struct {
+@@ -139,6 +144,87 @@ type protocol struct {
  	tsOffsetSecret [16]byte `state:"nosave"`
  }
  
@@ -206,6 +352,42 @@ index a3c8295..fedc28b 100644
 +	e.timeWaitEnter, e.timeWaitLeave = enter, leave
 +}
 +
++// DrainLocalClose completes a queued FIN, reset or closing ACK through normal TCP
++// validation. Call after every DeliverNetworkPacket and before the next one,
++// from the single ordered ingress owner. Never call under demux or endpoint
++// locks. SetTimeWaitHandler enables this fence; hook-free stacks are unchanged.
++func DrainLocalClose(s *stack.Stack) {
++	ep := protocolFromStack(s).localClose.Swap(nil)
++	if ep == nil {
++		return
++	}
++	for {
++		ep.mu.Lock()
++		switch state := ep.EndpointState(); {
++		case state.connecting():
++			handleConnectingLocked(ep)
++		case state.connected() && state != StateTimeWait:
++			handleConnectedLocked(ep)
++		default:
++			ep.mu.Unlock()
++			return
++		}
++		if ep.segmentQueue.empty() {
++			return
++		}
++	}
++}
++
++// releaseClose retires admission once no further network data can be sent.
++// It precedes reset output and cleanup; accounting may continue in the relay.
++// +checklocks:e.mu
++func (e *Endpoint) releaseClose() {
++	if release := e.closeHandler; release != nil {
++		e.closeHandler = nil
++		release()
++	}
++}
++
 +// BufferUsage reports receive-segment memory (including out-of-order and
 +// queued segments) and unacknowledged send data. Callers reducing socket
 +// limits can retain the reservation for memory that has not drained yet.
@@ -220,40 +402,43 @@ index a3c8295..fedc28b 100644
  func (*protocol) Number() tcpip.TransportProtocolNumber {
  	return ProtocolNumber
 diff --git a/pkg/tcpip/transport/tcp/rcv.go b/pkg/tcpip/transport/tcp/rcv.go
-index 6bb5252..308bd09 100644
+index 6bb5252..33c0b34 100644
 --- a/pkg/tcpip/transport/tcp/rcv.go
 +++ b/pkg/tcpip/transport/tcp/rcv.go
-@@ -12,6 +12,8 @@
+@@ -12,6 +12,9 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
-+// Modified by Net Switch, 2026-10-19: opt-in local SYN reuse without ISN checks.
++// Modified by Net Switch, 2026-10-19: with a TIME_WAIT policy, ACK FIN after
++// releasing admission; otherwise keep upstream ACK order. Opt-in local SYN reuse.
 +
  package tcp
  
  import (
-@@ -249,9 +251,6 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
- 	if s.flags.Contains(header.TCPFlagFin) {
+@@ -250,7 +253,10 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
  		r.RcvNxt++
  
--		// Send ACK immediately.
+ 		// Send ACK immediately.
 -		r.ep.snd.sendAck()
--
++		deferACK := r.ep.timeWaitEnter != nil
++		if !deferACK {
++			r.ep.snd.sendAck()
++		}
+ 
  		// Tell any readers that no more data will come.
  		r.closed = true
- 		r.ep.readyToRead(nil)
-@@ -273,6 +272,10 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
+@@ -273,6 +279,10 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
  			r.ep.setEndpointState(StateTimeWait)
  		}
  
-+		// Publish the close transition and release admission before the app
-+		// can observe this ACK and immediately open another connection.
-+		r.ep.snd.sendAck()
++		if deferACK {
++			r.ep.snd.sendAck()
++		}
 +
  		// Flush out any pending segments, except the very first one if
  		// it happens to be the one we're handling now because the
  		// caller is using it.
-@@ -589,6 +592,10 @@ func (r *receiver) handleTimeWaitSegment(s *segment) (resetTimeWait bool, newSyn
+@@ -589,6 +599,10 @@ func (r *receiver) handleTimeWaitSegment(s *segment) (resetTimeWait bool, newSyn
  
  	//    (2) returns to TIME-WAIT state if the SYN turns out
  	//      to be an old duplicate".

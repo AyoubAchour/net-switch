@@ -204,7 +204,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		return
 	}
 	var wq waiter.Queue
-	ep, errTCP := r.CreateEndpoint(&wq)
+	ep, errTCP := r.CreateEndpointWithCloseHandler(&wq, ticket.Retire)
 	if errTCP != nil {
 		return
 	}
@@ -249,8 +249,8 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		ep.Abort()
 	}
 	app.Close()
-	// TIME_WAIT releases admission at the state transition. The monitor keeps
-	// this ticket until removal and relay completion for final byte accounting.
+	// TCP releases admission at TIME_WAIT, reset or removal. The monitor keeps
+	// the ticket until removal and relay completion for final byte accounting.
 }
 
 // Stop cancels dials and relays. The owner must close the stack before Wait,

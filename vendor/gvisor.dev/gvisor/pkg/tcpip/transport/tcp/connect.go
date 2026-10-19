@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: send reopened TIME_WAIT SYNs to admission.
+// Modified by Net Switch, 2026-10-19: local SYN handoff and release before reset.
 
 package tcp
 
@@ -1100,6 +1100,7 @@ func (e *Endpoint) resetConnectionLocked(err tcpip.Error) {
 	// Only send a reset if the connection is being aborted for a reason
 	// other than receiving a reset.
 	e.hardError = err
+	e.releaseClose()
 	switch err.(type) {
 	case *tcpip.ErrConnectionReset, *tcpip.ErrTimeout:
 	default:

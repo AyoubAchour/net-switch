@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-10-19: opt-in close accounting before the handshake.
+
 package tcp
 
 import (
@@ -147,6 +149,15 @@ func (r *ForwarderRequest) Complete(sendReset bool) {
 // CreateEndpoint creates a TCP endpoint for the connection request, performing
 // the 3-way handshake in the process.
 func (r *ForwarderRequest) CreateEndpoint(queue *waiter.Queue) (tcpip.Endpoint, tcpip.Error) {
+	return r.CreateEndpointWithCloseHandler(queue, nil)
+}
+
+// CreateEndpointWithCloseHandler installs onClose before exposing the endpoint.
+// It runs once before reset output or removal, under the endpoint lock; it must
+// not block or call endpoint methods. TIME_WAIT admission remains a separate
+// policy. Use ordered ingress with SetTimeWaitHandler for synchronous RST and
+// final closing ACK processing. The ingress owner must call DrainLocalClose.
+func (r *ForwarderRequest) CreateEndpointWithCloseHandler(queue *waiter.Queue, onClose func()) (tcpip.Endpoint, tcpip.Error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -162,7 +173,7 @@ func (r *ForwarderRequest) CreateEndpoint(queue *waiter.Queue) (tcpip.Endpoint, 
 		TSVal:         r.synOptions.TSVal,
 		TSEcr:         r.synOptions.TSEcr,
 		SACKPermitted: r.synOptions.SACKPermitted,
-	}, queue, nil)
+	}, queue, nil, onClose)
 	if err != nil {
 		return nil, err
 	}

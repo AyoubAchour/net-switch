@@ -112,9 +112,21 @@ func TestTimeWaitZeroCapClosingBatch(t *testing.T) {
 	p.openWith(1000, func(syn []byte) {
 		ep.LockUser()
 		defer ep.UnlockUser()
-		p.inject(fin)
+		// Queue directly to freeze a whole processor batch. Ordered ingress
+		// now finishes a FIN before accepting the next packet.
+		queue := func(raw []byte) {
+			pkt := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(raw)})
+			defer pkt.DecRef()
+			pkt.NetworkHeader().Consume(header.IPv4MinimumSize)
+			pkt.TransportHeader().Consume(header.TCPMinimumSize)
+			pkt.NetworkProtocolNumber = header.IPv4ProtocolNumber
+			p.stack.TransportProtocolInstance(tcp.ProtocolNumber).(interface {
+				QueuePacket(gv.TransportEndpoint, gv.TransportEndpointID, *gv.PacketBuffer)
+			}).QueuePacket(ep, id, pkt)
+		}
+		queue(fin)
 		for range 3 {
-			p.inject(syn)
+			queue(syn)
 		}
 	})
 	old.conn.Close()

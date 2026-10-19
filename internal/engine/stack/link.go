@@ -15,18 +15,19 @@ const QueuePackets = 1024
 // Link owns its output buffers. A slot is reserved before copying a packet;
 // neither stack writers nor the UDP reply path wait for the TUN consumer.
 type Link struct {
-	ingress     sync.Mutex
-	mu          sync.Mutex
-	dispatcher  gv.NetworkDispatcher
-	observer    func(*gv.PacketBuffer)
-	queue       [QueuePackets][]byte
-	head, count int
-	mtu         uint32
-	closed      bool
-	onClose     func()
-	ready       chan struct{}
-	done        chan struct{}
-	Dropped     atomic.Uint64
+	ingress      sync.Mutex
+	mu           sync.Mutex
+	dispatcher   gv.NetworkDispatcher
+	observer     func(*gv.PacketBuffer)
+	afterInbound func()
+	queue        [QueuePackets][]byte
+	head, count  int
+	mtu          uint32
+	closed       bool
+	onClose      func()
+	ready        chan struct{}
+	done         chan struct{}
+	Dropped      atomic.Uint64
 }
 
 var _ gv.LinkEndpoint = (*Link)(nil)
@@ -150,6 +151,7 @@ func (l *Link) deliver(protocol tcpip.NetworkProtocolNumber, p *gv.PacketBuffer)
 	l.mu.Lock()
 	d := l.dispatcher
 	observe := l.observer
+	after := l.afterInbound
 	closed := l.closed
 	l.mu.Unlock()
 	if !closed && d != nil {
@@ -157,7 +159,18 @@ func (l *Link) deliver(protocol tcpip.NetworkProtocolNumber, p *gv.PacketBuffer)
 			observe(p)
 		}
 		d.DeliverNetworkPacket(protocol, p)
+		if after != nil {
+			after()
+		}
 	}
+}
+
+// SetAfterInbound installs the close-processing fence before ingress starts.
+// It runs after demux locks are released, under the single ingress owner.
+func (l *Link) SetAfterInbound(after func()) {
+	l.mu.Lock()
+	l.afterInbound = after
+	l.mu.Unlock()
 }
 
 func (l *Link) SetObserver(observe func(*gv.PacketBuffer)) {

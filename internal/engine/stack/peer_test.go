@@ -37,11 +37,15 @@ type accepted struct {
 
 type observedRemote struct {
 	*testfake.Conn
-	closed chan struct{}
-	once   sync.Once
+	closed    chan struct{}
+	once      sync.Once
+	closeGate *atomic.Pointer[chan struct{}]
 }
 
 func (c *observedRemote) Close() error {
+	if gate := c.closeGate.Load(); gate != nil {
+		<-*gate
+	}
 	err := c.Conn.Close()
 	c.once.Do(func() { close(c.closed) })
 	return err
@@ -65,6 +69,8 @@ type peer struct {
 	forward            *ntcp.Forwarder
 	phase              string
 	lastSent           []byte
+	owners             *testfake.Owners
+	relayCloseGate     atomic.Pointer[chan struct{}]
 }
 
 func newPeer(t *testing.T, timestamps bool) *peer {
@@ -77,7 +83,7 @@ func newPeerOptions(t *testing.T, timestamps bool, limits flows.Limits, options 
 	return newPeerLink(t, timestamps, limits, options, l, l)
 }
 
-func newPeerLink(t *testing.T, timestamps bool, limits flows.Limits, options ns.Options, l *ns.Link, endpoint gv.LinkEndpoint) *peer {
+func newPeerLink(t *testing.T, timestamps bool, limits flows.Limits, options ns.Options, l *ns.Link, endpoint ns.OrderedLink) *peer {
 	t.Helper()
 	s, err := ns.New(endpoint, options)
 	if err != nil {
@@ -94,9 +100,10 @@ func newPeerLink(t *testing.T, timestamps bool, limits flows.Limits, options ns.
 		a, b := testfake.Pair()
 		closed := make(chan struct{})
 		p.accepted <- accepted{b, closed}
-		return &observedRemote{Conn: a, closed: closed}, nil
+		return &observedRemote{Conn: a, closed: closed, closeGate: &p.relayCloseGate}, nil
 	}}
-	f := ntcp.New(context.Background(), s, limits.Handshakes, table, &testfake.Owners{Value: platform.Owner{AppID: "peer"}}, d, l)
+	p.owners = &testfake.Owners{Value: platform.Owner{AppID: "peer"}}
+	f := ntcp.New(context.Background(), s, limits.Handshakes, table, p.owners, d, l)
 	p.forward = f
 	t.Cleanup(func() { f.Stop(); s.Close(); s.Wait(); f.Wait(); l.Close() })
 	return p
@@ -126,6 +133,10 @@ func (p *peer) packet(seq, ack uint32, flags header.TCPFlags, payload []byte) []
 
 func (p *peer) inject(b []byte) {
 	p.lastSent = b
+	p.deliver(b)
+}
+
+func (p *peer) deliver(b []byte) {
 	pkt := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b)})
 	p.link.InjectInbound(ipv4.ProtocolNumber, pkt)
 	pkt.DecRef()
@@ -159,6 +170,9 @@ func (p *peer) wait(flags header.TCPFlags) header.TCP {
 		h := p.read(time.Until(deadline))
 		if h == nil {
 			break
+		}
+		if h.DestinationPort() != p.port {
+			continue // An old tuple's close packet cannot reject this connection.
 		}
 		if h.Flags().Contains(header.TCPFlagRst) {
 			p.t.Fatalf("unexpected RST, waiting for %v; reply=%s; %s", flags, segmentDescription(h), p.diagnostics())
@@ -243,7 +257,10 @@ func (p *peer) closeActive() []byte {
 	p.ack = h.SequenceNumber() + 1
 	p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 	fin := p.packet(p.seq, p.ack, header.TCPFlagFin|header.TCPFlagAck, nil)
-	p.inject(fin)
+	// A wire ACK can be visible while ingress is still completing the FIN.
+	// Let barrier tests observe that boundary without sharing peer state.
+	p.lastSent = fin
+	go p.deliver(fin)
 	p.seq++
 	for {
 		h = p.wait(header.TCPFlagAck)

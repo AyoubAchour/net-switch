@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-10-19: install close accounting before registration.
+
 package tcp
 
 import (
@@ -240,7 +242,7 @@ func (l *listenContext) createConnectingEndpoint(s *segment, rcvdSynOpts header.
 // modified.
 //
 // Precondition: if l.listenEP != nil, l.listenEP.mu must be locked.
-func (l *listenContext) startHandshake(s *segment, opts header.TCPSynOptions, queue *waiter.Queue, owner tcpip.PacketOwner) (h *handshake, _ tcpip.Error) {
+func (l *listenContext) startHandshake(s *segment, opts header.TCPSynOptions, queue *waiter.Queue, owner tcpip.PacketOwner, onClose ...func()) (h *handshake, _ tcpip.Error) {
 	// Create new endpoint.
 	irs := s.sequenceNumber
 	isn := generateSecureISN(s.id, l.stack.Clock(), l.protocol.seqnumSecret)
@@ -250,6 +252,9 @@ func (l *listenContext) startHandshake(s *segment, opts header.TCPSynOptions, qu
 	}
 
 	ep.owner = owner
+	if len(onClose) != 0 {
+		ep.closeHandler = onClose[0]
+	}
 
 	// listenEP is nil when listenContext is used by tcp.Forwarder.
 	deferAccept := time.Duration(0)
@@ -309,12 +314,12 @@ func (l *listenContext) startHandshake(s *segment, opts header.TCPSynOptions, qu
 // established endpoint is returned.
 //
 // Precondition: if l.listenEP != nil, l.listenEP.mu must be locked.
-func (l *listenContext) performHandshake(s *segment, opts header.TCPSynOptions, queue *waiter.Queue, owner tcpip.PacketOwner) (*Endpoint, tcpip.Error) {
+func (l *listenContext) performHandshake(s *segment, opts header.TCPSynOptions, queue *waiter.Queue, owner tcpip.PacketOwner, onClose func()) (*Endpoint, tcpip.Error) {
 	waitEntry, notifyCh := waiter.NewChannelEntry(waiter.WritableEvents)
 	queue.EventRegister(&waitEntry)
 	defer queue.EventUnregister(&waitEntry)
 
-	h, err := l.startHandshake(s, opts, queue, owner)
+	h, err := l.startHandshake(s, opts, queue, owner, onClose)
 	if err != nil {
 		return nil, err
 	}

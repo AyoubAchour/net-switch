@@ -92,6 +92,7 @@ const (
 type protocol struct {
 	stack           *stack.Stack
 	timeWaitHandler atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
+	localClose      atomic.Pointer[Endpoint]                                                  `state:"nosave"`
 
 	mu protocolRWMutex `state:"nosave"`
 
@@ -176,6 +177,42 @@ func (e *Endpoint) SetTimeWaitPolicy(enter func() bool, leave func()) {
 	e.LockUser()
 	defer e.UnlockUser()
 	e.timeWaitEnter, e.timeWaitLeave = enter, leave
+}
+
+// DrainLocalClose completes a queued FIN, reset or closing ACK through normal TCP
+// validation. Call after every DeliverNetworkPacket and before the next one,
+// from the single ordered ingress owner. Never call under demux or endpoint
+// locks. SetTimeWaitHandler enables this fence; hook-free stacks are unchanged.
+func DrainLocalClose(s *stack.Stack) {
+	ep := protocolFromStack(s).localClose.Swap(nil)
+	if ep == nil {
+		return
+	}
+	for {
+		ep.mu.Lock()
+		switch state := ep.EndpointState(); {
+		case state.connecting():
+			handleConnectingLocked(ep)
+		case state.connected() && state != StateTimeWait:
+			handleConnectedLocked(ep)
+		default:
+			ep.mu.Unlock()
+			return
+		}
+		if ep.segmentQueue.empty() {
+			return
+		}
+	}
+}
+
+// releaseClose retires admission once no further network data can be sent.
+// It precedes reset output and cleanup; accounting may continue in the relay.
+// +checklocks:e.mu
+func (e *Endpoint) releaseClose() {
+	if release := e.closeHandler; release != nil {
+		e.closeHandler = nil
+		release()
+	}
 }
 
 // BufferUsage reports receive-segment memory (including out-of-order and

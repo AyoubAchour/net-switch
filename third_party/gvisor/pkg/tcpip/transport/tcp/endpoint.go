@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: close-time TIME_WAIT budget and single SYN handoff.
+// Modified by Net Switch, 2026-10-19: close admission, TIME_WAIT budget and SYN handoff.
 
 package tcp
 
@@ -484,6 +484,8 @@ type Endpoint struct {
 	// and dropped when it is.
 	segmentQueue    segmentQueue `state:"wait"`
 	localSynHandled atomicbitops.Bool
+	// +checklocks:mu
+	closeHandler func() `state:"nosave"`
 	// +checklocks:mu
 	timeWaitEnter func() bool `state:"nosave"`
 	// +checklocks:mu
@@ -1215,6 +1217,7 @@ func (e *Endpoint) closePendingAcceptableConnectionsLocked() {
 // cleanupLocked frees all resources associated with the endpoint.
 // +checklocks:e.mu
 func (e *Endpoint) cleanupLocked() {
+	e.releaseClose()
 	if e.snd != nil {
 		e.snd.resendTimer.cleanup()
 		e.snd.probeTimer.cleanup()
