@@ -17,6 +17,7 @@ const QueuePackets = 1024
 type Link struct {
 	mu          sync.Mutex
 	dispatcher  gv.NetworkDispatcher
+	observer    func(*gv.PacketBuffer)
 	queue       [QueuePackets][]byte
 	head, count int
 	mtu         uint32
@@ -96,11 +97,21 @@ func (l *Link) Read(ctx context.Context) []byte {
 func (l *Link) InjectInbound(protocol tcpip.NetworkProtocolNumber, p *gv.PacketBuffer) {
 	l.mu.Lock()
 	d := l.dispatcher
+	observe := l.observer
 	closed := l.closed
 	l.mu.Unlock()
 	if !closed && d != nil {
+		if observe != nil {
+			observe(p)
+		}
 		d.DeliverNetworkPacket(protocol, p)
 	}
+}
+
+func (l *Link) SetObserver(observe func(*gv.PacketBuffer)) {
+	l.mu.Lock()
+	l.observer = observe
+	l.mu.Unlock()
 }
 
 func (l *Link) Close() {
