@@ -53,6 +53,12 @@ type OwnerLookup interface {
 	UDP(context.Context, netip.AddrPort) (Owner, error)
 }
 
+// DatagramOwnerLookup supplies the first remote endpoint for Linux's exact
+// sock_diag query. Source-only lookup remains available for other adapters.
+type DatagramOwnerLookup interface {
+	UDPFor(context.Context, Tuple) (Owner, error)
+}
+
 // A complete snapshot includes every requested endpoint, including absence.
 // On an incomplete dump return an error; never mark it as a fresh validation.
 type UDPIdentity interface {

@@ -40,7 +40,7 @@ type lineState struct {
 	Default4, Default6 bool
 }
 type Platform struct {
-	testClose func()
+	testClose            func()
 	mu                   sync.Mutex
 	ctx                  context.Context
 	Instance             string
@@ -116,7 +116,10 @@ func New(ctx context.Context, dir string) (*Platform, error) {
 }
 
 func (p *Platform) Close() error {
-	if p.testClose!=nil {p.testClose();p.testClose=nil}
+	if p.testClose != nil {
+		p.testClose()
+		p.testClose = nil
+	}
 	err := p.Cleanup(context.Background())
 	return errors.Join(err, p.journal.Close())
 }
@@ -141,7 +144,7 @@ func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 	for _, l := range links {
 		index = max(index, l.Attrs().Index+1)
 	}
-	p.tunSpec = tunObject{Index: index, Name: "ns" + p.Instance[:10], Alias: "netswitch:" + p.Instance, MTU: 9000}
+	p.tunSpec = tunObject{Index: index, Name: "ns" + p.Instance[:10], Alias: "netswitch:" + p.Instance, MTU: 9000, IngressQueue: 16384}
 	if err := p.journal.Create(ctx, "tun", p.objects.fingerprint(p.tunSpec)); err != nil {
 		return rollback(err)
 	}

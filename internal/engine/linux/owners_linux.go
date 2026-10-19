@@ -159,7 +159,14 @@ func (o *Owners) TCP(ctx context.Context, t platform.Tuple) (owner platform.Owne
 	}
 	return platform.Owner{}, os.ErrNotExist
 }
-func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (owner platform.Owner, err error) {
+func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (platform.Owner, error) {
+	return o.udpOwner(ctx, platform.Tuple{Source: source})
+}
+func (o *Owners) UDPFor(ctx context.Context, tuple platform.Tuple) (platform.Owner, error) {
+	return o.udpOwner(ctx, tuple)
+}
+func (o *Owners) udpOwner(ctx context.Context, tuple platform.Tuple) (owner platform.Owner, err error) {
+	source := tuple.Source
 	defer func() { o.recordError(err) }()
 	unknown := false
 	if o.fault != nil {
@@ -175,9 +182,17 @@ func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (owner platform
 	// Exact lookup is useful for the common wildcard socket. A port-filtered
 	// dump also detects SO_REUSEPORT ambiguity instead of accepting the arbitrary
 	// socket that the kernel's inbound hash selected.
-	_, err = diag(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source, netip.AddrPort{}, false)
+	exact, err := diag(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source, tuple.Destination, false)
 	if err != nil && !errors.Is(err, unix.ENOENT) {
 		return platform.Owner{}, fmt.Errorf("UDP exact query: %w", err)
+	}
+	o.mu.Lock()
+	ambiguous := o.ambiguousPorts[source.Port()]
+	o.mu.Unlock()
+	if err == nil && tuple.Destination.IsValid() && !ambiguous {
+		if r, e := matchUDP(exact, source); e == nil {
+			return o.resolveUDP(ctx, r, unknown)
+		}
 	}
 	rows, err := diagDump(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source)
 	if err != nil {
@@ -200,6 +215,10 @@ func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (owner platform
 	if err != nil {
 		return platform.Owner{}, err
 	}
+	return o.resolveUDP(ctx, r, unknown)
+}
+
+func (o *Owners) resolveUDP(ctx context.Context, r socketRow, unknown bool) (owner platform.Owner, err error) {
 	if unknown {
 		return platform.Owner{Generation: r.generation()}, nil
 	}
@@ -699,6 +718,9 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 		}
 		r, err := matchUDP(byPort[k.Port()], k)
 		if errors.Is(err, errSocketAmbiguous) {
+			o.mu.Lock()
+			o.ambiguousPorts[k.Port()] = true
+			o.mu.Unlock()
 			out[k] = platform.Owner{Generation: cookieSet(byPort[k.Port()], k)}
 			continue
 		}
