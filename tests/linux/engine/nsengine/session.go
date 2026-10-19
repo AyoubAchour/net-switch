@@ -203,8 +203,8 @@ func (s *Session) Stats(ctx context.Context) (engine.Stats, error) {
 	return decodeStats(raw)
 }
 
-// InjectFault implements engine.Controller. The protocol has no test hooks
-// yet (see the package comment).
+// InjectFault requires the live engine's acknowledgement. Production binaries
+// reject these commands; the acceptance workflow builds with -tags acceptance.
 func (s *Session) InjectFault(ctx context.Context, f engine.Fault) (engine.FaultAck, error) {
 	r := s.request("testFault")
 	r.Fault, _ = json.Marshal(f)
@@ -330,7 +330,8 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		Unknown: int64(g.Unknown), UnknownUDP: int64(g.UnknownUDP), TimeWait: int64(g.TimeWait),
 		TCPBytes: g.TCPBytes, PendingBytes: g.PendingBytes, SnapshotBytes: g.SnapshotBytes,
 		PendingPeakBytes: g.PendingPeakBytes,
-		Admitted: g.Admitted, Rejected: g.Rejected, DroppedNotices: g.DroppedNotices, TimeWaitSkipped: g.TimeWaitSkipped,
+		UDPReadBytes:     g.UDPReadBytes,
+		Admitted:         g.Admitted, Rejected: g.Rejected, DroppedNotices: g.DroppedNotices, TimeWaitSkipped: g.TimeWaitSkipped,
 		EventsDropped: top.EventsDropped + g.EventsDropped,
 		LookupCount:   g.LookupCount, LookupMisses: g.LookupMisses, LookupAmbiguous: g.LookupAmbiguous,
 		LookupTime:      time.Duration(g.LookupNanoseconds),

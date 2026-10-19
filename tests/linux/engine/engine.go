@@ -6,8 +6,7 @@
 //   - singbox: the baseline, sing-box as today's app configures it, plus the
 //     Linux changes the feasibility spike found (LINUX-PLAN.md section 0).
 //   - nsengine: netswitch-engine, 1.0's own engine. It speaks
-//     internal/engine/protocol; the driver is a stub until the engine binary
-//     serves that protocol on a control socket.
+//     internal/engine/protocol over the real engine's Unix control socket.
 //
 // The suite plays the control service: it picks lines, pins apps, points
 // lanes and closes flows through a Driver, and judges the engine only by what
@@ -315,7 +314,8 @@ type Stats struct {
 	Flows, Handshakes, UDP, Unknown, UnknownUDP, TimeWait int64
 	// Byte budgets in use (5.9).
 	TCPBytes, PendingBytes, SnapshotBytes int64
-	PendingPeakBytes int64
+	UDPReadBytes                          int64
+	PendingPeakBytes                      int64
 	// Counters since the engine started.
 	Admitted        uint64 // the combining counter k: flows admitted (5.4)
 	Rejected        uint64

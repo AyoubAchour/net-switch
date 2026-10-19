@@ -30,7 +30,7 @@ type Dependencies struct {
 	Identities platform.UDPIdentity
 }
 type Engine struct {
-	OnFatal func(error)
+	OnFatal   func(error)
 	mu        sync.Mutex
 	root      context.Context
 	deps      Dependencies
@@ -127,7 +127,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			if n <= 0 || n > len(b) {
 				continue
 			}
-			if echo.handle(b[:n]) { continue }
+			if echo.handle(b[:n]) {
+				continue
+			}
 			proto := header.IPv4ProtocolNumber
 			if b[0]>>4 == 6 {
 				proto = header.IPv6ProtocolNumber
@@ -184,7 +186,9 @@ func (e *Engine) fail(link *ns.Link, err error) {
 		cleanup := e.stopLocked(context.Background())
 		e.lastError = errors.Join(err, cleanup)
 		e.Table.Emit(flowapi.Event{Type: "fatal", Message: e.lastError.Error()})
-		if e.OnFatal != nil { e.OnFatal(e.lastError) }
+		if e.OnFatal != nil {
+			e.OnFatal(e.lastError)
+		}
 	}()
 }
 func (e *Engine) Apply(ctx context.Context, r policy.Revision) (policy.Applied, error) {

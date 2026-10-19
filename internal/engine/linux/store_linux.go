@@ -28,7 +28,7 @@ type diskRecord struct {
 }
 
 func (s diskStore) Records() ([]journal.Record, error) {
-	f, err := os.OpenFile(s.path, os.O_RDWR|os.O_CREATE, 0600)
+	f, err := trustedFile(s.path, unix.O_RDWR|unix.O_CREAT)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +79,7 @@ func (s diskStore) Append(r journal.Record) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(s.path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0600)
+	f, err := trustedFile(s.path, unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT)
 	if err != nil {
 		return err
 	}
@@ -104,23 +104,41 @@ func SyncDir(path string) error {
 
 type fileLock struct{ path string }
 
+func trustedFile(path string, flags int) (*os.File, error) {
+	fd, err := unix.Open(path, flags|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0600)
+	if err != nil {
+		return nil, &os.PathError{Op: "open private engine file", Path: path, Err: err}
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Mode&0777 != 0600 || st.Uid != uint32(os.Geteuid()) || st.Nlink != 1 {
+		unix.Close(fd)
+		return nil, fmt.Errorf("unsafe engine file %s: needs a private, singly linked regular file owned by this user", path)
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
 func (l fileLock) Acquire(ctx context.Context) (func() error, error) {
-	fd, err := unix.Open(l.path, unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_CREAT|unix.O_RDWR, 0600)
+	f, err := trustedFile(l.path, unix.O_CREAT|unix.O_RDWR)
 	if err != nil {
 		return nil, err
 	}
+	fd := int(f.Fd())
 	for {
 		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
-			return func() error { return unix.Close(fd) }, nil
+			return f.Close, nil
 		}
 		if !errors.Is(err, unix.EWOULDBLOCK) {
-			unix.Close(fd)
+			f.Close()
 			return nil, err
 		}
 		select {
 		case <-ctx.Done():
-			unix.Close(fd)
+			f.Close()
 			return nil, fmt.Errorf("engine owns the journal lock: %w", ctx.Err())
 		case <-time.After(20 * time.Millisecond):
 		}

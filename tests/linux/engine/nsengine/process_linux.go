@@ -49,7 +49,7 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 		return err
 	}
 	p.cmd = exec.Command("ip", "netns", "exec", env.Netns, d.exe.Path, "run", "--socket", p.socket, "--state-dir", p.state)
-	p.cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+filepath.Join(filepath.Dir(env.WorkDir),"inet","probe-ca.pem"))
+	p.cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+filepath.Join(filepath.Dir(env.WorkDir), "inet", "probe-ca.pem"))
 	p.cmd.Stdout = f
 	p.cmd.Stderr = f
 	if err := p.cmd.Start(); err != nil {
@@ -62,9 +62,11 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 		p.err = p.cmd.Wait()
 		f.Close()
 		if p.err != nil && env.Logf != nil {
-			data,_ := os.ReadFile(p.log)
-			if len(data)>4096 {data=data[len(data)-4096:]}
-			env.Logf("engine exited: %v\n%s",p.err,data)
+			data, _ := os.ReadFile(p.log)
+			if len(data) > 4096 {
+				data = data[len(data)-4096:]
+			}
+			env.Logf("engine exited: %v\n%s", p.err, data)
 		}
 		close(p.done)
 	}()

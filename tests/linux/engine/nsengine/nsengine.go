@@ -2,34 +2,17 @@
 // through its control protocol (internal/engine/protocol, SYSTEM-DESIGN.md
 // section 5.10).
 //
-// The protocol side is real: requests, replies, revisions, flows, totals,
-// stats and refusals are main's own types, and nsengine_test.go runs every
-// session operation against an in-memory protocol.Server. What's a stub is
-// the engine process: netswitch-engine only answers "version" so far, so
-// Prepare, Start and the process operations return engine.ErrNotImplemented,
-// which the harness reports as an error. A run against this driver can never
-// pass by accident.
-//
-// What the driver still needs from the engine, in the order cases use it:
-//
-//  1. A way to run outside systemd in a test namespace: for example
-//     `netswitch-engine run --socket <path> --state-dir <dir>`, with the
-//     journal (3.3) in the state dir and the socket mode 0600. The driver
-//     runs it with `ip netns exec`, as it does sing-box, and connects a
-//     Transport to the socket (JSON lines, as protocol.Serve reads them).
-//  2. Refusal codes on the wire. A refusal arrives as its error text only, so
-//     refusals.go classifies the texts, pinned to the real server by a test.
-//     A code field in protocol.Reply would replace that table.
-//  3. Test hooks, only in test builds, acknowledged when active: the
-//     "udp-destroy-notifications" fault (engine.Fault), and the hooks the
-//     pending overload gates name (suite/overload.go).
-//  4. Cleanup after a crash: `netswitchctl cleanup --engine --state-dir <dir>`
-//     reading the same journal, as ExecStopPost runs it.
+// Each case launches the real Linux engine under ip netns exec, attaches to
+// its root-only Unix socket, and renews its engine-issued lease. Crash cleanup
+// uses the same ownership journal as netswitchctl cleanup --engine. Faults
+// require an acceptance build and an acknowledgement from the live engine.
+// The protocol translations also run against an in-memory server in unit tests.
 package nsengine
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -51,8 +34,8 @@ type Transport func(ctx context.Context, req protocol.Request) ([]byte, error)
 // Driver is the netswitch-engine driver.
 type Driver struct {
 	exe harness.Executable
-	// call reaches the engine's control socket; nil until the engine serves
-	// one, and every protocol operation then fails as not implemented.
+	// call reaches the engine's control socket after launch. Unit tests may
+	// inject an in-memory protocol transport.
 	call Transport
 	// addresses reads a line's addresses from its interface: revisions carry
 	// them (platform.Line).
@@ -74,8 +57,10 @@ func New(path string) *Driver {
 
 var _ engine.V1 = (*Driver)(nil)
 
-func notYet(op string) error {
-	return fmt.Errorf("netswitch-engine %s: %w (the engine binary doesn't serve its control protocol yet)", op, engine.ErrNotImplemented)
+var errNoSession = errors.New("engine control is not connected")
+
+func notConnected(op string) error {
+	return fmt.Errorf("netswitch-engine %s: %w", op, errNoSession)
 }
 
 // Executable implements engine.Driver.
@@ -84,8 +69,7 @@ func (d *Driver) Executable() harness.Executable { return d.exe }
 // Kind implements engine.Driver.
 func (d *Driver) Kind() harness.EngineKind { return harness.V1 }
 
-// Prepare records the binary's version and hash, then reports that the
-// engine can't run cases yet.
+// Prepare records the tested binary's version and hash.
 func (d *Driver) Prepare(ctx context.Context) error {
 	if _, err := os.Stat(d.exe.Path); err != nil {
 		return err
@@ -102,9 +86,6 @@ func (d *Driver) Prepare(ctx context.Context) error {
 	d.exe.Version = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "netswitch-engine"))
 	return nil
 }
-
-// launch starts the engine in env's namespace and connects d.call to its
-// control socket.
 
 // Start implements engine.Driver: launch, attach, then revision 1.
 func (d *Driver) Start(ctx context.Context, env engine.Env, cfg engine.Config) error {
@@ -153,7 +134,7 @@ func (d *Driver) SetLanes(ctx context.Context, lanes map[engine.LineID]engine.Li
 
 func (d *Driver) next(ctx context.Context, cfg engine.Config) error {
 	if d.session == nil {
-		return notYet("apply")
+		return notConnected("apply")
 	}
 	// A case may have sent revisions through a session itself: continue
 	// from the one in effect.
@@ -176,7 +157,7 @@ func (d *Driver) next(ctx context.Context, cfg engine.Config) error {
 func (d *Driver) Flows(ctx context.Context) ([]engine.Flow, error) {
 	s := d.Session()
 	if s == nil {
-		return nil, notYet("flows")
+		return nil, notConnected("flows")
 	}
 	var all []engine.Flow
 	cursor := ""
@@ -203,7 +184,7 @@ func (d *Driver) Flows(ctx context.Context) ([]engine.Flow, error) {
 func (d *Driver) CloseFlows(ctx context.Context, sel engine.Selector) (engine.CloseResult, error) {
 	s := d.Session()
 	if s == nil {
-		return engine.CloseResult{}, notYet("closeFlows")
+		return engine.CloseResult{}, notConnected("closeFlows")
 	}
 	return s.CloseFlows(ctx, fmt.Sprintf("driver-close-%d", d.ops.Add(1)), sel, 0)
 }
@@ -212,7 +193,7 @@ func (d *Driver) CloseFlows(ctx context.Context, sel engine.Selector) (engine.Cl
 func (d *Driver) Stop(ctx context.Context) error {
 	s := d.Session()
 	if s == nil {
-		return notYet("stop")
+		return notConnected("stop")
 	}
 	s.SetAutoRenew(false)
 	if err := s.Stop(ctx); err != nil {
@@ -321,7 +302,7 @@ type reply struct {
 // is a plain error.
 func (d *Driver) do(ctx context.Context, req protocol.Request, out any) error {
 	if d.call == nil {
-		return notYet(req.Method)
+		return notConnected(req.Method)
 	}
 	line, err := d.call(ctx, req)
 	if err != nil {

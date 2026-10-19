@@ -45,7 +45,9 @@ func openTun(v tunObject) (*Tun, error) {
 	if err != nil {
 		return nil, err
 	}
-	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
+	// EXCL makes creation atomic: never attach to another process's adapter
+	// if a name collision occurs between the journal intent and this ioctl.
+	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR | unix.IFF_TUN_EXCL)
 	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
 		return nil, err
 	}

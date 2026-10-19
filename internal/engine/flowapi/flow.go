@@ -46,6 +46,10 @@ type Output interface{ Send([]byte) bool }
 
 const UDPReadBuffer = 9 << 10
 
+// Adapter scratch space, one queued ICMP quotation, and its bounded MTU cache
+// are reserved alongside the payload reader before opening a UDP socket.
+const UDPAdapterBuffer = 8 << 10
+
 type Event struct {
 	Type    string `json:"event"`
 	Message string `json:"message"`

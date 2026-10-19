@@ -48,7 +48,7 @@ func (l *Link) enqueue(size int, copyInto func([]byte)) bool {
 	copyInto(p)
 	l.queue[(l.head+l.count)%QueuePackets] = p
 	l.count++
-	l.peak = max(l.peak,l.count)
+	l.peak = max(l.peak, l.count)
 	select {
 	case l.ready <- struct{}{}:
 	default:
@@ -181,7 +181,7 @@ func (l *Link) SetObserver(observe func(*gv.PacketBuffer)) {
 	l.mu.Unlock()
 }
 
-func (l *Link) Queued() int { l.mu.Lock(); defer l.mu.Unlock(); return l.count }
+func (l *Link) Queued() int     { l.mu.Lock(); defer l.mu.Unlock(); return l.count }
 func (l *Link) PeakQueued() int { l.mu.Lock(); defer l.mu.Unlock(); return l.peak }
 
 func (l *Link) Close() {

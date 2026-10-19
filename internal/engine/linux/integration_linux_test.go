@@ -28,9 +28,11 @@ func TestKernelPlatform(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Fatal("isolated kernel test requires root")
 	}
-	selfNS,_:=os.Readlink("/proc/self/ns/net")
-	initNS,_:=os.Readlink("/proc/1/ns/net")
-	if selfNS=="" || selfNS==initNS {t.Fatal("refusing kernel mutations in the initial network namespace")}
+	selfNS, _ := os.Readlink("/proc/self/ns/net")
+	initNS, _ := os.Readlink("/proc/1/ns/net")
+	if selfNS == "" || selfNS == initNS {
+		t.Fatal("refusing kernel mutations in the initial network namespace")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	lo, err := netlink.LinkByName("lo")
@@ -77,9 +79,13 @@ func TestKernelPlatform(t *testing.T) {
 			var n int
 			for {
 				n, err = tun.ReadPacket(ctx, buf)
-				if err != nil {t.Fatal(err)}
-				if n>=29 && buf[0]>>4==4 && buf[9]==17 {break}
-				t.Logf("unrelated kernel control packet before UDP %d: %x",i,buf[:min(n,48)])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if n >= 29 && buf[0]>>4 == 4 && buf[9] == 17 {
+					break
+				}
+				t.Logf("unrelated kernel control packet before UDP %d: %x", i, buf[:min(n, 48)])
 			}
 			if n < 29 || buf[n-1] != byte(i) {
 				t.Fatalf("packet order: got %x at %d", buf[:n], i)
@@ -207,7 +213,11 @@ func TestKernelPlatform(t *testing.T) {
 		if err := netlink.AddrAdd(link, &netlink.Addr{IPNet: prefix("192.0.2.1/24")}); err != nil {
 			t.Fatal(err)
 		}
+		if err := netlink.AddrAdd(link, &netlink.Addr{IPNet: prefix("192.0.2.42/24")}); err != nil {
+			t.Fatal(err)
+		}
 		def := netlink.Route{LinkIndex: link.Index, Family: unix.AF_INET, Dst: prefix("0.0.0.0/0"), Scope: netlink.SCOPE_LINK, Table: unix.RT_TABLE_MAIN, Type: unix.RTN_UNICAST}
+		def.Src = net.ParseIP("192.0.2.42")
 		if err := netlink.RouteAdd(&def); err != nil {
 			t.Fatal(err)
 		}
@@ -219,10 +229,20 @@ func TestKernelPlatform(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer sock.Close()
+		if got := sock.LocalAddr().Addr(); got != netip.MustParseAddr("192.0.2.42") {
+			t.Fatalf("source selection ignored the kernel's preferred source: %s", got)
+		}
 		_, err = sock.WriteTo(make([]byte, 1400), netip.MustParseAddrPort("198.51.100.1:30000"), true)
 		var big *platform.TooBig
 		if !errors.As(err, &big) || big.MTU != 1280 {
 			t.Fatalf("real EMSGSIZE must carry path MTU 1280: %v", err)
+		}
+		// The receive goroutine may drain the queue before WriteTo handles
+		// EMSGSIZE. The path MTU must survive that ordering, per destination.
+		u := sock.(*udpSocket)
+		u.drainErrors()
+		if big := u.tooBig(netip.MustParseAddrPort("198.51.100.1:30000")); big.MTU != 1280 {
+			t.Fatalf("drained error queue lost the path MTU: %+v", big)
 		}
 		if err := netlink.RouteDel(&def); err != nil {
 			t.Fatal(err)

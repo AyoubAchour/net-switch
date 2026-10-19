@@ -1,5 +1,5 @@
 // Command netswitchctl installs, migrates, recovers and diagnoses Net Switch
-// 1.0. Only "version" works so far; the rest arrives with the 1.0 milestones.
+// 1.0. Linux engine journal cleanup is available alongside "version".
 package main
 
 import (

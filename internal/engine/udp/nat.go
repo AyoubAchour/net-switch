@@ -296,7 +296,21 @@ func (s *session) run() {
 		s.waitRejected(ctx)
 		return
 	}
-	socket, err := n.dialer.OpenUDP(ctx, decision.Line, s.source.Addr().Is6())
+	var socket platform.UDPConn
+	if dialer, ok := n.dialer.(platform.DestinationDialer); ok {
+		s.mu.Lock()
+		var destination netip.AddrPort
+		if len(s.queue) > 0 {
+			destination = s.queue[0].destination
+		}
+		s.mu.Unlock()
+		if !destination.IsValid() {
+			return
+		}
+		socket, err = dialer.OpenUDPTo(ctx, decision.Line, destination)
+	} else {
+		socket, err = n.dialer.OpenUDP(ctx, decision.Line, s.source.Addr().Is6())
+	}
 	if err != nil {
 		if observer, ok := n.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil {
 			observer.LineError(decision.Line, err)

@@ -4,12 +4,17 @@ package linux
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
+	"sort"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -18,6 +23,7 @@ import (
 
 type socketRow struct {
 	protocol       int
+	v6only         bool
 	local, remote  netip.AddrPort
 	uid, inode     uint32
 	cookie, cgroup uint64
@@ -41,8 +47,8 @@ func parseDiag(b []byte) (socketRow, error) {
 	default:
 		return r, errors.New("unknown inet_diag family")
 	}
-	r.local = netip.AddrPortFrom(a, binary.BigEndian.Uint16(b[4:6]))
-	r.remote = netip.AddrPortFrom(z, binary.BigEndian.Uint16(b[6:8]))
+	r.local = netip.AddrPortFrom(a.Unmap(), binary.BigEndian.Uint16(b[4:6]))
+	r.remote = netip.AddrPortFrom(z.Unmap(), binary.BigEndian.Uint16(b[6:8]))
 	r.cookie = uint64(binary.NativeEndian.Uint32(b[44:48])) | uint64(binary.NativeEndian.Uint32(b[48:52]))<<32
 	r.uid = binary.NativeEndian.Uint32(b[64:68])
 	r.inode = binary.NativeEndian.Uint32(b[68:72])
@@ -55,10 +61,17 @@ func parseDiag(b []byte) (socketRow, error) {
 		if kind == 21 && n >= 12 {
 			r.cgroup = binary.NativeEndian.Uint64(b[off+4:])
 		}
+		if kind == 11 && n >= 5 {
+			r.v6only = b[off+4] != 0
+		}
 		off += (n + 3) &^ 3
 	}
 	return r, nil
 }
+
+var diagDumpBuffers = sync.Pool{New: func() any { b := make([]byte, 64<<10); return &b }}
+
+var diagSequence atomic.Uint32
 
 // Each query has its own descriptor: an interrupted/cancelled dump cannot
 // leave replies that a subsequent lookup mistakes for its own response.
@@ -85,13 +98,22 @@ func diag(ctx context.Context, family, protocol int, local, remote netip.AddrPor
 		flags |= unix.NLM_F_DUMP
 	}
 	binary.NativeEndian.PutUint16(b[6:], flags)
-	binary.NativeEndian.PutUint32(b[8:], 1)
+	sequence := diagSequence.Add(1)
+	binary.NativeEndian.PutUint32(b[8:], sequence)
 	b[16] = byte(family)
 	b[17] = byte(protocol)
 	binary.NativeEndian.PutUint32(b[20:], ^uint32(0))
 	// UDP's exact query uses the inbound lookup convention (remote,local).
 	if protocol == unix.IPPROTO_UDP && !dump {
 		local, remote = remote, local
+	}
+	if family == unix.AF_INET6 {
+		if local.IsValid() && local.Addr().Is4() {
+			local = netip.AddrPortFrom(netip.AddrFrom16(local.Addr().As16()), local.Port())
+		}
+		if remote.IsValid() && remote.Addr().Is4() {
+			remote = netip.AddrPortFrom(netip.AddrFrom16(remote.Addr().As16()), remote.Port())
+		}
 	}
 	if local.IsValid() {
 		binary.BigEndian.PutUint16(b[24:], local.Port())
@@ -107,11 +129,12 @@ func diag(ctx context.Context, family, protocol int, local, remote netip.AddrPor
 	if err := unix.Sendto(fd, b, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
 		return nil, err
 	}
-	size := 4096
+	buf := make([]byte, 4096)
 	if dump {
-		size = 64 << 10
+		pooled := diagDumpBuffers.Get().(*[]byte)
+		defer diagDumpBuffers.Put(pooled)
+		buf = *pooled
 	}
-	buf := make([]byte, size)
 	var rows []socketRow
 	for {
 		n, err := readNetlink(f, buf)
@@ -126,7 +149,7 @@ func diag(ctx context.Context, family, protocol int, local, remote netip.AddrPor
 			return nil, err
 		}
 		for _, m := range messages {
-			if m.Header.Seq != 1 {
+			if m.Header.Seq != sequence {
 				return nil, errors.New("unexpected sock_diag sequence")
 			}
 			if m.Header.Flags&unix.NLM_F_DUMP_INTR != 0 {
@@ -209,9 +232,26 @@ func familyOf(a netip.Addr) int {
 	return unix.AF_INET
 }
 func matchUDP(rows []socketRow, source netip.AddrPort) (socketRow, error) {
+	exact := udpCandidates(rows, source)
+	if len(exact) == 0 {
+		return socketRow{}, os.ErrNotExist
+	}
+	if len(exact) > 1 {
+		return socketRow{}, errSocketAmbiguous
+	}
+	return exact[0], nil
+}
+
+func udpCandidates(rows []socketRow, source netip.AddrPort) []socketRow {
 	var exact, wild []socketRow
+	seen := map[uint64]bool{}
 	for _, r := range rows {
-		if r.local.Port() != source.Port() || r.local.Addr().BitLen() != source.Addr().BitLen() {
+		if r.local.Port() != source.Port() || seen[r.cookie] {
+			continue
+		}
+		seen[r.cookie] = true
+		dual := source.Addr().Is4() && r.local.Addr() == netip.IPv6Unspecified() && !r.v6only
+		if !dual && r.local.Addr().BitLen() != source.Addr().BitLen() {
 			continue
 		}
 		if r.local.Addr() == source.Addr() {
@@ -223,13 +263,22 @@ func matchUDP(rows []socketRow, source netip.AddrPort) (socketRow, error) {
 	if len(exact) == 0 {
 		exact = wild
 	}
-	if len(exact) == 0 {
-		return socketRow{}, os.ErrNotExist
+	return exact
+}
+
+// An ambiguous endpoint still follows unknown-owner policy. Its generation
+// covers the complete cookie set, so it cannot retain that policy when any
+// member closes or is replaced. The public generation remains an opaque ID.
+func cookieSet(rows []socketRow, source netip.AddrPort) string {
+	candidates := udpCandidates(rows, source)
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].cookie < candidates[j].cookie })
+	h := sha256.New()
+	var b [8]byte
+	for _, r := range candidates {
+		binary.BigEndian.PutUint64(b[:], r.cookie)
+		h.Write(b[:])
 	}
-	if len(exact) > 1 {
-		return socketRow{}, errSocketAmbiguous
-	}
-	return exact[0], nil
+	return "cookies:" + hex.EncodeToString(h.Sum(nil))
 }
 
 var errSocketAmbiguous = fmt.Errorf("multiple sockets at local endpoint")

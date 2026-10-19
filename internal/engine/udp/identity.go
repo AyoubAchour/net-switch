@@ -83,7 +83,7 @@ func (n *NAT) Destroy(source netip.AddrPort, generation string) {
 		b.Lock()
 		var keys []netip.AddrPort
 		for key := range b.m {
-			if key.Port() == source.Port() && key.Addr().BitLen() == source.Addr().BitLen() {
+			if key.Port() == source.Port() {
 				keys = append(keys, key)
 			}
 		}
