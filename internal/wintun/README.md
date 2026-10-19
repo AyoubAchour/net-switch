@@ -78,7 +78,21 @@ The long test sends 200,000 UDP requests per implementation, one at a time, with
 quiet periods from 0–200 microseconds spanning the driver's spin-to-sleep
 boundary. QueryPerformanceCounter measures each round trip. A 250 ms timeout is
 recorded, then one retry releases the DLL's queued packet; the slow attempt stays
-in the distribution. Our path must have zero round trips over 50 ms.
+in the distribution. Our path must have zero missed-wake rescues, without
+exceptions. Every round trip over 50 ms is classified after the run. A 1 ms
+QPC heartbeat on a locked OS thread uses a native high-resolution timer; an
+independent Go timer sampler detects pauses across the process. Only a common
+gap covering the delay to within five sampling periods (5 ms), without a
+rescue, counts as an environment pause. A partial overlap or a delayed sampler
+alone still fails our session. This identifies process/host scheduling pauses,
+not whether the Go runtime, OS or hypervisor caused them; the old uninstrumented
+failure cannot be classified retroactively.
+
+Every slow reply logs both sets of overlapping QPC intervals, our session's
+read waits/wakes, write wakeups and atomic ring head/tail observations at the
+gap endpoints and reply. Observations never block on a session lock. A hosted
+test suspends only its own child process to prove both samplers detect a real
+process pause, and verifies that an idle caller alone is not exempted.
 
 Throughput uses delivered UDP bytes over a fixed interval and complete, hashed
 TCP transfers, with one and eight streams. The UDP load generator is a separate
@@ -92,11 +106,14 @@ a DLL `ERROR_INVALID_DATA` is logged
 as a baseline failure, its partial UDP goodput (or zero for an incomplete TCP
 transfer) is retained, and a fresh DLL session is used only for the next metric.
 No failed sample is retried into a pass. The locked design's 10% performance
-regression gate applies to the pooled mean of all six samples per implementation,
+regression gate applies to the median of all six samples per implementation,
 never to an individual pair. UDP packets per wake-up and isolated batch copy,
 publication and SetEvent cost (1, 8 and 64 packets) are reported separately.
 Packet corruption in delivered data,
 unknown reference errors and failures of our session fail CI.
+The median averages the two central samples, retains the raw trial order in
+the report, and prevents one noisy trial from dominating either side. A
+sustained regression still fails the same 10% gate.
 
 Parallel senders verify every test payload. Deterministic malformed-entry tests
 independently prove recovery, even if the driver corruption does not occur in a

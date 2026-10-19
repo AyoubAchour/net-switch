@@ -37,6 +37,8 @@ type Stats struct {
 	Recoveries       uint64
 	RecoveryFailures uint64
 	Wakeups          uint64
+	ReadWaits        uint64
+	ReadWakes        uint64
 	Placeholders     uint64
 	OversizedPackets uint64
 }
@@ -65,6 +67,7 @@ type Session struct {
 	read, written, dropped            atomic.Uint64
 	corruptions, recoveries, failures atomic.Uint64
 	wakeups                           atomic.Uint64
+	readWaits, readWakes              atomic.Uint64
 	placeholders, oversized           atomic.Uint64
 }
 
@@ -127,7 +130,7 @@ func (*Session) RXChecksumVerified(p []byte) bool {
 	return false
 }
 func (s *Session) Stats() Stats {
-	return Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load()}
+	return Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), ReadWaits: s.readWaits.Load(), ReadWakes: s.readWakes.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load()}
 }
 
 // fail is called with mu held. Recovery runs elsewhere so neither a full ring
@@ -387,7 +390,11 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		if cancelEvent != 0 {
 			handles = append(handles, cancelEvent)
 		}
+		s.readWaits.Add(1)
 		_, err = windows.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		if err == nil {
+			s.readWakes.Add(1)
+		}
 		s.mu.RUnlock()
 		if err != nil {
 			return 0, err

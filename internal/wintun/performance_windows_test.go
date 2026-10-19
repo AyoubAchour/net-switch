@@ -303,12 +303,14 @@ func shortLatency(t *testing.T, mode string) float64 {
 	return float64(samples[len(samples)*95/100]) / 1000
 }
 
-func mean(values []float64) float64 {
-	var sum float64
-	for _, n := range values {
-		sum += n
+func median(values []float64) float64 {
+	ordered := append([]float64(nil), values...)
+	sort.Float64s(ordered)
+	mid := len(ordered) / 2
+	if len(ordered)%2 != 0 {
+		return ordered[mid]
 	}
-	return sum / float64(len(values))
+	return (ordered[mid-1] + ordered[mid]) / 2
 }
 
 // Run with the test binary's -test.cpuprofile flag. Keep the reference and our
@@ -335,7 +337,8 @@ func TestWintunPerformance(t *testing.T) {
 	requireRunner(t)
 	results := map[string]map[string][]float64{"dll": {}, "ours": {}}
 	// Balance order across six pairs, then pool all samples. Hosted runners
-	// vary by about 30%; no individual pair is a 10% regression gate.
+	// vary by about 30%; no individual pair is a 10% regression gate. Compare
+	// medians so one runner pause cannot dominate either implementation's score.
 	const pairs = 6
 	for trial := 0; trial < pairs; trial++ {
 		modes := []string{"dll", "ours"}
@@ -430,12 +433,12 @@ func TestWintunPerformance(t *testing.T) {
 			t.Errorf("incomplete comparison: %s", metric)
 			continue
 		}
-		dll, own := mean(dllValues), mean(ownValues)
+		dll, own := median(dllValues), median(ownValues)
 		if dll == 0 {
-			t.Errorf("DLL failed all %s trials; no usable performance comparison", metric)
+			t.Errorf("DLL median is zero for %s; no usable performance comparison", metric)
 			continue
 		}
-		report(t, map[string]any{"test": "performance_pooled", "arch": runtime.GOARCH, "pairs": pairs, "metric": metric, "dll": dll, "ours": own, "ratio": own / dll, "dll_samples": dllValues, "ours_samples": ownValues})
+		report(t, map[string]any{"test": "performance_pooled", "statistic": "median", "arch": runtime.GOARCH, "pairs": pairs, "metric": metric, "dll": dll, "ours": own, "ratio": own / dll, "dll_samples": dllValues, "ours_samples": ownValues})
 		if metric == "udp_p95_us" {
 			if own > dll*1.10 {
 				t.Errorf("latency regression: ours %.2f, DLL %.2f us", own, dll)

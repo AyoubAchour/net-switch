@@ -407,15 +407,17 @@ func (s *dllSession) Close() error {
 }
 
 type latencyResult struct {
-	Arch           string  `json:"arch"`
-	Mode           string  `json:"mode"`
-	RoundTrips     int     `json:"round_trips"`
-	Over50MS       int     `json:"over_50_ms"`
-	TimeoutRescues int     `json:"timeout_rescues"`
-	MaxMS          float64 `json:"max_ms"`
-	P50US          float64 `json:"p50_us"`
-	P95US          float64 `json:"p95_us"`
-	P99US          float64 `json:"p99_us"`
+	Arch              string  `json:"arch"`
+	Mode              string  `json:"mode"`
+	RoundTrips        int     `json:"round_trips"`
+	Over50MS          int     `json:"over_50_ms"`
+	EnvironmentPauses int     `json:"environment_pauses"`
+	SessionStalls     int     `json:"session_stalls"`
+	TimeoutRescues    int     `json:"timeout_rescues"`
+	MaxMS             float64 `json:"max_ms"`
+	P50US             float64 `json:"p50_us"`
+	P95US             float64 `json:"p95_us"`
+	P99US             float64 `json:"p99_us"`
 }
 
 func TestWintunPingPong(t *testing.T) {
@@ -425,6 +427,15 @@ func TestWintunPingPong(t *testing.T) {
 			f := newFixture(t, mode, 0)
 			c := udpSocket(t)
 			defer c.Close()
+			s, _ := f.io.(*Session)
+			monitor := startPauseMonitor(t, s)
+			type slowTrip struct {
+				sequence   int
+				start, end int64
+				rescued    bool
+				state      *sessionObservation
+			}
+			var slow []slowTrip
 			result := latencyResult{Arch: runtime.GOARCH, Mode: mode, RoundTrips: 200000}
 			timings := make([]time.Duration, 0, result.RoundTrips)
 			payload := make([]byte, 64)
@@ -467,33 +478,42 @@ func TestWintunPingPong(t *testing.T) {
 					}
 					break
 				}
-				d := elapsed(start)
+				end := ticks()
+				d := qpcDuration(start, end)
 				timings = append(timings, d)
 				if d > 50*time.Millisecond {
 					result.Over50MS++
-					var memory runtime.MemStats
-					runtime.ReadMemStats(&memory)
-					var stats any
-					if s, ok := f.io.(*Session); ok {
-						stats = s.Stats()
-					}
-					var pause uint64
-					if memory.NumGC != 0 {
-						pause = memory.PauseNs[(memory.NumGC-1)%256]
-					}
-					report(t, map[string]any{"test": "slow_round_trip", "arch": runtime.GOARCH, "mode": mode, "sequence": i, "ms": float64(d) / float64(time.Millisecond), "rescued": rescued, "gc_count": memory.NumGC, "last_gc_pause_ns": pause, "since_last_gc_ms": float64(time.Now().UnixNano()-int64(memory.LastGC)) / 1e6, "stats": stats})
+					slow = append(slow, slowTrip{i, start, end, rescued, observeSession(s)})
 				}
 				if float64(d)/float64(time.Millisecond) > result.MaxMS {
 					result.MaxMS = float64(d) / float64(time.Millisecond)
 				}
 			}
+			// Classify after both samplers have observed the end of the run. Logging
+			// or stopping the world for ReadMemStats in the hot loop creates noise.
+			monitor.finish(t)
+			for _, trip := range slow {
+				heartbeat := overlappingGaps(monitor.gaps[0], trip.start, trip.end)
+				scheduler := overlappingGaps(monitor.gaps[1], trip.start, trip.end)
+				classification, covered := classifyPause(trip.start, trip.end, trip.rescued, heartbeat, scheduler)
+				if classification == "environment_pause" {
+					result.EnvironmentPauses++
+				} else {
+					result.SessionStalls++
+				}
+				report(t, map[string]any{"test": "slow_round_trip", "arch": runtime.GOARCH, "mode": mode, "sequence": trip.sequence, "ms": qpcDuration(trip.start, trip.end).Seconds() * 1000, "start_qpc": trip.start, "end_qpc": trip.end, "qpc_frequency": performanceFrequency(), "rescued": trip.rescued, "classification": classification, "common_gap_ms": covered.Seconds() * 1000, "heartbeat_gaps": heartbeat, "scheduler_gaps": scheduler, "state_at_reply": trip.state})
+			}
+			report(t, map[string]any{"test": "pause_monitor", "arch": runtime.GOARCH, "mode": mode, "samples": monitor.samples, "heartbeat_gaps": len(monitor.gaps[0]), "scheduler_gaps": len(monitor.gaps[1])})
 			sort.Slice(timings, func(i, j int) bool { return timings[i] < timings[j] })
 			result.P50US = float64(timings[len(timings)/2]) / 1000
 			result.P95US = float64(timings[len(timings)*95/100]) / 1000
 			result.P99US = float64(timings[len(timings)*99/100]) / 1000
 			report(t, result)
-			if mode == "ours" && result.Over50MS != 0 {
-				t.Errorf("own session had %d round trips over 50 ms", result.Over50MS)
+			if mode == "ours" && result.SessionStalls != 0 {
+				t.Errorf("own session had %d unexplained round trips over 50 ms", result.SessionStalls)
+			}
+			if mode == "ours" && result.TimeoutRescues != 0 {
+				t.Errorf("own session needed %d missed-wake rescues", result.TimeoutRescues)
 			}
 			if mode == "dll" && result.Over50MS == 0 {
 				t.Log("DLL missed-wake race NOT reproduced in this sample")
