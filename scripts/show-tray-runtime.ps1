@@ -23,8 +23,10 @@ try {
   do {
     $trayProcess.Refresh()
     if ($trayProcess.HasExited) { throw "The runtime probe tray exited early: $($trayProcess.ExitCode)." }
-    # Wait for managed code before enumerating modules during process startup.
-    if ([IO.File]::Exists($logPath) -and [IO.File]::ReadAllText($logPath) -match ' started\r?\n') { break }
+    # Only managed tray code creates this file in the fresh directory, so its
+    # existence proves the CLR is loaded. Reading it can race with AppendAllText
+    # holding the file open; we do not need its contents to inspect the runtime.
+    if ([IO.File]::Exists($logPath)) { break }
     if ($watch.Elapsed.TotalSeconds -ge 60) { throw 'The runtime probe tray did not start within 60 seconds.' }
     Start-Sleep -Milliseconds 100
   } while ($true)
