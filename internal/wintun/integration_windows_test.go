@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -48,6 +49,29 @@ func report(t *testing.T, value any) {
 	b, err := json.Marshal(value)
 	must(t, err)
 	t.Logf("WINTUN_RESULT %s", b)
+}
+
+var performanceCounter = windows.NewLazySystemDLL("kernel32.dll").NewProc("QueryPerformanceCounter")
+var performanceFrequency = sync.OnceValue(func() int64 {
+	var n int64
+	ok, _, err := windows.NewLazySystemDLL("kernel32.dll").NewProc("QueryPerformanceFrequency").Call(uintptr(unsafe.Pointer(&n)))
+	if ok == 0 || n <= 0 {
+		panic(fmt.Sprintf("performance clock: %v", err))
+	}
+	return n
+})
+
+func ticks() int64 {
+	var n int64
+	ok, _, err := performanceCounter.Call(uintptr(unsafe.Pointer(&n)))
+	if ok == 0 {
+		panic(fmt.Sprintf("performance counter: %v", err))
+	}
+	return n
+}
+
+func elapsed(start int64) time.Duration {
+	return time.Duration(float64(ticks()-start) * 1e9 / float64(performanceFrequency()))
 }
 
 func command(t *testing.T, program string, args ...string) string {
@@ -325,14 +349,20 @@ func TestWintunPingPong(t *testing.T) {
 			f := newFixture(t, mode, 0)
 			c := udpSocket(t)
 			defer c.Close()
-			result := latencyResult{Arch: runtime.GOARCH, Mode: mode, RoundTrips: 100000}
+			result := latencyResult{Arch: runtime.GOARCH, Mode: mode, RoundTrips: 200000}
 			timings := make([]time.Duration, 0, result.RoundTrips)
 			payload := make([]byte, 64)
 			reply := make([]byte, 128)
 			for i := 0; i < result.RoundTrips; i++ {
+				// Vary the quiet period across the driver's 100 us spin-to-sleep
+				// boundary. There is still only one application datagram in flight.
+				quiet := ticks()
+				for elapsed(quiet) < time.Duration((i*37)%201)*time.Microsecond {
+					runtime.Gosched()
+				}
 				binary.LittleEndian.PutUint64(payload, uint64(i))
-				start := time.Now()
-				must(t, c.SetDeadline(start.Add(250*time.Millisecond)))
+				must(t, c.SetDeadline(time.Now().Add(250*time.Millisecond)))
+				start := ticks()
 				_, err := c.Write(payload)
 				must(t, err)
 				rescued := false
@@ -361,7 +391,7 @@ func TestWintunPingPong(t *testing.T) {
 					}
 					break
 				}
-				d := time.Since(start)
+				d := elapsed(start)
 				timings = append(timings, d)
 				if d > 50*time.Millisecond {
 					result.Over50MS++
@@ -415,7 +445,7 @@ func TestWintunParallelUDP(t *testing.T) {
 			}
 			for i := 0; i < n; i++ {
 				p := bufs[i][:sizes[i]]
-				if len(p) < 28 || p[9] != 17 {
+				if len(p) < 28 || p[0] != 0x45 || p[9] != 17 || !bytes.Equal(p[16:20], []byte{198, 19, 240, 2}) || binary.BigEndian.Uint16(p[22:24]) != 9001 {
 					continue
 				}
 				body := p[28:]
@@ -506,11 +536,19 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 		windows.SetEvent(r.readEvent)
 		s.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-		n, err := s.ReadPacket(ctx, make([]byte, MaxPacketSize))
-		cancel()
-		if n != 0 || !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("%s escaped: %d %v", kind, n, err)
+		buf := make([]byte, MaxPacketSize)
+		for {
+			n, err := s.ReadPacket(ctx, buf)
+			if errors.Is(err, context.DeadlineExceeded) {
+				break
+			}
+			if err != nil || n == 0 || !validIP(buf[:n]) {
+				cancel()
+				t.Fatalf("%s escaped: %d %v", kind, n, err)
+			}
+			// Windows may emit DNS/IPv6 discovery after a media reconnect.
 		}
+		cancel()
 		if s.Stats().Recoveries != before+1 {
 			t.Fatalf("%s did not recover: %+v", kind, s.Stats())
 		}
@@ -566,7 +604,7 @@ func processUsage(t *testing.T) (uint32, uint64) {
 func assertPnPAbsent(t *testing.T, instance string) {
 	t.Helper()
 	// Get-PnpDevice includes non-present devices unless -PresentOnly is supplied.
-	query := "$d = Get-PnpDevice -InstanceId '" + strings.ReplaceAll(instance, "'", "''") + "' -ErrorAction SilentlyContinue; if ($d) { $d | Select-Object InstanceId,Status | ConvertTo-Json -Compress }"
+	query := "$d = Get-PnpDevice -InstanceId '" + strings.ReplaceAll(instance, "'", "''") + "' -ErrorAction SilentlyContinue; if ($d) { $d | Select-Object InstanceId,Status | ConvertTo-Json -Compress }; exit 0"
 	var found string
 	for i := 0; i < 10; i++ {
 		found = command(t, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query)
@@ -581,13 +619,14 @@ func assertPnPAbsent(t *testing.T, instance string) {
 func TestWintunLifetime(t *testing.T) {
 	requireRunner(t)
 	a := newAdapter(t, MinCapacity)
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 100; i++ {
 		s, err := a.StartSession()
 		must(t, err)
 		must(t, s.Close())
 	}
-	runtime.GC()
+	debug.FreeOSMemory()
 	beforeHandles, beforeBytes := processUsage(t)
+	beforeTypes := handleTypes(t)
 	start := time.Now()
 	for i := 0; i < 1000; i++ {
 		s, err := a.StartSession()
@@ -597,9 +636,10 @@ func TestWintunLifetime(t *testing.T) {
 			runtime.GC()
 		}
 	}
-	runtime.GC()
+	debug.FreeOSMemory()
 	afterHandles, afterBytes := processUsage(t)
-	report(t, map[string]any{"test": "lifetime", "arch": runtime.GOARCH, "sessions": 1000, "seconds": time.Since(start).Seconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes})
+	afterTypes := handleTypes(t)
+	report(t, map[string]any{"test": "lifetime", "arch": runtime.GOARCH, "sessions": 1000, "seconds": time.Since(start).Seconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "types_before": beforeTypes, "types_after": afterTypes, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes})
 	if afterHandles > beforeHandles+2 {
 		t.Fatal("session handle leak")
 	}
@@ -611,6 +651,37 @@ func TestWintunLifetime(t *testing.T) {
 	instance := a.InstanceID()
 	must(t, a.Close())
 	assertPnPAbsent(t, instance)
+}
+
+func TestWintunAdapterRemoval(t *testing.T) {
+	requireRunner(t)
+	owner := newAdapter(t, MinCapacity)
+	borrowed, err := Open(owner.config)
+	must(t, err)
+	defer borrowed.Close()
+	s, err := borrowed.StartSession()
+	must(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.ReadPacket(ctx, make([]byte, MaxPacketSize))
+		done <- err
+	}()
+	// The owner removes an adapter while another reference has a blocked read.
+	// This exercises the driver's real PnP disconnection path.
+	must(t, owner.Close())
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("removal did not wake reader: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("adapter removal left a blocked reader")
+	}
+	must(t, s.Close())
+	assertPnPAbsent(t, owner.InstanceID())
+	report(t, map[string]any{"test": "adapter_removal", "arch": runtime.GOARCH, "stats": s.Stats()})
 }
 
 func TestWintunCrashChild(t *testing.T) {
@@ -658,7 +729,26 @@ func TestWintunCrash(t *testing.T) {
 	if child.Wait() == nil {
 		t.Fatal("child did not crash")
 	}
+	must(t, RecoverAfterCrash(Config{Name: "NsRingCrashCI", GUID: guid.String(), Capacity: MinCapacity}))
 	assertPnPAbsent(t, instance)
-	report(t, map[string]any{"test": "crash", "arch": runtime.GOARCH, "non_present_devices": 0})
+	report(t, map[string]any{"test": "crash", "arch": runtime.GOARCH, "cleanup": "service-recovery hook", "non_present_devices": 0})
+}
+
+func handleTypes(t *testing.T) map[uint32]int {
+	t.Helper()
+	// ProcessHandleInformation: two pointer-sized header fields followed by
+	// PROCESS_HANDLE_TABLE_ENTRY_INFO (three pointers and four ULONGs).
+	data := make([]byte, 1<<20)
+	var used uint32
+	must(t, windows.NtQueryInformationProcess(windows.CurrentProcess(), windows.ProcessHandleInformation, unsafe.Pointer(&data[0]), uint32(len(data)), &used))
+	count := binary.LittleEndian.Uint64(data[:8])
+	if count > uint64((len(data)-16)/40) {
+		t.Fatal("invalid process handle snapshot")
+	}
+	types := map[uint32]int{}
+	for i := uint64(0); i < count; i++ {
+		types[binary.LittleEndian.Uint32(data[16+i*40+28:])]++
+	}
+	return types
 }
 

@@ -6,6 +6,7 @@ package wintun
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -262,4 +264,36 @@ func DeleteDriver() error {
 		return callErr
 	}
 	return nil
+}
+
+// RecoverAfterCrash is called by the service-manager cleanup action under the
+// engine's ownership-journal lock, after verifying that the owner has exited.
+// The signed DLL retains phantom PnP nodes after process death. Recreating the
+// journaled GUID and closing its owning DLL handle removes that node as well.
+// No driver is uninstalled, and a present adapter is never taken over.
+func RecoverAfterCrash(config Config) error {
+	if config.GUID == "" || config.Name == "" {
+		return fmt.Errorf("crash recovery requires the journaled adapter name and GUID")
+	}
+	guid, err := windows.GUIDFromString(config.GUID)
+	if err != nil {
+		return err
+	}
+	if _, _, err := deviceForGUID(guid); err == nil {
+		return fmt.Errorf("refusing crash cleanup of present adapter %s", config.GUID)
+	} else if !errors.Is(err, windows.ERROR_NOT_FOUND) {
+		return err
+	}
+	// The DLL can still be finishing asynchronous orphan cleanup. A bounded
+	// retry handles that transition; all attempts retain the same identity.
+	var last error
+	for i := 0; i < 5; i++ {
+		a, err := Create(config)
+		if err == nil {
+			return a.Close()
+		}
+		last = err
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("recover crashed Wintun adapter: %w", last)
 }

@@ -97,7 +97,7 @@ func tcpEcho(t *testing.T, session batchIO) func() {
 
 func tcpTransfer(t *testing.T, streams int) float64 {
 	t.Helper()
-	const size = 8 << 20
+	const size = 64 << 20
 	content := make([]byte, size)
 	for i := range content {
 		content[i] = byte(i*13 + i/251)
@@ -105,7 +105,7 @@ func tcpTransfer(t *testing.T, streams int) float64 {
 	want := sha256.Sum256(content)
 	var wg sync.WaitGroup
 	failures := make(chan error, streams)
-	start := time.Now()
+	start := ticks()
 	for i := 0; i < streams; i++ {
 		wg.Add(1)
 		go func() {
@@ -145,17 +145,17 @@ func tcpTransfer(t *testing.T, streams int) float64 {
 	if t.Failed() {
 		t.FailNow()
 	}
-	return float64(size*streams) / time.Since(start).Seconds() / 1e6
+	return float64(size*streams) / elapsed(start).Seconds() / 1e6
 }
 
 func udpTransfer(t *testing.T, streams int) float64 {
 	t.Helper()
-	const rounds = 256
+	const rounds = 2048
 	const window = 16
 	const size = 1200
 	var wg sync.WaitGroup
 	failures := make(chan error, streams)
-	start := time.Now()
+	start := ticks()
 	for id := 0; id < streams; id++ {
 		c := udpSocket(t)
 		wg.Add(1)
@@ -194,7 +194,7 @@ func udpTransfer(t *testing.T, streams int) float64 {
 	if t.Failed() {
 		t.FailNow()
 	}
-	return float64(streams*rounds*window*size) / time.Since(start).Seconds() / 1e6
+	return float64(streams*rounds*window*size) / elapsed(start).Seconds() / 1e6
 }
 
 func shortLatency(t *testing.T) float64 {
@@ -204,8 +204,8 @@ func shortLatency(t *testing.T) float64 {
 	p := []byte("latency comparison")
 	b := make([]byte, 64)
 	for i := range samples {
-		start := time.Now()
-		c.SetDeadline(start.Add(time.Second))
+		c.SetDeadline(time.Now().Add(time.Second))
+		start := ticks()
 		_, err := c.Write(p)
 		must(t, err)
 		n, err := c.Read(b)
@@ -213,7 +213,7 @@ func shortLatency(t *testing.T) float64 {
 		if !bytes.Equal(b[:n], p) {
 			t.Fatal("latency payload mismatch")
 		}
-		samples[i] = time.Since(start)
+		samples[i] = elapsed(start)
 	}
 	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
 	return float64(samples[len(samples)*95/100]) / 1000

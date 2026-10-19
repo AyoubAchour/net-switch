@@ -197,8 +197,8 @@ jobs:
       - name: Fetch the unchanged signed Wintun DLL beside the executable
         run: ./scripts/prepare-wintun-tests.ps1
       - name: Ring ABI, parser, cancellation, corruption recovery and parallel UDP
-        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.run=TestRing|TestWintun(ParallelUDP|RecoveryAndCancellation)$'
-      - name: Single-packet ping-pong, 100000 round trips per implementation
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.run=TestRing|TestPinnedDLL|TestWintun(ParallelUDP|RecoveryAndCancellation|AdapterRemoval)$'
+      - name: Single-packet ping-pong, 200000 round trips per implementation
         if: ${{ !cancelled() }}
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPingPong$'
       - name: Bulk UDP and TCP throughput and latency comparison
@@ -217,7 +217,7 @@ jobs:
         run: |
           go test -race -c -o ./bin/wintun-race.test.exe ./internal/wintun
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./bin/wintun-race.test.exe '-test.v' '-test.timeout=5m' '-test.run=TestRing|TestWintun(RecoveryAndCancellation|Lifetime)$'
+          ./bin/wintun-race.test.exe '-test.v' '-test.timeout=5m' '-test.run=TestRing|TestWintun(RecoveryAndCancellation|AdapterRemoval|Lifetime)$'
 
   linux:
     name: Linux / Node ${{ matrix.node }} (shared code)

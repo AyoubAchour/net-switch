@@ -14,6 +14,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"golang.org/x/sys/windows"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 )
 
 const (
@@ -27,6 +28,14 @@ const (
 
 var ErrCorrupt = errors.New("Wintun ring corruption")
 var ErrDisconnected = errors.New("Wintun adapter disconnected")
+
+func corrupt(r ring, direction, reason string, head, tail uint32) error {
+	var size uint32
+	if head < r.capacity {
+		size = binary.LittleEndian.Uint32(r.data()[head : head+4])
+	}
+	return fmt.Errorf("%w: %s %s (head=%d tail=%d size=%d capacity=%d)", ErrCorrupt, direction, reason, head, tail, size, r.capacity)
+}
 
 func validCapacity(n uint32) bool { return n >= MinCapacity && n <= MaxCapacity && n&(n-1) == 0 }
 func aligned(n uint32) uint32     { return (n + 3) &^ 3 }
@@ -149,7 +158,7 @@ func (r *rings) read(buffers [][]byte, sizes []int) (int, error) {
 		return 0, ErrDisconnected
 	}
 	if r.send.load(0) != r.head {
-		return 0, ErrCorrupt
+		return 0, corrupt(r.send, "Send", "head changed", r.send.load(0), tail)
 	}
 	head := r.head
 	for i := range buffers {
@@ -158,7 +167,7 @@ func (r *rings) read(buffers [][]byte, sizes []int) (int, error) {
 			return i, nil
 		}
 		if err != nil {
-			return i, err
+			return i, corrupt(r.send, "Send", "invalid entry", head, tail)
 		}
 		if len(buffers[i]) < len(packet) {
 			return i, io.ErrShortBuffer
@@ -167,7 +176,7 @@ func (r *rings) read(buffers [][]byte, sizes []int) (int, error) {
 		// The driver's parallel-producer bug can overwrite occupied data.
 		// Check the private copy before publishing Head or delivering anything.
 		if binary.LittleEndian.Uint32(r.send.data()[head:head+4]) != uint32(len(packet)) || !validIP(buffers[i][:len(packet)]) {
-			return i, ErrCorrupt
+			return i, corrupt(r.send, "Send", "packet changed or failed validation", head, tail)
 		}
 		sizes[i] = len(packet)
 		head = next
@@ -199,7 +208,7 @@ func validIP(p []byte) bool {
 		if binary.BigEndian.Uint16(p[6:8])&0x3fff != 0 {
 			return true
 		}
-		if packet.Sum(p[:n], 0) != 65535 {
+		if checksum.Checksum(p[:n], 0) != 65535 {
 			return false
 		}
 		src = netip.AddrFrom4([4]byte(p[12:16]))
@@ -243,7 +252,7 @@ func validIP(p []byte) bool {
 	default:
 		return true // ICMP, ESP and other protocols are checked by the stack.
 	}
-	return packet.Sum(payload, packet.Pseudo(src, dst, protocol, len(payload))) == 65535
+	return checksum.Checksum(payload, packet.Sum(nil, packet.Pseudo(src, dst, protocol, len(payload)))) == 65535
 }
 
 func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
@@ -253,7 +262,7 @@ func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
 	}
 	capacity := r.receive.capacity
 	if head >= capacity || head&3 != 0 || r.receive.load(4) != r.tail {
-		return 0, len(packets), ErrCorrupt
+		return 0, len(packets), corrupt(r.receive, "Receive", "invalid cursor", head, r.receive.load(4))
 	}
 	tail := r.tail
 	for _, p := range packets {

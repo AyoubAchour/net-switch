@@ -28,8 +28,11 @@ per ten seconds, with recovery failures always logged. Events are bounded hints.
 Close wakes readers, waits for the kernel to unregister its memory descriptors,
 then releases events and unpins memory. Closing the owning adapter also calls
 the DLL's adapter removal. Process death makes the driver unregister its rings;
-the service manager's recovery/cleanup still owns post-crash PnP cleanup, as in
-system design section 2. `DeleteDriver` is an explicit installer operation only;
+the service manager calls `RecoverAfterCrash` with the journaled name and GUID
+under its ownership lock, as in system design section 2. Hosted tests confirmed
+that process death alone leaves a phantom node: the cleanup hook recreates that
+same identity through the DLL and closes it normally. It refuses to take over a
+present adapter. `DeleteDriver` is an explicit installer operation only;
 ordinary cleanup never removes a shared driver.
 
 The DLL is loaded once from beside the executable, verified before loading and

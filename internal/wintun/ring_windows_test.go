@@ -4,9 +4,13 @@ package wintun
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"unsafe"
 
@@ -34,6 +38,28 @@ func TestRingABI(t *testing.T) {
 		if !validCapacity(c) {
 			t.Fatalf("rejected %d", c)
 		}
+	}
+}
+
+func TestPinnedDLLMatchesDistribution(t *testing.T) {
+	_, source, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("source path unavailable")
+	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(source), "../../packaging/versions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pins struct {
+		NativeSources struct {
+			Wintun struct{ EmbeddedAmd64Sha256, EmbeddedArm64Sha256 string }
+		}
+	}
+	if err := json.Unmarshal(data, &pins); err != nil {
+		t.Fatal(err)
+	}
+	if pins.NativeSources.Wintun.EmbeddedAmd64Sha256 != pinnedDLL["amd64"] || pins.NativeSources.Wintun.EmbeddedArm64Sha256 != pinnedDLL["arm64"] {
+		t.Fatal("runtime DLL hashes differ from distribution pins")
 	}
 }
 
