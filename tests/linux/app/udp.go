@@ -533,6 +533,7 @@ func runUDPBurst(args []string) (any, error) {
 type FloodResult struct {
 	// Token marks every datagram: socket i sends "T:<token>:0:<i> ".
 	Token      string         `json:"token"`
+	Locals     []string       `json:"locals"`
 	Sockets    int            `json:"sockets"`
 	Opened     int            `json:"opened"`
 	Sent       int            `json:"sent"` // datagrams the kernel took
@@ -578,6 +579,7 @@ func runUDPFlood(args []string) (any, error) {
 			continue
 		}
 		conns = append(conns, c)
+		r.Locals = append(r.Locals, c.LocalAddr().String())
 	}
 	defer func() {
 		for _, c := range conns {
