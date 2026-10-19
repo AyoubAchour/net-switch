@@ -156,6 +156,8 @@ func ProtectDirectory(path string) error {
 	return fmt.Errorf("machine folder was repeatedly replaced while securing it")
 }
 
+const fileDeleteChild = 0x00000040 // FILE_DELETE_CHILD (winnt.h)
+
 func trustedMachineSecurity(sd *windows.SECURITY_DESCRIPTOR) bool {
 	trustedSID := func(sid *windows.SID) bool {
 		return sid != nil && (sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.IsWellKnown(windows.WinLocalSystemSid))
@@ -170,7 +172,7 @@ func trustedMachineSecurity(sd *windows.SECURITY_DESCRIPTOR) bool {
 	}
 	const dangerous = windows.GENERIC_ALL | windows.GENERIC_WRITE | windows.MAXIMUM_ALLOWED |
 		windows.WRITE_DAC | windows.WRITE_OWNER | windows.DELETE | windows.FILE_WRITE_DATA |
-		windows.FILE_APPEND_DATA | windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES | windows.FILE_DELETE_CHILD
+		windows.FILE_APPEND_DATA | windows.FILE_WRITE_EA | windows.FILE_WRITE_ATTRIBUTES | fileDeleteChild
 	for i := uint32(0); i < uint32(acl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if windows.GetAce(acl, i, &ace) != nil {

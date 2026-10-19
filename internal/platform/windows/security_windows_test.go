@@ -37,7 +37,7 @@ func TestTrustedMachineSecurity(t *testing.T) {
 	}
 	for _, right := range []uint32{windows.WRITE_DAC, windows.WRITE_OWNER, windows.DELETE,
 		windows.FILE_WRITE_DATA, windows.FILE_APPEND_DATA, windows.FILE_WRITE_EA,
-		windows.FILE_WRITE_ATTRIBUTES, windows.FILE_DELETE_CHILD, windows.GENERIC_WRITE, windows.GENERIC_ALL} {
+		windows.FILE_WRITE_ATTRIBUTES, fileDeleteChild, windows.GENERIC_WRITE, windows.GENERIC_ALL} {
 		t.Run(fmt.Sprintf("untrusted grant %x", right), func(t *testing.T) {
 			sd, err := windows.SecurityDescriptorFromString(fmt.Sprintf("O:BAD:P(A;;FA;;;BA)(A;;0x%x;;;BU)", right))
 			if err != nil {
