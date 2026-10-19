@@ -405,6 +405,7 @@ func runStream(args []string) (any, error) {
 	duration := fs.Int("duration", 10000, "ms to keep the connection")
 	interval := fs.Int("interval", 200, "ms between pings")
 	localAddr := fs.String("local-addr", "", "source address to bind")
+	localPort := fs.Int("local-port", 0, "source port to bind")
 	bindDev := fs.String("bind-dev", "", "interface to bind to (an outside connection)")
 	release := fs.String("release-file", "", "end once this file exists (--duration is then the longest it runs)")
 	if err := parse(fs, args); err != nil {
@@ -423,12 +424,17 @@ func runStream(args []string) (any, error) {
 	}
 	r := StreamResult{Seen: map[string]int{}}
 	d := net.Dialer{Timeout: 5 * time.Second, Control: socketOptions(*bindDev)}
-	if *localAddr != "" {
-		addr, err := netip.ParseAddr(*localAddr)
-		if err != nil {
-			return nil, usageError{err}
+	if *localAddr != "" || *localPort != 0 {
+		addr := netip.IPv4Unspecified()
+		if list[0].Addr().Is6() {
+			addr = netip.IPv6Unspecified()
 		}
-		d.LocalAddr = net.TCPAddrFromAddrPort(netip.AddrPortFrom(addr, 0))
+		if *localAddr != "" {
+			if addr, err = netip.ParseAddr(*localAddr); err != nil {
+				return nil, usageError{err}
+			}
+		}
+		d.LocalAddr = net.TCPAddrFromAddrPort(netip.AddrPortFrom(addr, uint16(*localPort)))
 	}
 	end := time.Now().Add(time.Duration(*duration) * time.Millisecond)
 	conn, err := d.Dial("tcp", list[0].String())

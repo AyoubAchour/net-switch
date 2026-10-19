@@ -72,6 +72,7 @@ type Env struct {
 	// Before is the PC's routing state before the engine first started.
 	Before topo.Snapshot
 	sharedDir string // SharedDir, once made
+	nextPort  int    // the next source port ports hands out
 }
 
 type caseFunc func(e *Env)
@@ -528,8 +529,41 @@ func (b *Bg) Stop() {
 // To is a server address with a port.
 func To(addr netip.Addr, port uint16) string { return netip.AddrPortFrom(addr, port).String() }
 
-// TCP runs the tcp mode as an app and returns its result.
+// Source ports a case hands out: below the kernel's ephemeral range (32768
+// and up), and never twice in a case. Every app reaches the engine from the
+// TUN's one address, so two connections to a server that happen to get the
+// same ephemeral port within a minute share a 4-tuple, and the baseline's
+// TIME_WAIT freeze (tcp.port-reuse-freeze, a defect with its own case) would
+// fail a case that isn't about it. The engine is new each case, so only
+// reuse within a case can collide.
+const firstPort, lastPort = 21000, 32000
+
+// ports reserves n consecutive source ports for this case.
+func (e *Env) ports(n int) int {
+	if e.nextPort == 0 {
+		e.nextPort = firstPort
+	}
+	base := e.nextPort
+	e.nextPort += max(n, 1)
+	if e.nextPort > lastPort {
+		e.T.Fatalf("the case used up its %d source ports", lastPort-firstPort)
+	}
+	return base
+}
+
+// TCP runs the tcp mode as an app and returns its result. Unless the case
+// picks source ports itself, each connection gets one of the case's own.
 func (e *Env) TCP(name string, user User, args ...string) app.TCPResult {
+	args = slices.Clone(args)
+	if !slices.Contains(args, "--port-base") {
+		count := 1
+		if i := slices.Index(args, "--count"); i >= 0 && i+1 < len(args) {
+			if n, err := strconv.Atoi(args[i+1]); err == nil {
+				count = n
+			}
+		}
+		args = append(args, "--port-base", strconv.Itoa(e.ports(count)))
+	}
 	var r app.TCPResult
 	e.RunJSON(Run{App: name, User: user, Args: append([]string{"tcp"}, args...), Timeout: 5 * time.Minute}, &r)
 	return r
@@ -638,9 +672,11 @@ func (e *Env) WaitNoFlow(timeout time.Duration, match func(engine.Flow) bool) ([
 // Stream is a long TCP connection's result.
 type Stream = app.StreamResult
 
-// StartStream opens a long connection to the stream server in the background.
+// StartStream opens a long connection to the stream server in the background,
+// from one of the case's own source ports.
 func (e *Env) StartStream(name string, user User, duration time.Duration, extra ...string) *Bg {
-	args := append([]string{"stream", "--to", To(topo.Server4, wire.PortStream), "--duration", strconv.Itoa(int(duration.Milliseconds())), "--interval", "100"}, extra...)
+	args := append([]string{"stream", "--to", To(topo.Server4, wire.PortStream), "--duration", strconv.Itoa(int(duration.Milliseconds())), "--interval", "100",
+		"--local-port", strconv.Itoa(e.ports(1))}, extra...)
 	return e.Start(Run{App: name, User: user, Args: args})
 }
 
