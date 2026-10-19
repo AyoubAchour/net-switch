@@ -46,6 +46,7 @@ type Totals struct {
 	Lines map[string]Bytes `json:"lines"`
 }
 type Gauges struct {
+	PendingPeakBytes int64
 	// Non-cumulative buckets: 100 us wide through 20 ms, then overflow.
 	// Histograms can be subtracted across a cold-socket test phase.
 	LookupHistogram                                                                                   [201]uint64
@@ -83,6 +84,7 @@ type Table struct {
 	events               chan flowapi.Event
 	eventsDropped        atomic.Uint64
 	pendingBytes         atomic.Int64
+	pendingPeakBytes     atomic.Int64
 	doubleReleases       atomic.Uint64
 }
 
@@ -471,6 +473,7 @@ func (t *Table) ReservePending(n int) bool {
 			return false
 		}
 		if t.pendingBytes.CompareAndSwap(old, old+int64(n)) {
+			for peak := t.pendingPeakBytes.Load(); old+int64(n)>peak && !t.pendingPeakBytes.CompareAndSwap(peak,old+int64(n)); peak=t.pendingPeakBytes.Load() {}
 			return true
 		}
 	}
@@ -511,6 +514,7 @@ func (t *Table) Stats() Gauges {
 	defer t.mu.Unlock()
 	g := t.gauges
 	g.PendingBytes = t.pendingBytes.Load()
+	g.PendingPeakBytes = t.pendingPeakBytes.Load()
 	g.DoubleReleases = t.doubleReleases.Load()
 	g.EventsDropped = t.eventsDropped.Load()
 	return g

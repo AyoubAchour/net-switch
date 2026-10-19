@@ -315,6 +315,7 @@ type Stats struct {
 	Flows, Handshakes, UDP, Unknown, UnknownUDP, TimeWait int64
 	// Byte budgets in use (5.9).
 	TCPBytes, PendingBytes, SnapshotBytes int64
+	PendingPeakBytes int64
 	// Counters since the engine started.
 	Admitted        uint64 // the combining counter k: flows admitted (5.4)
 	Rejected        uint64

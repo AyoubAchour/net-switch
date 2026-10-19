@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"runtime/debug"
 	"sync"
 
@@ -277,12 +278,16 @@ func (e *Engine) Stats() any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := map[string]any{"flows": e.Table.Stats()}
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	s["heapBytes"] = memory.HeapAlloc
 	if e.lastError != nil {
 		s["fatal"] = e.lastError.Error()
 	}
 	if e.link != nil {
 		s["tunDropped"] = e.link.Dropped.Load()
 		s["tunQueued"] = e.link.Queued()
+		s["tunPeakQueued"] = e.link.PeakQueued()
 	}
 	if e.tcp != nil {
 		s["tcpRejected"] = e.tcp.Rejected.Load()
@@ -296,6 +301,8 @@ func (e *Engine) Stats() any {
 		s["udpIdentityErrors"] = e.udp.IdentityErrors.Load()
 		s["udpOversize"] = e.udp.Oversize.Load()
 		s["udpReadErrors"] = e.udp.ReadErrors.Load()
+		s["udpPeakQueuePackets"] = e.udp.PeakQueuePackets.Load()
+		s["udpPeakQueueBytes"] = e.udp.PeakQueueBytes.Load()
 	}
 	return s
 }

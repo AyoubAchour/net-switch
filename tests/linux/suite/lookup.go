@@ -34,11 +34,11 @@ func init() { register(50, addLookup) }
 func addLookup(r *registry) {
 	const slow = "sing-box scans every open file of the socket's user on each new connection (about 3 µs per file), so its estimated p95 lookup is well over 10 ms"
 	r.defect("lookup.gate-terminal", "Owner lookup with 10,000 open files, from a plain terminal: owner found for 99.5% (p95: an estimate here, measured in lookup.p95-measured)", slow, "5.6", 4*time.Minute,
-		func(e *Env) { lookupGate(e, false) })
+		func(e *Env) { lookupGate(e, false, false) })
 	r.defect("lookup.gate-app-scope", "Owner lookup with 10,000 open files, app in its own scope: owner found for 99.5% (p95: an estimate here, measured in lookup.p95-measured)", slow, "5.6", 4*time.Minute,
-		func(e *Env) { lookupGate(e, true) })
+		func(e *Env) { lookupGate(e, true, false) })
 	r.add("lookup.p95-measured", "The engine's own p95 owner-lookup time stays under 10 ms with 10,000 open files, in an app scope and from a plain terminal",
-		harness.Requires10, "5.6", 8*time.Minute, func(e *Env) { lookupGate(e, false); e.StopEngine(); lookupGate(e, true) })
+		harness.Requires10, "5.6", 8*time.Minute, func(e *Env) { lookupGate(e, false, true); e.StopEngine(); lookupGate(e, true, true) })
 	r.add("lookup.fork-exec", "A program started by another (fork and exec) is attributed to itself", harness.Parity, "5.6", 0, forkExec)
 	r.add("lookup.inherited-socket", "A socket inherited by a child that alone holds it is the child's", harness.Parity, "5.6", 0, inheritedSocket)
 	r.defect("lookup.ambiguous-holders", "A socket held by two apps on different lines at once is treated as unknown",
@@ -58,7 +58,7 @@ type phase struct {
 	histogram       [201]uint64
 }
 
-func lookupGate(e *Env, scoped bool) {
+func lookupGate(e *Env, scoped, measured bool) {
 	e.StartEngine(e.DefaultConfig())
 	var session engine.Controller
 	if v1, ok := e.Eng.(engine.V1); ok {
@@ -158,7 +158,9 @@ func lookupGate(e *Env, scoped bool) {
 		e.T.Check(count == p.lookups && count >= gateConnections, "histogram contains every measured cold lookup (%d buckets, %d lookups)", count, p.lookups)
 		e.T.Check(p95 < 10*time.Millisecond, "%s (app scope %v): measured lookup p95 upper bound %v is under 10 ms", p.label, scoped, p95)
 	}
-	e.T.Expect(ok, "with %d open files, each phase finds the owner for at least %.1f%%, as the servers and the engine both count (%s)",
+	check := e.T.Expect
+	if measured { check = e.T.Check }
+	check(ok, "with %d open files, each phase finds the owner for at least %.1f%%, as the servers and the engine both count (%s)",
 		gateFiles, 100*gateFound, strings.Join(verdicts, "; "))
 }
 

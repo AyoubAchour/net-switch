@@ -106,10 +106,10 @@ func diag(ctx context.Context, family, protocol int, local, remote netip.AddrPor
 	if err := unix.Sendto(fd, b, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
 		return nil, err
 	}
-	buf := make([]byte, 256<<10)
+	buf := make([]byte, 64<<10)
 	var rows []socketRow
 	for {
-		n, err := f.Read(buf)
+		n, err := readNetlink(f, buf)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -155,6 +155,23 @@ func diag(ctx context.Context, family, protocol int, local, remote netip.AddrPor
 			}
 		}
 	}
+}
+
+func readNetlink(f *os.File, b []byte) (int, error) {
+	raw, err := f.SyscallConn()
+	if err != nil { return 0, err }
+	var n, flags int
+	var from unix.Sockaddr
+	var readErr error
+	err = raw.Read(func(fd uintptr) bool {
+		n, _, flags, from, readErr = unix.Recvmsg(int(fd), b, nil, unix.MSG_DONTWAIT)
+		return !errors.Is(readErr, unix.EAGAIN) && !errors.Is(readErr, unix.EWOULDBLOCK)
+	})
+	if err != nil { return 0,err }; if readErr != nil { return 0,readErr }
+	if flags&unix.MSG_TRUNC != 0 { return 0,unix.ENOBUFS }
+	peer,ok := from.(*unix.SockaddrNetlink)
+	if !ok || peer.Pid != 0 { return 0,errors.New("netlink response is not from the kernel") }
+	return n,nil
 }
 
 var errDiagInterrupted = errors.New("sock_diag dump interrupted")

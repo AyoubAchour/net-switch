@@ -71,6 +71,7 @@ type NAT struct {
 	reconcileMu                                                      sync.Mutex
 	refresh                                                          chan struct{}
 	Invalid, Dropped, Rejected, IdentityErrors, Oversize, ReadErrors atomic.Uint64
+	PeakQueuePackets, PeakQueueBytes atomic.Uint64
 }
 
 func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.Output, mtu int) *NAT {
@@ -174,6 +175,8 @@ func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket f
 	payload, raw, df := copyPacket()
 	s.queue = append(s.queue, datagram{destination: destination, payload: payload, original: raw, df: df, bytes: bytes})
 	s.bytes += bytes
+	for old := n.PeakQueuePackets.Load(); uint64(len(s.queue))>old && !n.PeakQueuePackets.CompareAndSwap(old,uint64(len(s.queue))); old=n.PeakQueuePackets.Load() {}
+	for old := n.PeakQueueBytes.Load(); uint64(s.bytes)>old && !n.PeakQueueBytes.CompareAndSwap(old,uint64(s.bytes)); old=n.PeakQueueBytes.Load() {}
 	s.mu.Unlock()
 	if created {
 		go s.run()
@@ -238,7 +241,9 @@ func (s *session) run() {
 	}
 	cl()
 	if err != nil {
-		owner = platform.Owner{}
+		// Attribution may be unknown while the kernel socket cookie is known.
+		// Keep that cookie so unknown-owner sessions can still be validated.
+		owner = platform.Owner{Generation: owner.Generation}
 	}
 	s.mu.Lock()
 	s.owner = owner

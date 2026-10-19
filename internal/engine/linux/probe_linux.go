@@ -22,6 +22,7 @@ func (p *Platform) Probe(ctx context.Context, line, operator string) (platform.P
 	started := time.Now()
 	quick := strings.HasPrefix(operator, "quick:")
 	operator = strings.TrimPrefix(operator, "quick:")
+	operator = strings.ToLower(operator)
 	var url, media, ip string
 	switch strings.ToLower(operator) {
 	case "cloudflare":

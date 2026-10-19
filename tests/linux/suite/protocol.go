@@ -35,6 +35,7 @@ func addProtocol(r *registry) {
 	add("protocol.predict-keeps-counter", "predict gives a shared app's distribution without advancing the combining counter", "5.4, 5.10", 0, predictKeepsCounter)
 	add("protocol.lookup-counters", "stats counts ambiguous owners and records lookup time", "5.6, 5.10", 0, lookupCounters)
 	add("protocol.probe-per-line", "A probe tests the physical line, not its lane, and repeating its operation id returns the recorded result", "4.5, 5.10", 0, probePerLine)
+	add("protocol.https-probe-validation", "Full probes validate TLS and operator bodies, require HTTP/2 for Quad9, and refuse redirects and login portals", "4.5", 0, httpsProbes)
 	add("udp.identity-without-notifications", "UDP port reuse is caught within 1 s with destroy notifications dropped or delayed, for an opposite pin and a blocked line", "5.3", 3*time.Minute, udpIdentityWithoutNotifications)
 }
 

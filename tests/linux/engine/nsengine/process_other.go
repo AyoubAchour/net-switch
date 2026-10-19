@@ -14,6 +14,6 @@ func (d *Driver) launch(context.Context, engine.Env) error {
 }
 func (d *Driver) crash() error                   { return notYet("Linux namespaces unavailable") }
 func (d *Driver) cleanup(context.Context) error  { return notYet("Linux namespaces unavailable") }
-func (d *Driver) waitExit(context.Context) error { return notYet("Linux namespaces unavailable") }
+func (d *Driver) waitExit(context.Context) error { return nil }
 func (d *Driver) running() bool                  { return false }
 func (d *Driver) logPath() string                { return "" }

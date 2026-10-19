@@ -329,6 +329,7 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		Flows: int64(g.Flows), Handshakes: int64(g.Handshakes), UDP: int64(g.UDP),
 		Unknown: int64(g.Unknown), UnknownUDP: int64(g.UnknownUDP), TimeWait: int64(g.TimeWait),
 		TCPBytes: g.TCPBytes, PendingBytes: g.PendingBytes, SnapshotBytes: g.SnapshotBytes,
+		PendingPeakBytes: g.PendingPeakBytes,
 		Admitted: g.Admitted, Rejected: g.Rejected, DroppedNotices: g.DroppedNotices, TimeWaitSkipped: g.TimeWaitSkipped,
 		EventsDropped: top.EventsDropped + g.EventsDropped,
 		LookupCount:   g.LookupCount, LookupMisses: g.LookupMisses, LookupAmbiguous: g.LookupAmbiguous,
