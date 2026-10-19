@@ -27,7 +27,9 @@ per ten seconds, with recovery failures always logged. Events are bounded hints.
 
 Close wakes readers, waits for the kernel to unregister its memory descriptors,
 then releases events and unpins memory. Closing the owning adapter also calls
-the DLL's adapter removal. Process death makes the driver unregister its rings;
+the DLL's adapter removal. PnP removal makes the 0.14.1 driver close the device
+handle itself; its terminal ring marker prevents closing that reused handle
+number again. Process death makes the driver unregister its rings;
 the service manager calls `RecoverAfterCrash` with the journaled name and GUID
 under its ownership lock, as in system design section 2. Hosted tests confirmed
 that process death alone leaves a phantom node: the cleanup hook recreates that
@@ -52,3 +54,33 @@ contracts. No Wintun or wireguard-go source was copied or adapted.
 
 The existing distribution already includes the prebuilt binary license. Adding
 this package does not incorporate or relicense the GPL driver/API sources.
+
+## Hosted tests
+
+All adapter tests require both the explicit test opt-in and a GitHub-hosted
+runner. They never run in ordinary `go test`. x64 also runs real recovery and
+lifetime tests under the race detector; ARM64 has no Go race detector.
+
+The long test sends 200,000 UDP requests per implementation, one at a time, with
+quiet periods from 0–200 microseconds spanning the driver's spin-to-sleep
+boundary. QueryPerformanceCounter measures each round trip. A 250 ms timeout is
+recorded, then one retry releases the DLL's queued packet; the slow attempt stays
+in the distribution. Our path must have zero round trips over 50 ms.
+
+Throughput uses delivered UDP bytes over a fixed interval and complete, hashed
+TCP transfers, with one and eight streams. Three trials alternate implementation
+order. All samples remain in the comparison: a DLL `ERROR_INVALID_DATA` is logged
+as a baseline failure, its partial UDP goodput (or zero for an incomplete TCP
+transfer) is retained, and a fresh DLL session is used only for the next metric.
+No failed sample is retried into a pass. The locked design's 10% performance
+regression gate applies to the medians. Packet corruption in delivered data,
+unknown reference errors and failures of our session fail CI.
+
+Parallel senders verify every test payload. Deterministic malformed-entry tests
+independently prove recovery, even if the driver corruption does not occur in a
+particular stress sample. Lifetime tests count process handles and their kernel
+object types, measure private memory after GC/scavenging, and enumerate PnP
+records without filtering out non-present devices.
+
+- [Windows high-resolution timing](https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps)
+- [Process handle snapshot ABI reference](https://github.com/winsiderss/phnt/blob/master/ntpsapi.h)

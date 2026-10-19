@@ -6,16 +6,19 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
+	"golang.org/x/sys/windows"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -23,8 +26,9 @@ import (
 	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-func tcpEcho(t *testing.T, session batchIO) func() {
+func tcpEcho(t *testing.T, f *fixture) func() {
 	t.Helper()
+	session := f.io
 	link := ns.NewLink()
 	stack, err := ns.New(link, ns.DefaultOptions())
 	must(t, err)
@@ -47,6 +51,9 @@ func tcpEcho(t *testing.T, session batchIO) func() {
 		for {
 			n, err := session.ReadBatch(ctx, bufs, sizes)
 			if err != nil {
+				if ctx.Err() == nil {
+					f.recordFault(err)
+				}
 				return
 			}
 			for i := 0; i < n; i++ {
@@ -95,7 +102,7 @@ func tcpEcho(t *testing.T, session batchIO) func() {
 	}
 }
 
-func tcpTransfer(t *testing.T, streams int) float64 {
+func tcpTransfer(t *testing.T, streams int) (float64, error) {
 	t.Helper()
 	const size = 64 << 20
 	content := make([]byte, size)
@@ -139,62 +146,82 @@ func tcpTransfer(t *testing.T, streams int) float64 {
 	}
 	wg.Wait()
 	close(failures)
+	var failure error
 	for err := range failures {
-		t.Error(err)
+		failure = errors.Join(failure, err)
 	}
-	if t.Failed() {
-		t.FailNow()
+	if failure != nil {
+		return 0, failure
 	}
-	return float64(size*streams) / elapsed(start).Seconds() / 1e6
+	return float64(size*streams) / elapsed(start).Seconds() / 1e6, nil
 }
 
-func udpTransfer(t *testing.T, streams int) float64 {
+func udpTransfer(t *testing.T, streams int) (float64, error) {
 	t.Helper()
-	const rounds = 2048
-	const window = 16
 	const size = 1200
-	var wg sync.WaitGroup
-	failures := make(chan error, streams)
+	// UDP is lossy under saturation, particularly while a corrupted session
+	// reopens. Measure delivered goodput for a fixed interval, with every
+	// delivered payload checked. Do not wait forever for a dropped datagram.
+	var senders, readers sync.WaitGroup
+	var sent, received atomic.Uint64
+	failures := make(chan error, streams*2)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	connections := make([]*net.UDPConn, streams)
 	start := ticks()
 	for id := 0; id < streams; id++ {
 		c := udpSocket(t)
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			defer c.Close()
-			payload := bytes.Repeat([]byte{byte(id + 1)}, size)
-			reply := make([]byte, size+1)
-			for round := 0; round < rounds; round++ {
-				c.SetDeadline(time.Now().Add(2 * time.Second))
-				for i := 0; i < window; i++ {
-					if _, err := c.Write(payload); err != nil {
-						failures <- err
-						return
-					}
+		connections[id] = c
+		payload := bytes.Repeat([]byte{byte(id + 1)}, size)
+		senders.Add(1)
+		readers.Add(1)
+		go func() {
+			defer senders.Done()
+			for ctx.Err() == nil {
+				if _, err := c.Write(payload); err != nil {
+					failures <- err
+					return
 				}
-				for i := 0; i < window; i++ {
-					n, err := c.Read(reply)
-					if err != nil {
-						failures <- err
-						return
-					}
-					if !bytes.Equal(reply[:n], payload) {
-						failures <- fmt.Errorf("UDP echo corruption")
-						return
-					}
-				}
+				sent.Add(1)
 			}
-		}(id)
+		}()
+		go func() {
+			defer readers.Done()
+			reply := make([]byte, size+1)
+			for {
+				n, err := c.Read(reply)
+				if err != nil {
+					var timeout net.Error
+					if errors.As(err, &timeout) && timeout.Timeout() && ctx.Err() != nil {
+						return
+					}
+					failures <- err
+					return
+				}
+				if !bytes.Equal(reply[:n], payload) {
+					failures <- fmt.Errorf("UDP echo corruption")
+					return
+				}
+				received.Add(1)
+			}
+		}()
 	}
-	wg.Wait()
+	senders.Wait()
+	for _, c := range connections {
+		c.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
+	}
+	readers.Wait()
+	for _, c := range connections {
+		c.Close()
+	}
 	close(failures)
+	var failure error
 	for err := range failures {
-		t.Error(err)
+		failure = errors.Join(failure, err)
 	}
-	if t.Failed() {
-		t.FailNow()
-	}
-	return float64(streams*rounds*window*size) / elapsed(start).Seconds() / 1e6
+	seconds := elapsed(start).Seconds()
+	report(t, map[string]any{"test": "udp_goodput", "arch": runtime.GOARCH, "streams": streams, "sent": sent.Load(), "received": received.Load(), "seconds": seconds})
+	return float64(received.Load()*size) / seconds / 1e6, failure
 }
 
 func shortLatency(t *testing.T) float64 {
@@ -240,14 +267,43 @@ func TestWintunPerformance(t *testing.T) {
 				}
 				measure("udp_p95_us", shortLatency(t))
 				for _, streams := range []int{1, 8} {
-					measure(fmt.Sprintf("udp_%d_MBps", streams), udpTransfer(t, streams))
+					value, err := udpTransfer(t, streams)
+					must(t, err)
+					if fault := f.fault(); fault != nil {
+						if mode != "dll" || !errors.Is(fault, windows.ERROR_INVALID_DATA) {
+							t.Fatal(fault)
+						}
+						// Retain the partial/failed DLL measurement. Only restart for
+						// the NEXT metric, never rerun a failed sample into a pass.
+						report(t, map[string]any{"test": "baseline_driver_failure", "arch": runtime.GOARCH, "trial": trial, "metric": fmt.Sprintf("udp_%d_MBps", streams), "error": fault.Error(), "recorded_MBps": value})
+						f.stopEcho()
+						must(t, f.io.Close())
+						f.io = startIO(t, f.a, mode)
+						f.faultMu.Lock()
+						f.lastFault = nil
+						f.faultMu.Unlock()
+						f.startEcho(t)
+					}
+					measure(fmt.Sprintf("udp_%d_MBps", streams), value)
 				}
 				f.stopEcho()
 				f.stopEcho = func() {}
-				stop := tcpEcho(t, f.io)
-				defer stop()
 				for _, streams := range []int{1, 8} {
-					measure(fmt.Sprintf("tcp_%d_MBps", streams), tcpTransfer(t, streams))
+					var value float64
+					var err error
+					func() { stop := tcpEcho(t, f); defer stop(); value, err = tcpTransfer(t, streams) }()
+					if err != nil {
+						if mode != "dll" || !errors.Is(f.fault(), windows.ERROR_INVALID_DATA) {
+							t.Fatal(err)
+						}
+						report(t, map[string]any{"test": "baseline_driver_failure", "arch": runtime.GOARCH, "trial": trial, "metric": fmt.Sprintf("tcp_%d_MBps", streams), "error": f.fault().Error(), "recorded_MBps": 0})
+						must(t, f.io.Close())
+						f.io = startIO(t, f.a, mode)
+						f.faultMu.Lock()
+						f.lastFault = nil
+						f.faultMu.Unlock()
+					}
+					measure(fmt.Sprintf("tcp_%d_MBps", streams), value)
 				}
 			})
 		}
@@ -259,6 +315,10 @@ func TestWintunPerformance(t *testing.T) {
 			continue
 		}
 		dll, own := median(dllValues), median(ownValues)
+		if dll == 0 {
+			t.Errorf("DLL failed most %s trials; no usable performance comparison", metric)
+			continue
+		}
 		report(t, map[string]any{"test": "performance_median", "arch": runtime.GOARCH, "metric": metric, "dll": dll, "ours": own, "ratio": own / dll})
 		if metric == "udp_p95_us" {
 			if own > dll*1.10 {

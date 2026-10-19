@@ -139,6 +139,25 @@ func TestRingReadRejectsDamagedPacket(t *testing.T) {
 	}
 }
 
+func TestRingDisconnectedHandleIsNotClosedTwice(t *testing.T) {
+	// Simulate the numeric device handle having been reused for a new event
+	// after the driver closed the original and published its disconnect marker.
+	reused, err := windows.CreateEvent(nil, 0, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(reused)
+	r := &rings{device: reused, send: ring{make([]byte, MinCapacity+ringHeader+ringSlack), MinCapacity}}
+	r.pin.Pin(&r.send.bytes[0])
+	r.send.store(4, ^uint32(0))
+	if err := r.close(); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := windows.WaitForSingleObject(reused, 0); err != nil || result != uint32(windows.WAIT_TIMEOUT) {
+		t.Fatalf("closed a reused handle: %d %v", result, err)
+	}
+}
+
 func FuzzRingEntry(f *testing.F) {
 	f.Add(uint32(0), uint32(8), uint32(1), []byte{1})
 	f.Add(uint32(MinCapacity-4), uint32(4), uint32(65536), []byte{0x45})

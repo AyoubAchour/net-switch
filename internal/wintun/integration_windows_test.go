@@ -92,10 +92,25 @@ type batchIO interface {
 }
 
 type fixture struct {
-	a        *Adapter
-	io       batchIO
-	stopEcho func()
-	faults   atomic.Uint64
+	a         *Adapter
+	io        batchIO
+	stopEcho  func()
+	faults    atomic.Uint64
+	faultMu   sync.Mutex
+	lastFault error
+}
+
+func (f *fixture) recordFault(err error) {
+	f.faults.Add(1)
+	f.faultMu.Lock()
+	f.lastFault = err
+	f.faultMu.Unlock()
+}
+
+func (f *fixture) fault() error {
+	f.faultMu.Lock()
+	defer f.faultMu.Unlock()
+	return f.lastFault
 }
 
 func newAdapter(t *testing.T, capacity uint32) *Adapter {
@@ -155,7 +170,7 @@ func udpSocket(t *testing.T) *net.UDPConn {
 }
 
 func echoUDP(p []byte) bool {
-	if len(p) < 28 || p[0] != 0x45 || p[9] != 17 || !validIP(p) {
+	if len(p) < 28 || p[0] != 0x45 || p[9] != 17 || !bytes.Equal(p[16:20], []byte{198, 19, 240, 2}) || binary.BigEndian.Uint16(p[22:24]) != 9001 || !validIP(p) {
 		return false
 	}
 	for i := 0; i < 4; i++ {
@@ -181,7 +196,7 @@ func (f *fixture) startEcho(t *testing.T) {
 			n, err := f.io.ReadBatch(ctx, buffers, sizes)
 			if err != nil {
 				if ctx.Err() == nil {
-					f.faults.Add(1)
+					f.recordFault(err)
 					t.Logf("echo read: %v", err)
 				}
 				return
@@ -194,7 +209,7 @@ func (f *fixture) startEcho(t *testing.T) {
 				}
 			}
 			if _, err = f.io.WriteBatch(out); err != nil && ctx.Err() == nil {
-				f.faults.Add(1)
+				f.recordFault(err)
 				t.Logf("echo write: %v", err)
 			}
 		}
@@ -455,7 +470,7 @@ func TestWintunParallelUDP(t *testing.T) {
 				}
 				id := binary.LittleEndian.Uint32(body)
 				seq := binary.LittleEndian.Uint32(body[4:])
-				if id >= 32 || seq >= 20000 {
+				if id >= 32 || seq >= 100000 {
 					invalid.Add(1)
 					continue
 				}
@@ -479,7 +494,7 @@ func TestWintunParallelUDP(t *testing.T) {
 			defer wg.Done()
 			defer c.Close()
 			body := make([]byte, 1200)
-			for seq := 0; seq < 20000; seq++ {
+			for seq := 0; seq < 100000; seq++ {
 				binary.LittleEndian.PutUint32(body, uint32(id))
 				binary.LittleEndian.PutUint32(body[4:], uint32(seq))
 				for j := 8; j < len(body); j++ {
@@ -568,7 +583,15 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 	f.stopEcho()
 	f.stopEcho = func() {}
 	done := make(chan error, 1)
-	go func() { _, err := s.ReadPacket(context.Background(), make([]byte, MaxPacketSize)); done <- err }()
+	go func() {
+		buf := make([]byte, MaxPacketSize)
+		for {
+			if _, err := s.ReadPacket(context.Background(), buf); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
 	must(t, s.Close())
 	select {
 	case err := <-done:
@@ -603,17 +626,33 @@ func processUsage(t *testing.T) (uint32, uint64) {
 
 func assertPnPAbsent(t *testing.T, instance string) {
 	t.Helper()
-	// Get-PnpDevice includes non-present devices unless -PresentOnly is supplied.
-	query := "$d = Get-PnpDevice -InstanceId '" + strings.ReplaceAll(instance, "'", "''") + "' -ErrorAction SilentlyContinue; if ($d) { $d | Select-Object InstanceId,Status | ConvertTo-Json -Compress }; exit 0"
-	var found string
-	for i := 0; i < 10; i++ {
-		found = command(t, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query)
-		if found == "" {
+	for i := 0; i < 100; i++ {
+		if !pnpExists(t, instance) {
 			return
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("adapter remains, including non-present PnP records: %s", found)
+	t.Fatalf("adapter remains, including non-present PnP records: %s", instance)
+}
+
+func pnpExists(t *testing.T, instance string) bool {
+	t.Helper()
+	// Deliberately omit DIGCF_PRESENT: phantom devices count as leftovers too.
+	set, err := windows.SetupDiGetClassDevsEx(&netClass, "SWD\\Wintun", 0, 0, 0, "")
+	must(t, err)
+	defer set.Close()
+	for i := 0; ; i++ {
+		dev, err := set.EnumDeviceInfo(i)
+		if err == windows.ERROR_NO_MORE_ITEMS {
+			return false
+		}
+		must(t, err)
+		id, err := set.DeviceInstanceID(dev)
+		must(t, err)
+		if strings.EqualFold(id, instance) {
+			return true
+		}
+	}
 }
 
 func TestWintunLifetime(t *testing.T) {
@@ -661,12 +700,20 @@ func TestWintunAdapterRemoval(t *testing.T) {
 	defer borrowed.Close()
 	s, err := borrowed.StartSession()
 	must(t, err)
+	if err := RecoverAfterCrash(owner.config); err == nil {
+		t.Fatal("crash cleanup accepted a live adapter")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := s.ReadPacket(ctx, make([]byte, MaxPacketSize))
-		done <- err
+		buf := make([]byte, MaxPacketSize)
+		for {
+			if _, err := s.ReadPacket(ctx, buf); err != nil {
+				done <- err
+				return
+			}
+		}
 	}()
 	// The owner removes an adapter while another reference has a blocked read.
 	// This exercises the driver's real PnP disconnection path.

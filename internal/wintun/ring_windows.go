@@ -136,8 +136,16 @@ func (r *rings) close() error {
 	// The device must go first: this sets Disconnected and waits for the receive
 	// thread and outstanding NDIS packets before unlocking either ring.
 	if r.device != 0 {
-		if e := windows.CloseHandle(r.device); e != nil {
-			return e
+		// On PnP removal 0.14.1 closes the owner's handle from the kernel.
+		// Unregistration publishes MAXULONG only after all NDIS packets have
+		// returned and the receive thread has stopped. The numeric handle can
+		// already name an unrelated newly opened object: never close it again.
+		if r.send.load(4) != ^uint32(0) {
+			if e := windows.CloseHandle(r.device); e != nil {
+				if e != windows.ERROR_INVALID_HANDLE || r.send.load(4) != ^uint32(0) {
+					return e
+				}
+			}
 		}
 		r.device = 0
 	}
