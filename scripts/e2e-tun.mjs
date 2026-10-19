@@ -31,10 +31,12 @@ async function network(action, adapter) {
   let output = '', errors = '';
   child.stdout.on('data', (chunk) => { output += chunk; });
   child.stderr.on('data', (chunk) => { errors += chunk; });
-  const timer = setTimeout(() => child.kill(), 45_000);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; child.kill(); }, 45_000);
   try {
-    const [code] = await once(child, 'exit');
-    assert.equal(code, 0, `Network ${action}: ${errors}\n${output}`);
+    const [code, signal] = await once(child, 'exit');
+    const result = timedOut ? 'timed out after 45 seconds; PowerShell was killed' : `exited ${code}${signal ? ` (${signal})` : ''}`;
+    assert.equal(code, 0, `Network ${action} ${result}: ${errors}\n${output}`);
     return JSON.parse(output.replace(/^\uFEFF/, '').trim());
   } finally { clearTimeout(timer); }
 }
