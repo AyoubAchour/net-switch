@@ -218,6 +218,9 @@ func TestDualStackUDPOwnerAndReconciliation(t *testing.T) {
 	o := NewOwners()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
+	if err := o.Warm(ctx); err != nil {
+		t.Fatal(err)
+	}
 	owner, err := o.UDP(ctx, key)
 	if err != nil || owner.PID != uint32(os.Getpid()) || owner.Generation == "" {
 		t.Fatalf("dual-stack IPv4 owner: %+v %v", owner, err)

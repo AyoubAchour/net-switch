@@ -17,6 +17,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -309,6 +310,9 @@ type FaultAck struct {
 
 // Stats are the engine's counters and gauges (5.6, 5.9, 5.10).
 type Stats struct {
+	OwnerLookup                                                   json.RawMessage
+	TunKernel                                                     json.RawMessage
+	PeakFlows, PeakHandshakes, PeakUDP, PeakPerApp, PeakUDPPerApp int
 	// Gauges: what's in use now. TimeWait counts retained TIME_WAIT
 	// endpoints, which aren't live flows (5.9).
 	Flows, Handshakes, UDP, Unknown, UnknownUDP, TimeWait int64

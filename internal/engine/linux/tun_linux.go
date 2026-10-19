@@ -19,6 +19,7 @@ import (
 // specifies. We create the descriptor ourselves to reserve its exact index
 // in the ownership journal before TUNSETIFF.
 type Tun struct {
+	index            int
 	writeBuffer      [9010]byte
 	device           tun.Device
 	readMu, writeMu  sync.Mutex
@@ -81,14 +82,25 @@ func openTun(v tunObject) (*Tun, error) {
 	if err := netlink.LinkSetUp(l); err != nil {
 		return nil, err
 	}
-	t := &Tun{device: device, mtu: v.MTU, sizes: make([]int, device.BatchSize()), bufs: make([][]byte, device.BatchSize())}
+	t := &Tun{device: device, index: v.Index, mtu: v.MTU, sizes: make([]int, device.BatchSize()), bufs: make([][]byte, device.BatchSize())}
 	for i := range t.bufs {
 		t.bufs[i] = make([]byte, 65535)
 	}
 	ok = true
 	return t, nil
 }
-func (t *Tun) MTU() int     { return t.mtu }
+func (t *Tun) MTU() int { return t.mtu }
+func (t *Tun) Stats() any {
+	l, err := netlink.LinkByIndex(t.index)
+	if err != nil {
+		return map[string]string{"error": err.Error()}
+	}
+	s := l.Attrs().Statistics
+	if s == nil {
+		return nil
+	}
+	return map[string]uint64{"ingressPackets": s.TxPackets, "ingressDropped": s.TxDropped, "egressPackets": s.RxPackets, "egressDropped": s.RxDropped}
+}
 func (t *Tun) Close() error { return t.device.Close() }
 func (t *Tun) ReadPacket(ctx context.Context, out []byte) (int, error) {
 	t.readMu.Lock()

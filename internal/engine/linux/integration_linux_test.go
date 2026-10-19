@@ -191,6 +191,9 @@ func TestKernelPlatform(t *testing.T) {
 		if err := netlink.RouteAdd(&r); err != nil {
 			t.Fatal(err)
 		}
+		if _, found, err := (objectDriver{p.objects, "route"}).Inspect(ctx, routeFP(p.objects, r)); err != nil || !found {
+			t.Fatalf("recovery fixture must exist before our cleanup: %v %v", found, err)
+		}
 		recovered, err := New(ctx, dir)
 		if err != nil {
 			t.Fatal(err)

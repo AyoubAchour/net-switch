@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/apppath"
@@ -40,16 +41,83 @@ type fdWindow struct {
 	observed time.Time
 }
 type Owners struct {
-	mu             sync.Mutex
-	cgroups        map[uint64]string
-	recent         map[uint32][]uint32
-	cache          map[uint64]cachedHolders
-	inodes         map[uint32][]holder
-	windows        map[uint32]fdWindow
-	ambiguousPorts map[uint16]bool
+	warmed          bool
+	lookupErrors    [4]atomic.Uint64
+	lastLookupError atomic.Pointer[string]
+	mu              sync.Mutex
+	cgroups         map[uint64]string
+	recent          map[uint32][]uint32
+	cache           map[uint64]cachedHolders
+	inodes          map[uint32][]holder
+	windows         map[uint32]fdWindow
+	ambiguousPorts  map[uint16]bool
 	// Fault callbacks are assigned only by the acceptance build.
 	fault        func(context.Context) error
 	destroyFault func(context.Context, socketRow, func())
+}
+
+type lookupStats struct {
+	Timeout, Missing, Ambiguous, Other uint64
+	LastError                          string
+}
+
+func (o *Owners) Stats() any {
+	s := lookupStats{Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
+	if p := o.lastLookupError.Load(); p != nil {
+		s.LastError = *p
+	}
+	return s
+}
+func (o *Owners) recordError(err error) {
+	if err == nil {
+		return
+	}
+	i := 3
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded):
+		i = 0
+	case errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ENOENT):
+		i = 1
+	case errors.Is(err, platform.ErrAmbiguous):
+		i = 2
+	}
+	o.lookupErrors[i].Add(1)
+	text := err.Error()
+	if len(text) > 512 {
+		text = text[:512]
+	}
+	o.lastLookupError.Store(&text)
+}
+
+// Load the kernel's diagnostic handlers and the cgroup directory index before
+// capture. No socket owner is cached here: every admitted socket is still cold.
+func (o *Owners) Warm(ctx context.Context) error {
+	o.mu.Lock()
+	ready := o.warmed
+	o.mu.Unlock()
+	if ready {
+		return nil
+	}
+	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
+		for _, protocol := range []int{unix.IPPROTO_TCP, unix.IPPROTO_UDP} {
+			address := netip.IPv4Unspecified()
+			if family == unix.AF_INET6 {
+				address = netip.IPv6Unspecified()
+			}
+			endpoint := netip.AddrPortFrom(address, 65535)
+			if _, err := diag(ctx, family, protocol, endpoint, endpoint, false); err != nil && !errors.Is(err, unix.ENOENT) {
+				return fmt.Errorf("initialize socket diagnostics: %w", err)
+			}
+		}
+	}
+	_ = o.refreshCgroups(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	o.mu.Lock()
+	o.warmed = true
+	o.mu.Unlock()
+	return nil
 }
 
 func NewOwners() *Owners {
@@ -61,7 +129,8 @@ func NewOwners() *Owners {
 func lookupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, 8*time.Millisecond)
 }
-func (o *Owners) TCP(ctx context.Context, t platform.Tuple) (platform.Owner, error) {
+func (o *Owners) TCP(ctx context.Context, t platform.Tuple) (owner platform.Owner, err error) {
+	defer func() { o.recordError(err) }()
 	if o.fault != nil {
 		if err := o.fault(ctx); err != nil {
 			return platform.Owner{}, err
@@ -77,16 +146,21 @@ func (o *Owners) TCP(ctx context.Context, t platform.Tuple) (platform.Owner, err
 		rows, err = diagDump(ctx, familyOf(t.Source.Addr()), unix.IPPROTO_TCP, t.Source)
 	}
 	if err != nil {
-		return platform.Owner{}, err
+		return platform.Owner{}, fmt.Errorf("TCP socket query: %w", err)
 	}
 	for _, r := range rows {
 		if r.local == t.Source && r.remote == t.Destination {
-			return o.holders(ctx, r)
+			owner, err = o.holders(ctx, r)
+			if err != nil {
+				err = fmt.Errorf("TCP holder scan: %w", err)
+			}
+			return owner, err
 		}
 	}
 	return platform.Owner{}, os.ErrNotExist
 }
-func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (platform.Owner, error) {
+func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (owner platform.Owner, err error) {
+	defer func() { o.recordError(err) }()
 	unknown := false
 	if o.fault != nil {
 		if err := o.fault(ctx); err != nil {
@@ -101,18 +175,18 @@ func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (platform.Owner
 	// Exact lookup is useful for the common wildcard socket. A port-filtered
 	// dump also detects SO_REUSEPORT ambiguity instead of accepting the arbitrary
 	// socket that the kernel's inbound hash selected.
-	_, err := diag(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source, netip.AddrPort{}, false)
+	_, err = diag(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source, netip.AddrPort{}, false)
 	if err != nil && !errors.Is(err, unix.ENOENT) {
-		return platform.Owner{}, err
+		return platform.Owner{}, fmt.Errorf("UDP exact query: %w", err)
 	}
 	rows, err := diagDump(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source)
 	if err != nil {
-		return platform.Owner{}, err
+		return platform.Owner{}, fmt.Errorf("UDP family dump: %w", err)
 	}
 	if source.Addr().Is4() {
 		v6, err := diagDump(ctx, unix.AF_INET6, unix.IPPROTO_UDP, source)
 		if err != nil {
-			return platform.Owner{}, err
+			return platform.Owner{}, fmt.Errorf("UDP dual-stack dump: %w", err)
 		}
 		rows = append(rows, v6...)
 	}
@@ -129,9 +203,10 @@ func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (platform.Owner
 	if unknown {
 		return platform.Owner{Generation: r.generation()}, nil
 	}
-	owner, err := o.holders(ctx, r)
+	owner, err = o.holders(ctx, r)
 	if err != nil {
 		owner = platform.Owner{Generation: r.generation()}
+		err = fmt.Errorf("UDP holder scan: %w", err)
 	}
 	return owner, err
 }
@@ -208,33 +283,9 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 	dir := o.cgroups[id]
 	o.mu.Unlock()
 	if dir == "" {
-		found := map[uint64]string{}
-		_ = filepath.WalkDir("/sys/fs/cgroup", func(path string, e fs.DirEntry, err error) error {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			if err != nil {
-				return fs.SkipDir
-			}
-			if !e.IsDir() {
-				return nil
-			}
-			var s unix.Stat_t
-			if unix.Stat(path, &s) == nil {
-				found[s.Ino] = path
-				if s.Ino == id {
-					dir = path
-				}
-			}
-			return nil
-		})
+		_ = o.refreshCgroups(ctx)
 		o.mu.Lock()
-		if len(o.cgroups) > 8192 {
-			clear(o.cgroups)
-		}
-		for id, path := range found {
-			o.cgroups[id] = path
-		}
+		dir = o.cgroups[id]
 		o.mu.Unlock()
 	}
 	if dir == "" {
@@ -254,6 +305,35 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 	slices.Sort(pids)
 	slices.Reverse(pids)
 	return pids
+}
+
+func (o *Owners) refreshCgroups(ctx context.Context) error {
+	found := map[uint64]string{}
+	err := filepath.WalkDir("/sys/fs/cgroup", func(path string, e fs.DirEntry, err error) error {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return fs.SkipDir
+		}
+		if !e.IsDir() {
+			return nil
+		}
+		var st unix.Stat_t
+		if unix.Stat(path, &st) == nil {
+			found[st.Ino] = path
+		}
+		return nil
+	})
+	o.mu.Lock()
+	if len(o.cgroups) > 8192 {
+		clear(o.cgroups)
+	}
+	for id, path := range found {
+		o.cgroups[id] = path
+	}
+	o.mu.Unlock()
+	return err
 }
 
 func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, error) {
@@ -328,6 +408,8 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return nil
 		}
 		defer f.Close()
+		var metadata unix.Stat_t
+		canIndex := (unix.Fstat(int(f.Fd()), &metadata) == nil && metadata.Uid == r.uid) || slices.Contains(recent, pid)
 		o.mu.Lock()
 		if len(o.windows) > 4096 {
 			clear(o.windows)
@@ -374,7 +456,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					continue
 				}
 				h := holder{pid, start, fd}
-				remember[uint32(inode)] = h
+				if canIndex || uint32(inode) == r.inode {
+					remember[uint32(inode)] = h
+				}
 				if uint32(inode) == r.inode {
 					if err := accept(h); err != nil {
 						return err
@@ -391,7 +475,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				current.observed = time.Now()
 				o.windows[pid] = current
 			}
-			if len(o.inodes) > 65536 {
+			if len(o.inodes) > 131072 {
 				clear(o.inodes)
 			}
 			for inode, h := range remember {
