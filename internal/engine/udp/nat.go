@@ -40,8 +40,8 @@ type session struct {
 	owner           platform.Owner
 	validated, last time.Time
 	active, closed  bool
-	rejected bool
-	rejectApp string
+	rejected        bool
+	rejectApp       string
 	socket          platform.UDPConn
 	wake            chan struct{}
 	done            chan struct{}
@@ -147,7 +147,12 @@ func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket f
 	if s.rejected {
 		app := s.rejectApp
 		s.mu.Unlock()
-		if n.control.AllowReject(app) { _, raw, _ := copyPacket(); n.out.Send(packet.Unreachable(raw, 0)) } else { n.Dropped.Add(1) }
+		if n.control.AllowReject(app) {
+			_, raw, _ := copyPacket()
+			n.out.Send(packet.Unreachable(raw, 0))
+		} else {
+			n.Dropped.Add(1)
+		}
 		return
 	}
 	// Reserve all owned copies, including the quoted packet used for errors.
@@ -244,6 +249,9 @@ func (s *session) run() {
 	}
 	socket, err := n.dialer.OpenUDP(ctx, decision.Line, s.source.Addr().Is6())
 	if err != nil {
+		if observer, ok := n.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil {
+			observer.LineError(decision.Line, err)
+		}
 		s.rejectPending(owner.AppID)
 		return
 	}
@@ -326,6 +334,10 @@ func (s *session) read(ctx context.Context) {
 	n := s.n
 	defer s.close()
 	buf := make([]byte, n.mtu+1)
+	headerSize := 48
+	if s.source.Addr().Is4() {
+		headerSize = 28
+	}
 	for {
 		size, remote, err := s.socket.ReadFrom(buf)
 		if err != nil {
@@ -338,7 +350,7 @@ func (s *session) read(ctx context.Context) {
 			n.Dropped.Add(1)
 			continue
 		}
-		if size < 0 || size > len(buf) || size+48 > n.mtu {
+		if size < 0 || size > len(buf) || size+headerSize > n.mtu {
 			n.Oversize.Add(1)
 			continue
 		}

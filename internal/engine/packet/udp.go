@@ -9,7 +9,12 @@ func UDP(src, dst netip.AddrPort, payload []byte) []byte {
 	if len(payload) > 65507 {
 		return nil
 	}
-	b := make([]byte, 8+len(payload))
+	// Build directly in the final allocation: the pending-byte reservation
+	// covers a payload copy and this packet, with no temporary third copy.
+	raw, b := allocateIP(src.Addr(), dst.Addr(), 17, 8+len(payload))
+	if raw == nil {
+		return nil
+	}
 	binary.BigEndian.PutUint16(b, src.Port())
 	binary.BigEndian.PutUint16(b[2:], dst.Port())
 	binary.BigEndian.PutUint16(b[4:], uint16(len(b)))
@@ -19,7 +24,7 @@ func UDP(src, dst netip.AddrPort, payload []byte) []byte {
 		cs = 65535
 	}
 	binary.BigEndian.PutUint16(b[6:], cs)
-	return IP(src.Addr(), dst.Addr(), 17, b)
+	return raw
 }
 
 // IPHeader accepts a truncated quotation only when quoted is true. Fragment
