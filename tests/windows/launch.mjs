@@ -55,7 +55,7 @@ export async function startServer(options, dataDir, output) {
   try {
     session = await until(async () => {
       if (spawnError) throw spawnError;
-      if (child.exitCode !== null) throw new Error(`Server exited ${child.exitCode}`);
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Server exited ${child.exitCode ?? child.signalCode}`);
       const candidate = JSON.parse(await readFile(path.join(dataDir, 'server.json'), 'utf8'));
       // A crash may leave a stale session file from the preceding run.
       if (candidate.pid !== child.pid) return null;
@@ -73,15 +73,15 @@ export async function startServer(options, dataDir, output) {
     return answer;
   };
   const on = () => until(async () => {
-    assert.equal(child.exitCode, null, 'Server died');
+    assert(child.exitCode === null && child.signalCode === null, 'Server died');
     const state = await api('state');
     if (state.routing.status === 'error') throw new Error(JSON.stringify(state.routing));
     return state.routing.status === 'on' && state;
   }, 'routing on', 120_000);
   const quit = async () => {
-    if (child.exitCode !== null) return;
+    if (child.exitCode !== null || child.signalCode !== null) return;
     await api('quit', {});
-    await until(() => child.exitCode !== null, 'server exit', 30_000);
+    await until(() => child.exitCode !== null || child.signalCode !== null, 'server exit', 30_000);
     assert.equal(child.exitCode, 0, 'Server quit failed');
   };
   return { child, api, on, quit };

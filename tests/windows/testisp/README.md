@@ -15,6 +15,12 @@ gVisor terminates its TCP and UDP traffic. Every relay socket binds both the rea
 uplink address and `IP_UNICAST_IF`; IPv4 uses the network-byte-order interface
 index required by Winsock. A route chosen by metric alone is never sufficient.
 
+The acceptance extension uses one unconnected UDP socket per source address and
+port. It preserves mappings across destinations and relays unsolicited replies.
+IPv4/IPv6 reply construction and fragmentation have pure unit tests. Controlled
+target translation is configured over the control API; it never translates
+arbitrary public destinations. See the [acceptance limits](../README.md).
+
 The loopback control API exposes packet, byte, connection and destination counts
 for TestISP and its upstream relay. It supports `running`, `pause` (stop reading
 the adapter), and `drop` (drain and discard packets). The proof also withdraws and

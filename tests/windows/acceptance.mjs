@@ -25,6 +25,13 @@ let main, second;
 const pending = new Map();
 let serial = 0;
 
+// Independent probes keep reporting after a failure. The job still fails, and
+// tests needing that baseline are explicitly blocked instead of counted as passes.
+async function observe(name, label, fn) {
+  try { return await report.test(name, label, fn); }
+  catch { process.exitCode = 1; return undefined; }
+}
+
 function client(command, args = {}, timeout = 120_000) {
   return new Promise((resolve, reject) => {
     const id = ++serial;
@@ -159,9 +166,17 @@ try {
     assert(result.unsolicited, `The gateway lost the third, uncontacted STUN sender: ${JSON.stringify({ result, stats: await harness.control('stats'), target: responder.seen.slice(-5) })}`);
     return result;
   });
-  const directReuse = await report.test('controlled port reuse baseline', 'parity', async () => {
+  const directReuse = await observe('physical controlled port reuse baseline', 'parity', async () => {
+    const samples = await client('reuse', { target: { ...responder.direct, source: harness.uplink.address }, count: 20 });
+    assert(samples.length === 20 && samples.every((sample) => sample.outcome === 'closed'), `Physical reuse failed: ${JSON.stringify(samples)}`);
+    return samples;
+  });
+  await observe('gateway controlled port reuse baseline', 'parity', async () => {
     const samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 20 });
-    assert(samples.length === 20 && samples.every((sample) => sample.outcome === 'closed'), `Direct reuse failed: ${JSON.stringify(samples)}`);
+    const failed = samples.find((sample) => sample.outcome !== 'closed');
+    let sockets;
+    if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection -LocalPort ${failed.port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess) | ConvertTo-Json -Compress`]);
+    assert(samples.length === 20 && !failed, `Gateway reuse failed: ${JSON.stringify({ samples, sockets })}`);
     return samples;
   });
   await report.test('controlled ICMP v4/v6 baselines', 'parity', async () => ({
@@ -233,15 +248,15 @@ try {
     await client('close'); return { response, byLine, before, after };
   });
   for (const size of [64, 1200, 1800, 8192]) {
-    await report.test(`UDP payload and fragmentation through TUN: ${size} bytes`, 'parity', () => client('udp', { target: responder.virtual, size }));
+    await observe(`UDP payload and fragmentation through TUN: ${size} bytes`, 'parity', () => client('udp', { target: responder.virtual, size }));
   }
-  await report.test('STUN two-server mapping through TUN', 'parity', async () => {
+  await observe('STUN two-server mapping through TUN', 'parity', async () => {
     const result = await client('udp', { target: responder.virtual, stun: true });
     assert.equal(new Set(result.mappings.map((item) => item.port)).size, 1, JSON.stringify(result));
     assert(result.unsolicited, 'The app lost the third, uncontacted STUN sender');
     return result;
   });
-  await report.test('real QUIC v1 through TUN has the right payload hash', 'parity', async () => {
+  await observe('real QUIC v1 through TUN has the right payload hash', 'parity', async () => {
     await server.api('app-line', { path: quicExe, line: second.id }); await delay(500);
     const before = await harness.control('stats');
     const response = await quicProbe(responder.virtual.host);
@@ -249,23 +264,25 @@ try {
     assert(after.testisp.bytesIn > before.testisp.bytesIn && after.testisp.bytesOut > before.testisp.bytesOut);
     return { response, before, after };
   });
-  await report.test('controlled IPv6 TCP and UDP through TUN', 'parity', async () => {
+  await observe('controlled IPv6 TCP and UDP through TUN', 'parity', async () => {
     assert.equal((await server.api('state')).routing.ipv6, true, 'IPv6 capture was not enabled');
     const tcp = await client('open', { target: ipv6Target });
     const byLine = await counts(1); assert(byLine[second.id] >= 1); await client('close');
     const udp = await client('udp', { target: ipv6Target }); return { tcp, udp, byLine };
   });
-  await report.test('ICMP v4/v6 and 1400-byte MTU probes through TUN', 'parity', async () => {
+  await observe('ICMP v4/v6 and 1400-byte MTU probes through TUN', 'parity', async () => {
     await server.api('lines/order', { ids: [second.id, main.id] }); await server.on();
-    const before = await harness.control('stats');
-    const result = { v4: await ping(responder.virtual.host), v6: await ping(ipv6Target.host),
-      mtu4: await ping(responder.virtual.host, undefined, 1400, true), mtu6: await ping(ipv6Target.host, undefined, 1400) };
-    const after = await harness.control('stats');
-    for (const host of [responder.virtual.host, ipv6Target.host]) assert((after.echoRequests?.[host] ?? 0) >= (before.echoRequests?.[host] ?? 0) + 2, `Echo replies for ${host} did not reach the controlled path`);
-    await server.api('lines/order', { ids: [main.id, second.id] }); await server.on();
-    return { result, before, after };
+    try {
+      const before = await harness.control('stats');
+      const result = { v4: await ping(responder.virtual.host), v6: await ping(ipv6Target.host),
+        mtu4: await ping(responder.virtual.host, undefined, 1400, true), mtu6: await ping(ipv6Target.host, undefined, 1400) };
+      const after = await harness.control('stats');
+      for (const host of [responder.virtual.host, ipv6Target.host]) assert((after.echoRequests?.[host] ?? 0) >= (before.echoRequests?.[host] ?? 0) + 2, `Echo replies for ${host} did not reach the controlled path`);
+      return { result, before, after };
+    } finally { await server.api('lines/order', { ids: [main.id, second.id] }); await server.on(); }
   });
-  for (const gap of [0, 10, 100, 500]) {
+  if (!directReuse) report.results.push({ name: 'freeze gate', label: 'baseline-defect', status: 'blocked', reason: 'Direct port reuse baseline failed; no engine conclusion is possible.' });
+  for (const gap of directReuse ? [0, 10, 100, 500] : []) {
     await report.test(`freeze gate: ${gap} ms port reuse`, 'baseline-defect', async () => {
       const samples = await client('reuse', { target: responder.virtual, count: gap ? 10 : 1000, gap });
       const failure = samples.find((sample) => sample.outcome !== 'closed' || sample.ms > 100 + gap);
@@ -288,7 +305,7 @@ try {
     const samples = await client('reuse', { target: responder.virtual, count: 1, length: 100_000_000 });
     assert.equal(samples[0]?.outcome, 'closed', JSON.stringify(samples)); return samples;
   });
-  await report.test('freeze gate: reuse after 100 MB transfer', 'baseline-defect', async () => {
+  if (directReuse) await report.test('freeze gate: reuse after 100 MB transfer', 'baseline-defect', async () => {
     const samples = await client('reuse', { target: responder.virtual, count: 1, reusePort: large[0].port });
     if (samples[0].outcome === 'timeout') throw new BaselineDefect('Port stalls after a verified 100 MB transfer', samples);
     assert.equal(samples[0].outcome, 'closed'); return samples;
@@ -354,7 +371,7 @@ try {
     server.child.kill('SIGKILL');
     // Engine exit is independently observed. Never confuse killing the whole
     // process tree with the app cleaning up after one component crashes.
-    await until(() => server.child.exitCode !== null, 'control process death');
+    await until(() => server.child.exitCode !== null || server.child.signalCode !== null, 'control process death');
     try { process.kill(engine.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
     const state = await clean();
     const direct = await harness.probe(harness.uplink);
@@ -373,9 +390,13 @@ try {
   if (worker?.exitCode === null && worker.connected) worker.disconnect();
   if (quicServer?.exitCode === null) quicServer.kill();
   if (server?.child.exitCode === null) try { await server.quit(); } catch (error) { console.error(error); process.exitCode = 1; }
+  await observe('final NetSwitch adapter, route and firewall cleanup', 'parity', clean);
   if (harness) try { await harness.close(); } catch (error) { console.error(error); process.exitCode = 1; }
   try { await targetFirewall('clean'); } catch (error) { console.error(error); process.exitCode = 1; }
   if (responder) { await writeFile(path.join(dir, 'target-observations.json'), JSON.stringify(responder.seen, null, 2)); await responder.close(); }
   output.end();
   await report.save(path.join(dir, 'report.json'));
+  if (options.profile === 'v1' && report.results.some((result) => ['deferred', 'blocked'].includes(result.status))) {
+    console.error('The v1 profile cannot pass while required gates are deferred or blocked.'); process.exitCode = 1;
+  }
 }
