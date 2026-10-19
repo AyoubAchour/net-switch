@@ -120,7 +120,7 @@ jobs:
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
       - name: Summarize the requested CPU profiles
         if: ${{ always() && inputs.profile }}
-        run: find "$RUNNER_TEMP/acceptance" -name 'cpu-*.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -nodecount=25 "$RUNNER_TEMP/netswitch-engine" {} \;
+        run: find "$RUNNER_TEMP/acceptance" -name 'cpu-*.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodecount=35 "$RUNNER_TEMP/netswitch-engine" {} \;
       - name: Make root-produced evidence readable by the artifact uploader
         if: ${{ always() }}
         run: |

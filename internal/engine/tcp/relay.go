@@ -27,6 +27,14 @@ func Splice(ctx context.Context, app halfConn, remote platform.TCPConn, count fu
 	copyOne := func(dst, src halfConn, add func(uint64)) {
 		var err error
 		for {
+			// An idle read must not retain a 32 KiB pool buffer. At the flow
+			// limit, two blocked reads per flow would retain 4 GiB and make
+			// the 512 MiB GC target spend all its time scanning live objects.
+			if ready, ok := src.(interface{ WaitReadable(context.Context) error }); ok {
+				if err = ready.WaitReadable(ctx); err != nil {
+					break
+				}
+			}
 			b := relayBuffers.Get().(*[]byte)
 			n, readErr := src.Read(*b)
 			if n > 0 {
