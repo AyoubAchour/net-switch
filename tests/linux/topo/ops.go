@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"strconv"
+	"strings"
 
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
 )
@@ -88,16 +89,47 @@ func (n *Net) ClearNetem(ctx context.Context, id engine.LineID) error {
 	return nil
 }
 
-// SetUplinkMTU shrinks the MTU of the line's uplink, one hop past the PC, so
-// the PC's own interface stays at 1500 and path MTU discovery has to work.
-func (n *Net) SetUplinkMTU(ctx context.Context, id engine.LineID, mtu int) error {
+// SetPathMTU makes the line's router forward at most mtu bytes per packet,
+// both ways, IPv4 and IPv6. Every link stays at 1500, so neither the PC nor
+// the servers see the limit on their own interfaces: TCP can't avoid it with
+// its MSS, and both ends must discover it from the router's ICMP
+// "fragmentation needed" / "packet too big", as across a real smaller hop.
+// (The kernel's pmtu.sh selftest keeps the small MTU on a router for the same
+// reason. IPv6 forwarding honours a route's MTU only when it's locked.)
+func (n *Net) SetPathMTU(ctx context.Context, id engine.LineID, mtu int) error {
 	l := Line(id)
-	value := strconv.Itoa(mtu)
-	if _, err := n.R.IP(ctx, l.ISP, "link", "set", "wan", "mtu", value); err != nil {
-		return err
+	lock := "mtu lock " + strconv.Itoa(mtu)
+	return n.R.Batch(ctx, l.ISP, []string{
+		"route replace default via " + l.Core4.Addr().String() + " " + lock,
+		"route replace default via " + l.Core6.Addr().String() + " " + lock,
+		"route replace " + l.Addr4.Masked().String() + " dev lan proto kernel scope link src " + l.GW4.String() + " " + lock,
+		"route replace " + l.Addr6.Masked().String() + " dev lan proto kernel metric 256 " + lock,
+	})
+}
+
+// PathMTU reads back the MTUs the line's router forwards with (route -> mtu).
+func (n *Net) PathMTU(ctx context.Context, id engine.LineID) (map[string]string, error) {
+	l := Line(id)
+	out := map[string]string{}
+	for _, family := range []string{"-4", "-6"} {
+		text, err := n.R.IP(ctx, l.ISP, family, "route", "show")
+		if err != nil {
+			return nil, err
+		}
+		for _, line := range strings.Split(text, "\n") {
+			fields := strings.Fields(line)
+			for i, f := range fields {
+				if f == "mtu" && i+1 < len(fields) {
+					v := fields[i+1]
+					if v == "lock" && i+2 < len(fields) {
+						v = fields[i+2]
+					}
+					out[fields[0]+" "+family] = v
+				}
+			}
+		}
 	}
-	_, err := n.R.IP(ctx, INET, "link", "set", "up-"+string(id), "mtu", value)
-	return err
+	return out, nil
 }
 
 // ChangeAddress moves the PC's IPv4 address on a line to another in the same

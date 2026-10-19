@@ -224,9 +224,27 @@ func defaultRouteRemoved(e *Env) {
 	if err := e.Net.DelDefault(e.Ctx(), "b"); err != nil {
 		e.T.Fatalf("%v", err)
 	}
-	// Give the control side (the engine's reconciler in 1.0, the driver's
-	// emulation on the baseline) a moment to see the change.
-	e.Sleep(1500 * time.Millisecond)
+	// Wait until no table on the PC still has a default route through b: the
+	// control side (1.0's reconciler, the driver's emulation on the baseline)
+	// has seen the change.
+	iface := topo.Line("b").Iface
+	deadline := time.Now().Add(5 * time.Second)
+	left := ""
+	for {
+		left = ""
+		for _, family := range []string{"-4", "-6"} {
+			out, err := e.Net.R.IP(e.Ctx(), topo.DUT, family, "route", "show", "table", "all", "default", "dev", iface)
+			if err != nil {
+				e.T.Fatalf("%v", err)
+			}
+			left += strings.TrimSpace(out)
+		}
+		if left == "" || time.Now().After(deadline) {
+			break
+		}
+		e.Sleep(100 * time.Millisecond)
+	}
+	e.T.Require(left == "", "within 5 s no routing table has a default route through b any more (%s)", left)
 	from := time.Now().UnixMilli()
 	r := e.TCP("bravo", AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "3", "--timeout", "8000")
 	to := time.Now().UnixMilli()
@@ -304,9 +322,10 @@ func addressChange(e *Env) {
 // still running, so a case acts on a flow that really exists. (Its answers
 // are checked from its result afterwards.)
 func (e *Env) streamUp(name string, bg *Bg) {
-	_, ok := e.WaitFlow(3*time.Second, func(f engine.Flow) bool { return f.App == AppPath(name) && f.Destination.Port() == wire.PortStream })
-	e.T.Require(ok, "the engine lists %s's stream", name)
-	e.Sleep(300 * time.Millisecond)
+	_, ok := e.WaitFlow(3*time.Second, func(f engine.Flow) bool {
+		return f.App == AppPath(name) && f.Destination.Port() == wire.PortStream && f.Down > 0
+	})
+	e.T.Require(ok, "the engine lists %s's stream, with answers flowing", name)
 	e.T.Require(bg.Running(), "%s's stream is still running", name)
 }
 
@@ -508,16 +527,40 @@ func netemLine(e *Env) {
 	e.T.Check(u.Received >= 28 && lines["b"] == u.Received, "bravo UDP over the lossy line: %d of %d answered, all on b (lines %s)", u.Received, u.Sent, Describe(lines))
 }
 
-// reducedPath shrinks line c's uplink and proves the setting took.
+// reducedPath makes line c's router a smaller hop and proves the setting took.
 func (e *Env) reducedPath(mtu int) {
-	if err := e.Net.SetUplinkMTU(e.Ctx(), "c", mtu); err != nil {
+	if err := e.Net.SetPathMTU(e.Ctx(), "c", mtu); err != nil {
 		e.T.Fatalf("mtu: %v", err)
 	}
-	out, err := e.Net.R.IP(e.Ctx(), topo.Line("c").ISP, "link", "show", "wan")
+	routes, err := e.Net.PathMTU(e.Ctx(), "c")
 	if err != nil {
 		e.T.Fatalf("%v", err)
 	}
-	e.T.Require(strings.Contains(out, " mtu "+strconv.Itoa(mtu)+" "), "line c's uplink MTU reads %d", mtu)
+	want := strconv.Itoa(mtu)
+	good := 0
+	for _, v := range routes {
+		if v == want {
+			good++
+		}
+	}
+	e.T.Require(len(routes) == 4 && good == 4, "line c's router forwards at most %d bytes both ways, IPv4 and IPv6 (%v)", mtu, routes)
+}
+
+// learnedOnBothEnds checks the PC and the server each learned the smaller
+// path towards the other, which only happens if traffic met it.
+func (e *Env) learnedOnBothEnds(mtu int) {
+	c := topo.Line("c")
+	for _, pair := range []struct{ server, pc netip.Addr }{{topo.Server4, c.Addr4.Addr()}, {topo.Server6, c.Addr6.Addr()}} {
+		pc := e.LearnedMTU(pair.server.String(), "c")
+		server := 0
+		if out, err := e.Net.R.IP(e.Ctx(), topo.INET, "route", "get", pair.pc.String(), "from", pair.server.String()); err == nil {
+			if m := mtuPattern.FindStringSubmatch(out); m != nil {
+				server, _ = strconv.Atoi(m[1])
+			}
+		}
+		e.T.Check(pc > 0 && pc <= mtu && server > 0 && server <= mtu,
+			"both ends learned the %d-byte path: the PC towards %s (%d), the server towards %s (%d)", mtu, pair.server, pc, pair.pc, server)
+	}
 }
 
 func smallMTU(e *Env, mtu int) {
@@ -561,11 +604,8 @@ func smallMTU(e *Env, mtu int) {
 	dns := Select(recs, func(r inet.Record) bool { return r.Kind == "dns" && strings.HasSuffix(r.Data, "/16") })
 	e.T.Check(len(bulk) == 4 && RecordLines(bulk)["c"] == 4, "the servers saw all 4 transfers arrive over line c (%d transfers, lines %s)", len(bulk), Describe(RecordLines(bulk)))
 	e.T.Check(len(dns) == 3 && RecordLines(dns)["c"] == 3, "the DNS server saw the UDP and TCP queries arrive over line c (%d queries, lines %s)", len(dns), Describe(RecordLines(dns)))
-	// The kernel had to learn the smaller path: proof the transfers met it.
-	for _, server := range []netip.Addr{topo.Server4, topo.Server6} {
-		learned := e.LearnedMTU(server.String(), "c")
-		e.T.Check(learned > 0 && learned <= mtu, "the PC learned a path MTU of %d towards %s over line c (want at most %d)", learned, server, mtu)
-	}
+	// Proof the transfers met the smaller hop rather than going round it.
+	e.learnedOnBothEnds(mtu)
 }
 
 func bigUDP(e *Env) {
@@ -580,14 +620,15 @@ func bigUDP(e *Env) {
 	var got []string
 	ok := true
 	for _, server := range []netip.Addr{topo.Server4, topo.Server6} {
+		// Warm-up: IPv6 only fragments at the source, so each end loses its
+		// first big datagram while it learns the path. Then every one counts.
+		e.UDP("charlie", AsUser, "--to", To(server, wire.PortUDPEcho), "--count", "3", "--size", "1400", "--interval", "200")
 		u := e.UDP("charlie", AsUser, "--to", To(server, wire.PortUDPEcho), "--count", "6", "--size", "1400", "--interval", "200")
 		lines := Lines(u.Seen)
-		// The first may be lost while the path MTU is learned (IPv6 fragments
-		// only at the source); after that, every one must get through.
-		ok = ok && u.Received >= 5 && lines["c"] == u.Received
+		ok = ok && u.Received == u.Sent && lines["c"] == u.Received
 		got = append(got, fmt.Sprintf("%s: %d of %d answered, lines %s, errors %v", server, u.Received, u.Sent, Describe(lines), u.SendErrors))
 	}
-	e.T.Expect(ok, "1400-byte datagrams without DF over a 1280-byte path get through, all on c (%s)", strings.Join(got, "; "))
+	e.T.Expect(ok, "1400-byte datagrams without DF over a 1280-byte path all get through once the path is known, all on c (%s)", strings.Join(got, "; "))
 }
 
 func dfTooBig(e *Env) {

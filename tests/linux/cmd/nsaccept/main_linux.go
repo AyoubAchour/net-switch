@@ -267,8 +267,13 @@ func run(o options, report *harness.Report) (int, error) {
 		return 1, fmt.Errorf("namespaces from an earlier run are still there: %v", left)
 	}
 
+	cgroups, err := delegatedCgroup()
+	if err != nil {
+		return 1, err
+	}
+	report.System["cgroup"] = cgroups
 	fixtures := &suite.Fixtures{}
-	cases := suite.Cases(suite.Config{Self: self, Driver: drv, Users: users, Fixtures: fixtures})
+	cases := suite.Cases(suite.Config{Self: self, Driver: drv, Users: users, Fixtures: fixtures, CgroupRoot: cgroups})
 	if err := harness.Validate(cases); err != nil {
 		return 1, err
 	}
@@ -383,6 +388,45 @@ func utsString[T int8 | uint8](b []T) string {
 		s.WriteByte(byte(c))
 	}
 	return s.String()
+}
+
+// delegatedCgroup returns the cgroup v2 folder the cases may create cgroups
+// in. Systemd owns the cgroup tree; a program may only create cgroups in a
+// subtree delegated to it (systemd.io/CGROUP_DELEGATION). So the harness must
+// run in a delegated scope (systemd-run --scope -p Delegate=yes), and moves
+// itself into a "harness" leaf, since a cgroup with children can't also hold
+// processes.
+func delegatedCgroup() (string, error) {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return "", err
+	}
+	own := ""
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if p, ok := strings.CutPrefix(line, "0::"); ok {
+			own = p
+		}
+	}
+	if own == "" {
+		return "", errors.New("no cgroup v2 membership in /proc/self/cgroup")
+	}
+	if filepath.Base(own) == "harness" {
+		own = filepath.Dir(own)
+	}
+	unit := filepath.Base(own)
+	out, err := exec.Command("systemctl", "show", "--property=Delegate", "--value", unit).Output()
+	if err != nil || strings.TrimSpace(string(out)) != "yes" {
+		return "", fmt.Errorf("the harness's cgroup %s isn't delegated to it (Delegate=%q): run it with systemd-run --scope -p Delegate=yes", own, strings.TrimSpace(string(out)))
+	}
+	root := filepath.Join("/sys/fs/cgroup", own)
+	leaf := filepath.Join(root, "harness")
+	if err := os.MkdirAll(leaf, 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(leaf, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0); err != nil {
+		return "", fmt.Errorf("moving the harness into %s: %w", leaf, err)
+	}
+	return root, nil
 }
 
 // prepareUsers checks the desktop user and makes the second user.

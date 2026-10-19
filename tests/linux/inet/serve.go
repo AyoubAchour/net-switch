@@ -311,6 +311,12 @@ func serveUDP(addr netip.AddrPort, handle func(c *net.UDPConn, src netip.AddrPor
 	var serr error
 	if err := raw.Control(func(fd uintptr) {
 		serr = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUFFORCE, 4<<20)
+		if serr == nil && addr.Addr().Is4() {
+			// Replies without DF, as DNS servers send them: a big answer is
+			// fragmented on a smaller path instead of lost while this end
+			// learns the path MTU. (10, 0: IP_MTU_DISCOVER, IP_PMTUDISC_DONT.)
+			serr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, 10, 0)
+		}
 	}); err != nil || serr != nil {
 		return fmt.Errorf("receive buffer for %s: %v %v", addr, err, serr)
 	}

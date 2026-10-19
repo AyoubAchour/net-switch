@@ -32,7 +32,7 @@ const (
 func init() { register(50, addLookup) }
 
 func addLookup(r *registry) {
-	const slow = "sing-box scans every open file of the socket's user on each new connection, about 3 µs per file"
+	const slow = "sing-box scans every open file of the socket's user on each new connection (about 3 µs per file), and now and then misses the owner"
 	r.defect("lookup.gate-terminal", "Owner lookup with 10,000 open files, from a plain terminal: p95 under 10 ms, owner found for 99.5%", slow, "5.6", 4*time.Minute,
 		func(e *Env) { lookupGate(e, false) })
 	r.defect("lookup.gate-app-scope", "Owner lookup with 10,000 open files, app in its own scope: p95 under 10 ms, owner found for 99.5%", slow, "5.6", 4*time.Minute,
@@ -98,13 +98,17 @@ func lookupGate(e *Env, scoped bool) {
 	}
 	holder.Stop()
 
-	for _, p := range phases {
-		found := float64(Lines(p.r.Seen)["b"]) / float64(gateConnections)
-		e.T.Check(found >= gateFound, "owner found (connection on bravo's line b, as the servers saw it) for %.1f%% of %d cold connections %s, with %d files open (gate %.1f%%)",
-			100*found, gateConnections, p.label, gateFiles, 100*gateFound)
-	}
+	// Section 5.6's gate is both numbers, per phase: owner found (the
+	// connection on bravo's line b, as the servers saw it) for 99.5%, and
+	// p95 lookup under 10 ms. Completing the connections is a prerequisite.
 	var verdicts []string
 	ok := true
+	for _, p := range phases {
+		e.T.Check(p.r.OK == gateConnections, "all %d cold connections %s completed (%d; errors %v)", gateConnections, p.label, p.r.OK, p.r.Errors)
+		found := float64(Lines(p.r.Seen)["b"]) / float64(gateConnections)
+		ok = ok && found >= gateFound
+		verdicts = append(verdicts, fmt.Sprintf("%s: owner found for %.1f%%", p.label, 100*found))
+	}
 	for _, p := range phases {
 		if session != nil {
 			// The engine's own measurements, for exactly this phase.
@@ -121,7 +125,8 @@ func lookupGate(e *Env, scoped bool) {
 		ok = ok && extra < gateLatencyMS
 		verdicts = append(verdicts, fmt.Sprintf("%s: estimated %.2f ms (setup p95 %.2f minus %.2f without the files)", p.label, extra, p.r.Connect.P95, control.r.Connect.P50))
 	}
-	e.T.Expect(ok, "p95 owner lookup with %d open files stays under %.0f ms in each phase (%s)", gateFiles, gateLatencyMS, strings.Join(verdicts, "; "))
+	e.T.Expect(ok, "with %d open files, each phase finds the owner for at least %.1f%% and keeps p95 lookup under %.0f ms (%s)",
+		gateFiles, 100*gateFound, gateLatencyMS, strings.Join(verdicts, "; "))
 }
 
 func forkExec(e *Env) {

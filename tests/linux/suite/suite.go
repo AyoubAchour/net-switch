@@ -53,6 +53,9 @@ type Config struct {
 	Users  Users
 	// Fixtures are filled in by Provision before the identity cases run.
 	Fixtures *Fixtures
+	// CgroupRoot is the cgroup v2 folder delegated to the harness; cases
+	// create their scopes in it.
+	CgroupRoot string
 }
 
 // Env is one running case's world.
@@ -592,10 +595,14 @@ func (e *Env) ExpectSameState(label string, before topo.Snapshot) bool {
 	return e.T.Check(len(diff) == 0, "%s: routing state is as before the engine started (%d differences: %s)", label, len(diff), strings.Join(shown, "; "))
 }
 
-// Cgroup makes a cgroup v2 folder for a case and removes it afterwards.
+// Cgroup makes a cgroup v2 folder for a case, inside the subtree delegated to
+// the harness, and removes it afterwards.
 func (e *Env) Cgroup(name string) string {
-	dir := filepath.Join("/sys/fs/cgroup/nsaccept.slice", name)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if e.cfg.CgroupRoot == "" {
+		e.T.Fatalf("the harness has no delegated cgroup subtree")
+	}
+	dir := filepath.Join(e.cfg.CgroupRoot, name)
+	if err := os.Mkdir(dir, 0o755); err != nil {
 		e.T.Fatalf("cgroup %s: %v", dir, err)
 	}
 	e.T.Cleanup(func() {

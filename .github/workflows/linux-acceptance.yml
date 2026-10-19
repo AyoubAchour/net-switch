@@ -63,11 +63,14 @@ jobs:
         run: go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
       - name: Fetch sing-box at the pinned version and check its SHA-256
         run: sudo "$RUNNER_TEMP/nsaccept" fetch-sing-box --dest /opt/sing-box
+      # In a transient scope with Delegate=yes: systemd lets a program create
+      # cgroups only in a subtree delegated to it, and the lookup cases need some.
       - name: Run the acceptance suite as root
         env:
           RUN_FILTER: ${{ inputs.run }}
         run: >-
-          sudo env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
+          sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-${{ github.run_id }}-${{ strategy.job-index }}" --
+          env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
           "$RUNNER_TEMP/nsaccept" run --engine sing-box --engine-path /opt/sing-box/sing-box
           --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance"
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
