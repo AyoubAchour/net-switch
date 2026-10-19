@@ -157,6 +157,53 @@ func TestTCPReadinessPreservesDataEOFAndClose(t *testing.T) {
 	}
 }
 
+func TestUDPErrorCallbackUsesTheRealICMPQuote(t *testing.T) {
+	target, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := target.LocalAddr().(*net.UDPAddr).AddrPort()
+	if err := target.Close(); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var optionErr error
+	if err := raw.Control(func(fd uintptr) { optionErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_RECVERR, 1) }); err != nil {
+		t.Fatal(err)
+	}
+	if optionErr != nil {
+		t.Fatal(optionErr)
+	}
+	u := &udpSocket{conn: conn, raw: raw, errors: make(chan platform.DatagramError, 1), done: make(chan struct{})}
+	var delivered []platform.DatagramError
+	u.SetErrorHandler(func(e platform.DatagramError) {
+		if !u.errorMu.TryLock() {
+			t.Error("callback held the error-queue lock")
+		} else {
+			u.errorMu.Unlock()
+		}
+		delivered = append(delivered, e)
+	})
+	if _, err := u.WriteTo([]byte("icmp quote"), destination, false); err != nil {
+		t.Fatal(err)
+	}
+	conn.SetReadDeadline(time.Now().Add(time.Second))
+	if err := u.WaitReadable(context.Background()); !errors.Is(err, unix.ECONNREFUSED) {
+		t.Fatalf("closed peer didn't produce a real ICMP error: %v", err)
+	}
+	if len(delivered) != 1 || delivered[0].Destination != destination || string(delivered[0].Payload) != "icmp quote" || !delivered[0].Unreachable {
+		t.Fatalf("ICMP quote lost its port or payload: %+v", delivered)
+	}
+}
+
 func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 	const count = 256
 	keys := make(map[netip.AddrPort]bool, count)
