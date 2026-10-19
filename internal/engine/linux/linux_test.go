@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -81,6 +82,56 @@ func TestTCPReadinessPreservesDataEOFAndClose(t *testing.T) {
 	if err := socket.WaitReadable(context.Background()); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("closed socket: %v", err)
 	}
+}
+
+func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
+	const count = 256
+	keys := make(map[netip.AddrPort]bool, count)
+	for range count {
+		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		keys[c.LocalAddr().(*net.UDPAddr).AddrPort()] = true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := diagDump(ctx, unix.AF_INET, unix.IPPROTO_UDP, netip.AddrPort{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := NewOwners()
+	if err := o.Warm(ctx); err != nil {
+		t.Fatal(err)
+	}
+	jobs := make(chan socketRow, count)
+	for _, r := range rows {
+		if keys[r.local] {
+			jobs <- r
+		}
+	}
+	if len(jobs) != count {
+		t.Fatalf("expected %d real sockets, found %d", count, len(jobs))
+	}
+	close(jobs)
+	var workers sync.WaitGroup
+	for range 8 {
+		workers.Go(func() {
+			for r := range jobs {
+				// The race detector can slow proc scanning; the real 8 ms
+				// production deadline is measured by the acceptance gate.
+				one, done := context.WithTimeout(ctx, 100*time.Millisecond)
+				owner, err := o.holders(one, r)
+				done()
+				if err != nil || owner.PID != uint32(os.Getpid()) || owner.Generation != r.generation() {
+					t.Errorf("cold shared scan: %+v %v", owner, err)
+				}
+			}
+		})
+	}
+	workers.Wait()
+	t.Logf("attributed %d cold socket inodes with 8 concurrent lookups", count)
 }
 
 func (*byteCountingTun) Write(p [][]byte, offset int) (int, error) {

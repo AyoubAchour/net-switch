@@ -41,10 +41,12 @@ type fdWindow struct {
 	lastFD     int64
 	tailProbed bool
 	observed   time.Time
+	scanning   chan struct{}
 }
 type Owners struct {
 	warmed          bool
 	lookupErrors    [4]atomic.Uint64
+	cgroupStats     [3]atomic.Uint64
 	lastLookupError atomic.Pointer[string]
 	mu              sync.Mutex
 	cgroups         map[uint64]string
@@ -59,12 +61,14 @@ type Owners struct {
 }
 
 type lookupStats struct {
-	Timeout, Missing, Ambiguous, Other uint64
-	LastError                          string
+	Timeout, Missing, Ambiguous, Other           uint64
+	CgroupHints, CgroupResolved, CgroupPopulated uint64
+	LastError                                    string
 }
 
 func (o *Owners) Stats() any {
 	s := lookupStats{Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
+	s.CgroupHints, s.CgroupResolved, s.CgroupPopulated = o.cgroupStats[0].Load(), o.cgroupStats[1].Load(), o.cgroupStats[2].Load()
 	if p := o.lastLookupError.Load(); p != nil {
 		s.LastError = *p
 	}
@@ -252,6 +256,12 @@ func processOwner(pid uint32) (platform.Owner, error) {
 	if err != nil {
 		return platform.Owner{}, err
 	}
+	return processOwnerAt(pid, start)
+}
+
+// The caller has already read this incarnation's start time. Verify it again
+// after reading executable metadata, without a redundant third stat read.
+func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 	root := fmt.Sprintf("/proc/%d/", pid)
 	exe, err := os.Readlink(root + "exe")
 	if err != nil {
@@ -300,6 +310,7 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 	if id == 0 {
 		return nil
 	}
+	o.cgroupStats[0].Add(1)
 	o.mu.Lock()
 	dir := o.cgroups[id]
 	o.mu.Unlock()
@@ -312,6 +323,7 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 	if dir == "" {
 		return nil
 	}
+	o.cgroupStats[1].Add(1)
 	b, err := os.ReadFile(filepath.Join(dir, "cgroup.procs"))
 	if err != nil {
 		return nil
@@ -325,6 +337,9 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 	}
 	slices.Sort(pids)
 	slices.Reverse(pids)
+	if len(pids) > 0 {
+		o.cgroupStats[2].Add(1)
+	}
 	return pids
 }
 
@@ -371,6 +386,11 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		if expired() {
 			return nil
 		}
+		for _, previous := range found {
+			if previous == h {
+				return nil
+			}
+		}
 		start, err := processStart(h.pid)
 		if err != nil || start != h.start {
 			return nil
@@ -379,7 +399,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		if err != nil || got != target {
 			return nil
 		}
-		live, err := processOwner(h.pid)
+		live, err := processOwnerAt(h.pid, start)
 		if err != nil || live.StartTime != h.start {
 			return nil
 		}
@@ -389,18 +409,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		if result.AppID == "" {
 			result = live
 		}
-		for _, previous := range found {
-			if previous == h {
-				return nil
-			}
-		}
 		found = append(found, h)
 		seen[h.pid] = true
 		if fd, err := strconv.ParseInt(h.fd, 10, 64); err == nil {
 			o.mu.Lock()
 			window := o.windows[h.pid]
 			if window.start != h.start {
-				window = fdWindow{start: h.start}
+				window = fdWindow{start: h.start, scanning: window.scanning}
 			}
 			window.lastFD = fd
 			window.observed = time.Now()
@@ -443,6 +458,56 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return nil
 		}
 		dir := fmt.Sprintf("/proc/%d/fd", pid)
+		// One scanner per process. Followers consume the inode hints it
+		// publishes instead of issuing the same hundreds of readlinks again.
+		var gate chan struct{}
+		for {
+			o.mu.Lock()
+			if len(o.windows) > 4096 {
+				for old, state := range o.windows {
+					if old != pid && state.scanning == nil {
+						delete(o.windows, old)
+					}
+					if len(o.windows) <= 4096 {
+						break
+					}
+				}
+			}
+			window := o.windows[pid]
+			if window.scanning == nil {
+				gate = make(chan struct{})
+				window.scanning = gate
+				o.windows[pid] = window
+				o.mu.Unlock()
+				break
+			}
+			wait := window.scanning
+			o.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-wait:
+			}
+			o.mu.Lock()
+			hints := append([]holder(nil), o.inodes[r.inode]...)
+			o.mu.Unlock()
+			for _, h := range hints {
+				if err := accept(h); err != nil {
+					return err
+				}
+			}
+			if result.AppID != "" {
+				return nil
+			}
+		}
+		defer func() {
+			o.mu.Lock()
+			window := o.windows[pid]
+			window.scanning = nil
+			o.windows[pid] = window
+			close(gate)
+			o.mu.Unlock()
+		}()
 		f, err := os.Open(dir)
 		if err != nil {
 			return nil
@@ -451,12 +516,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		var metadata unix.Stat_t
 		canIndex := (unix.Fstat(int(f.Fd()), &metadata) == nil && metadata.Uid == r.uid) || slices.Contains(recent, pid)
 		o.mu.Lock()
-		if len(o.windows) > 4096 {
-			clear(o.windows)
-		}
 		window := o.windows[pid]
 		if window.start != start {
-			window = fdWindow{start: start}
+			window = fdWindow{start: start, scanning: gate}
 		}
 		// Once a live holder is known, reuse other processes' very recent
 		// search windows. A burst must not rescan the same 64 descriptors in
@@ -469,9 +531,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		window.next += 64
 		o.windows[pid] = window
 		o.mu.Unlock()
-		if complete {
-			position = 0
-		}
 		if position > 0 {
 			if _, err := f.Seek(position, 0); err != nil {
 				return nil
@@ -526,6 +585,16 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}()
 		if !complete {
+			// Reopening normally reuses the previous descriptor. Check that
+			// one live link even when another lookup just scanned this process.
+			if window.lastFD > 0 {
+				if err := visit([]string{strconv.FormatInt(window.lastFD, 10)}); err != nil {
+					return err
+				}
+				if len(found) > 0 && found[len(found)-1].pid == pid {
+					return nil
+				}
+			}
 			// Scan newly allocated descriptors first. Everything below this
 			// high-water mark was already indexed by a prior window; rescanning
 			// 256 neighbours in every unrelated process made multi-app bursts
@@ -538,6 +607,10 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				if len(found) > 0 && found[len(found)-1].pid == pid {
 					return nil
 				}
+			}
+			if time.Since(window.observed) < 5*time.Millisecond {
+				heavy = append(heavy, pid)
+				return nil
 			}
 			if !window.tailProbed && result.AppID == "" && !expired() {
 				if tail, err := descriptorTail(f, pid, expired); err == nil {
@@ -561,27 +634,8 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				}
 			}
 		}
-		if !complete && position > 0 {
-			// Closing and reopening a socket normally reuses a low descriptor.
-			// Inspect that prefix even when the rotating window is already past
-			// EOF; otherwise every other cold lookup can skip the live holder.
-			if _, err := f.Seek(0, 0); err == nil {
-				names, _ := f.Readdirnames(64)
-				if err := visit(names); err != nil {
-					return err
-				}
-				if len(found) > 0 && found[len(found)-1].pid == pid {
-					return nil
-				}
-			}
-			if _, err := f.Seek(position, 0); err != nil {
-				return nil
-			}
-		}
-		if !complete && position == 0 {
-			if _, err := f.Seek(0, 0); err != nil {
-				return nil
-			}
+		if _, err := f.Seek(position, 0); err != nil {
+			return nil
 		}
 		for !expired() {
 			names, readErr := f.Readdirnames(64)
@@ -597,16 +651,16 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				}
 				o.mu.Lock()
 				if current := o.windows[pid]; current.start == start {
-					current.next = max(0, max(current.high, maxFD)-32) + 2
+					current.next = 0
 					o.windows[pid] = current
 				}
 				o.mu.Unlock()
 				break
 			}
-			if !complete {
-				heavy = append(heavy, pid)
-				break
-			}
+			// A large unrelated process must not consume the rest of this
+			// lookup's budget. Resume its next window after visiting its peers.
+			heavy = append(heavy, pid)
+			break
 		}
 		return nil
 	}
@@ -740,13 +794,22 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	if result.AppID != "" {
 		return finish()
 	}
-	for _, pid := range heavy {
-		delete(seen, pid)
-		if err := scan(pid, true); err != nil {
-			return platform.Owner{}, err
-		}
-		if result.AppID != "" {
-			return finish()
+	for len(heavy) > 0 && !expired() {
+		pending := heavy
+		heavy = nil
+		visited := map[uint32]bool{}
+		for _, pid := range pending {
+			if visited[pid] {
+				continue
+			}
+			visited[pid] = true
+			delete(seen, pid)
+			if err := scan(pid, true); err != nil {
+				return platform.Owner{}, err
+			}
+			if result.AppID != "" {
+				return finish()
+			}
 		}
 	}
 	return finish()
