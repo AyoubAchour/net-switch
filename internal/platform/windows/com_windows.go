@@ -4,6 +4,7 @@ package winplatform
 // IP-interface provider. It is not a general scripting host and runs only in
 // bounded workers. All interfaces and BSTRs are released on the creating thread.
 import (
+	"errors"
 	"fmt"
 	"runtime"
 	"strings"
@@ -26,9 +27,16 @@ type variant struct {
 	extra    uintptr
 }
 
+type comError struct{ Code uint32 }
+
+func (e *comError) Error() string { return fmt.Sprintf("COM HRESULT 0x%08x", e.Code) }
+func missingCOM(err error) bool {
+	var e *comError
+	return errors.As(err, &e) && (e.Code == 0x80070002 || e.Code == 0x80070003)
+}
 func hresult(hr uintptr) error {
 	if int32(uint32(hr)) < 0 {
-		return fmt.Errorf("COM HRESULT 0x%08x", uint32(hr))
+		return &comError{Code: uint32(hr)}
 	}
 	return nil
 }
@@ -179,11 +187,24 @@ func (o *comObject) call(name string, flags uint16, args ...any) (variant, error
 	}()
 	_, err = o.invokeSlot(6, uintptr(id), uintptr(unsafe.Pointer(&iidNull)), 0, uintptr(flags), uintptr(unsafe.Pointer(&params)), uintptr(unsafe.Pointer(&result)), uintptr(unsafe.Pointer(&exception)), 0)
 	if err != nil {
+		if exception.deferred != 0 {
+			_, _, _ = syscall.SyscallN(exception.deferred, uintptr(unsafe.Pointer(&exception)))
+		}
 		detail := bstrText(exception.description)
 		result.clear()
-		return variant{}, fmt.Errorf("%s: %w %s", name, err, detail)
+		return variant{}, dispatchError(name, err, exception.scode, exception.code, detail)
 	}
 	return result, nil
+}
+
+func dispatchError(member string, outer error, scode int32, code uint16, detail string) error {
+	if scode < 0 {
+		return fmt.Errorf("%s: %w (%v); %s", member, &comError{Code: uint32(scode)}, outer, detail)
+	}
+	if code != 0 {
+		return fmt.Errorf("%s: %w; exception code %d; %s", member, outer, code, detail)
+	}
+	return fmt.Errorf("%s: %w %s", member, outer, detail)
 }
 func (o *comObject) object(name string, flags uint16, args ...any) (*comObject, error) {
 	v, err := o.call(name, flags, args...)

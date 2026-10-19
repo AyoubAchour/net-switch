@@ -43,7 +43,7 @@ jobs:
           architecture: ${{ matrix.arch }}
           package-manager-cache: false
       - name: Build Go control with commit identity
-        run: go build -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o bin/netswitch.exe ./cmd/netswitch
+        run: go build -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o bin/netswitch.exe ./cmd/netswitch
       - name: Native Win32 parity
         id: parity
         if: matrix.control == 'go'

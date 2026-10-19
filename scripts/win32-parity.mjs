@@ -2,8 +2,8 @@
 // Each case compares the old implementation with the Go worker, not a handwritten
 // expected value. Temporary settings and connections are restored in finally.
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile, readFile } from 'node:fs/promises';
+import { execFile, spawn } from 'node:child_process';
+import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer, connect } from 'node:net';
@@ -14,7 +14,7 @@ import { nativeArchitecture } from '../lib/architecture.mjs';
 import { AppInfo } from '../lib/appinfo.mjs';
 import { appKey } from '../lib/apps.mjs';
 import { InstalledApps } from '../lib/installed-apps.mjs';
-import { restoreMetrics } from '../lib/platform/windows-network.mjs';
+import { restoreMetrics, restoreMinimizeConnectionsPolicy } from '../lib/platform/windows-network.mjs';
 import { runPowerShellJson } from '../lib/ps.mjs';
 import { recordExecutable } from './server-under-test.mjs';
 
@@ -58,7 +58,16 @@ try {
     const before = await windows.readDefaultRoutes();
     for (const route of before) assert(current.defaultRoutes.some((r) => r.gateway === route.gateway && r.interfaceAddress === route.interfaceAddress), JSON.stringify(route));
   });
-  await check('Wi-Fi policy registry value', async () => assert.equal(await native('policy'), await windows.readMinimizeConnectionsPolicy()));
+  await check('Wi-Fi policy registry read, write and restore', async () => {
+    const before = await windows.readMinimizeConnectionsPolicy();
+    assert.equal(await native('policy'), before);
+    try {
+      await native('policy-set', { value: 0 });
+      assert.equal(await windows.readMinimizeConnectionsPolicy(), 0);
+      await native('policy-set', { value: before });
+      assert.equal(await windows.readMinimizeConnectionsPolicy(), before);
+    } finally { await restoreMinimizeConnectionsPolicy(before); }
+  });
   await check('metrics, active writes, persistent writes and restore', async () => {
     const adapter = adapters.find((a) => a.connected);
     assert(adapter, 'runner needs a connected adapter');
@@ -159,6 +168,32 @@ ConvertTo-Json -InputObject @($result) -Compress`);
     } finally { await native('autostart-set', { on: false }); }
     assert.equal(await native('autostart'), false);
     assert.equal(await windows.readAutostart(), false);
+  });
+  await check('reparse-point rejection leaves the target ACL unchanged', async () => {
+    const target = path.join(folder, 'link-target'), link = path.join(folder, 'root-link');
+    const parent = path.join(folder, 'linked-child');
+    await mkdir(target); await mkdir(parent); await symlink(target, link, 'junction');
+    await symlink(target, path.join(parent, 'nested-link'), 'junction');
+    const acl = () => runPowerShellJson(`(Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl | ConvertTo-Json -Compress`, { args: { DIR: target } });
+    const before = await acl();
+    await assert.rejects(native('protect-directory', { path: link }), /reparse point/i);
+    await assert.rejects(native('protect-directory', { path: parent }), /reparse point/i);
+    assert.equal(await acl(), before);
+  });
+  await check('process identity is checked before stopping a child', async () => {
+    const image = await realpath(process.execPath);
+    for (const stop of [windows.stopOrphan, (pid, image) => native('stop-process', { pid, path: image })]) {
+      const child = spawn(image, ['-e', 'process.stdout.write("ready\\n");setInterval(()=>{},1000)'], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      try {
+        await once(child.stdout, 'data');
+        await stop(child.pid, path.join(folder, 'not-the-owned-process.exe'));
+        assert.equal(child.exitCode, null, 'a mismatched image was stopped');
+        const exited = once(child, 'exit');
+        await stop(child.pid, image);
+        await exited;
+        assert.notEqual(child.exitCode, null, 'the matching child did not exit');
+      } finally { if (child.exitCode === null) child.kill(); }
+    }
   });
   console.log(`Win32 parity: ${count} cases executed, ${count - failures} passed, ${failures} failed`);
   if (failures) process.exitCode = 1;

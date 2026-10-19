@@ -103,6 +103,9 @@ type bitmapInfo struct {
 }
 
 func iconPNG(path string) ([]byte, error) {
+	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("executable is not available for icon lookup")
+	}
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err

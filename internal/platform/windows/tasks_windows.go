@@ -29,7 +29,7 @@ func taskEnabled() (any, error) {
 		defer s.release()
 		folder, err := s.object("GetFolder", 1, `\Net Switch`)
 		if err != nil {
-			if strings.Contains(err.Error(), "80070002") {
+			if missingCOM(err) {
 				return false, nil
 			}
 			return nil, err
@@ -38,7 +38,7 @@ func taskEnabled() (any, error) {
 		for _, name := range []string{"Server", "Sign-in"} {
 			task, err := folder.object("GetTask", 1, name)
 			if err != nil {
-				if strings.Contains(err.Error(), "80070002") {
+				if missingCOM(err) {
 					return false, nil
 				}
 				return nil, err
@@ -91,14 +91,14 @@ func setTasks(a map[string]any) error {
 		folder, err := root.object("GetFolder", 1, "Net Switch")
 		if a["on"] != true {
 			if err != nil {
-				if strings.Contains(err.Error(), "80070002") {
+				if missingCOM(err) {
 					return nil, nil
 				}
 				return nil, err
 			}
 			defer folder.release()
 			for _, name := range []string{"Server", "Sign-in"} {
-				if err := folder.discard("DeleteTask", 1, name, 0); err != nil && !strings.Contains(err.Error(), "80070002") {
+				if err := folder.discard("DeleteTask", 1, name, 0); err != nil && !missingCOM(err) {
 					return nil, err
 				}
 			}
@@ -106,7 +106,7 @@ func setTasks(a map[string]any) error {
 			return nil, nil
 		}
 		if err != nil {
-			if !strings.Contains(err.Error(), "80070002") {
+			if !missingCOM(err) {
 				return nil, err
 			}
 			folder, err = root.object("CreateFolder", 1, "Net Switch")
@@ -171,7 +171,7 @@ func upgradeTask(a map[string]any) (any, error) {
 		defer s.release()
 		folder, err := s.object("GetFolder", 1, `\Net Switch`)
 		if err != nil {
-			if strings.Contains(err.Error(), "80070002") {
+			if missingCOM(err) {
 				return "absent", nil
 			}
 			return nil, err
@@ -179,7 +179,7 @@ func upgradeTask(a map[string]any) (any, error) {
 		defer folder.release()
 		task, err := folder.object("GetTask", 1, "Server")
 		if err != nil {
-			if strings.Contains(err.Error(), "80070002") {
+			if missingCOM(err) {
 				return "absent", nil
 			}
 			return nil, err

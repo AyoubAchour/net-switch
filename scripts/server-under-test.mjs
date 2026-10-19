@@ -18,6 +18,7 @@ const flag = (name) => {
 export const serverExecutable = flag('--server-executable') ?? process.execPath;
 export const engineExecutable = flag('--engine-executable') ?? path.join(flag('--engine-dir') ?? path.join(root, 'engine'), 'sing-box.exe');
 export const isNodeServer = /^(?:node|nodejs)(?:\.exe)?$/i.test(path.basename(serverExecutable));
+export const nodeEntry = path.join(root, 'scripts', 'server-under-test-node.mjs');
 
 export async function recordExecutable(label, executable, args = ['--version']) {
   const resolved = await realpath(executable);
@@ -30,18 +31,18 @@ export async function recordExecutable(label, executable, args = ['--version']) 
 export async function recordServerAndEngine() {
   await recordExecutable('SERVER UNDER TEST', serverExecutable);
   if (isNodeServer) {
-    const entry = path.join(root, 'server.mjs');
-    console.log(`NODE ENTRY: ${JSON.stringify({ path: entry, sha256: createHash('sha256').update(await readFile(entry)).digest('hex') })}`);
+    for (const entry of [nodeEntry, path.join(root, 'lib', 'server-factory.mjs')]) {
+      console.log(`NODE ENTRY: ${JSON.stringify({ path: entry, sha256: createHash('sha256').update(await readFile(entry)).digest('hex') })}`);
+    }
   }
   await recordExecutable('ENGINE UNDER TEST', engineExecutable, ['version']);
 }
 export function launchServer(dataDir, mode = 'proxy') {
   const args = [
-    ...(isNodeServer ? [path.join(root, 'server.mjs')] : ['--root', root]),
+    ...(isNodeServer ? [nodeEntry] : ['--root', root]),
     ...(mode === 'proxy' ? ['--dev-proxy'] : []),
     '--user-data', dataDir, '--machine-data', dataDir,
-    ...(mode === 'proxy' ? ['--engine-dir', path.dirname(engineExecutable)] : []),
-    ...(!isNodeServer && mode === 'tun' ? ['--engine-executable', engineExecutable] : []),
+    '--engine-executable', engineExecutable,
   ];
   return spawn(serverExecutable, args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 }
