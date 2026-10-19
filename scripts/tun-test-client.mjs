@@ -78,13 +78,13 @@ async function reuseProbe() {
   }
   return attempts;
 }
-process.on('message', async ({ id, command, count, ids, size, server }) => {
+process.on('message', async ({ id, command, count, ids, size, server, port }) => {
   try {
     let result;
     if (command === 'open') result = await open(count);
     else if (command === 'refresh') result = await Promise.all(ids.map((key) => requestOn(held.get(key))));
     else if (command === 'reuse') result = await reuseProbe();
-    else if (command === 'udp') result = await udpProbe({ size, server });
+    else if (command === 'udp') result = await udpProbe({ size, server, port });
     else if (command === 'close') { for (const item of held.values()) item.agent.destroy(); held.clear(); result = true; }
     else throw new Error(`Unknown command ${command}`);
     process.send({ id, result });

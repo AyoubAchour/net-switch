@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { createSocket } from 'node:dgram';
 
-// Ask the runner's own resolver for a reserved .invalid name. The answer is
-// NXDOMAIN, so neither a public resolver nor a public domain is a dependency.
+// Ask the harness's local responder for a reserved .invalid name. The answer
+// is NXDOMAIN, so neither a public resolver nor a public domain is a dependency.
 // EDNS padding preserves the 64- and 1800-byte UDP coverage.
 export async function udpProbe({ size, server, port = 53, timeoutMs = 5000 }) {
   const socket = createSocket('udp4');
@@ -19,7 +19,7 @@ export async function udpProbe({ size, server, port = 53, timeoutMs = 5000 }) {
     return await new Promise((resolve, reject) => {
       let done = false;
       const timer = setTimeout(() => finish(reject,
-        new Error(`Runner DNS ${server}:${port} did not answer ${packet.length} UDP bytes`)), timeoutMs);
+        new Error(`Test DNS ${server}:${port} did not answer ${packet.length} UDP bytes`)), timeoutMs);
       const finish = (fn, value) => { if (done) return; done = true; clearTimeout(timer); fn(value); };
       socket.on('error', (error) => finish(reject, error));
       socket.on('message', (reply, peer) => {

@@ -19,7 +19,7 @@ function negativeAnswer(query) {
   return reply;
 }
 for (const size of [64, 1800]) {
-  test(`runner DNS sends one ${size}-byte packet with a complete padded question`, async (t) => {
+  test(`test DNS sends one ${size}-byte packet with a complete padded question`, async (t) => {
     let received = 0;
     const endpoint = await responder(t, (query, send) => {
       received++;
@@ -39,7 +39,7 @@ for (const size of [64, 1800]) {
     assert(result.port > 0);
   });
 }
-test('runner DNS rejects a response for the wrong question', async (t) => {
+test('test DNS rejects a response for the wrong question', async (t) => {
   const endpoint = await responder(t, (query, send) => {
     const reply = negativeAnswer(query);
     reply[13] ^= 1;
@@ -47,7 +47,7 @@ test('runner DNS rejects a response for the wrong question', async (t) => {
   });
   await assert.rejects(udpProbe({ size: 64, ...endpoint }), /DNS question changed/);
 });
-test('runner DNS rejects SERVFAIL instead of accepting any DNS reply', async (t) => {
+test('test DNS rejects SERVFAIL instead of accepting any DNS reply', async (t) => {
   const endpoint = await responder(t, (query, send) => {
     const reply = negativeAnswer(query);
     reply[3] = 0x82;
@@ -55,7 +55,7 @@ test('runner DNS rejects SERVFAIL instead of accepting any DNS reply', async (t)
   });
   await assert.rejects(udpProbe({ size: 64, ...endpoint }), /must return NXDOMAIN/);
 });
-test('runner DNS does not retry when only an unrelated transaction replies', async (t) => {
+test('test DNS does not retry when only an unrelated transaction replies', async (t) => {
   let received = 0;
   const endpoint = await responder(t, (query, send) => {
     received++;

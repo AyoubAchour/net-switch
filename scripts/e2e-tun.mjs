@@ -9,6 +9,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { Engine } from '../lib/engine.mjs';
 import { lineOutbound } from '../lib/apps.mjs';
+import { testLocalUdp } from './tun-test-udp.mjs';
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
   throw new Error('TUN tests may run only on disposable GitHub-hosted Windows runners.');
@@ -105,14 +106,8 @@ try {
   adapter = await network('inspect');
   log(`Physical adapter: ${JSON.stringify(adapter)}`);
   log(`PORT-REUSE direct baseline: ${JSON.stringify(await client('reuse'))}`);
-  // Capture the runner's resolver before the later DNS-change experiment.
-  // Both sizes are mandatory: an unavailable baseline fails instead of
-  // silently removing UDP coverage from this run.
-  const dnsServer = adapter.dns.find((address) => /^\d+\.\d+\.\d+\.\d+$/.test(address));
-  assert(dnsServer, `No IPv4 runner DNS resolver: ${JSON.stringify(adapter.dns)}`);
-  for (const size of [64, 1800]) {
-    log(`UDP direct baseline: ${JSON.stringify(await client('udp', { size, server: dnsServer }))}`);
-  }
+  await testLocalUdp({ client, clientExe, adapter, dataDir: dir, log });
+  await clean('after local UDP fixture');
   // Hosted runners have one physical internet adapter. Two independently tagged
   // outbounds on that adapter let the Clash API prove which line was selected.
   const lines = ['aa', 'bb'].map((id) => ({ id, alias: adapter.alias }));
@@ -162,14 +157,6 @@ try {
   log(`ok - selector PUT ${elapsed.toFixed(1)} ms with 100 open connections; all old sockets reused, new connections use bb`);
   await client('close');
 
-  for (const size of [64, 1800]) {
-    const result = await client('udp', { size, server: dnsServer });
-    const all = await routed([result], 'bb');
-    assert(all.some((connection) => Number(connection.metadata.sourcePort) === result.port &&
-      connection.metadata.network === 'udp' && connection.metadata.destinationIP === dnsServer &&
-      Number(connection.metadata.destinationPort) === 53), 'Runner DNS must cross TUN as UDP');
-    log(`ok - UDP through TUN: ${JSON.stringify(result)}`);
-  }
   const reuse = await client('reuse');
   log(`PORT-REUSE TUN: ${JSON.stringify(reuse)}`);
   alive();

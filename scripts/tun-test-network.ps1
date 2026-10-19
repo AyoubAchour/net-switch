@@ -12,7 +12,10 @@ if ($Action -eq 'inspect') {
   $adapter = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex
   $key = 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\' + $adapter.InterfaceGuid
   $staticDns = (Get-ItemProperty -LiteralPath $key).NameServer
+  $ipv4 = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 |
+    Where-Object { $_.AddressState -eq 'Preferred' -and -not $_.SkipAsSource } | Select-Object -First 1
   [pscustomobject]@{ alias = $adapter.Name; index = $adapter.ifIndex; staticDns = $staticDns
+    ipv4 = $ipv4.IPAddress
     dns = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4).ServerAddresses)
   } | ConvertTo-Json -Compress
 } elseif ($Action -eq 'state') {

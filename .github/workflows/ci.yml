@@ -58,6 +58,7 @@ jobs:
           name: tun-test-${{ matrix.arch }}
           path: |
             dist/tun-test/*.log*
+            dist/tun-test/udp/*.log*
             dist/tun-test/report.txt
           retention-days: 14
 
