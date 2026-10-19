@@ -1,0 +1,71 @@
+name: Windows TUN repeat experiment
+on:
+  push:
+    branches: [ci/windows-tun-flakes]
+    paths: [.github/workflows/windows-tun-repeat.yml]
+  workflow_dispatch:
+    inputs:
+      label:
+        description: Measurement label
+        required: true
+        default: before
+permissions:
+  contents: read
+jobs:
+  register:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Temporary dispatch workflow registered'
+  repeat:
+    if: github.event_name == 'workflow_dispatch'
+    name: ${{ inputs.label }} / ${{ matrix.arch }} / batch ${{ matrix.batch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+        batch: [1, 2, 3, 4]
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - id: node
+        run: |
+          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "version=$($pins.node.version)`n")
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Fetch the verified engine
+        run: ./scripts/fetch-engine.ps1
+      - name: Isolate the PID deletion race without sing-box
+        if: matrix.batch == 1
+        run: |
+          node scripts/probe-pid-race.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Repeat the affected steps five times without hiding failures
+        run: |
+          $failed = 0
+          for ($iteration = 1; $iteration -le 5; $iteration++) {
+            Write-Output "REPEAT-BEGIN arch=${{ matrix.arch }} batch=${{ matrix.batch }} iteration=$iteration"
+            node scripts/check-engine-config.mjs
+            $configCode = $LASTEXITCODE
+            node scripts/e2e-tun.mjs
+            $tunCode = $LASTEXITCODE
+            Write-Output "REPEAT-END arch=${{ matrix.arch }} batch=${{ matrix.batch }} iteration=$iteration config=$configCode tun=$tunCode"
+            if ($configCode -ne 0 -or $tunCode -ne 0) { $failed++ }
+          }
+          Write-Output "REPEAT-TOTAL failures=$failed runs=5"
+          if ($failed -gt 0) { exit 1 }
