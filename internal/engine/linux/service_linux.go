@@ -54,7 +54,7 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	p.ctx = forwarding
 	defer p.Close()
 	e := engine.New(forwarding, engine.Dependencies{OpenTun: p.OpenTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners}, flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncDir})
-	runtime := serviceRuntime{Engine:e, cancel:cancelForwarding}
+	runtime := serviceRuntime{Engine: e, cancel: cancelForwarding}
 	srv := protocol.New(runtime, e.Table, p)
 	srv.Instance = p.Instance
 	fatal := make(chan error, 1)
@@ -65,6 +65,7 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 		}
 	}
 	e.OnFatal = p.Fatal
+	srv.OnCleanupFailure = func(err error) { p.Fatal(fmt.Errorf("control cleanup failed: %w", err)) }
 	p.LineDown = func(line string) { e.Table.CloseFlows(flows.Selector{Line: line}, 0) }
 	p.AddressRemoved = func(addr netip.Addr) { e.Table.CloseFlows(flows.Selector{Source: addr}, 0) }
 	if hooks != nil {
@@ -160,5 +161,9 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	return err
 }
 
-type serviceRuntime struct { *engine.Engine; cancel context.CancelFunc }
-func(r serviceRuntime)Stop(ctx context.Context)error{r.cancel();return r.Engine.Stop(ctx)}
+type serviceRuntime struct {
+	*engine.Engine
+	cancel context.CancelFunc
+}
+
+func (r serviceRuntime) Stop(ctx context.Context) error { r.cancel(); return r.Engine.Stop(ctx) }

@@ -159,7 +159,9 @@ func lookupGate(e *Env, scoped, measured bool) {
 		e.T.Check(p95 < 10*time.Millisecond, "%s (app scope %v): measured lookup p95 upper bound %v is under 10 ms", p.label, scoped, p95)
 	}
 	check := e.T.Expect
-	if measured { check = e.T.Check }
+	if measured {
+		check = e.T.Check
+	}
 	check(ok, "with %d open files, each phase finds the owner for at least %.1f%%, as the servers and the engine both count (%s)",
 		gateFiles, 100*gateFound, strings.Join(verdicts, "; "))
 }

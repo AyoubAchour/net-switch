@@ -146,7 +146,7 @@ func TestWildcardUDPAddressRemovalMatchesOnlyItsLineAndFamily(t *testing.T) {
 	if ctx.Err() == nil {
 		t.Fatal("wildcard UDP survived source removal")
 	}
-	if f.Stats().UDPReadBytes != 2*(9<<10) {
+	if f.Stats().UDPReadBytes != 2*(17<<10) {
 		t.Fatal("UDP read buffers unaccounted")
 	}
 }

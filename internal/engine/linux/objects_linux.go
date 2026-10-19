@@ -110,8 +110,11 @@ func (d objectDriver) Inspect(ctx context.Context, f journal.Fingerprint) (journ
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
-	if f["boot"] != d.o.boot || f["netns"] != d.o.netns {
+	if f["boot"] != d.o.boot {
 		return nil, false, nil
+	}
+	if f["netns"] != d.o.netns {
+		return nil, false, fmt.Errorf("journal belongs to network namespace %s; cleanup is running in %s", f["netns"], d.o.netns)
 	}
 	switch d.kind {
 	case "route":

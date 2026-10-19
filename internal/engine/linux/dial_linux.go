@@ -14,6 +14,7 @@ import (
 	"syscall"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
@@ -41,24 +42,47 @@ func (p *Platform) DialTCP(ctx context.Context, id string, dst netip.AddrPort) (
 	return c.(*net.TCPConn), nil
 }
 func (p *Platform) OpenUDP(ctx context.Context, id string, v6 bool) (platform.UDPConn, error) {
+	// Compatibility for callers without a first destination. This is only a
+	// route query; no packet is sent to this address.
+	dst := netip.MustParseAddrPort("1.1.1.1:443")
+	if v6 {
+		dst = netip.MustParseAddrPort("[2606:4700:4700::1111]:443")
+	}
+	return p.OpenUDPTo(ctx, id, dst)
+}
+
+func (p *Platform) OpenUDPTo(ctx context.Context, id string, dst netip.AddrPort) (platform.UDPConn, error) {
+	v6 := dst.Addr().Is6()
 	l, err := p.binding(id, v6)
 	if err != nil {
 		return nil, err
 	}
-	family, address := "udp4", "0.0.0.0:0"
-	if v6 {
-		family, address = "udp6", "[::]:0"
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	address = ""
-	for _, ip := range l.Addresses {
-		if ip.Is6() == v6 && ip.IsGlobalUnicast() {
-			address = net.JoinHostPort(ip.String(), "0")
-			break
+	routes, err := retryDump(ctx, func() ([]netlink.Route, error) {
+		return netlink.RouteGetWithOptions(net.IP(dst.Addr().AsSlice()), &netlink.RouteGetOptions{OifIndex: l.Index, Mark: l.Mark})
+	})
+	if err != nil {
+		return nil, err
+	}
+	var source netip.Addr
+	for _, r := range routes {
+		if r.LinkIndex == l.Index {
+			if ip, ok := netip.AddrFromSlice(r.Src); ok && !ip.IsUnspecified() {
+				source = ip.Unmap()
+				break
+			}
 		}
 	}
-	if address == "" {
-		return nil, fmt.Errorf("line %s has no usable source address", id)
+	if !source.IsValid() {
+		return nil, fmt.Errorf("line %s has no usable source route to %s", id, dst)
 	}
+	family := "udp4"
+	if v6 {
+		family = "udp6"
+	}
+	address := net.JoinHostPort(source.String(), "0")
 	lc := net.ListenConfig{Control: func(_, _ string, raw syscall.RawConn) error {
 		if err := bindSocket(raw, l); err != nil {
 			return err
@@ -83,7 +107,12 @@ func (p *Platform) OpenUDP(ctx context.Context, id string, v6 bool) (platform.UD
 		c.Close()
 		return nil, err
 	}
-	return &udpSocket{conn: c, raw: raw, v6: v6, errors: make(chan platform.DatagramError, 16), done: make(chan struct{})}, nil
+	return &udpSocket{conn: c, raw: raw, v6: v6, errors: make(chan platform.DatagramError, 1), done: make(chan struct{})}, nil
+}
+
+type mtuEntry struct {
+	destination netip.Addr
+	mtu         uint32
 }
 
 type udpSocket struct {
@@ -94,6 +123,8 @@ type udpSocket struct {
 	once             sync.Once
 	errors           chan platform.DatagramError
 	done             chan struct{}
+	mtus             [8]mtuEntry
+	mtuCursor        int
 }
 
 func (s *udpSocket) LocalAddr() netip.AddrPort { return s.conn.LocalAddr().(*net.UDPAddr).AddrPort() }
@@ -125,26 +156,38 @@ func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) 
 	}
 	n, err := s.conn.WriteToUDPAddrPort(b, dst)
 	if errors.Is(err, unix.EMSGSIZE) {
-		mtu := s.drainErrors()
-		if mtu == 0 {
-			if s.v6 {
-				mtu = 1280
-			} else {
-				mtu = 576
-			}
-		}
-		return n, &platform.TooBig{MTU: mtu}
+		return n, s.tooBig(dst)
 	}
 	return n, err
+}
+
+func (s *udpSocket) tooBig(dst netip.AddrPort) *platform.TooBig {
+	s.drainErrors()
+	s.errorMu.Lock()
+	var mtu uint32
+	for _, entry := range s.mtus {
+		if entry.destination == dst.Addr() {
+			mtu = entry.mtu
+			break
+		}
+	}
+	s.errorMu.Unlock()
+	if mtu == 0 {
+		if s.v6 {
+			mtu = 1280
+		} else {
+			mtu = 576
+		}
+	}
+	return &platform.TooBig{MTU: mtu}
 }
 
 // A single socket reader drains the error queue when the kernel wakes it with
 // SO_ERROR. A second RawConn.Read would compete for Go's read lock and could
 // starve replies. ReadError consumes bounded messages from this channel.
-func (s *udpSocket) drainErrors() uint32 {
+func (s *udpSocket) drainErrors() {
 	s.errorMu.Lock()
 	defer s.errorMu.Unlock()
-	var mtu uint32
 	for i := 0; i < 16; i++ {
 		var data [2048]byte
 		var control [256]byte
@@ -177,20 +220,33 @@ func (s *udpSocket) drainErrors() uint32 {
 			}
 			errno := binary.NativeEndian.Uint32(m.Data)
 			info := binary.NativeEndian.Uint32(m.Data[8:])
-			message := platform.DatagramError{Destination: dst, Payload: append([]byte(nil), data[:n]...)}
+			message := platform.DatagramError{Destination: dst}
 			if errno == uint32(unix.EMSGSIZE) {
 				message.MTU = info
-				mtu = info
+				if info != 0 {
+					index := s.mtuCursor % len(s.mtus)
+					for i, entry := range s.mtus {
+						if entry.destination == dst.Addr() {
+							index = i
+							break
+						}
+					}
+					s.mtus[index] = mtuEntry{dst.Addr(), info}
+					s.mtuCursor++
+				}
 			} else {
 				message.Unreachable = true
 			}
+			if len(s.errors) == cap(s.errors) {
+				continue
+			}
+			message.Payload = append([]byte(nil), data[:n]...)
 			select {
 			case s.errors <- message:
 			default:
 			}
 		}
 	}
-	return mtu
 }
 func (s *udpSocket) ReadError(ctx context.Context) (platform.DatagramError, error) {
 	select {

@@ -105,6 +105,13 @@ type LineDialer interface {
 	OpenUDP(context.Context, string, bool) (UDPConn, error)
 }
 
+// DestinationDialer lets an adapter ask the OS to choose a source address for
+// the first datagram, then bind it for the lifetime of an unconnected mapping.
+// This preserves endpoint-independent mapping on interfaces with many addresses.
+type DestinationDialer interface {
+	OpenUDPTo(context.Context, string, netip.AddrPort) (UDPConn, error)
+}
+
 // Prepare must use the ownership journal. Capture is enabled only after all
 // policy and routes are ready. Cleanup is idempotent and fingerprint checked.
 type RouteManager interface {

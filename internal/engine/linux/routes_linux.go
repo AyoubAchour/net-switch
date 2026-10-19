@@ -27,6 +27,8 @@ import (
 
 const routeProtocol = 186
 
+var netlinkTimeoutOnce sync.Once
+
 var bypass = []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "255.255.255.255/32", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"}
 
 type lineState struct {
@@ -63,6 +65,9 @@ type ownedObject struct {
 }
 
 func New(ctx context.Context, dir string) (*Platform, error) {
+	// Route operations must not hold lifecycle cleanup indefinitely if netlink
+	// stops answering. The lookup socket has its own tighter per-flow deadline.
+	netlinkTimeoutOnce.Do(func() { _ = netlink.SetSocketTimeout(time.Second) })
 	if !filepath.IsAbs(dir) {
 		return nil, errors.New("state directory must be absolute")
 	}
@@ -75,6 +80,13 @@ func New(ctx context.Context, dir string) (*Platform, error) {
 	}
 	if !st.IsDir() || st.Mode().Perm()&0077 != 0 {
 		return nil, errors.New("state directory must be private (0700)")
+	}
+	var owner unix.Stat_t
+	if err := unix.Lstat(dir, &owner); err != nil {
+		return nil, err
+	}
+	if owner.Uid != uint32(os.Geteuid()) {
+		return nil, errors.New("state directory belongs to another user")
 	}
 	boot, ns, err := namespaceIdentity()
 	if err != nil {
@@ -109,6 +121,13 @@ func (p *Platform) Close() error {
 func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	rollback := func(cause error) (platform.TunDevice, error) {
+		if p.objects.tun != nil {
+			p.objects.tun.Close()
+			p.objects.tun = nil
+		}
+		return nil, errors.Join(cause, p.journal.Cleanup(context.WithoutCancel(ctx)))
+	}
 	links, err := retryDump(ctx, netlink.LinkList)
 	if err != nil {
 		return nil, err
@@ -119,13 +138,12 @@ func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 	}
 	p.tunSpec = tunObject{Index: index, Name: "ns" + p.Instance[:10], Alias: "netswitch:" + p.Instance, MTU: 9000}
 	if err := p.journal.Create(ctx, "tun", p.objects.fingerprint(p.tunSpec)); err != nil {
-		return nil, err
+		return rollback(err)
 	}
 	for _, cidr := range []string{"198.18.0.1/30", "fdfe:dcba:9876::1/126"} {
 		v := addressObject{index, p.tunSpec.Name, p.tunSpec.Alias, cidr}
 		if err := p.journal.Create(ctx, "address", p.objects.fingerprint(v)); err != nil {
-			p.objects.tun.Close()
-			return nil, err
+			return rollback(err)
 		}
 	}
 	if p.WrapTun != nil {

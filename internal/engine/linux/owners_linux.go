@@ -34,25 +34,26 @@ type cachedHolders struct {
 	observed time.Time
 }
 type fdWindow struct {
-	start uint64
-	next  int64
-	high int64
+	start    uint64
+	next     int64
+	high     int64
 	observed time.Time
 }
 type Owners struct {
-	mu      sync.Mutex
-	cgroups map[uint64]string
-	recent  map[uint32][]uint32
-	cache   map[uint64]cachedHolders
-	inodes  map[uint32][]holder
-	windows map[uint32]fdWindow
+	mu             sync.Mutex
+	cgroups        map[uint64]string
+	recent         map[uint32][]uint32
+	cache          map[uint64]cachedHolders
+	inodes         map[uint32][]holder
+	windows        map[uint32]fdWindow
+	ambiguousPorts map[uint16]bool
 	// Fault callbacks are assigned only by the acceptance build.
 	fault        func(context.Context) error
 	destroyFault func(context.Context, socketRow, func())
 }
 
 func NewOwners() *Owners {
-	return &Owners{cgroups: map[uint64]string{}, recent: map[uint32][]uint32{}, cache: map[uint64]cachedHolders{}, inodes: map[uint32][]holder{}, windows: map[uint32]fdWindow{}}
+	return &Owners{cgroups: map[uint64]string{}, recent: map[uint32][]uint32{}, cache: map[uint64]cachedHolders{}, inodes: map[uint32][]holder{}, windows: map[uint32]fdWindow{}, ambiguousPorts: map[uint16]bool{}}
 }
 
 // Work stops short of 10 ms to leave room for returning, timing and policy
@@ -69,6 +70,9 @@ func (o *Owners) TCP(ctx context.Context, t platform.Tuple) (platform.Owner, err
 	ctx, cancel := lookupContext(ctx)
 	defer cancel()
 	rows, err := diag(ctx, familyOf(t.Source.Addr()), unix.IPPROTO_TCP, t.Source, t.Destination, false)
+	if errors.Is(err, unix.ENOENT) && t.Source.Addr().Is4() {
+		rows, err = diag(ctx, unix.AF_INET6, unix.IPPROTO_TCP, t.Source, t.Destination, false)
+	}
 	if errors.Is(err, unix.ENOENT) {
 		rows, err = diagDump(ctx, familyOf(t.Source.Addr()), unix.IPPROTO_TCP, t.Source)
 	}
@@ -105,9 +109,19 @@ func (o *Owners) UDP(ctx context.Context, source netip.AddrPort) (platform.Owner
 	if err != nil {
 		return platform.Owner{}, err
 	}
+	if source.Addr().Is4() {
+		v6, err := diagDump(ctx, unix.AF_INET6, unix.IPPROTO_UDP, source)
+		if err != nil {
+			return platform.Owner{}, err
+		}
+		rows = append(rows, v6...)
+	}
 	r, err := matchUDP(rows, source)
 	if errors.Is(err, errSocketAmbiguous) {
-		return platform.Owner{}, platform.ErrAmbiguous
+		o.mu.Lock()
+		o.ambiguousPorts[source.Port()] = true
+		o.mu.Unlock()
+		return platform.Owner{Generation: cookieSet(rows, source)}, platform.ErrAmbiguous
 	}
 	if err != nil {
 		return platform.Owner{}, err
@@ -325,7 +339,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		// Once a live holder is known, reuse other processes' very recent
 		// search windows. A burst must not rescan the same 64 descriptors in
 		// every concurrent lookup. Positive hints are always revalidated above.
-		if !complete && result.AppID!="" && time.Since(window.observed)<5*time.Millisecond {
+		if !complete && result.AppID != "" && time.Since(window.observed) < 5*time.Millisecond {
 			o.mu.Unlock()
 			return nil
 		}
@@ -342,13 +356,15 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}
 		remember := map[uint32]holder{}
-		maxFD:=window.high
+		maxFD := window.high
 		visit := func(names []string) error {
 			for _, fd := range names {
 				if expired() {
 					break
 				}
-				if number,err:=strconv.ParseInt(fd,10,64);err==nil {maxFD=max(maxFD,number)}
+				if number, err := strconv.ParseInt(fd, 10, 64); err == nil {
+					maxFD = max(maxFD, number)
+				}
 				got, err := os.Readlink(dir + "/" + fd)
 				if err != nil || !strings.HasPrefix(got, "socket:[") || !strings.HasSuffix(got, "]") {
 					continue
@@ -370,10 +386,10 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		defer func() {
 			o.mu.Lock()
 			defer o.mu.Unlock()
-			if current:=o.windows[pid];current.start==start {
-				current.high=max(current.high,maxFD)
-				current.observed=time.Now()
-				o.windows[pid]=current
+			if current := o.windows[pid]; current.start == start {
+				current.high = max(current.high, maxFD)
+				current.observed = time.Now()
+				o.windows[pid] = current
 			}
 			if len(o.inodes) > 65536 {
 				clear(o.inodes)
@@ -385,6 +401,23 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				}
 			}
 		}()
+		if !complete && position > 0 {
+			// Closing and reopening a socket normally reuses a low descriptor.
+			// Inspect that prefix even when the rotating window is already past
+			// EOF; otherwise every other cold lookup can skip the live holder.
+			if _, err := f.Seek(0, 0); err == nil {
+				names, _ := f.Readdirnames(64)
+				if err := visit(names); err != nil {
+					return err
+				}
+				if len(found) > 0 && found[len(found)-1].pid == pid {
+					return nil
+				}
+			}
+			if _, err := f.Seek(position, 0); err != nil {
+				return nil
+			}
+		}
 		for !expired() {
 			names, readErr := f.Readdirnames(64)
 			if err := visit(names); err != nil {
@@ -394,9 +427,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				return nil
 			}
 			if readErr != nil {
+				if !complete && position > 0 {
+					heavy = append(heavy, pid)
+				}
 				o.mu.Lock()
-				if current := o.windows[pid]; current.start==start {
-					current.next = max(0,max(current.high,maxFD)-32)+2
+				if current := o.windows[pid]; current.start == start {
+					current.next = max(0, max(current.high, maxFD)-32) + 2
 					o.windows[pid] = current
 				}
 				o.mu.Unlock()
@@ -404,16 +440,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 			if !complete {
 				heavy = append(heavy, pid)
-				// Descriptor passing and fork commonly reuse a small fd even
-				// while the creator's ordinary socket window is much higher.
-				if position > 0 {
-					if _, err := f.Seek(0, 0); err == nil {
-						names, _ := f.Readdirnames(16)
-						if err := visit(names); err != nil {
-							return err
-						}
-					}
-				}
 				break
 			}
 		}
@@ -544,7 +570,7 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 	for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
 		need := false
 		for _, k := range keys {
-			if familyOf(k.Addr()) == fam {
+			if familyOf(k.Addr()) == fam || fam == unix.AF_INET6 {
 				need = true
 				break
 			}
@@ -588,6 +614,10 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 			return nil, ctx.Err()
 		}
 		r, err := matchUDP(byPort[k.Port()], k)
+		if errors.Is(err, errSocketAmbiguous) {
+			out[k] = platform.Owner{Generation: cookieSet(byPort[k.Port()], k)}
+			continue
+		}
 		if err != nil {
 			continue
 		}
@@ -618,7 +648,9 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 				owner = platform.Owner{}
 				break
 			}
-			owner = v
+			if owner.AppID == "" {
+				owner = v
+			}
 		}
 		if owner.AppID != "" {
 			owner.Generation = r.generation()

@@ -161,7 +161,9 @@ func (t *Table) Predict(app string) (policy.Prediction, error) {
 func (t *Table) EchoLine(ipv6 bool) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.policy == nil { return "", ErrStopped }
+	if t.policy == nil {
+		return "", ErrStopped
+	}
 	d, err := t.policy.Decide(platform.Owner{}, 0, ipv6, 0)
 	return d.Line, err
 }
@@ -191,7 +193,7 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	t.gauges.Flows++
 	if protocol == "udp" {
 		t.gauges.UDP++
-		t.gauges.UDPReadBytes += flowapi.UDPReadBuffer
+		t.gauges.UDPReadBytes += flowapi.UDPReadBuffer + flowapi.UDPAdapterBuffer
 	} else {
 		f.handshake = true
 		f.receive, f.send = 64<<10, 64<<10
@@ -390,7 +392,7 @@ func (f *ticket) retireLocked() {
 	udp := f.record.Protocol == "udp"
 	if udp {
 		t.gauges.UDP--
-		t.gauges.UDPReadBytes -= flowapi.UDPReadBuffer
+		t.gauges.UDPReadBytes -= flowapi.UDPReadBuffer + flowapi.UDPAdapterBuffer
 	}
 	if f.resolved {
 		app := f.record.Owner.AppID
@@ -473,7 +475,8 @@ func (t *Table) ReservePending(n int) bool {
 			return false
 		}
 		if t.pendingBytes.CompareAndSwap(old, old+int64(n)) {
-			for peak := t.pendingPeakBytes.Load(); old+int64(n)>peak && !t.pendingPeakBytes.CompareAndSwap(peak,old+int64(n)); peak=t.pendingPeakBytes.Load() {}
+			for peak := t.pendingPeakBytes.Load(); old+int64(n) > peak && !t.pendingPeakBytes.CompareAndSwap(peak, old+int64(n)); peak = t.pendingPeakBytes.Load() {
+			}
 			return true
 		}
 	}

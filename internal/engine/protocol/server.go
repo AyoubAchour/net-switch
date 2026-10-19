@@ -50,7 +50,8 @@ type Server struct {
 	done                        chan struct{}
 	doneOnce                    sync.Once
 	// TestFault is nil in production. Acceptance binaries install it explicitly.
-	TestFault func(context.Context, json.RawMessage) (any, error)
+	TestFault        func(context.Context, json.RawMessage) (any, error)
+	OnCleanupFailure func(error)
 }
 
 func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
@@ -286,6 +287,9 @@ func (s *Server) RunLease(ctx context.Context) {
 		case <-tick.C:
 			if err := s.CheckLease(ctx); err != nil {
 				s.Emit(Event{Type: "fatal", Message: err.Error()})
+				if s.OnCleanupFailure != nil {
+					s.OnCleanupFailure(err)
+				}
 			}
 		}
 	}

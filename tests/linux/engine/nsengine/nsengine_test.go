@@ -363,8 +363,8 @@ func TestStatsShapes(t *testing.T) {
 
 func TestUnconnectedDriverRefusesCommands(t *testing.T) {
 	d := New("netswitch-engine")
-	if _, err := d.Hello(context.Background()); !errors.Is(err, engine.ErrNotImplemented) {
-		t.Fatalf("without a control socket every operation is not implemented, got %v", err)
+	if _, err := d.Hello(context.Background()); !errors.Is(err, errNoSession) {
+		t.Fatalf("without a control socket the driver must report not connected, got %v", err)
 	}
 	if err := d.Start(context.Background(), engine.Env{}, config()); err == nil {
 		t.Fatalf("start: %v", err)
