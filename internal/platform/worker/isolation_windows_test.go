@@ -156,7 +156,9 @@ func isolationProbe(input isolationRequest) (isolationResult, error) {
 		k.Close()
 	}
 	code, _, _ := windows.NewLazySystemDLL("iphlpapi.dll").NewProc("SetTcpEntry").Call(uintptr(unsafe.Pointer(&input.TCP[0])))
-	result.TCPDenied = code == uintptr(windows.ERROR_ACCESS_DENIED)
+	// SetTcpEntry documents both 5 (access denied) and 317 (non-elevated).
+	// The parent also proves the live connection survived this attempted close.
+	result.TCPDenied = code == uintptr(windows.ERROR_ACCESS_DENIED) || code == 317
 	result.TCPCode = strconv.FormatUint(uint64(code), 10)
 	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 	if err := windows.QueryInformationJobObject(0, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits)), nil); err != nil {
@@ -252,8 +254,34 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 				if got.AdminDenyOnly || got.Integrity != "S-1-16-12288" || got.ProcessCode != "<nil>" || got.RegistryCode != "<nil>" || got.TCPCode != "0" {
 					t.Fatalf("admin worker lost required writes: %+v", got)
 				}
+				if err := accepted.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+					t.Fatal(err)
+				}
+				_, err := accepted.Read(make([]byte, 1))
+				if err == nil {
+					t.Fatal("admin close did not close the TCP connection")
+				}
+				if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+					t.Fatal("admin close left the TCP connection alive")
+				}
 			} else if !got.AdminDenyOnly || got.Integrity != "S-1-16-8192" || !got.ProcessDenied || !got.RegistryDenied || !got.TCPDenied {
 				t.Fatalf("read worker retained authority: %+v", got)
+			} else {
+				for _, pair := range [][2]net.Conn{{client, accepted}, {accepted, client}} {
+					for _, conn := range pair {
+						if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if _, err := pair[0].Write([]byte{42}); err != nil {
+						t.Fatalf("TCP connection was altered by read worker: %v", err)
+					}
+					var b [1]byte
+					if _, err := io.ReadFull(pair[1], b[:]); err != nil || b[0] != 42 {
+						t.Fatalf("TCP connection did not survive: %v %v", b, err)
+					}
+				}
+				t.Log("TCP connection still carries data in both directions")
 			}
 		})
 	}

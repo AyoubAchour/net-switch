@@ -54,14 +54,14 @@ func (p *process) Close() error {
 	return nil
 }
 
-// Reads use a Medium-integrity token with Administrators deny-only. Writes and
-// outside (which enables TCP counters) retain admin access with privileges
-// stripped. Both enter a bounded worker-only job before they can execute.
 const workerUILimits = windows.JOB_OBJECT_UILIMIT_DESKTOP | windows.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
 	windows.JOB_OBJECT_UILIMIT_EXITWINDOWS | windows.JOB_OBJECT_UILIMIT_GLOBALATOMS |
 	windows.JOB_OBJECT_UILIMIT_HANDLES | windows.JOB_OBJECT_UILIMIT_READCLIPBOARD |
 	windows.JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | windows.JOB_OBJECT_UILIMIT_WRITECLIPBOARD
 
+// Reads use a Medium-integrity token with Administrators deny-only. Writes and
+// outside (which enables TCP counters) retain admin access with privileges
+// stripped. Both enter a bounded worker-only job before they can execute.
 func Start(executable string, args []string) (Process, error) {
 	// No worker needs a console. CREATE_NO_WINDOW still enters hidden-console
 	// initialization for console-subsystem binaries, which fails with a lowered

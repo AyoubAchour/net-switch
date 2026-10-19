@@ -97,8 +97,16 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"root", "child", "nested-directory"} {
-		t.Run(kind, func(t *testing.T) {
+	for _, test := range []struct {
+		kind       string
+		quarantine bool
+	}{
+		{"root", false}, {"root", true},
+		{"child", false}, {"child", true},
+		{"nested-directory", false}, {"nested-directory", true},
+	} {
+		t.Run(fmt.Sprintf("%s/quarantine=%t", test.kind, test.quarantine), func(t *testing.T) {
+			kind := test.kind
 			root := filepath.Join(t.TempDir(), "machine")
 			if err := ProtectDirectory(root); err != nil {
 				t.Fatal(err)
@@ -121,7 +129,9 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 					}
 				}
 			}
-			setProofSecurity(t, target, user.User.Sid.String(), "0x00040000")
+			// CreateFile adds SYNCHRONIZE even for a metadata-only open. The
+			// fixture must grant it alongside WRITE_DAC to exercise retention.
+			setProofSecurity(t, target, user.User.Sid.String(), "0x00140000")
 			before := fileSecurity(t, target)
 			p, err := worker.Start(exe, []string{"worker", "acl-proof"})
 			if err != nil {
@@ -140,16 +150,22 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			if err := decoder.Decode(&ready); err != nil || !ready.Ready {
 				t.Fatalf("Medium worker could not acquire the original grant: %+v %v", ready, err)
 			}
-			if err := ProtectDirectory(root); err != nil {
-				t.Fatal(err)
-			}
-			old, err := filepath.Glob(root + ".untrusted-*")
-			if err != nil || len(old) != 1 {
-				t.Fatalf("untrusted objects were not quarantined: %v %v", old, err)
-			}
-			relative, _ := filepath.Rel(root, target)
-			if after := fileSecurity(t, filepath.Join(old[0], relative)); before != after {
-				t.Fatalf("original ACL was changed before quarantine: %s -> %s", before, after)
+			if test.quarantine {
+				if err := ProtectDirectory(root); err != nil {
+					t.Fatal(err)
+				}
+				old, err := filepath.Glob(root + ".untrusted-*")
+				if err != nil || len(old) != 1 {
+					t.Fatalf("untrusted objects were not quarantined: %v %v", old, err)
+				}
+				relative, _ := filepath.Rel(root, target)
+				if after := fileSecurity(t, filepath.Join(old[0], relative)); before != after {
+					t.Fatalf("original ACL was changed before quarantine: %s -> %s", before, after)
+				}
+			} else {
+				// Vulnerable control: remove the dangerous grant in place. The
+				// old handle must still undo this, proving the exploit actually ran.
+				setProofSecurity(t, target, user.User.Sid.String(), "0x00100000")
 			}
 			if err := encoder.Encode(true); err != nil {
 				t.Fatal(err)
@@ -162,9 +178,9 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			if err := p.Wait(); err != nil {
 				t.Fatalf("metadata proof did not execute: %v %+v", err, answer)
 			}
-			t.Logf("%s retained WRITE_DAC: escaped=%t, write result=%s", kind, answer.Escaped, answer.Error)
-			if answer.Escaped {
-				t.Fatal(fmt.Sprintf("%s metadata handle restored attacker write access after protection", kind))
+			t.Logf("%s retained WRITE_DAC: quarantine=%t, escaped=%t, write result=%s", kind, test.quarantine, answer.Escaped, answer.Error)
+			if answer.Escaped == test.quarantine {
+				t.Fatalf("retained metadata handle: quarantine=%t, escaped=%t", test.quarantine, answer.Escaped)
 			}
 		})
 	}

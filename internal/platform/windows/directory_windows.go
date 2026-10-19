@@ -40,7 +40,10 @@ func ProtectDirectory(path string) error {
 		h, err := windows.CreateFile(p, access|windows.FILE_READ_ATTRIBUTES, share, nil, windows.OPEN_EXISTING,
 			windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 		if err != nil {
-			return object{}, fmt.Errorf("open protected path %s (refusing existing writers or renames): %w", name, err)
+			if err == windows.ERROR_SHARING_VIOLATION {
+				return object{}, fmt.Errorf("open protected path %s: an existing handle prevents exclusive protection: %w", name, err)
+			}
+			return object{}, fmt.Errorf("open protected path %s: %w", name, err)
 		}
 		// This wrapper owns the handle, including enumeration and closing. A
 		// path-based walk would reopen it without sharing our DELETE access.
