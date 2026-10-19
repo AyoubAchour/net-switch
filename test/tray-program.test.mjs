@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
@@ -38,15 +38,30 @@ function setup(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'netswitch-tray-'));
   const runs = [];
   t.after(async () => {
+    if (process.env.NETSWITCH_TRAY_DIAGNOSTIC) {
+      t.diagnostic(`before cleanup: ${JSON.stringify(runs.map(r => ({ pid: r.child.pid, exitCode: r.child.exitCode, signalCode: r.child.signalCode, elapsed: Math.round(performance.now() - r.started) })))} log=${JSON.stringify(log())}`);
+      for (const run of runs.filter(r => r.child.exitCode === null && r.child.signalCode === null)) {
+        const snapshot = spawnSync(POWERSHELL, ['-NoProfile', '-Command', `$p = Get-Process -Id ${run.child.pid} -ErrorAction SilentlyContinue; $p | Select-Object Id,CPU,StartTime,Responding | Format-List; $p.Modules | Where-Object { $_.ModuleName -match 'clr|jit|mscor|Windows.Forms' } | Select-Object FileName | Format-Table -AutoSize; $p.Threads | Select-Object Id,ThreadState,WaitReason | Format-Table`], { encoding: 'utf8', timeout: 15_000 });
+        t.diagnostic(`process snapshot: ${snapshot.stdout} ${snapshot.stderr}`);
+      }
+    }
     for (const run of runs) {
       if (run.child.exitCode === null && run.child.signalCode === null) run.child.kill();
     }
     await Promise.all(runs.map((run) => exitWithin(run, 5000)));
+    for (const run of runs) t.diagnostic(`cleanup pid=${run.child.pid} exit=${run.child.exitCode} signal=${run.child.signalCode}`);
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   });
   const start = (file, args, options = {}) => {
+    const started = performance.now();
     const child = spawn(file, args, { stdio: 'ignore', ...options });
-    const run = { child, exited: once(child, 'exit').then(([code]) => code) };
+    const elapsed = () => Math.round(performance.now() - started);
+    t.diagnostic(`spawn returned pid=${child.pid} file=${path.basename(file)} ms=${elapsed()}`);
+    child.once('spawn', () => t.diagnostic(`spawn event pid=${child.pid} ms=${elapsed()}`));
+    const run = { child, started, exited: once(child, 'exit').then(([code]) => {
+      t.diagnostic(`exit pid=${child.pid} code=${code} ms=${elapsed()}`);
+      return code;
+    }) };
     runs.push(run);
     return run;
   };
