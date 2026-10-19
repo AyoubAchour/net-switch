@@ -92,11 +92,14 @@ The fix belongs in the Wintun API/driver distribution used by the harness and
 engine. This branch keeps the verified signed binary and reports the failure;
 it does not add wake-up traffic, retry a failed round or relax the deadline.
 The mandatory gate remains capable of failing until the dependency is fixed.
+Per-job attempt counts and the packet/counter evidence are retained in
+[reuse-investigation.json](reuse-investigation.json), including incomplete rounds.
 PR #33 was merged and vendor regenerated before the second stress run
 (`39254207549`); the FIN stalls still reproduced. Its SYN handoff change cannot
 explain these cases: the handshake already finished in under 2 ms. A lost SYN
 or SYN-ACK would instead exercise the handshake retransmission timer (gVisor's
-initial value is one second), not this established-connection FIN recovery.
+initial value is one second). The captured Windows TCP templates also use an
+initial RTO of 1,000 ms. Neither is this established-connection FIN recovery.
 
 `testisp-probe.exe` is the same source and binary as the gateway, launched in
 `probe` mode under a separate executable path so firewall rules can distinguish
