@@ -73,20 +73,39 @@ var diagDumpBuffers = sync.Pool{New: func() any { b := make([]byte, 64<<10); ret
 
 var diagSequence atomic.Uint32
 
-// Each query has its own descriptor: an interrupted/cancelled dump cannot
-// leave replies that a subsequent lookup mistakes for its own response.
 func diag(ctx context.Context, family, protocol int, local, remote netip.AddrPort, dump bool) ([]socketRow, error) {
-	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, unix.NETLINK_SOCK_DIAG)
+	return diagQuery(ctx, family, protocol, local, remote, dump, nil)
+}
+
+// Only completed exact queries are reusable. Interrupted dumps, cancellation,
+// malformed messages and errors discard the descriptor with all pending data.
+func diagQuery(ctx context.Context, family, protocol int, local, remote netip.AddrPort, dump bool, pool *diagPool) (rows []socketRow, err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	connection, err := pool.get()
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(fd), "sock_diag")
-	defer f.Close()
-	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
-		return nil, err
-	}
-	stop := context.AfterFunc(ctx, func() { f.SetReadDeadline(time.Now()) })
-	defer stop()
+	f, fd := connection.file, connection.fd
+	canceled := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { f.SetReadDeadline(time.Now()); close(canceled) })
+	defer func() {
+		// A cancellation callback must finish before a later borrower can
+		// install its own deadline on this same descriptor.
+		if !stop() {
+			<-canceled
+		}
+		if err != nil || dump || ctx.Err() != nil {
+			f.Close()
+			return
+		}
+		if f.SetReadDeadline(time.Time{}) != nil {
+			f.Close()
+			return
+		}
+		pool.put(connection)
+	}()
 	if deadline, ok := ctx.Deadline(); ok {
 		f.SetReadDeadline(deadline)
 	}
@@ -129,13 +148,12 @@ func diag(ctx context.Context, family, protocol int, local, remote netip.AddrPor
 	if err := unix.Sendto(fd, b, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
 		return nil, err
 	}
-	buf := make([]byte, 4096)
+	buf := connection.buffer[:]
 	if dump {
 		pooled := diagDumpBuffers.Get().(*[]byte)
 		defer diagDumpBuffers.Put(pooled)
 		buf = *pooled
 	}
-	var rows []socketRow
 	for {
 		n, err := readNetlink(f, buf)
 		if err != nil {
