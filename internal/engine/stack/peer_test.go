@@ -74,7 +74,12 @@ func newPeer(t *testing.T, timestamps bool) *peer {
 func newPeerOptions(t *testing.T, timestamps bool, limits flows.Limits, options ns.Options) *peer {
 	t.Helper()
 	l := ns.NewLink()
-	s, err := ns.New(l, options)
+	return newPeerLink(t, timestamps, limits, options, l, l)
+}
+
+func newPeerLink(t *testing.T, timestamps bool, limits flows.Limits, options ns.Options, l *ns.Link, endpoint gv.LinkEndpoint) *peer {
+	t.Helper()
+	s, err := ns.New(endpoint, options)
 	if err != nil {
 		t.Fatal(err)
 	}
