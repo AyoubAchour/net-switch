@@ -44,11 +44,26 @@ type observedRemote struct {
 	closeGate *atomic.Pointer[chan struct{}]
 	sentEOF   chan struct{}
 	eofOnce   sync.Once
+	readEOF   atomic.Bool
+}
+
+func (c *observedRemote) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if err == io.EOF {
+		c.readEOF.Store(true)
+	}
+	return n, err
 }
 
 func (c *observedRemote) CloseRead() error {
 	err := c.Conn.CloseRead()
 	c.eofOnce.Do(func() { close(c.sentEOF) })
+	// Hold the copy goroutine after CloseWrite but before Splice can return.
+	// Blocking only remote.Close is too late: c.done may already be closed,
+	// allowing the monitor to release the ticket during a negative test.
+	if gate := c.closeGate.Load(); gate != nil && c.readEOF.Load() {
+		<-*gate
+	}
 	return err
 }
 
