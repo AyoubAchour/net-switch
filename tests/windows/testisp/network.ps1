@@ -31,6 +31,15 @@ if ($Action -eq 'block-direct') {
     Set-NetIPInterface -InterfaceIndex $index -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 5500 -NlMtuBytes 1500 -Dhcp Disabled
     Set-DnsClient -InterfaceIndex $index -RegisterThisConnectionsAddress $false
     New-NetIPAddress -InterfaceIndex $index -IPAddress '198.19.0.1' -PrefixLength 30 -AddressFamily IPv4 | Out-Null
+    # New-NetIPAddress returns while duplicate-address detection is pending.
+    $deadline = [DateTime]::UtcNow.AddSeconds(20)
+    do {
+      $address = Get-NetIPAddress -InterfaceIndex $index -IPAddress '198.19.0.1' -AddressFamily IPv4
+      if ($address.AddressState -eq 'Preferred') { break }
+      if ($address.AddressState -eq 'Duplicate') { throw 'TestISP address is duplicate.' }
+      Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $deadline)
+    if ($address.AddressState -ne 'Preferred') { throw "TestISP address never became ready: $($address | ConvertTo-Json -Compress)" }
   }
   if ($Action -eq 'withdraw') {
     Get-NetRoute -InterfaceIndex $index -DestinationPrefix '0.0.0.0/0' | Remove-NetRoute -Confirm:$false
