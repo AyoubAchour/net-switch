@@ -90,7 +90,9 @@ failure cannot be classified retroactively.
 
 Every slow reply logs both sets of overlapping QPC intervals, our session's
 read waits/wakes, write wakeups and atomic ring head/tail observations at the
-gap endpoints and reply. Observations never block on a session lock. A hosted
+gap endpoints and reply. The native sampler also retains observations during
+in-flight replies older than 25 ms, so unexplained stalls have evidence from
+inside the delay. Observations never block on a session lock. A hosted
 test suspends only its own child process to prove both samplers detect a real
 process pause, and verifies that an idle caller alone is not exempted.
 

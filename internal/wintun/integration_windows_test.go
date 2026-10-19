@@ -450,6 +450,7 @@ func TestWintunPingPong(t *testing.T) {
 				binary.LittleEndian.PutUint64(payload, uint64(i))
 				must(t, c.SetDeadline(time.Now().Add(250*time.Millisecond)))
 				start := ticks()
+				monitor.inflight.Store(start)
 				_, err := c.Write(payload)
 				must(t, err)
 				rescued := false
@@ -479,6 +480,7 @@ func TestWintunPingPong(t *testing.T) {
 					break
 				}
 				end := ticks()
+				monitor.inflight.Store(0)
 				d := qpcDuration(start, end)
 				timings = append(timings, d)
 				if d > 50*time.Millisecond {
@@ -493,6 +495,12 @@ func TestWintunPingPong(t *testing.T) {
 			// or stopping the world for ReadMemStats in the hot loop creates noise.
 			monitor.finish(t)
 			for _, trip := range slow {
+				states := make([]tripObservation, 0)
+				for _, state := range monitor.states {
+					if state.Start == trip.start && state.At >= trip.start && state.At <= trip.end {
+						states = append(states, state)
+					}
+				}
 				heartbeat := overlappingGaps(monitor.gaps[0], trip.start, trip.end)
 				scheduler := overlappingGaps(monitor.gaps[1], trip.start, trip.end)
 				classification, covered := classifyPause(trip.start, trip.end, trip.rescued, heartbeat, scheduler)
@@ -501,7 +509,7 @@ func TestWintunPingPong(t *testing.T) {
 				} else {
 					result.SessionStalls++
 				}
-				report(t, map[string]any{"test": "slow_round_trip", "arch": runtime.GOARCH, "mode": mode, "sequence": trip.sequence, "ms": qpcDuration(trip.start, trip.end).Seconds() * 1000, "start_qpc": trip.start, "end_qpc": trip.end, "qpc_frequency": performanceFrequency(), "rescued": trip.rescued, "classification": classification, "common_gap_ms": covered.Seconds() * 1000, "heartbeat_gaps": heartbeat, "scheduler_gaps": scheduler, "state_at_reply": trip.state})
+				report(t, map[string]any{"test": "slow_round_trip", "arch": runtime.GOARCH, "mode": mode, "sequence": trip.sequence, "ms": qpcDuration(trip.start, trip.end).Seconds() * 1000, "start_qpc": trip.start, "end_qpc": trip.end, "qpc_frequency": performanceFrequency(), "rescued": trip.rescued, "classification": classification, "common_gap_ms": covered.Seconds() * 1000, "heartbeat_gaps": heartbeat, "scheduler_gaps": scheduler, "states_during_delay": states, "state_at_reply": trip.state})
 			}
 			report(t, map[string]any{"test": "pause_monitor", "arch": runtime.GOARCH, "mode": mode, "samples": monitor.samples, "heartbeat_gaps": len(monitor.gaps[0]), "scheduler_gaps": len(monitor.gaps[1])})
 			sort.Slice(timings, func(i, j int) bool { return timings[i] < timings[j] })

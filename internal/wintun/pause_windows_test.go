@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -60,12 +61,20 @@ func qpcDuration(start, end int64) time.Duration {
 }
 
 type pauseMonitor struct {
-	stop    chan struct{}
-	done    sync.WaitGroup
-	once    sync.Once
-	gaps    [2][]pauseGap // Each sampler owns its slice until both have joined.
-	errors  [2]error
-	samples [2]int
+	stop     chan struct{}
+	done     sync.WaitGroup
+	once     sync.Once
+	gaps     [2][]pauseGap // Each sampler owns its slice until both have joined.
+	errors   [2]error
+	samples  [2]int
+	inflight atomic.Int64
+	states   []tripObservation // Owned by the native sampler; read only after join.
+}
+
+type tripObservation struct {
+	Start int64               `json:"trip_start_qpc"`
+	At    int64               `json:"sample_qpc"`
+	State *sessionObservation `json:"state"`
 }
 
 // One heartbeat stays on its own OS thread and uses a native high-resolution
@@ -115,7 +124,13 @@ func startPauseMonitor(t *testing.T, s *Session) *pauseMonitor {
 					time.Sleep(time.Millisecond)
 				}
 				now := ticks()
+				inflight := m.inflight.Load()
 				after := observeSession(s)
+				// Keep evidence from INSIDE a delayed reply even when both
+				// heartbeats keep running. Ordinary 1 ms samples need no storage.
+				if id == 0 && s != nil && inflight != 0 && qpcDuration(inflight, now) > 25*time.Millisecond {
+					m.states = append(m.states, tripObservation{inflight, now, after})
+				}
 				m.samples[id]++
 				if qpcDuration(previous, now) > 5*time.Millisecond {
 					m.gaps[id] = append(m.gaps[id], pauseGap{previous, now, before, after})
