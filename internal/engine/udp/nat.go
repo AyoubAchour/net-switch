@@ -40,6 +40,8 @@ type session struct {
 	owner           platform.Owner
 	validated, last time.Time
 	active, closed  bool
+	rejected bool
+	rejectApp string
 	socket          platform.UDPConn
 	wake            chan struct{}
 	done            chan struct{}
@@ -142,6 +144,12 @@ func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket f
 	}
 	s.mu.Lock()
 	b.Unlock()
+	if s.rejected {
+		app := s.rejectApp
+		s.mu.Unlock()
+		if n.control.AllowReject(app) { _, raw, _ := copyPacket(); n.out.Send(packet.Unreachable(raw, 0)) } else { n.Dropped.Add(1) }
+		return
+	}
 	// Reserve all owned copies, including the quoted packet used for errors.
 	bytes := 2*size + 48
 	if s.closed || len(s.queue) >= PendingPackets || s.bytes+bytes > PendingBytes || !n.control.ReservePending(bytes) {
@@ -211,7 +219,13 @@ func (s *session) run() {
 	}
 	s.ticket.SetCancel(cancel)
 	lookup, cl := context.WithTimeout(ctx, 50*time.Millisecond)
+	lookupStart := time.Now()
 	owner, err := n.owners.UDP(lookup, s.source)
+	if observer, ok := n.control.(interface {
+		Lookup(time.Duration, error, platform.Owner)
+	}); ok {
+		observer.Lookup(time.Since(lookupStart), err, owner)
+	}
 	cl()
 	if err != nil {
 		owner = platform.Owner{}
@@ -295,6 +309,10 @@ func (s *session) run() {
 func (s *session) rejectPending(app string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// A packet arriving after this flush must also receive a rejection, even
+	// if close has not yet removed the session from its shard.
+	s.rejected = true
+	s.rejectApp = app
 	for _, d := range s.queue {
 		if s.n.control.AllowReject(app) {
 			s.n.out.Send(packet.Unreachable(d.original, 0))
