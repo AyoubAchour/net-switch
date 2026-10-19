@@ -269,9 +269,11 @@ type ProbeResult struct {
 
 // Fault is a test-only fault in a 1.0 test build.
 type Fault struct {
-	// Kind "udp-destroy-notifications": the engine's sock_diag UDP destroy
-	// listener (5.3) loses its notifications, so only the 1 s
-	// reconciliation can catch a reused port.
+	// Kind "udp-destroy-notifications": the engine's listener on the
+	// sock_diag multicast groups SKNLGRP_INET_UDP_DESTROY and
+	// SKNLGRP_INET6_UDP_DESTROY (5.3) stops seeing its messages as Mode
+	// says, for both families, until the engine stops. Only the 1 s
+	// reconciliation dump can then catch a reused port.
 	Kind string
 	// Mode "drop" loses every notification; "delay" delivers each after Delay.
 	Mode  string

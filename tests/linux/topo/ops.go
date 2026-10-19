@@ -96,15 +96,26 @@ func (n *Net) ClearNetem(ctx context.Context, id engine.LineID) error {
 // "fragmentation needed" / "packet too big", as across a real smaller hop.
 // (The kernel's pmtu.sh selftest keeps the small MTU on a router for the same
 // reason. IPv6 forwarding honours a route's MTU only when it's locked.)
+//
+// The servers' routes back to the line also get a fixed advertised MSS: once
+// a server learns the path, it would otherwise offer a smaller MSS and the
+// PC's sockets would never meet the hop themselves.
 func (n *Net) SetPathMTU(ctx context.Context, id engine.LineID, mtu int) error {
 	l := Line(id)
 	lock := "mtu lock " + strconv.Itoa(mtu)
-	return n.R.Batch(ctx, l.ISP, []string{
+	if err := n.R.Batch(ctx, l.ISP, []string{
 		"route replace default via " + l.Core4.Addr().String() + " " + lock,
 		"route replace default via " + l.Core6.Addr().String() + " " + lock,
 		"route replace " + l.Addr4.Masked().String() + " dev lan proto kernel scope link src " + l.GW4.String() + " " + lock,
 		"route replace " + l.Addr6.Masked().String() + " dev lan proto kernel metric 256 " + lock,
-	})
+	}); err != nil {
+		return err
+	}
+	core := []string{"route replace " + l.Public6.String() + " via " + l.WAN6.Addr().String() + " advmss 1440"}
+	if !l.NAT {
+		core = append(core, "route replace "+l.Addr4.Masked().String()+" via "+l.WAN4.Addr().String()+" advmss 1460")
+	}
+	return n.R.Batch(ctx, INET, core)
 }
 
 // PathMTU reads back the MTUs the line's router forwards with (route -> mtu).

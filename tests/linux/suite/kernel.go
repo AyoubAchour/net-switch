@@ -566,30 +566,26 @@ func smallMTU(e *Env, mtu int) {
 	cfg.Policy.IPv6 = true
 	e.StartEngine(cfg)
 	from := time.Now().UnixMilli()
-	// Each direction in turn, so each end has to discover the smaller hop.
-	// Once one end knows it, its handshakes offer a smaller MSS and the other
-	// end never meets the hop; so the PC's knowledge is flushed before the
-	// download, as the kernel's pmtu.sh flushes between its runs.
+	// Download first: the PC knows nothing yet and offers a full MSS, so the
+	// server's big segments meet the hop and the server learns the path.
+	// Then upload: the server still offers a full MSS (SetPathMTU fixes it),
+	// so the PC's segments meet the hop and the PC learns it too.
 	c := topo.Line("c")
 	for _, fam := range []struct {
 		name     string
 		server   netip.Addr
 		pc       netip.Addr
-		family   string
 		download string
-	}{{"IPv4", topo.Server4, c.Addr4.Addr(), "-4", "2097152"}, {"IPv6", topo.Server6, c.Addr6.Addr(), "-6", "1048576"}} {
+	}{{"IPv4", topo.Server4, c.Addr4.Addr(), "2097152"}, {"IPv6", topo.Server6, c.Addr6.Addr(), "1048576"}} {
 		var up, down app.BulkResult
-		e.RunJSON(Run{App: "charlie", Args: []string{"bulk", "--to", To(fam.server, wire.PortBulk), "--bytes", "1048576", "--timeout", "60000", "--upload"}, Timeout: 90 * time.Second}, &up)
-		e.T.Check(up.OK, "charlie's %s 1 MiB upload over the %d-byte path arrives intact (%.0f ms, %s)", fam.name, mtu, up.MS, up.Err)
-		learned := e.LearnedMTU(fam.server.String(), "c")
-		e.T.Check(learned > 0 && learned <= mtu, "the PC learned the %d-byte path towards %s from the upload (%d)", mtu, fam.server, learned)
-		if _, err := e.Net.R.IP(e.Ctx(), topo.DUT, fam.family, "route", "flush", "cache"); err != nil {
-			e.T.Fatalf("%v", err)
-		}
 		e.RunJSON(Run{App: "charlie", Args: []string{"bulk", "--to", To(fam.server, wire.PortBulk), "--bytes", fam.download, "--timeout", "60000"}, Timeout: 90 * time.Second}, &down)
 		e.T.Check(down.OK, "charlie's %s download over the %d-byte path arrives intact (%d bytes in %.0f ms, %s)", fam.name, mtu, down.Bytes, down.MS, down.Err)
 		server := e.serverLearnedMTU(fam.server, fam.pc)
 		e.T.Check(server > 0 && server <= mtu, "the server learned the %d-byte path towards %s from the download (%d)", mtu, fam.pc, server)
+		e.RunJSON(Run{App: "charlie", Args: []string{"bulk", "--to", To(fam.server, wire.PortBulk), "--bytes", "1048576", "--timeout", "60000", "--upload"}, Timeout: 90 * time.Second}, &up)
+		e.T.Check(up.OK, "charlie's %s 1 MiB upload over the %d-byte path arrives intact (%.0f ms, %s)", fam.name, mtu, up.MS, up.Err)
+		learned := e.LearnedMTU(fam.server.String(), "c")
+		e.T.Check(learned > 0 && learned <= mtu, "the PC learned the %d-byte path towards %s from the upload (%d)", mtu, fam.server, learned)
 	}
 	var mid, big app.DNSResult
 	e.RunJSON(Run{App: "charlie", Args: []string{"dns", "--server", To(topo.Server4, wire.PortDNS), "--name", "mid.test", "--type", "TXT", "--edns", "4096"}}, &mid)

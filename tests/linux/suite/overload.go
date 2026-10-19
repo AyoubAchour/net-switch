@@ -41,19 +41,21 @@ func udpSessions(e *Env) {
 		for _, addr := range topo.ManyServers()[i*10 : i*10+10] {
 			dests = append(dests, To(addr, wire.PortUDPEcho))
 		}
-		floods[name] = e.Start(Run{App: name, Args: []string{"udpflood", "--to", strings.Join(dests, ","), "--sockets", fmt.Sprint(perApp), "--rate", "2000", "--timeout", "4000"}})
+		// 800 new sessions a second per app: the excess arrives within the
+		// 1,000/s budget for refusal notices (5.9), so every one can be told.
+		floods[name] = e.Start(Run{App: name, Args: []string{"udpflood", "--to", strings.Join(dests, ","), "--sockets", fmt.Sprint(perApp), "--rate", "800", "--timeout", "4000"}})
 	}
-	e.Sleep(2 * time.Second)
+	e.Sleep(3 * time.Second)
 	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
 	total := 0
 	var counts []string
-	minAnswered, maxAnswered := perApp, 0
+	minAnswered, maxAnswered, minRefused := perApp, 0, perApp
 	for _, name := range []string{"alpha", "bravo", "charlie", "delta"} {
 		var r app.FloodResult
-		floods[name].WaitJSON(e, 60*time.Second, &r)
+		floods[name].WaitJSON(e, 90*time.Second, &r)
 		e.T.Check(r.Opened == perApp && len(r.OpenErrors) == 0, "%s opened its %d sockets (%d, errors %v)", name, perApp, r.Opened, r.OpenErrors)
 		total += r.Answered
-		minAnswered, maxAnswered = min(minAnswered, r.Answered), max(maxAnswered, r.Answered)
+		minAnswered, maxAnswered, minRefused = min(minAnswered, r.Answered), max(maxAnswered, r.Answered), min(minRefused, r.Refused)
 		counts = append(counts, fmt.Sprintf("%s %d answered, %d refused, %d silent", name, r.Answered, r.Refused, r.Silent))
 	}
 	e.T.Check(minAnswered >= udpSessionsPerApp*95/100, "every app still got at least 95%% of its allowed %d sessions served (least: %d; %s)", udpSessionsPerApp, minAnswered, strings.Join(counts, "; "))
@@ -61,9 +63,11 @@ func udpSessions(e *Env) {
 	stream.WaitJSON(e, 40*time.Second, &s)
 	e.CheckStreamSurvived("charlie's stream through the flood", s, "c")
 	e.T.Check(e.Eng.Running(), "the engine is still running")
-	e.T.Expect(maxAnswered <= udpSessionsPerApp && total <= udpSessionsTotal,
-		"no app gets more than %d sessions and all together no more than %d (most for one app %d, total %d; %s)",
-		udpSessionsPerApp, udpSessionsTotal, maxAnswered, total, strings.Join(counts, "; "))
+	// Losing sessions at random isn't a limit: the excess must be refused.
+	excess := perApp - udpSessionsPerApp
+	e.T.Expect(maxAnswered <= udpSessionsPerApp && total <= udpSessionsTotal && minRefused >= excess*9/10,
+		"no app gets more than %d sessions, all together no more than %d, and each app's %d extra sessions are refused (most for one app %d, total %d, fewest refused %d; %s)",
+		udpSessionsPerApp, udpSessionsTotal, excess, maxAnswered, total, minRefused, strings.Join(counts, "; "))
 }
 
 func tcpStorm(e *Env) {

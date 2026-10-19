@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -70,14 +71,21 @@ func sockaddr(ap netip.AddrPort) syscall.Sockaddr {
 // takes ownership of fd.
 func connectFD(fd int, to netip.AddrPort, timeout time.Duration) FDResult {
 	r := FDResult{Pid: os.Getpid(), Uid: os.Getuid(), Inode: inode(fd)}
-	tv := syscall.NsecToTimeval(timeout.Nanoseconds())
-	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
+	// No SO_SNDTIMEO: with one, a signal (Go's runtime sends them) ends a
+	// blocking connect with EINTR instead of restarting it (signal(7)). The
+	// deadline shuts the socket down instead, which aborts the connect.
+	var timedOut atomic.Bool
+	timer := time.AfterFunc(timeout, func() {
+		timedOut.Store(true)
+		_ = syscall.Shutdown(fd, syscall.SHUT_RDWR)
+	})
 	start := time.Now()
 	err := syscall.Connect(fd, sockaddr(to))
+	stopped := timer.Stop()
 	r.ConnectMS = msSince(start)
-	if err != nil {
+	if err != nil || (!stopped && timedOut.Load()) {
 		syscall.Close(fd)
-		if err == syscall.EINPROGRESS || err == syscall.EAGAIN {
+		if timedOut.Load() {
 			r.Err = "TIMEOUT"
 		} else {
 			r.Err = Code(err)
