@@ -38,12 +38,20 @@ func (g *gateway) trace(packet []byte, direction string) {
 	item.Payload = len(tcp) - int(tcp[12]>>4)*4
 	if direction != "delivered" {
 		g.diag.Lock()
-		if g.diag.wire == nil { g.diag.wire = make(map[string]uint64) }
+		if g.diag.wire == nil {
+			g.diag.wire = make(map[string]uint64)
+		}
 		g.diag.wire[direction+"-segments"]++
 		if item.Flags&2 != 0 {
-			if item.Flags&16 != 0 { g.diag.wire[direction+"-synack"]++ } else { g.diag.wire[direction+"-syn"]++ }
+			if item.Flags&16 != 0 {
+				g.diag.wire[direction+"-synack"]++
+			} else {
+				g.diag.wire[direction+"-syn"]++
+			}
 		}
-		if item.Flags&1 != 0 { g.diag.wire[direction+"-fin"]++ }
+		if item.Flags&1 != 0 {
+			g.diag.wire[direction+"-fin"]++
+		}
 		g.diag.Unlock()
 	}
 	g.states()

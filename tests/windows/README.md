@@ -148,6 +148,15 @@ fresh random payloads and record source tuples, so stale replies cannot pass.
 
 ## Design deviations and limits
 
+Cleanup checks query the Net Plug and Play class without `-PresentOnly`, as well
+as adapters, routes and firewall rules. The two crash cases snapshot non-present
+Wintun devices before restarting or shutting TestISP down. An orphan caused by
+abrupt 0.3.x termination is a measured `baseline-defect` when present and a parity
+pass when absent; it is intermittent, so absence is not treated as a changed
+oracle. The final gate exempts only those same recorded non-present instance IDs
+under the baseline profile. A new/present device or a route/firewall leftover
+still fails, and all orphans fail the v1 profile.
+
 TestISP is a separately observable virtual path sharing the real uplink, not a
 physically separate uplink. Physical cable loss cannot be isolated on a runner
 with one uplink. The proof uses a firewall rule scoped to the direct probe and

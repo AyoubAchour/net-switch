@@ -46,12 +46,6 @@ golang.org/x/time/rate
 # golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
 ## explicit; go 1.17
 golang.zx2c4.com/wintun
-# golang.zx2c4.com/wireguard v0.0.0-20261006164505-2631ce99a06f
-## explicit; go 1.23.1
-golang.zx2c4.com/wireguard/conn
-golang.zx2c4.com/wireguard/conn/winrio
-golang.zx2c4.com/wireguard/rwcancel
-golang.zx2c4.com/wireguard/tun
 # gvisor.dev/gvisor v0.0.0-20261017122056-1b7906fdee8c => ./third_party/gvisor
 ## explicit; go 1.27.2
 gvisor.dev/gvisor/pkg/atomicbitops

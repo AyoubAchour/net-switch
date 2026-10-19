@@ -131,7 +131,11 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			if g.mode.Load() == 0 {
 				g.trace(data, "reply")
 				err := g.device.Write(data)
-				if err != nil { g.event("wintun-write-error", 0, "", err.Error()) } else { g.trace(data, "delivered") }
+				if err != nil {
+					g.event("wintun-write-error", 0, "", err.Error())
+				} else {
+					g.trace(data, "delivered")
+				}
 				g.stats.Lock()
 				if err != nil {
 					g.stats.TestISP.Errors++

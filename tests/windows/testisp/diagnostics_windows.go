@@ -18,37 +18,37 @@ import (
 )
 
 type diagnosticEvent struct {
-	At int64 `json:"at"`
-	Kind string `json:"kind"`
-	Connection uint64 `json:"connection,omitempty"`
-	Tuple string `json:"tuple,omitempty"`
-	Detail string `json:"detail,omitempty"`
-	Counters map[string]uint64 `json:"counters"`
+	At         int64             `json:"at"`
+	Kind       string            `json:"kind"`
+	Connection uint64            `json:"connection,omitempty"`
+	Tuple      string            `json:"tuple,omitempty"`
+	Detail     string            `json:"detail,omitempty"`
+	Counters   map[string]uint64 `json:"counters"`
 }
 
 type heartbeatGap struct {
-	From int64 `json:"from"`
-	To int64 `json:"to"`
-	Ms float64 `json:"ms"`
+	From int64   `json:"from"`
+	To   int64   `json:"to"`
+	Ms   float64 `json:"ms"`
 }
 
 type watchedEndpoint struct {
-	id uint64
-	tuple string
+	id       uint64
+	tuple    string
 	endpoint tcpip.Endpoint
-	state uint32
+	state    uint32
 }
 
 type diagnostics struct {
 	sync.Mutex
-	serial uint64
-	events [1024]diagnosticEvent
-	next uint64
+	serial    uint64
+	events    [1024]diagnosticEvent
+	next      uint64
 	endpoints []watchedEndpoint
-	gaps []heartbeatGap
-	ticks uint64
-	maxGapMs float64
-	wire map[string]uint64
+	gaps      []heartbeatGap
+	ticks     uint64
+	maxGapMs  float64
+	wire      map[string]uint64
 }
 
 func (g *gateway) tcpCounters() map[string]uint64 {
@@ -87,7 +87,9 @@ func (g *gateway) newConnection(id stack.TransportEndpointID) (uint64, string) {
 
 func (g *gateway) watchEndpoint(id uint64, tuple string, ep tcpip.Endpoint) {
 	g.diag.Lock()
-	if len(g.diag.endpoints) == 64 { g.diag.endpoints = g.diag.endpoints[1:] }
+	if len(g.diag.endpoints) == 64 {
+		g.diag.endpoints = g.diag.endpoints[1:]
+	}
 	g.diag.endpoints = append(g.diag.endpoints, watchedEndpoint{id, tuple, ep, ep.State()})
 	g.diag.Unlock()
 	g.event("endpoint-state", id, tuple, tcp.EndpointState(ep.State()).String())
@@ -100,10 +102,15 @@ func (g *gateway) states() {
 	g.diag.Lock()
 	for i := range g.diag.endpoints {
 		p := &g.diag.endpoints[i]
-		if state := p.endpoint.State(); state != p.state { p.state = state; changed = append(changed, *p) }
+		if state := p.endpoint.State(); state != p.state {
+			p.state = state
+			changed = append(changed, *p)
+		}
 	}
 	g.diag.Unlock()
-	for _, p := range changed { g.event("endpoint-state", p.id, p.tuple, tcp.EndpointState(p.state).String()) }
+	for _, p := range changed {
+		g.event("endpoint-state", p.id, p.tuple, tcp.EndpointState(p.state).String())
+	}
 }
 
 func (g *gateway) heartbeat() {
@@ -112,15 +119,20 @@ func (g *gateway) heartbeat() {
 	previous := time.Now()
 	for {
 		select {
-		case <-g.done: return
+		case <-g.done:
+			return
 		case <-timer.C:
 			now := time.Now() // ticker timestamps hide scheduler delays; sample now.
-			ms := float64(now.Sub(previous))/float64(time.Millisecond)
+			ms := float64(now.Sub(previous)) / float64(time.Millisecond)
 			g.diag.Lock()
 			g.diag.ticks++
-			if ms > g.diag.maxGapMs { g.diag.maxGapMs = ms }
+			if ms > g.diag.maxGapMs {
+				g.diag.maxGapMs = ms
+			}
 			if ms > 5 {
-				if len(g.diag.gaps) == 512 { g.diag.gaps = g.diag.gaps[1:] }
+				if len(g.diag.gaps) == 512 {
+					g.diag.gaps = g.diag.gaps[1:]
+				}
 				g.diag.gaps = append(g.diag.gaps, heartbeatGap{previous.UnixMicro(), now.UnixMicro(), ms})
 			}
 			g.diag.Unlock()
@@ -141,42 +153,57 @@ func (g *gateway) diagnosticSnapshot() map[string]any {
 	err := windows.GetIfEntry2Ex(windows.MibIfEntryNormal, &row)
 	ring := map[string]any{"full": g.device.ringFull.Load(), "readErrors": g.device.readErrors.Load(), "writeErrors": g.device.writeErrors.Load(),
 		"inDiscards": row.InDiscards, "outDiscards": row.OutDiscards, "inErrors": row.InErrors, "outErrors": row.OutErrors}
-	if err != nil { ring["error"] = err.Error() }
+	if err != nil {
+		ring["error"] = err.Error()
+	}
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	pauses := []heartbeatGap{}
 	for i, end := range memory.PauseEnd {
-		if end != 0 { pauses = append(pauses, heartbeatGap{int64(end-memory.PauseNs[i])/1000, int64(end)/1000, float64(memory.PauseNs[i])/1e6}) }
+		if end != 0 {
+			pauses = append(pauses, heartbeatGap{int64(end-memory.PauseNs[i]) / 1000, int64(end) / 1000, float64(memory.PauseNs[i]) / 1e6})
+		}
 	}
 	g.diag.Lock()
 	defer g.diag.Unlock()
 	start := uint64(0)
-	if g.diag.next > uint64(len(g.diag.events)) { start = g.diag.next-uint64(len(g.diag.events)) }
+	if g.diag.next > uint64(len(g.diag.events)) {
+		start = g.diag.next - uint64(len(g.diag.events))
+	}
 	events := make([]diagnosticEvent, 0, g.diag.next-start)
-	for n := start; n < g.diag.next; n++ { events = append(events, g.diag.events[n%uint64(len(g.diag.events))]) }
+	for n := start; n < g.diag.next; n++ {
+		events = append(events, g.diag.events[n%uint64(len(g.diag.events))])
+	}
 	return map[string]any{"at": time.Now().UnixMicro(), "tcp": g.tcpCounters(), "windowsTCP": win, "ring": ring,
-		"wire": copyCounters(g.diag.wire),
+		"wire":   copyCounters(g.diag.wire),
 		"events": events, "heartbeat": map[string]any{"periodMs": 1, "ticks": g.diag.ticks, "maxGapMs": g.diag.maxGapMs, "gaps": append([]heartbeatGap{}, g.diag.gaps...)},
 		"gc": map[string]any{"count": memory.NumGC, "pauses": pauses}}
 }
 
 func copyCounters(values map[string]uint64) map[string]uint64 {
 	result := make(map[string]uint64, len(values))
-	for key, value := range values { result[key] = value }
+	for key, value := range values {
+		result[key] = value
+	}
 	return result
 }
 
 type observedReader struct {
 	io.Reader
-	g *gateway
-	id uint64
+	g                *gateway
+	id               uint64
 	tuple, direction string
-	first bool
+	first            bool
 }
 
 func (r *observedReader) Read(buf []byte) (int, error) {
 	n, err := r.Reader.Read(buf)
-	if n > 0 && !r.first { r.first = true; r.g.event("first-byte-"+r.direction, r.id, r.tuple, fmt.Sprint(n)) }
-	if err != nil { r.g.event("read-end-"+r.direction, r.id, r.tuple, err.Error()) }
+	if n > 0 && !r.first {
+		r.first = true
+		r.g.event("first-byte-"+r.direction, r.id, r.tuple, fmt.Sprint(n))
+	}
+	if err != nil {
+		r.g.event("read-end-"+r.direction, r.id, r.tuple, err.Error())
+	}
 	return n, err
 }
