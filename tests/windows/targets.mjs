@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { createCipheriv, createHash } from 'node:crypto';
 import { createSocket } from 'node:dgram';
 import { once } from 'node:events';
 import { createServer as createTCPServer } from 'node:net';
@@ -18,9 +19,10 @@ export async function targets(address) {
     if (url.pathname === '/bytes') {
       const length = Math.min(100_000_000, Math.max(0, Number(url.searchParams.get('length')) || 0));
       res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': length, Connection: 'close' });
-      const block = Buffer.alloc(64 * 1024, 0x5a);
+      const block = Buffer.alloc(64 * 1024);
+      const cipher = createCipheriv('aes-256-ctr', createHash('sha256').update(observation.nonce ?? '').digest(), Buffer.alloc(16));
       for (let sent = 0; sent < length; sent += block.length) {
-        if (!res.write(block.subarray(0, Math.min(block.length, length - sent)))) {
+        if (!res.write(cipher.update(block.subarray(0, Math.min(block.length, length - sent))))) {
           await new Promise((resolve) => {
             const done = () => { res.off('drain', done); res.off('close', done); resolve(); };
             res.once('drain', done); res.once('close', done);
@@ -28,7 +30,7 @@ export async function targets(address) {
           if (res.destroyed) return;
         }
       }
-      res.end();
+      res.end(cipher.final());
       return;
     }
     res.setHeader('Content-Type', 'application/json');

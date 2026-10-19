@@ -23,6 +23,8 @@ accepted as evidence.
   app does not import it.
 - Old connections must keep using their original sockets. Reconnecting behind
   the test's back is a failure, even when the new request succeeds.
+- The 100 MB body is a per-request AES-CTR stream, checked with SHA-256. Its bytes
+  vary by position, so duplicated or reordered chunks cannot hide in filler.
 - Missing baselines fail CI. A broken target, process, control API or harness
   never becomes a `baseline-defect` exemption. Independent probes may continue
   collecting evidence after a failure; the job remains failed.

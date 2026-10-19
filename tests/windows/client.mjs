@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash, randomBytes } from 'node:crypto';
+import { createCipheriv, createHash, randomBytes } from 'node:crypto';
 import { createSocket } from 'node:dgram';
 import { Agent as HTTPAgent, request as httpRequest } from 'node:http';
 import { Agent as HTTPSAgent, request as httpsRequest } from 'node:https';
@@ -118,7 +118,7 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
         }
         socket.on('connect', () => {
           connected = true;
-          const path = length ? `/bytes?length=${length}` : `/close?nonce=${nonce}`;
+          const path = length ? `/bytes?length=${length}&nonce=${nonce}` : `/close?nonce=${nonce}`;
           socket.write(`GET ${path} HTTP/1.1\r\nHost: target\r\nConnection: close\r\n\r\n`);
         });
         socket.on('data', (data) => {
@@ -148,8 +148,10 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
     assert.match(result.header, /^HTTP\/1\.1 200/);
     if (!length) assert.equal(JSON.parse(result.body).nonce, nonce, 'Old or corrupt data entered a new connection');
     if (length) {
-      const expected = createHash('sha256'); const block = Buffer.alloc(64 * 1024, 0x5a);
-      for (let n = 0; n < length; n += block.length) expected.update(block.subarray(0, Math.min(block.length, length - n)));
+      const expected = createHash('sha256'); const block = Buffer.alloc(64 * 1024);
+      const cipher = createCipheriv('aes-256-ctr', createHash('sha256').update(nonce).digest(), Buffer.alloc(16));
+      for (let n = 0; n < length; n += block.length) expected.update(cipher.update(block.subarray(0, Math.min(block.length, length - n))));
+      expected.update(cipher.final());
       assert.equal(result.bytes, length); assert.equal(result.sha256, expected.digest('hex'), 'Large TCP payload corrupted');
     }
     if (gap) await delay(gap);
