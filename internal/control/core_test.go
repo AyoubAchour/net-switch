@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"math"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,14 +21,21 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/lines"
+	"github.com/AyoubAchour/net-switch/internal/platform"
 	"github.com/AyoubAchour/net-switch/internal/settings"
 	"github.com/AyoubAchour/net-switch/internal/usage"
 )
 
 type memoryFiles struct {
-	mu   sync.Mutex
-	data map[string][]byte
-	fail bool
+	mu     sync.Mutex
+	data   map[string][]byte
+	fail   bool
+	writes []recordedWrite
+	logs   []string
+}
+type recordedWrite struct {
+	Path  string
+	Bytes []byte
 }
 
 func (f *memoryFiles) ReadFile(p string) ([]byte, error) {
@@ -55,6 +64,7 @@ func (f *memoryFiles) Rename(a, b string) error {
 		return fs.ErrNotExist
 	}
 	f.data[b] = v
+	f.writes = append(f.writes, recordedWrite{Path: b, Bytes: append([]byte{}, v...)})
 	delete(f.data, a)
 	return nil
 }
@@ -83,12 +93,20 @@ type fakeEngine struct {
 	s           engine.Snapshot
 	connections []engine.Connection
 	calls       []string
+	commands    []map[string]any
 	failure     error
 	beforeApply func(engine.Revision)
 	probe       func(engine.ProbeRequest) engine.ProbeResult
 }
 
 func (f *fakeEngine) Snapshot() engine.Snapshot { f.mu.Lock(); defer f.mu.Unlock(); return f.s }
+func (f *fakeEngine) Fail(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.s.Status = "error"
+	text := err.Error()
+	f.s.Error = &text
+}
 func (f *fakeEngine) Start(_ context.Context, p engine.Policy) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -97,6 +115,7 @@ func (f *fakeEngine) Start(_ context.Context, p engine.Policy) error {
 	f.s.Instance = "test-engine"
 	f.s.Policy = p
 	f.s.StartedWith = &p
+	f.s.AppliedRevision = 0
 	f.s.StartedAt = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 	return f.failure
 }
@@ -119,6 +138,14 @@ func (f *fakeEngine) Apply(_ context.Context, r engine.Revision) (engine.Acknowl
 	if f.failure != nil {
 		return engine.Acknowledgement{}, f.failure
 	}
+	if f.s.Status == "on" && f.s.StartedWith != nil && len(f.s.StartedWith.Lines) > 1 {
+		for _, line := range r.Policy.Lines {
+			target := r.Policy.Lanes[line.ID]
+			if target != "" && (f.s.AppliedRevision == 0 || f.s.Policy.Lanes[line.ID] != target) {
+				f.commands = append(f.commands, map[string]any{"method": "PUT", "route": "/proxies/lane-" + line.ID, "body": map[string]any{"name": "line-" + target}})
+			}
+		}
+	}
 	f.s.Policy = r.Policy
 	f.s.AppliedRevision = r.Number
 	f.s.AppliedHash = r.Hash
@@ -129,6 +156,7 @@ func (f *fakeEngine) CloseFlows(_ context.Context, r engine.CloseRequest) (engin
 	defer f.mu.Unlock()
 	for _, id := range r.ConnectionIDs {
 		f.calls = append(f.calls, "close:"+id)
+		f.commands = append(f.commands, map[string]any{"method": "DELETE", "route": "/connections/" + id})
 	}
 	return engine.CloseResult{Closed: len(r.ConnectionIDs)}, nil
 }
@@ -141,6 +169,7 @@ func (f *fakeEngine) CloseConnection(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "close:"+id)
+	f.commands = append(f.commands, map[string]any{"method": "DELETE", "route": "/connections/" + id})
 	return nil
 }
 func (f *fakeEngine) Probe(_ context.Context, r engine.ProbeRequest) engine.ProbeResult {
@@ -170,6 +199,9 @@ func (f *fakePlatform) Call(_ context.Context, name string, a map[string]any) (a
 		if tt, ok := a["connections"].([]*apps.Tuple); ok {
 			n = len(tt)
 		}
+		if tt, ok := a["connections"].([]platform.TCPSelector); ok {
+			n = len(tt)
+		}
 		return map[string]any{"closed": float64(n), "failed": float64(0), "gone": float64(0), "codes": []any{}}, nil
 	case "installed-apps":
 		return []any{}, nil
@@ -186,8 +218,8 @@ func testCore(t *testing.T, initial map[string]any) (*Core, *fakeEngine, *fakeCl
 	}
 	files.data[filepath.Join("/test", "settings.json")] = b
 	clock := &fakeClock{at: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
-	serial := 0
-	id := func() string { serial++; return fmt.Sprintf("%012x", serial) }
+	var serial atomic.Uint64
+	id := func() string { return fmt.Sprintf("%012x", serial.Add(1)) }
 	io := settings.Options{Files: files, Now: clock.Now, ID: id, Sleep: func(time.Duration) {}}
 	store := settings.New("/test", io)
 	if _, err := store.Load(); err != nil {
@@ -209,11 +241,12 @@ func testCore(t *testing.T, initial map[string]any) (*Core, *fakeEngine, *fakeCl
 	}
 	f := &fakeEngine{s: engine.Snapshot{Status: "off", Instance: "test-engine", Policy: engine.Policy{}}}
 	p := &fakePlatform{}
-	c, err := New(context.Background(), Options{Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: time.UTC, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, Background: func(fn func()) { fn() }})
+	c, err := New(context.Background(), Options{Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: time.UTC, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, Background: func(fn func()) { fn() }, Log: func(s string) { files.mu.Lock(); files.logs = append(files.logs, s); files.mu.Unlock() }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(c.cancel)
+	c.elevated = true
 	return c, f, clock, files
 }
 func testLines() []lines.Line {
@@ -350,6 +383,63 @@ func TestHTTPBoundaryWithoutOpeningSocket(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStateNonFiniteRatesAreNull(t *testing.T) {
+	c, _, _, _ := testCore(t, map[string]any{})
+	c.tracker = &seededTracker{rows: []apps.Row{{Key: "unknown", Path: "", Rate: apps.Rate{Down: math.NaN(), Up: math.Inf(1)}, LineDown: map[string]float64{}, SortScore: math.Inf(-1), Connections: map[string]int{}}}}
+	b, err := js.Marshal(c.State())
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := js.Decode(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := js.Object(array(js.Object(v)["apps"])[0])
+	rate := js.Object(row["rate"])
+	if rate["down"] != nil || rate["up"] != nil || row["sortScore"] != nil {
+		t.Fatalf("non-finite values must be null: %s", b)
+	}
+}
+
+func TestConcurrentStateSettingsAndCounters(t *testing.T) {
+	c, _, clock, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.adapters = []map[string]any{{"alias": "Ethernet", "ipv4s": []any{"192.0.2.1"}}, {"alias": "Wi-Fi", "ipv4s": []any{"192.0.2.2"}}}
+	c.routes = []map[string]any{{"interfaceAddress": "192.0.2.1"}, {"interfaceAddress": "192.0.2.2"}}
+	c.routesAt = c.now()
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			if _, err := js.Marshal(c.State()); err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 25; i++ {
+			clock.advance(1000)
+			c.HelperLine([]byte(fmt.Sprintf(`{"adapters":[{"alias":"Ethernet","rx":%d,"tx":0}]}`, i*100)))
+			if err := c.Poll(context.Background()); err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 15; i++ {
+			if _, err := c.Action(context.Background(), "POST", "/api/lines/update", map[string]any{"id": "b2", "label": fmt.Sprintf("Phone %d", i)}); err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	wg.Wait()
 }
 
 type seededTracker struct{ rows []apps.Row }

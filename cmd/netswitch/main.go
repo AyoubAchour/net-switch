@@ -253,7 +253,7 @@ func run() error {
 	if err := settings.AtomicWrite(session, b, ioOptions); err != nil {
 		return err
 	}
-	log.append(fmt.Sprintf("started on port %d (mode %s, Go control %s)", port, mode, buildinfo.String()))
+	core.Announce(port)
 	fmt.Printf("Net Switch is running at http://127.0.0.1:%d/#token=%s\n", port, token)
 	core.Run()
 	signals := make(chan os.Signal, 1)
@@ -273,7 +273,6 @@ func run() error {
 	if err := os.Remove(session); err != nil && !os.IsNotExist(err) {
 		log.append("could not remove server.json: " + err.Error())
 	}
-	log.append("quit")
 	shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdown)

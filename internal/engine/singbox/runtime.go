@@ -95,6 +95,7 @@ func (a *Adapter) status(status string, err error) {
 		a.s.Error = &s
 	}
 }
+func (a *Adapter) Fail(err error) { a.status("error", err) }
 func randomID() string {
 	var b [24]byte
 	if _, err := rand.Read(b[:]); err != nil {

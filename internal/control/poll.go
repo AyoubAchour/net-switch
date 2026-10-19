@@ -131,8 +131,10 @@ func (c *Core) sampleLinesLocked(s engine.Snapshot) {
 		}
 		if before != nil && up != nil && *before != *up {
 			if *up {
+				c.log("%s is up again", item.Label)
 				c.noteLocked("up", item.ID, item.Label+" is back.")
 			} else {
+				c.log("%s is down (%s)", item.Label, *l.health.Reason)
 				reason := "it doesn’t work right now"
 				if l.health.Reason != nil {
 					switch *l.health.Reason {
@@ -150,6 +152,10 @@ func (c *Core) sampleLinesLocked(s engine.Snapshot) {
 	}
 }
 func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connection, gen uint64) error {
+	pending, err := c.pendingClosures()
+	if err != nil {
+		return err
+	}
 	c.mu.Lock()
 	if gen != c.generation {
 		c.mu.Unlock()
@@ -168,6 +174,17 @@ func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connecti
 			blocked = blocked || id == line.ID
 		}
 		if moved || blocked {
+			existing := false
+			for _, intent := range pending {
+				if intent.Request.Line == line.ID && intent.Request.Instance == s.Instance {
+					intents = append(intents, intent)
+					existing = true
+					break
+				}
+			}
+			if existing {
+				continue
+			}
 			ids := []string{}
 			for _, v := range connections {
 				if id := apps.ConnectionLine(&v.Connection); id != nil && *id == line.ID {
@@ -182,7 +199,7 @@ func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connecti
 	}
 	c.mu.Unlock()
 	if len(intents) == 0 {
-		return c.ApplyPolicy(ctx)
+		return c.applyPolicy(ctx, true)
 	}
 	return c.applyWithClosures(ctx, p, intents, gen)
 }
@@ -295,8 +312,11 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 			if result.Outcome == engine.LineFailed {
 				rate := c.tracker.LineRate(id)
 				if rate.Down >= 16*1024 || rate.Up >= 16*1024 {
-					c.log("%s didn't answer an internet test in time, but it is carrying traffic", c.labelLocked(id))
+					c.laneLogLocked(l, "probe-busy", fmt.Sprintf("%s didn't answer an internet test in time, but it is carrying traffic, so it still counts as working", c.labelLocked(id)))
 					return
+				}
+				if !l.health.Offline {
+					c.laneLogLocked(l, "probe", fmt.Sprintf("%s didn't reach the internet in a test", c.labelLocked(id)))
 				}
 				for i := 0; i < max(1, failedChecks); i++ {
 					l.health.NoteProbe(ptr(false), now)
@@ -310,6 +330,17 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 	for _, job := range jobs {
 		c.op.Background(job)
 	}
+}
+
+func (c *Core) laneLogLocked(l *lane, key, text string) {
+	if l.logged == nil {
+		l.logged = map[string]int64{}
+	}
+	if at, ok := l.logged[key]; ok && c.now()-at < 30000 {
+		return
+	}
+	l.logged[key] = c.now()
+	c.log("%s", text)
 }
 
 // Run schedules polls after their previous completion, so a slow read never

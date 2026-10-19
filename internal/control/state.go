@@ -9,6 +9,21 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/lines"
 )
 
+// Keep the API's nested numeric records in the JSON sanitizer's object form.
+// encoding/json rejects NaN in a struct before it can emit the required null.
+func rateJSON(rate *apps.Rate) any {
+	if rate == nil {
+		return nil
+	}
+	return map[string]any{"down": rate.Down, "up": rate.Up}
+}
+func outsideJSON(row *apps.OutsideRow) any {
+	if row == nil {
+		return nil
+	}
+	return map[string]any{"connections": row.Connections, "byLine": row.ByLine, "beforeRouting": row.BeforeRouting, "measured": row.Measured, "rate": rateJSON(row.Rate)}
+}
+
 func (c *Core) combineActiveLocked(s engine.Snapshot) bool {
 	if !s.Policy.Combine || s.Status != "on" {
 		return false
@@ -146,7 +161,7 @@ func (c *Core) State() map[string]any {
 		}
 		var rate any
 		if m, ok := c.meters[line.Alias]; ok && c.now()-m.at <= 5000 {
-			rate = m.rate
+			rate = rateJSON(m.rate)
 		}
 		ssid := adapter["ssid"]
 		if !js.Truth(ssid) {
@@ -188,11 +203,11 @@ func (c *Core) State() map[string]any {
 		row["key"] = a.Key
 		row["path"] = a.Path
 		row["line"] = a.Line
-		row["rate"] = a.Rate
+		row["rate"] = rateJSON(&a.Rate)
 		row["lineDown"] = a.LineDown
 		row["sortScore"] = a.SortScore
 		row["connections"] = a.Connections
-		row["outside"] = a.Outside
+		row["outside"] = outsideJSON(a.Outside)
 		appRows = append(appRows, row)
 	}
 	var retryAt, ipv6, offer, autostart any
@@ -221,3 +236,4 @@ func (c *Core) State() map[string]any {
 	updates := c.op.Mode != "proxy" && c.values["checkForUpdates"] == true
 	return map[string]any{"mode": c.op.Mode, "elevated": c.elevated, "version": c.op.Version, "update": offer, "updateChecks": updates, "features": map[string]any{"reconnect": true, "combine": true, "lines": true, "installedApps": true}, "combine": map[string]any{"on": s.Policy.Combine, "active": c.combineActiveLocked(s), "mode": c.values["combineMode"]}, "routing": map[string]any{"status": s.Status, "wanted": c.wanted, "error": s.Error, "measuring": routing && c.monitorFailures < 3, "proxyPort": s.ProxyPort, "ipv6": ipv6, "retryAt": retryAt}, "lines": ll, "candidates": candidates, "apps": appRows, "events": append([]map[string]any{}, c.events...), "settings": map[string]any{"autostart": autostart, "checkForUpdates": updates, "probeTargets": c.values["probeTargets"]}, "setup": map[string]any{"cableNotDefault": len(others) > 0, "wifiBlocked": c.policy == float64(3) && wifi, "keepBothConnected": len(items) > 1 && hasWifiLine && c.policy != float64(0) && c.policy != float64(3), "changed": map[string]any{"cableDefault": metricChanged, "keepBoth": policyChanged}}}
 }
+

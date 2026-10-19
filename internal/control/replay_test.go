@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -87,6 +88,9 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			}
 			c.usage = usage.New(location)
 			var expected []map[string]any
+			var expectedCommands []map[string]any
+			var expectedWrites []map[string]any
+			var expectedLogs []string
 			var adapters []map[string]any
 			completion := 0
 			for i, entry := range trace.Entries {
@@ -112,6 +116,22 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 				if entry.Direction == "output" && entry.Kind == "api" {
 					expected = append(expected, m)
 				}
+				if entry.Direction == "output" && entry.Kind == "log" {
+					text := js.Text(m["text"])
+					switch text {
+					case "line readings come from PowerShell: the native helper is not built (npm run build:helper)":
+						text = "line readings come from native workers"
+					case "network readings come from PowerShell and route.exe: the native helper is not built":
+						text = "network readings come from native workers (Windows change notifications)"
+					}
+					expectedLogs = append(expectedLogs, text)
+				}
+				if entry.Direction == "output" && entry.Kind == "write" && controlFile(js.Text(m["file"])) {
+					expectedWrites = append(expectedWrites, m)
+				}
+				if entry.Direction == "output" && entry.Kind == "engine" && (m["method"] == "PUT" || m["method"] == "DELETE") {
+					expectedCommands = append(expectedCommands, m)
+				}
 			}
 			c.adapters = adapters
 			c.routes = []map[string]any{}
@@ -123,6 +143,7 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			c.routesAt = c.now()
 			c.policy = float64(1)
 			c.elevated = true
+			c.Announce(47821)
 			probes := map[string]any{}
 			e.probe = func(r engine.ProbeRequest) engine.ProbeResult {
 				value, ok := probes[r.Line]
@@ -139,6 +160,9 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := c.Start(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.SaveUsage(); err != nil {
 				t.Fatal(err)
 			}
 			responses := 0
@@ -167,6 +191,11 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 						}
 						if err := c.Supervise(context.Background()); err != nil {
 							t.Fatal(err)
+						}
+						if (nextPoll-clockOrigin(trace))%60000 == 0 {
+							if err := c.SaveUsage(); err != nil {
+								t.Fatal(err)
+							}
 						}
 						nextPoll += 1000
 					}
@@ -288,10 +317,57 @@ func TestRecordedTraceAPIReplay(t *testing.T) {
 			if responses != len(expected) {
 				t.Fatalf("replayed %d of %d API outputs", responses, len(expected))
 			}
+			actualCommands := []map[string]any{}
+			for _, command := range e.commands {
+				b, _ := js.Marshal(command)
+				v, _ := js.Decode(b)
+				m := js.Object(v)
+				for from, to := range mapping {
+					if m["route"] == "/proxies/lane-"+from {
+						m["route"] = "/proxies/lane-" + to
+					}
+					if body := js.Object(m["body"]); body != nil && body["name"] == "line-"+from {
+						body["name"] = "line-" + to
+					}
+				}
+				actualCommands = append(actualCommands, m)
+			}
+			if !reflect.DeepEqual(actualCommands, expectedCommands) {
+				t.Fatalf("engine mutation sequence differs\ngot %v\nwant %v", actualCommands, expectedCommands)
+			}
 			if completion == 0 {
 				t.Fatal("no asynchronous completions replayed")
 			}
-			_ = fs
+			actualWrites := []recordedWrite{}
+			for _, w := range fs.writes {
+				if controlFile(w.Path) {
+					actualWrites = append(actualWrites, w)
+				}
+			}
+			if len(actualWrites) != len(expectedWrites) {
+				t.Fatalf("control writes: got %d, want %d", len(actualWrites), len(expectedWrites))
+			}
+			for i, w := range actualWrites {
+				want := expectedWrites[i]
+				if filepath.Base(w.Path) != filepath.Base(js.Text(want["file"])) {
+					t.Fatalf("write %d: %s != %s", i, w.Path, want["file"])
+				}
+				a, err := orderedTraceJSON(w.Bytes)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, err := orderedTraceJSON([]byte(js.Text(want["text"])))
+				if err != nil {
+					t.Fatal(err)
+				}
+				a = remapTrace(a, mapping)
+				if !reflect.DeepEqual(a, b) {
+					t.Fatalf("write %d %s: %s", i, w.Path, firstDifference(a, b, "$"))
+				}
+			}
+			if !reflect.DeepEqual(fs.logs, expectedLogs) {
+				t.Fatalf("log condition sequence differs\ngot: %q\nwant: %q", fs.logs, expectedLogs)
+			}
 			t.Logf("%s: %d entries, %d completion records, %d API outputs", trace.Name, len(trace.Entries), completion, responses)
 		})
 	}
@@ -364,4 +440,61 @@ func firstDifference(a, b any, path string) string {
 	return fmt.Sprintf("%s: got %v, want %v", path, a, b)
 }
 
-var _ = strings.Compare
+func clockOrigin(trace recordedTrace) int64 {
+	if trace.Scenario.Now != nil {
+		return *trace.Scenario.Now
+	}
+	return 1792411200000
+}
+func controlFile(path string) bool {
+	base := filepath.Base(strings.ReplaceAll(path, `\`, "/"))
+	return base == "settings.json" || base == "settings.json.bak" || base == "usage.json" || base == "windows-undo.json" || base == "windows-undo.json.bak"
+}
+func orderedTraceJSON(b []byte) (any, error) {
+	d := json.NewDecoder(bytes.NewReader(b))
+	var read func(string) (any, error)
+	read = func(key string) (any, error) {
+		token, err := d.Token()
+		if err != nil {
+			return nil, err
+		}
+		switch token {
+		case json.Delim('{'):
+			m := map[string]any{}
+			entries := []any{}
+			for d.More() {
+				t, err := d.Token()
+				if err != nil {
+					return nil, err
+				}
+				name := t.(string)
+				v, err := read(name)
+				if err != nil {
+					return nil, err
+				}
+				m[name] = v
+				entries = append(entries, []any{name, v})
+			}
+			if _, err := d.Token(); err != nil {
+				return nil, err
+			}
+			if key == "appLines" || key == "shares" {
+				return entries, nil
+			}
+			return m, nil
+		case json.Delim('['):
+			a := []any{}
+			for d.More() {
+				v, err := read("")
+				if err != nil {
+					return nil, err
+				}
+				a = append(a, v)
+			}
+			_, err := d.Token()
+			return a, err
+		}
+		return token, nil
+	}
+	return read("")
+}

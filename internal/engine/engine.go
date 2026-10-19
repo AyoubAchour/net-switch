@@ -83,6 +83,8 @@ type Connection struct {
 // The closure cutoff is captured before Apply, never from a subsequent poll.
 type Engine interface {
 	Snapshot() Snapshot
+	// Fail reports a control-side prerequisite failure without starting the engine.
+	Fail(error)
 	Start(context.Context, Policy) error
 	Stop(context.Context) error
 	Apply(context.Context, Revision) (Acknowledgement, error)

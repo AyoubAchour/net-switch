@@ -11,6 +11,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/lines"
+	"github.com/AyoubAchour/net-switch/internal/platform"
 )
 
 func (c *Core) Action(ctx context.Context, method, path string, b map[string]any) (any, error) {
@@ -341,6 +342,12 @@ func (c *Core) reconnect(ctx context.Context, key string) (map[string]any, error
 		routed = c.tracker.ConnectionIDsOffLine(key, target)
 		outside = c.outside.IDsOffLine(key, target)
 	}
+	tuples := []platform.TCPSelector{}
+	for _, id := range outside {
+		if t := apps.ParseOutsideID(id); t != nil {
+			tuples = append(tuples, platform.TCPSelector{Tuple: *t, ProcessStarted: c.outsideStarts[id]})
+		}
+	}
 	c.mu.Unlock()
 	closed, failed, gone := 0, 0, 0
 	for _, id := range routed {
@@ -348,12 +355,6 @@ func (c *Core) reconnect(ctx context.Context, key string) (map[string]any, error
 			failed++
 		} else {
 			closed++
-		}
-	}
-	tuples := []*apps.Tuple{}
-	for _, id := range outside {
-		if t := apps.ParseOutsideID(id); t != nil {
-			tuples = append(tuples, t)
 		}
 	}
 	v, err := c.op.Platform.Call(ctx, "close-tcp", map[string]any{"connections": tuples})
@@ -364,7 +365,11 @@ func (c *Core) reconnect(ctx context.Context, key string) (map[string]any, error
 	closed += int(js.Number(m["closed"]))
 	failed += int(js.Number(m["failed"]))
 	gone += int(js.Number(m["gone"]))
-	c.log("reconnect %s: closed %d, failed %d, already gone %d", key, closed, failed, gone)
+	codes := []string{}
+	for _, code := range array(m["codes"]) {
+		codes = append(codes, fmt.Sprint(code))
+	}
+	c.log("reconnect %s: closed %d, failed %d (codes %s), already gone %d", key, closed, failed, strings.Join(codes, ","), gone)
 	return map[string]any{"closed": closed, "failed": failed, "gone": gone}, nil
 }
 func (c *Core) changeSettings(ctx context.Context, b map[string]any) error {
