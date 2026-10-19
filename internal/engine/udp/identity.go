@@ -37,8 +37,8 @@ func (n *NAT) Reconcile(ctx context.Context) {
 	active := make([]*session, 0, len(sessions))
 	for _, s := range sessions {
 		s.mu.Lock()
-		ready := s.active && !s.closed
-		idle := started.Sub(s.last) >= IdleTimeout
+		ready := (s.active || s.rejected) && !s.closed
+		idle := started.Sub(s.last) >= IdleTimeout || (s.rejected && started.Sub(s.rejectedAt) >= RejectLifetime)
 		s.mu.Unlock()
 		if idle {
 			s.close()

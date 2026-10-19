@@ -41,7 +41,16 @@ func TestFileTailRecoveryAndCorruption(t *testing.T) {
 	}
 	file.Write([]byte("{\"record\":{},\"sha256\":\"wrong\"}\n"))
 	file.Close()
+	if records, err := store.Records(); err != nil || len(records) != 2 {
+		t.Fatal("garbled final line was not recovered", err)
+	}
+	file, err = os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Write([]byte("garbled\nanother line\n"))
+	file.Close()
 	if _, err := store.Records(); err == nil {
-		t.Fatal("complete corruption silently ignored")
+		t.Fatal("interior corruption silently ignored")
 	}
 }

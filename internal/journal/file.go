@@ -47,19 +47,22 @@ func (f *FileStore) Records() ([]Record, error) {
 	var offset int64
 	for {
 		var line []byte
+		oversize := false
 		for {
 			part, readErr := r.ReadSlice('\n')
 			if len(line)+len(part) > RecordLimit {
-				return nil, errors.New("journal record exceeds limit")
+				oversize = true
 			}
-			line = append(line, part...)
+			if !oversize {
+				line = append(line, part...)
+			}
 			err = readErr
 			if err != bufio.ErrBufferFull {
 				break
 			}
 		}
 		if err == io.EOF {
-			if len(line) > 0 {
+			if len(line) > 0 || oversize {
 				if err := file.Truncate(offset); err != nil {
 					return nil, err
 				}
@@ -73,25 +76,51 @@ func (f *FileStore) Records() ([]Record, error) {
 		if err != nil {
 			return nil, err
 		}
-		var e envelope
-		d := json.NewDecoder(bytes.NewReader(line))
-		d.DisallowUnknownFields()
-		if err := d.Decode(&e); err != nil {
-			return nil, err
+		record, decodeErr := decodeRecord(line)
+		if oversize {
+			decodeErr = errors.New("journal record exceeds limit")
 		}
-		sum := sha256.Sum256(e.Record)
-		if e.Hash != hex.EncodeToString(sum[:]) {
-			return nil, errors.New("journal checksum mismatch")
-		}
-		var record Record
-		d = json.NewDecoder(bytes.NewReader(e.Record))
-		d.DisallowUnknownFields()
-		if err := d.Decode(&record); err != nil {
-			return nil, err
+		if decodeErr != nil {
+			// A torn write may include its newline. Only the final invalid
+			// record is recoverable; corruption before another line is fatal.
+			if _, peekErr := r.Peek(1); peekErr != io.EOF {
+				return nil, decodeErr
+			}
+			if err := file.Truncate(offset); err != nil {
+				return nil, err
+			}
+			if err := file.Sync(); err != nil {
+				return nil, err
+			}
+			f.dirty = false
+			return records, nil
 		}
 		records = append(records, record)
 		offset += int64(len(line))
 	}
+}
+
+func decodeRecord(line []byte) (Record, error) {
+	var e envelope
+	d := json.NewDecoder(bytes.NewReader(line))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&e); err != nil {
+		return Record{}, err
+	}
+	if err := d.Decode(new(any)); err != io.EOF {
+		return Record{}, errors.New("trailing journal data")
+	}
+	sum := sha256.Sum256(e.Record)
+	if e.Hash != hex.EncodeToString(sum[:]) {
+		return Record{}, errors.New("journal checksum mismatch")
+	}
+	var record Record
+	d = json.NewDecoder(bytes.NewReader(e.Record))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&record); err != nil {
+		return Record{}, err
+	}
+	return record, nil
 }
 
 func (f *FileStore) Append(record Record) error {

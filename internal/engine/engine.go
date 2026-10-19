@@ -271,6 +271,7 @@ func (e *Engine) Stats() any {
 		s["udpDropped"] = e.udp.Dropped.Load()
 		s["udpIdentityErrors"] = e.udp.IdentityErrors.Load()
 		s["udpOversize"] = e.udp.Oversize.Load()
+		s["udpReadErrors"] = e.udp.ReadErrors.Load()
 	}
 	return s
 }

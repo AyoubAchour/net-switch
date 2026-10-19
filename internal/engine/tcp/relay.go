@@ -3,30 +3,51 @@ package tcp
 import (
 	"context"
 	"io"
+	"net"
+	"sync"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 )
 
-type counterWriter struct {
-	w   io.Writer
-	add func(uint64)
+type halfConn interface {
+	net.Conn
+	CloseRead() error
+	CloseWrite() error
 }
 
-func (w counterWriter) Write(p []byte) (int, error) {
-	n, err := w.w.Write(p)
-	w.add(uint64(n))
-	return n, err
-}
+var relayBuffers = sync.Pool{New: func() any { b := make([]byte, RelayBuffer); return &b }}
 
 // A clean EOF shuts down only that direction. The other side may still have
 // its entire response to send. Errors and cancellation close both directions.
-func Splice(ctx context.Context, app, remote platform.TCPConn, count func(uint64, uint64), abort func()) error {
-	closeBoth := func() { abort(); app.Close(); remote.Close() }
+func Splice(ctx context.Context, app halfConn, remote platform.TCPConn, count func(uint64, uint64), abort func()) error {
+	closeBoth := sync.OnceFunc(func() { remote.SetLinger(0); abort(); app.Close(); remote.Close() })
 	stop := context.AfterFunc(ctx, closeBoth)
 	defer stop()
 	done := make(chan error, 2)
-	copyOne := func(dst, src platform.TCPConn, add func(uint64)) {
-		_, err := io.CopyBuffer(counterWriter{dst, add}, src, make([]byte, RelayBuffer))
+	copyOne := func(dst, src halfConn, add func(uint64)) {
+		var err error
+		for {
+			b := relayBuffers.Get().(*[]byte)
+			n, readErr := src.Read(*b)
+			if n > 0 {
+				written, writeErr := dst.Write((*b)[:n])
+				add(uint64(written))
+				err = writeErr
+				if err == nil && written != n {
+					err = io.ErrShortWrite
+				}
+			}
+			relayBuffers.Put(b)
+			if err != nil {
+				break
+			}
+			if readErr != nil {
+				if readErr != io.EOF {
+					err = readErr
+				}
+				break
+			}
+		}
 		if err == nil {
 			err = dst.CloseWrite()
 		}
@@ -42,6 +63,9 @@ func Splice(ctx context.Context, app, remote platform.TCPConn, count func(uint64
 	other := <-done
 	if err == nil {
 		err = other
+	}
+	if err != nil {
+		closeBoth()
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()

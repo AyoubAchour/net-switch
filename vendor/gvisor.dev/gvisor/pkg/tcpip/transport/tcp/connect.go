@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-10-19: send reopened TIME_WAIT SYNs to admission.
 package tcp
 
 import (
@@ -1540,6 +1541,11 @@ func (e *Endpoint) handleTimeWaitSegments() (extendTimeWait bool, reuseTW func()
 						return false, reuseTW
 					}
 				}
+			}
+		}
+		if newSyn && s.flags&(header.TCPFlagAck|header.TCPFlagFin|header.TCPFlagRst) == 0 {
+			if handler := e.protocol.timeWaitHandler.Load(); handler != nil {
+				return false, func() { defer s.DecRef(); (*handler)(e.TransportEndpointInfo.ID, s.pkt) }
 			}
 		}
 		if extTW {

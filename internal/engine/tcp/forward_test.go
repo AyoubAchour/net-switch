@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
 	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
@@ -32,7 +33,7 @@ func (o channelOut) Send(b []byte) bool {
 	return n == 1
 }
 
-func harness(t *testing.T, c *testfake.Controller, d testfake.Dialer) (*Forwarder, func() (*gonet.TCPConn, error)) {
+func harness(t *testing.T, c flowapi.Controller, d testfake.Dialer) (*Forwarder, func() (*gonet.TCPConn, error)) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	links := [2]*channel.Endpoint{channel.New(1024, ns.MTU, ""), channel.New(1024, ns.MTU, "")}

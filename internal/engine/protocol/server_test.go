@@ -57,6 +57,9 @@ func setup(t *testing.T) (*Server, *runtimeFake, func(string) Request) {
 	runtime := &runtimeFake{table: f}
 	s := New(runtime, f, nil)
 	req := func(method string) Request {
+		if method == "attach" {
+			return Request{ID: method, Method: method, Instance: s.Instance}
+		}
 		return Request{ID: method, Method: method, Instance: s.Instance, Epoch: 1}
 	}
 	if r := s.Handle(context.Background(), req("attach")); r.Error != "" {
@@ -95,7 +98,7 @@ func TestRevisionProtocol(t *testing.T) {
 func TestLeaseFencingAndLapse(t *testing.T) {
 	s, runtime, req := setup(t)
 	r := req("attach")
-	r.Epoch = 2
+	r.Epoch = 0
 	call(t, s, r)
 	if s.Handle(context.Background(), req("renew")).Error == "" {
 		t.Fatal("old controller renewed")
@@ -107,7 +110,7 @@ func TestLeaseFencingAndLapse(t *testing.T) {
 	if err := s.CheckLease(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	r.Epoch = 3
+	r.Epoch = 0
 	if s.Handle(context.Background(), r).Error == "" {
 		t.Fatal("attach resurrected cleanup")
 	}

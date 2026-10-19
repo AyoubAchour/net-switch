@@ -26,7 +26,11 @@ func (f FileState) SaveApplied(a policy.Applied) error {
 	}
 	name := file.Name()
 	defer os.Remove(name)
-	if err := json.NewEncoder(file).Encode(a); err != nil {
+	history := struct {
+		N    uint64 `json:"n"`
+		Hash string `json:"hash"`
+	}{a.N, a.Hash}
+	if err := json.NewEncoder(file).Encode(history); err != nil {
 		file.Close()
 		return err
 	}

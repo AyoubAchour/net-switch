@@ -83,16 +83,17 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		return v, nil
 	}
 	if r.Method == "attach" {
-		if r.Instance != s.Instance || r.Epoch <= s.epoch || s.stopping || s.stopped || (s.attached && !s.now().Before(s.expires)) {
+		if r.Instance != s.Instance || r.Epoch != 0 || s.epoch == ^uint64(0) || s.stopping || s.stopped || (s.attached && !s.now().Before(s.expires)) {
 			s.mu.Unlock()
 			return nil, errors.New("attach refused")
 		}
-		s.epoch = r.Epoch
+		s.epoch++
 		s.expires = s.now().Add(Lease)
 		s.attached = true
-		s.table.SetEpoch(r.Epoch)
+		s.table.SetEpoch(s.epoch)
+		epoch := s.epoch
 		s.mu.Unlock()
-		return map[string]any{"epoch": r.Epoch, "leaseSeconds": 30}, nil
+		return map[string]any{"epoch": epoch, "leaseSeconds": 30}, nil
 	}
 	if r.Method == "stop" && s.stopped && r.Instance == s.Instance && r.Epoch == s.epoch {
 		s.mu.Unlock()

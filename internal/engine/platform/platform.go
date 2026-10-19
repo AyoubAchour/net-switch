@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"syscall"
 	"time"
 )
 
@@ -14,6 +15,8 @@ var ErrNotYet = errors.New("platform support not yet implemented")
 var ErrAmbiguous = errors.New("socket has ambiguous owners")
 
 type TunDevice interface {
+	// One ordered reader only. Linux devices must not use IFF_MULTI_QUEUE;
+	// implementations splitting GSO batches preserve their wire order.
 	ReadPacket(context.Context, []byte) (int, error)
 	WritePacket(context.Context, []byte) error
 	MTU() int
@@ -48,8 +51,14 @@ type TCPConn interface {
 	net.Conn
 	CloseRead() error
 	CloseWrite() error
+	// SetLinger(0) followed by Close aborts the remote connection with RST.
+	SetLinger(int) error
 }
 
+// ReadFrom errors describe individual datagrams unless errors.Is(net.ErrClosed).
+// Translate EMSGSIZE/WSAEMSGSIZE to TooBig; other receive errors remain
+// recoverable. Close unblocks ReadFrom. The NAT keeps the same public port
+// across oversized or otherwise failed receives, until closure/cancellation.
 type UDPConn interface {
 	ReadFrom([]byte) (int, netip.AddrPort, error)
 	WriteTo([]byte, netip.AddrPort, bool) (int, error)
@@ -61,6 +70,12 @@ type UDPConn interface {
 type TooBig struct{ MTU uint32 }
 
 func (e *TooBig) Error() string { return "datagram exceeds path MTU" }
+
+// IsTooBig also recognizes native socket errors before adapter translation.
+func IsTooBig(err error) bool {
+	var big *TooBig
+	return errors.As(err, &big) || errors.Is(err, syscall.EMSGSIZE) || errors.Is(err, syscall.Errno(10040)) // WSAEMSGSIZE
+}
 
 type DatagramError struct {
 	Destination netip.AddrPort

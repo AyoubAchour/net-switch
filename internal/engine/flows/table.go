@@ -46,6 +46,9 @@ type Totals struct {
 	Lines map[string]Bytes `json:"lines"`
 }
 type Gauges struct {
+	UDPReadBytes                                                                                      int64
+	DoubleReleases                                                                                    uint64
+	TimeWait                                                                                          int
 	EventsDropped                                                                                     uint64
 	Flows, Handshakes, UDP, Unknown, UnknownUDP                                                       int
 	TCPBytes, PendingBytes, SnapshotBytes                                                             int64
@@ -53,6 +56,7 @@ type Gauges struct {
 }
 type counts struct{ flows, udp int }
 type Table struct {
+	applyMu              sync.Mutex
 	mu                   sync.Mutex
 	limits               Limits
 	now                  func() time.Time
@@ -72,6 +76,8 @@ type Table struct {
 	rejectApps           map[string]int
 	events               chan flowapi.Event
 	eventsDropped        atomic.Uint64
+	pendingBytes         atomic.Int64
+	doubleReleases       atomic.Uint64
 }
 
 func New(l Limits, store StateStore) *Table {
@@ -92,31 +98,49 @@ func (t *Table) Apply(r policy.Revision) (policy.Applied, error) {
 	if err != nil {
 		return policy.Applied{}, err
 	}
+	t.applyMu.Lock()
+	defer t.applyMu.Unlock()
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	if t.applied != nil {
 		if r.N < t.applied.N {
+			t.mu.Unlock()
 			return policy.Applied{}, ErrStale
 		}
 		if r.N == t.applied.N {
 			if r.Hash != t.applied.Hash {
+				t.mu.Unlock()
 				return policy.Applied{}, ErrConflict
 			}
-			return *t.applied, nil
+			a := *t.applied
+			t.mu.Unlock()
+			return a, nil
 		}
 	}
-	a := policy.Applied{N: r.N, Hash: r.Hash, Point: t.point + 1}
+	t.mu.Unlock()
+	// Only revision history is durable. The apply point belongs to this live
+	// instance and is assigned after persistence, alongside the policy swap.
+	a := policy.Applied{N: r.N, Hash: r.Hash}
 	if t.store != nil {
 		if err := t.store.SaveApplied(a); err != nil {
 			return policy.Applied{}, err
 		}
 	}
-	t.point = a.Point
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.point++
+	a.Point = t.point
 	t.policy = p
 	t.applied = &a
 	return a, nil
 }
-func (t *Table) Unload() { t.mu.Lock(); t.policy = nil; t.applied = nil; t.mu.Unlock() }
+func (t *Table) Unload() {
+	t.applyMu.Lock()
+	defer t.applyMu.Unlock()
+	t.mu.Lock()
+	t.policy = nil
+	t.applied = nil
+	t.mu.Unlock()
+}
 func (t *Table) Predict(app string) (policy.Prediction, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -138,7 +162,11 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	if !tuple.Source.IsValid() || !tuple.Destination.IsValid() {
 		return nil, errors.New("invalid tuple")
 	}
-	if t.gauges.Flows >= t.limits.Flows || (protocol == "udp" && t.gauges.UDP >= t.limits.UDP) || (protocol == "tcp" && (t.gauges.Handshakes >= t.limits.Handshakes || t.gauges.TCPBytes+MinTCP > t.limits.TCPBytes)) {
+	if tuple.Source.Addr().Is6() && !t.policy.IPv6() {
+		t.gauges.Rejected++
+		return nil, policy.ErrIPv6
+	}
+	if t.gauges.Flows >= t.limits.Flows || (protocol == "udp" && t.gauges.UDP >= t.limits.UDP) || (protocol == "tcp" && (t.gauges.Handshakes >= t.limits.Handshakes || t.gauges.Flows-t.gauges.UDP >= t.limits.TimeWait)) {
 		t.gauges.Rejected++
 		return nil, ErrBudget
 	}
@@ -147,18 +175,22 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	t.gauges.Flows++
 	if protocol == "udp" {
 		t.gauges.UDP++
+		t.gauges.UDPReadBytes += flowapi.UDPReadBuffer
 	} else {
 		f.handshake = true
-		f.tcpBytes = MinTCP
 		f.receive, f.send = 64<<10, 64<<10
 		t.gauges.Handshakes++
-		t.gauges.TCPBytes += MinTCP
 	}
 	t.flows[f.record.ID] = f
 	return f, nil
 }
 
 type ticket struct {
+	accountMu                   sync.RWMutex
+	accountClosed               bool
+	up, down                    atomic.Uint64
+	timeWait                    bool
+	lineAddresses               []netip.Addr
 	table                       *Table
 	record                      Record
 	resolved, closed, handshake bool
@@ -203,15 +235,11 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 			t.gauges.UnknownUDP++
 		}
 	}
-	if !udp && t.gauges.TCPBytes+DefaultTCP-MinTCP <= t.limits.TCPBytes {
-		t.gauges.TCPBytes += DefaultTCP - MinTCP
-		f.tcpBytes = DefaultTCP
-		f.receive, f.send = 1<<20, 1<<20
-	}
 	t.point++
 	f.record.Point = t.point
 	f.record.Decision = d
 	f.record.Owner = owner
+	f.lineAddresses = t.policy.Addresses(d.Line)
 	f.resolved = true
 	t.k.Add(1)
 	t.gauges.Admitted++
@@ -240,6 +268,33 @@ func (f *ticket) Grow(receive, send int) bool {
 	f.receive, f.send = receive, send
 	return true
 }
+
+// Shrink releases growth only after the relay has reduced both socket limits.
+// The floor is count-admitted; only bytes above it consume the shared budget.
+func (f *ticket) Shrink(receive, send int) {
+	t := f.table
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if f.closed || receive < MinTCP || send < MinTCP || receive > f.receive || send > f.send {
+		return
+	}
+	delta := int64(f.receive-receive) + int64(f.send-send)
+	f.receive, f.send = receive, send
+	f.tcpBytes -= delta
+	t.gauges.TCPBytes -= delta
+}
+
+// TIME_WAIT retains its admitted flow slot and owner quota until the endpoint
+// is actually removed. Capacity is never obtained by evicting a live endpoint.
+func (f *ticket) TimeWait() {
+	t := f.table
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !f.closed && !f.timeWait {
+		f.timeWait = true
+		t.gauges.TimeWait++
+	}
+}
 func (f *ticket) Established(source netip.Addr) {
 	t := f.table
 	t.mu.Lock()
@@ -264,22 +319,15 @@ func (f *ticket) SetCancel(cancel context.CancelFunc) {
 	}
 }
 func (f *ticket) Add(up, down uint64) {
-	t := f.table
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if !f.resolved {
+	// The per-ticket gate makes close's final fold atomic with respect to a
+	// concurrent UDP completion, without taking the packet-path table lock.
+	f.accountMu.RLock()
+	defer f.accountMu.RUnlock()
+	if f.accountClosed {
 		return
 	}
-	f.record.Up += up
-	f.record.Down += down
-	a := t.totals.Apps[f.record.Owner.AppID]
-	a.Up += up
-	a.Down += down
-	t.totals.Apps[f.record.Owner.AppID] = a
-	l := t.totals.Lines[f.record.Line]
-	l.Up += up
-	l.Down += down
-	t.totals.Lines[f.record.Line] = l
+	f.up.Add(up)
+	f.down.Add(down)
 }
 func (f *ticket) Close() {
 	t := f.table
@@ -289,6 +337,9 @@ func (f *ticket) Close() {
 		return
 	}
 	f.closed = true
+	if f.timeWait {
+		t.gauges.TimeWait--
+	}
 	delete(t.flows, f.record.ID)
 	t.gauges.Flows--
 	t.gauges.TCPBytes -= f.tcpBytes
@@ -298,8 +349,14 @@ func (f *ticket) Close() {
 	udp := f.record.Protocol == "udp"
 	if udp {
 		t.gauges.UDP--
+		t.gauges.UDPReadBytes -= flowapi.UDPReadBuffer
 	}
 	if f.resolved {
+		f.accountMu.Lock()
+		f.accountClosed = true
+		fold(t.totals.Apps, f.record.Owner.AppID, f.up.Load(), f.down.Load())
+		fold(t.totals.Lines, f.record.Line, f.up.Load(), f.down.Load())
+		f.accountMu.Unlock()
 		app := f.record.Owner.AppID
 		c := t.apps[app]
 		c.flows--
@@ -320,20 +377,27 @@ func (f *ticket) Close() {
 	}
 }
 func (t *Table) ReservePending(n int) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if n < 0 || int64(n) > t.limits.PendingBytes-t.gauges.PendingBytes {
-		return false
+	for {
+		old := t.pendingBytes.Load()
+		if n < 0 || int64(n) > t.limits.PendingBytes-old {
+			return false
+		}
+		if t.pendingBytes.CompareAndSwap(old, old+int64(n)) {
+			return true
+		}
 	}
-	t.gauges.PendingBytes += int64(n)
-	return true
 }
 func (t *Table) ReleasePending(n int) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.gauges.PendingBytes -= int64(n)
-	if t.gauges.PendingBytes < 0 {
-		panic("pending byte reservation released twice")
+	for {
+		old := t.pendingBytes.Load()
+		if n < 0 || int64(n) > old {
+			t.doubleReleases.Add(1)
+			t.Emit(flowapi.Event{Type: "log", Message: "invalid pending byte release (possible double release)"})
+			return
+		}
+		if t.pendingBytes.CompareAndSwap(old, old-int64(n)) {
+			return
+		}
 	}
 }
 func (t *Table) AllowReject(app string) bool {
@@ -358,6 +422,8 @@ func (t *Table) Stats() Gauges {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	g := t.gauges
+	g.PendingBytes = t.pendingBytes.Load()
+	g.DoubleReleases = t.doubleReleases.Load()
 	g.EventsDropped = t.eventsDropped.Load()
 	return g
 }
@@ -401,7 +467,21 @@ func (t *Table) Totals() Totals {
 	for k, b := range t.totals.Lines {
 		v.Lines[k] = b
 	}
+	for _, f := range t.flows {
+		if f.resolved {
+			up, down := f.up.Load(), f.down.Load()
+			fold(v.Apps, f.record.Owner.AppID, up, down)
+			fold(v.Lines, f.record.Line, up, down)
+		}
+	}
 	return v
+}
+
+func fold(m map[string]Bytes, key string, up, down uint64) {
+	b := m[key]
+	b.Up += up
+	b.Down += down
+	m[key] = b
 }
 
 type Selector struct {
@@ -464,7 +544,7 @@ func (t *Table) CloseFlows(s Selector, before uint64) (CloseResult, error) {
 	result := CloseResult{}
 	for id, f := range t.flows {
 		r := f.record
-		match := ids[id] || (s.Line != "" && r.Line == s.Line) || (s.App != "" && r.Owner.AppID == s.App && r.Line != s.NotLine) || (s.Source.IsValid() && r.PhysicalSource == s.Source) || (s.IPv6 && r.Source.Addr().Is6())
+		match := ids[id] || (s.Line != "" && r.Line == s.Line) || (s.App != "" && r.Owner.AppID == s.App && r.Line != s.NotLine) || f.matchesSource(s.Source) || (s.IPv6 && r.Source.Addr().Is6())
 		if !match {
 			continue
 		}
@@ -502,6 +582,27 @@ func (t *Table) CloseAll() {
 		cancel()
 	}
 }
+func (f *ticket) matchesSource(source netip.Addr) bool {
+	if !source.IsValid() {
+		return false
+	}
+	if f.record.PhysicalSource == source {
+		return true
+	}
+	// A device-bound wildcard UDP socket lets the OS choose its source for
+	// each destination. Retire this line's same-family mappings, using the
+	// addresses saved at admission even after policy replacement.
+	if f.record.Protocol != "udp" || !f.record.PhysicalSource.IsUnspecified() || f.record.Source.Addr().Is6() != source.Is6() {
+		return false
+	}
+	for _, a := range f.lineAddresses {
+		if a == source {
+			return true
+		}
+	}
+	return false
+}
+
 func sorted(records []Record) {
 	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
 }

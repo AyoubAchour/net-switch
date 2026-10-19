@@ -40,7 +40,7 @@ func (t *Table) Page(cursor string) (Page, error) {
 		for _, f := range t.flows {
 			if f.resolved {
 				count++
-				bytes += int64(unsafe.Sizeof(Record{})) + int64(len(f.record.Owner.Path)+len(f.record.Owner.AppID)+len(f.record.Owner.Generation))
+				bytes += int64(unsafe.Sizeof(Record{})) + int64(len(f.record.Owner.Path)+len(f.record.Owner.AppID)+len(f.record.Owner.Generation)+len(f.record.Line)+len(f.record.Lane))
 			}
 		}
 		if count > t.limits.SnapshotEntries || bytes > t.limits.SnapshotBytes-t.gauges.SnapshotBytes {
@@ -50,7 +50,9 @@ func (t *Table) Page(cursor string) (Page, error) {
 		records := make([]Record, 0, count)
 		for _, f := range t.flows {
 			if f.resolved {
-				records = append(records, f.record)
+				r := f.record
+				r.Up, r.Down = f.up.Load(), f.down.Load()
+				records = append(records, r)
 			}
 		}
 		sorted(records)

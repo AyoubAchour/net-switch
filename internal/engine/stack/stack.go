@@ -26,8 +26,8 @@ type Options struct {
 }
 
 func DefaultOptions() Options {
-	// The zero-timeout candidate fails the lost-ACK and stale-data gates.
-	// Retain upstream's safe timeout until a reviewed reuse fix passes them.
+	// Keep lost-final-ACK protection. The forwarder installs the local-app
+	// SYN reopen hook; see TestTimeWaitImmediateReuse.
 	o := Options{TimeWait: 60 * time.Second}
 	if runtime.GOOS == "windows" {
 		o.ClockResolution = 500 * time.Microsecond
@@ -49,8 +49,8 @@ func New(link gv.LinkEndpoint, o Options) (*gv.Stack, error) {
 	congestion := tcpip.CongestionControlOption("cubic")
 	for _, opt := range []tcpip.SettableTransportProtocolOption{
 		&congestion,
-		&tcpip.TCPReceiveBufferSizeRangeOption{Min: 64 << 10, Default: 1 << 20, Max: 8 << 20},
-		&tcpip.TCPSendBufferSizeRangeOption{Min: 64 << 10, Default: 1 << 20, Max: 6 << 20},
+		&tcpip.TCPReceiveBufferSizeRangeOption{Min: 64 << 10, Default: 64 << 10, Max: 8 << 20},
+		&tcpip.TCPSendBufferSizeRangeOption{Min: 64 << 10, Default: 64 << 10, Max: 6 << 20},
 	} {
 		if err := s.SetTransportProtocolOption(tcp.ProtocolNumber, opt); err != nil {
 			return fail(err)

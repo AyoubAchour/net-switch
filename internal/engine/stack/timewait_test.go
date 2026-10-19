@@ -1,34 +1,43 @@
-package stack
+package stack_test
 
 import (
 	"bytes"
 	"fmt"
-	"io"
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/faketime"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
 func TestTimeWaitImmediateReuse(t *testing.T) {
-	for _, timestamps := range []bool{false, true} {
-		t.Run(fmt.Sprintf("timestamps=%t", timestamps), func(t *testing.T) {
-			p := newPeer(t, timestamps)
+	for _, relation := range []string{"below", "equal", "above"} {
+		t.Run(relation, func(t *testing.T) {
+			p := newPeer(t, false)
+			p.open(1000)
+			p.upload([]byte("initial"))
+			p.closeActive()
 			var slowest time.Duration
 			for i := range 1000 {
-				d := p.open(uint32(1000 + i*10000))
-				if d > slowest {
-					slowest = d
+				seq := p.seq
+				if relation == "below" {
+					seq -= 100
 				}
-				p.upload([]byte(fmt.Sprintf("flow %d", i)))
+				if relation == "above" {
+					seq += 100
+				}
+				slowest = max(slowest, p.open(seq))
+				p.upload([]byte(fmt.Sprintf("reuse %d", i)))
 				p.closeActive()
 			}
-			t.Logf("1,000 reuses, slowest handshake %s", slowest)
-			if slowest > 100*time.Millisecond {
-				t.Fatal("reuse stalled over 100 ms")
-			}
-			if p.dials.Load() != 1000 {
-				t.Fatal("unexpected outbound dial")
+			t.Logf("1000 immediate reuses, no timestamps, ISN %s old RcvNxt; slowest %s; dials=%d admitted=%d; every payload SHA-256 checked", relation, slowest, p.dials.Load(), p.table.Stats().Admitted)
+			if slowest > 100*time.Millisecond || p.dials.Load() != 1001 || p.table.Stats().Admitted != 1001 {
+				t.Fatal("reuse, dial or admission gate failed")
 			}
 		})
 	}
@@ -42,7 +51,7 @@ func TestTimeWaitReuseDelays(t *testing.T) {
 			p.upload([]byte("old"))
 			p.closeActive()
 			time.Sleep(delay)
-			if d := p.open(10000); d > 100*time.Millisecond {
+			if d := p.open(1000); d > 100*time.Millisecond {
 				t.Fatalf("reuse took %s", d)
 			}
 			p.upload([]byte("new"))
@@ -56,16 +65,24 @@ func TestTimeWaitSequenceWrap(t *testing.T) {
 	p.open(^uint32(0) - 32)
 	p.upload(bytes.Repeat([]byte{0xa5}, 100))
 	p.closeActive()
-	p.open(500)
-	p.upload([]byte("after wrap"))
-	p.closeActive()
+	for i := range 1000 {
+		if d := p.open(p.seq - 100); d > 100*time.Millisecond {
+			t.Fatalf("reuse %d took %s", i, d)
+		}
+		p.upload(bytes.Repeat([]byte{byte(i)}, 100))
+		p.closeActive()
+	}
+	if p.dials.Load() != 1001 {
+		t.Fatal("extra or missing dial")
+	}
+	t.Log("1000 no-timestamp reuses across sequence wrap; all payload hashes match")
 }
 
 func TestTimeWaitAfter100MB(t *testing.T) {
 	if testing.Short() {
 		t.Skip("100 MB gate runs in CI")
 	}
-	p := newPeer(t, true)
+	p := newPeer(t, false)
 	p.open(1000)
 	block := bytes.Repeat([]byte{1, 2, 3, 4}, 2048)
 	for left := 100_000_000; left > 0; {
@@ -74,64 +91,187 @@ func TestTimeWaitAfter100MB(t *testing.T) {
 		left -= n
 	}
 	p.closeActive()
-	p.open(200_000_000)
-	p.upload([]byte("after 100 MB"))
-	p.closeActive()
+	for i := range 1000 {
+		seq := p.seq + uint32(i%3)*100 - 100
+		if d := p.open(seq); d > 100*time.Millisecond {
+			t.Fatalf("reuse %d took %s", i, d)
+		}
+		p.upload([]byte(fmt.Sprintf("after 100 MB: %d", i)))
+		p.closeActive()
+	}
+	if p.dials.Load() != 1001 {
+		t.Fatal("extra or missing dial")
+	}
+	t.Log("100 MB + 1000 immediate reuses below/equal/above RcvNxt without timestamps; all SHA-256 hashes match")
 }
 
-func TestTimeWaitDelayedSegmentsAndReordering(t *testing.T) {
-	for _, timestamps := range []bool{false, true} {
-		t.Run(fmt.Sprintf("timestamps=%t", timestamps), func(t *testing.T) {
-			p := newPeer(t, timestamps)
-			p.open(1000)
-			syn := p.syn
-			data := p.upload([]byte("stale payload"))
-			rst := p.packet(p.seq, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil)
-			p.closeActive()
-			p.open(100000)
-			// Reordered local queues deliver RST, data, then SYN from the old flow.
-			p.inject(rst)
-			p.inject(data)
-			p.inject(syn)
-			p.upload([]byte("fresh payload"))
-			p.closeActive()
-			if p.dials.Load() != 2 {
-				t.Fatal("old SYN caused another dial")
-			}
-		})
+func TestTimeWaitOldSegmentsBeforeNewSYN(t *testing.T) {
+	p := newPeer(t, false)
+	p.open(1000)
+	old := p.upload([]byte("stale payload"))
+	// A retransmitted SYN precedes the old connection's FIN in the ordered
+	// local TUN stream. Deliver it while that incarnation still owns the tuple.
+	p.inject(p.syn)
+	fin := p.closeActive()
+	p.inject(old)
+	p.inject(fin)
+	p.inject(p.packet(p.seq, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
+	if d := p.open(p.seq - 100); d > 100*time.Millisecond {
+		t.Fatal(d)
+	}
+	p.upload([]byte("fresh payload"))
+	p.closeActive()
+	if p.dials.Load() != 2 || p.table.Stats().Admitted != 2 {
+		t.Fatal("old segments created a flow")
 	}
 }
 
-func TestTimeWaitCandidateFailsLostFinalACK(t *testing.T) {
-	p := newPeer(t, false)
+func TestTimeWaitLostFinalACK(t *testing.T) {
+	clock := faketime.NewManualClock()
+	o := ns.DefaultOptions()
+	o.Clock = clock
+	if o.TimeWait != 60*time.Second {
+		t.Fatal("lost-ACK protection changed")
+	}
+	p := newPeerOptions(t, false, flows.Defaults(), o)
 	p.open(1000)
 	p.upload([]byte("before lost ACK"))
-	fin := p.closeActive() // The driver consumes, but the simulated app loses, our ACK.
-	p.inject(fin)          // LAST_ACK retransmits its FIN.
-	h := p.read(time.Second)
-	if h == nil || !h.Flags().Contains(header.TCPFlagRst) {
-		t.Fatal("candidate behavior changed; rerun the complete TIME_WAIT gate")
+	fin := p.closeActive()
+	// The app lost the final ACK and retransmits near expiry. That ACK resets
+	// TIME_WAIT, so it is still protected at 60 seconds from the initial FIN.
+	for _, advance := range []time.Duration{59 * time.Second, time.Second} {
+		clock.Advance(advance)
+		p.inject(fin)
+		h := p.wait(header.TCPFlagAck)
+		if h.Flags().Contains(header.TCPFlagRst) || h.AckNumber() != p.seq {
+			t.Fatal("lost FIN ACK was reset")
+		}
 	}
-	t.Log("GATE FAILED: timeout 0 resets the app in LAST_ACK after loss of our final ACK")
+	if p.dials.Load() != 1 {
+		t.Fatal("FIN retransmission dialed")
+	}
+	t.Log("FIN retransmits at 59 s and 60 s receive ACK, never RST")
 }
 
-func TestTimeWaitCandidateFailsOverlappingSequenceSpaces(t *testing.T) {
-	p := newPeer(t, false)
+func TestTimeWaitBlockedAndBudgetReuse(t *testing.T) {
+	limits := flows.Defaults()
+	limits.Flows = 1
+	limits.TimeWait = 1
+	p := newPeerOptions(t, false, limits, ns.DefaultOptions())
 	p.open(1000)
-	old := p.upload([]byte("OLD!"))
+	p.upload([]byte("first"))
 	p.closeActive()
+	// Releasing the old endpoint before Begin lets its own tuple reuse the
+	// last slot. A different tuple still receives an immediate budget RST.
+	p.port++
+	p.inject(p.packet(500, 0, header.TCPFlagSyn, []byte("syn data")))
+	h := p.read(time.Second)
+	if h == nil || !h.Flags().Contains(header.TCPFlagRst) || h.AckNumber() != 509 {
+		t.Fatal("budget SYN/data reset missing")
+	}
+	p.port--
 	p.open(1000)
-	// A genuinely fresh connection can overlap an old sequence space when
-	// timestamps are absent. The old ACK is outside the new send window.
-	p.inject(old)
-	p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck|header.TCPFlagPsh, []byte("NEW!")))
-	got := make([]byte, 4)
-	if _, err := io.ReadFull(p.current.conn, got); err != nil {
+	p.upload([]byte("second"))
+	p.closeActive()
+	p.config.Blocked = []string{"B"}
+	if _, err := p.table.Apply(policy.Revision{N: 2, Hash: policy.Hash(p.config), Config: p.config}); err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "OLD!" {
-		t.Fatalf("candidate behavior changed (%q); rerun complete TIME_WAIT gate", got)
+	p.inject(p.packet(1000, 0, header.TCPFlagSyn, nil))
+	h = p.read(time.Second)
+	if h == nil || !h.Flags().Contains(header.TCPFlagRst) {
+		t.Fatal("blocked reuse did not reset")
 	}
-	t.Log("GATE FAILED: timeout 0 delivered old payload into a new connection without timestamps")
+	if p.dials.Load() != 2 || p.table.Stats().Admitted != 2 {
+		t.Fatal("rejected SYN advanced k or dialed")
+	}
+}
+
+func TestTimeWaitThreeQueuedSYNsDialOnce(t *testing.T) {
+	p := newPeer(t, false)
+	p.open(1000)
+	p.upload([]byte("old"))
+	p.closeActive()
+	id := gv.TransportEndpointID{LocalAddress: remoteAddr, LocalPort: 443, RemoteAddress: appAddr, RemotePort: p.port}
+	ep, ok := p.stack.FindTransportEndpoint(header.IPv4ProtocolNumber, tcp.ProtocolNumber, id, ns.NIC).(*tcp.Endpoint)
+	if !ok {
+		t.Fatal("old endpoint already removed")
+	}
+	if d := p.openWith(1000, func(syn []byte) {
+		ep.LockUser()
+		defer ep.UnlockUser()
+		for range 3 {
+			p.inject(syn)
+		}
+	}); d > 100*time.Millisecond {
+		t.Fatal(d)
+	}
+	p.upload([]byte("three SYNs, one payload"))
+	p.closeActive()
+	if p.dials.Load() != 2 || p.table.Stats().Admitted != 2 {
+		t.Fatal("queued duplicates dialed or advanced k")
+	}
+	if h := p.read(5 * time.Millisecond); h != nil && h.Flags().Contains(header.TCPFlagRst) {
+		t.Fatal("queued SYN was reset")
+	}
+	t.Log("three SYNs queued on TIME_WAIT: one replacement dial, one k advance, no RST")
+}
+
+func TestTimeWaitSimultaneousCloseReuse(t *testing.T) {
+	p := newPeer(t, false)
+	p.open(1000)
+	p.upload([]byte("before simultaneous FIN"))
+	p.current.conn.CloseWrite()
+	h := p.wait(header.TCPFlagFin)
+	// Our FIN is still unacknowledged when the app's FIN arrives.
+	p.inject(p.packet(p.seq, p.ack, header.TCPFlagFin|header.TCPFlagAck, nil))
+	p.seq++
+	p.ack = h.SequenceNumber() + 1
+	p.wait(header.TCPFlagAck)
+	p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 	p.current.conn.Close()
+	if d := p.open(1000); d > 100*time.Millisecond {
+		t.Fatal(d)
+	}
+	p.upload([]byte("after simultaneous FIN"))
+	p.closeActive()
+	if p.dials.Load() != 2 {
+		t.Fatal("unexpected dials")
+	}
+}
+
+func TestTimeWaitThousandPerSecondCap(t *testing.T) {
+	limits := flows.Defaults()
+	limits.TimeWait = 64
+	p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+	start := time.Now()
+	for i := range 1000 {
+		p.port = uint16(40000 + i)
+		if i < limits.TimeWait {
+			p.open(1000)
+			p.upload([]byte("cap"))
+			p.closeActive()
+		} else {
+			p.inject(p.packet(1000, 0, header.TCPFlagSyn, nil))
+			if h := p.read(time.Second); h == nil || !h.Flags().Contains(header.TCPFlagRst) {
+				t.Fatal("cap did not reject")
+			}
+		}
+		if g := p.table.Stats(); g.Flows > limits.TimeWait || g.TimeWait > limits.TimeWait {
+			t.Fatal(g)
+		}
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("offered less than 1000 connections/s: %s", d)
+	} else {
+		t.Logf("1000 attempts in %s; retained endpoints <= %d", d, limits.TimeWait)
+	}
+	// The shared monitor counts retained endpoints, without evicting any.
+	deadline := time.Now().Add(time.Second)
+	for p.table.Stats().TimeWait != limits.TimeWait && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if g := p.table.Stats(); g.TimeWait != limits.TimeWait || g.Flows != limits.TimeWait {
+		t.Fatal(g)
+	}
 }

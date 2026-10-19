@@ -13,7 +13,7 @@ func TestPersistedRevisionIsHistoryUntilStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	history, err := state.History()
-	if err != nil || *history != a {
+	if err != nil || history.N != a.N || history.Hash != a.Hash || history.Point != 0 {
 		t.Fatal(history, err)
 	}
 	restart := New(Defaults(), state)
@@ -23,7 +23,7 @@ func TestPersistedRevisionIsHistoryUntilStart(t *testing.T) {
 }
 func TestTCPGrowthReservesBeforeAllocation(t *testing.T) {
 	l := Defaults()
-	l.TCPBytes = DefaultTCP + (1 << 20)
+	l.TCPBytes = 3<<20 - 2*MinTCP
 	f := table(t, l)
 	x := admit(t, f, "tcp", "known").(*ticket)
 	if !x.Grow(2<<20, 1<<20) {

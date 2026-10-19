@@ -87,21 +87,30 @@ func (*Ticket) SetCancel(context.CancelFunc) {}
 func (t *Ticket) Close()                     { t.once.Do(func() { t.c.Closed.Add(1) }) }
 
 type Conn struct {
-	r *io.PipeReader
-	w *io.PipeWriter
+	r     *io.PipeReader
+	w     *io.PipeWriter
+	reset atomic.Bool
 }
 
 func Pair() (*Conn, *Conn) {
 	ar, aw := io.Pipe()
 	br, bw := io.Pipe()
-	return &Conn{ar, bw}, &Conn{br, aw}
+	return &Conn{r: ar, w: bw}, &Conn{r: br, w: aw}
 }
 func (c *Conn) Read(p []byte) (int, error)  { return c.r.Read(p) }
 func (c *Conn) Write(p []byte) (int, error) { return c.w.Write(p) }
-func (c *Conn) Close() error                { c.r.Close(); return c.w.Close() }
-func (c *Conn) Abort(err error)             { c.r.CloseWithError(err); c.w.CloseWithError(err) }
-func (c *Conn) CloseRead() error            { return c.r.Close() }
-func (c *Conn) CloseWrite() error           { return c.w.Close() }
+func (c *Conn) Close() error {
+	if c.reset.Load() {
+		c.Abort(errors.New("connection reset"))
+		return nil
+	}
+	c.r.Close()
+	return c.w.Close()
+}
+func (c *Conn) SetLinger(n int) error { c.reset.Store(n == 0); return nil }
+func (c *Conn) Abort(err error)       { c.r.CloseWithError(err); c.w.CloseWithError(err) }
+func (c *Conn) CloseRead() error      { return c.r.Close() }
+func (c *Conn) CloseWrite() error     { return c.w.Close() }
 func (*Conn) LocalAddr() net.Addr {
 	return net.TCPAddrFromAddrPort(netip.MustParseAddrPort("192.0.2.1:5000"))
 }

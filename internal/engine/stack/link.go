@@ -15,6 +15,7 @@ const QueuePackets = 1024
 // Link owns its output buffers. A slot is reserved before copying a packet;
 // neither stack writers nor the UDP reply path wait for the TUN consumer.
 type Link struct {
+	ingress     sync.Mutex
 	mu          sync.Mutex
 	dispatcher  gv.NetworkDispatcher
 	observer    func(*gv.PacketBuffer)
@@ -95,6 +96,22 @@ func (l *Link) Read(ctx context.Context) []byte {
 }
 
 func (l *Link) InjectInbound(protocol tcpip.NetworkProtocolNumber, p *gv.PacketBuffer) {
+	l.ingress.Lock()
+	defer l.ingress.Unlock()
+	l.deliver(protocol, p)
+}
+
+// InjectBatch preserves GSO segment order and keeps other producers from
+// interleaving a batch. The engine owns one TUN reader; no multi-queue TUN.
+func (l *Link) InjectBatch(protocol tcpip.NetworkProtocolNumber, packets []*gv.PacketBuffer) {
+	l.ingress.Lock()
+	defer l.ingress.Unlock()
+	for _, p := range packets {
+		l.deliver(protocol, p)
+	}
+}
+
+func (l *Link) deliver(protocol tcpip.NetworkProtocolNumber, p *gv.PacketBuffer) {
 	l.mu.Lock()
 	d := l.dispatcher
 	observe := l.observer

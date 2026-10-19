@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math/bits"
+	"net/netip"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
@@ -177,3 +178,13 @@ func (p *Policy) Predict(app string) Prediction {
 	return Prediction{Line: p.config.Lanes[p.config.Lines[0].ID]}
 }
 func (p *Policy) IPv6() bool { return p.config.IPv6 }
+
+// Addresses shares the compiled policy's immutable address list with tickets.
+func (p *Policy) Addresses(line string) []netip.Addr {
+	for _, l := range p.config.Lines {
+		if l.ID == line {
+			return l.Addresses
+		}
+	}
+	return nil
+}

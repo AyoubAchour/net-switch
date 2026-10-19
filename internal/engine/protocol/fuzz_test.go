@@ -21,7 +21,7 @@ func FuzzProtocol(f *testing.F) {
 		table := flows.New(flows.Defaults(), nil)
 		runtime := &runtimeFake{table: table}
 		s := New(runtime, table, nil)
-		s.Handle(context.Background(), Request{ID: "attach", Method: "attach", Instance: s.Instance, Epoch: 1})
+		s.Handle(context.Background(), Request{ID: "attach", Method: "attach", Instance: s.Instance})
 		table.Apply(revision(1))
 		r.Instance = s.Instance
 		out := s.Handle(context.Background(), r)

@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-10-19: local-app TIME_WAIT and buffer accounting.
 // Package tcp contains the implementation of the TCP transport protocol.
 package tcp
 
@@ -21,6 +22,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -87,7 +89,8 @@ const (
 
 // +stateify savable
 type protocol struct {
-	stack *stack.Stack
+	stack           *stack.Stack
+	timeWaitHandler atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
 
 	mu protocolRWMutex `state:"nosave"`
 
@@ -137,6 +140,31 @@ type protocol struct {
 	// freshly drawn from the secure RNG on restore.
 	seqnumSecret   [16]byte `state:"nosave"`
 	tsOffsetSecret [16]byte `state:"nosave"`
+}
+
+// SetTimeWaitHandler opts into reopening TIME_WAIT for any bare SYN. This is
+// only safe for a local-app stack with ordered ingress: a host cannot reuse
+// a tuple it still owns, and no old segment may arrive after the new SYN.
+// The old endpoint closes and its queued segments are dropped, never reset.
+// The handler runs after removal and receives a borrowed packet. Install it
+// before capture starts; listeners retain their existing dispatch priority.
+func SetTimeWaitHandler(s *stack.Stack, handler func(stack.TransportEndpointID, *stack.PacketBuffer) bool) {
+	p := protocolFromStack(s)
+	if handler == nil {
+		p.timeWaitHandler.Store(nil)
+	} else {
+		p.timeWaitHandler.Store(&handler)
+	}
+}
+
+// BufferUsage reports receive-segment memory (including out-of-order and
+// queued segments) and unacknowledged send data. Callers reducing socket
+// limits can retain the reservation for memory that has not drained yet.
+func (e *Endpoint) BufferUsage() (receive, send int) {
+	e.sndQueueInfo.sndQueueMu.Lock()
+	send = e.sndQueueInfo.SndBufUsed
+	e.sndQueueInfo.sndQueueMu.Unlock()
+	return e.receiveMemUsed(), send
 }
 
 // Number returns the tcp protocol number.

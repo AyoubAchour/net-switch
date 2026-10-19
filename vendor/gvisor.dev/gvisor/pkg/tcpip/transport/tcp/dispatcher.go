@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-10-19: drop queued segments on local-app reuse.
 package tcp
 
 import (
@@ -264,9 +265,22 @@ func handleTimeWait(ep *Endpoint) {
 
 	extendTimeWait, reuseTW := ep.handleTimeWaitSegments()
 	if reuseTW != nil {
+		localReuse := ep.protocol.timeWaitHandler.Load() != nil
+		if localReuse {
+			ep.segmentQueue.freeze()
+		}
 		ep.transitionToStateCloseLocked()
+		if localReuse {
+			// Freeze before removal and drain under ep.mu: neither a late
+			// enqueue nor another processor may reset the app's new SYN.
+			for s := ep.segmentQueue.dequeue(); s != nil; s = ep.segmentQueue.dequeue() {
+				s.DecRef()
+			}
+		}
 		ep.mu.Unlock()
-		ep.drainClosingSegmentQueue()
+		if !localReuse {
+			ep.drainClosingSegmentQueue()
+		}
 		ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
 		reuseTW()
 		return

@@ -34,6 +34,8 @@ type Ticket interface {
 
 type Output interface{ Send([]byte) bool }
 
+const UDPReadBuffer = 9 << 10
+
 type Event struct {
 	Type    string `json:"event"`
 	Message string `json:"message"`
