@@ -194,6 +194,7 @@ func (e *Env) LearnedMTU(dst string, line engine.LineID) int {
 	best := 0
 	for _, args := range [][]string{{"route", "get", dst, "from", src}, {"route", "get", dst, "oif", l.Iface}} {
 		out, err := e.Net.R.IP(e.Ctx(), topo.DUT, args...)
+		e.T.Logf("ip route %s: %s %v", strings.Join(args[1:], " "), strings.Join(strings.Fields(out), " "), err)
 		if err != nil {
 			continue
 		}

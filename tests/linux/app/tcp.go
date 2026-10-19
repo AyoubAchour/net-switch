@@ -111,6 +111,7 @@ func runTCP(args []string) (any, error) {
 	gap := fs.Int("gap", 0, "ms between connections (concurrency 1)")
 	localAddr := fs.String("local-addr", "", "source address to bind")
 	bindDev := fs.String("bind-dev", "", "interface to bind to (an outside connection)")
+	portBase := fs.Int("port-base", 0, "connection i uses source port port-base+i (never one used moments before)")
 	waitFor := fs.String("wait-file", "", "start once this file exists")
 	presocket := fs.Bool("presocket", false, "create the socket before waiting for --wait-file (one connection)")
 	if err := parse(fs, args); err != nil {
@@ -153,7 +154,18 @@ func runTCP(args []string) (any, error) {
 				if *gap > 0 && i > 0 {
 					time.Sleep(time.Duration(*gap) * time.Millisecond)
 				}
-				attempts[i] = whoamiOnce(i, list[i%len(list)], local, *bindDev, time.Duration(*timeout)*time.Millisecond)
+				src := local
+				if *portBase > 0 {
+					addr := netip.IPv4Unspecified()
+					if list[i%len(list)].Addr().Is6() {
+						addr = netip.IPv6Unspecified()
+					}
+					if local.IsValid() {
+						addr = local.Addr()
+					}
+					src = netip.AddrPortFrom(addr, uint16(*portBase+i))
+				}
+				attempts[i] = whoamiOnce(i, list[i%len(list)], src, *bindDev, time.Duration(*timeout)*time.Millisecond)
 			}
 		}()
 	}

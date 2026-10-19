@@ -546,21 +546,18 @@ func (e *Env) reducedPath(mtu int) {
 	e.T.Require(len(routes) == 4 && good == 4, "line c's router forwards at most %d bytes both ways, IPv4 and IPv6 (%v)", mtu, routes)
 }
 
-// learnedOnBothEnds checks the PC and the server each learned the smaller
-// path towards the other, which only happens if traffic met it.
-func (e *Env) learnedOnBothEnds(mtu int) {
-	c := topo.Line("c")
-	for _, pair := range []struct{ server, pc netip.Addr }{{topo.Server4, c.Addr4.Addr()}, {topo.Server6, c.Addr6.Addr()}} {
-		pc := e.LearnedMTU(pair.server.String(), "c")
-		server := 0
-		if out, err := e.Net.R.IP(e.Ctx(), topo.INET, "route", "get", pair.pc.String(), "from", pair.server.String()); err == nil {
-			if m := mtuPattern.FindStringSubmatch(out); m != nil {
-				server, _ = strconv.Atoi(m[1])
-			}
-		}
-		e.T.Check(pc > 0 && pc <= mtu && server > 0 && server <= mtu,
-			"both ends learned the %d-byte path: the PC towards %s (%d), the server towards %s (%d)", mtu, pair.server, pc, pair.pc, server)
+// serverLearnedMTU is the path MTU the fake internet learned towards an
+// address on the PC (0 when none).
+func (e *Env) serverLearnedMTU(server, pc netip.Addr) int {
+	out, err := e.Net.R.IP(e.Ctx(), topo.INET, "route", "get", pc.String(), "from", server.String())
+	if err != nil {
+		e.T.Fatalf("%v", err)
 	}
+	if m := mtuPattern.FindStringSubmatch(out); m != nil {
+		mtu, _ := strconv.Atoi(m[1])
+		return mtu
+	}
+	return 0
 }
 
 func smallMTU(e *Env, mtu int) {
@@ -569,24 +566,30 @@ func smallMTU(e *Env, mtu int) {
 	cfg.Policy.IPv6 = true
 	e.StartEngine(cfg)
 	from := time.Now().UnixMilli()
-	for _, t := range []struct {
-		label  string
-		server netip.Addr
-		upload bool
-		size   string
-	}{
-		{"IPv4 2 MiB download", topo.Server4, false, "2097152"},
-		{"IPv4 1 MiB upload", topo.Server4, true, "1048576"},
-		{"IPv6 1 MiB download", topo.Server6, false, "1048576"},
-		{"IPv6 1 MiB upload", topo.Server6, true, "1048576"},
-	} {
-		args := []string{"bulk", "--to", To(t.server, wire.PortBulk), "--bytes", t.size, "--timeout", "60000"}
-		if t.upload {
-			args = append(args, "--upload")
+	// Each direction in turn, so each end has to discover the smaller hop.
+	// Once one end knows it, its handshakes offer a smaller MSS and the other
+	// end never meets the hop; so the PC's knowledge is flushed before the
+	// download, as the kernel's pmtu.sh flushes between its runs.
+	c := topo.Line("c")
+	for _, fam := range []struct {
+		name     string
+		server   netip.Addr
+		pc       netip.Addr
+		family   string
+		download string
+	}{{"IPv4", topo.Server4, c.Addr4.Addr(), "-4", "2097152"}, {"IPv6", topo.Server6, c.Addr6.Addr(), "-6", "1048576"}} {
+		var up, down app.BulkResult
+		e.RunJSON(Run{App: "charlie", Args: []string{"bulk", "--to", To(fam.server, wire.PortBulk), "--bytes", "1048576", "--timeout", "60000", "--upload"}, Timeout: 90 * time.Second}, &up)
+		e.T.Check(up.OK, "charlie's %s 1 MiB upload over the %d-byte path arrives intact (%.0f ms, %s)", fam.name, mtu, up.MS, up.Err)
+		learned := e.LearnedMTU(fam.server.String(), "c")
+		e.T.Check(learned > 0 && learned <= mtu, "the PC learned the %d-byte path towards %s from the upload (%d)", mtu, fam.server, learned)
+		if _, err := e.Net.R.IP(e.Ctx(), topo.DUT, fam.family, "route", "flush", "cache"); err != nil {
+			e.T.Fatalf("%v", err)
 		}
-		var r app.BulkResult
-		e.RunJSON(Run{App: "charlie", Args: args, Timeout: 90 * time.Second}, &r)
-		e.T.Check(r.OK, "charlie %s over the %d-byte path arrives intact (%d bytes in %.0f ms, %s)", t.label, mtu, r.Bytes, r.MS, r.Err)
+		e.RunJSON(Run{App: "charlie", Args: []string{"bulk", "--to", To(fam.server, wire.PortBulk), "--bytes", fam.download, "--timeout", "60000"}, Timeout: 90 * time.Second}, &down)
+		e.T.Check(down.OK, "charlie's %s download over the %d-byte path arrives intact (%d bytes in %.0f ms, %s)", fam.name, mtu, down.Bytes, down.MS, down.Err)
+		server := e.serverLearnedMTU(fam.server, fam.pc)
+		e.T.Check(server > 0 && server <= mtu, "the server learned the %d-byte path towards %s from the download (%d)", mtu, fam.pc, server)
 	}
 	var mid, big app.DNSResult
 	e.RunJSON(Run{App: "charlie", Args: []string{"dns", "--server", To(topo.Server4, wire.PortDNS), "--name", "mid.test", "--type", "TXT", "--edns", "4096"}}, &mid)
@@ -604,8 +607,6 @@ func smallMTU(e *Env, mtu int) {
 	dns := Select(recs, func(r inet.Record) bool { return r.Kind == "dns" && strings.HasSuffix(r.Data, "/16") })
 	e.T.Check(len(bulk) == 4 && RecordLines(bulk)["c"] == 4, "the servers saw all 4 transfers arrive over line c (%d transfers, lines %s)", len(bulk), Describe(RecordLines(bulk)))
 	e.T.Check(len(dns) == 3 && RecordLines(dns)["c"] == 3, "the DNS server saw the UDP and TCP queries arrive over line c (%d queries, lines %s)", len(dns), Describe(RecordLines(dns)))
-	// Proof the transfers met the smaller hop rather than going round it.
-	e.learnedOnBothEnds(mtu)
 }
 
 func bigUDP(e *Env) {

@@ -89,12 +89,14 @@ func lookupGate(e *Env, scoped bool) {
 		e.T.Logf("%s: %d ok, errors %v, connect p50 %.2f p95 %.2f max %.2f ms", label, p.r.OK, p.r.Errors, p.r.Connect.P50, p.r.Connect.P95, p.r.Connect.Max)
 		return p
 	}
-	control := run("control, few open files", "--count", "100")
+	// Every connection gets a source port never used before in the case, so
+	// a reused port's TIME_WAIT (5.1, a separate defect) can't stall it.
+	control := run("control, few open files", "--count", "100", "--port-base", "20000")
 	holder := e.Start(Run{App: "alpha", Cgroup: terminal, Args: []string{"holdfiles", "--count", strconv.Itoa(gateFiles)}})
 	holder.WaitOutput(e, "{\"holding\"", 30*time.Second)
 	phases := []phase{
-		run("one at a time", "--count", strconv.Itoa(gateConnections)),
-		run("ten at once", "--count", strconv.Itoa(gateConnections), "--concurrency", "10"),
+		run("one at a time", "--count", strconv.Itoa(gateConnections), "--port-base", "20100"),
+		run("ten at once", "--count", strconv.Itoa(gateConnections), "--concurrency", "10", "--port-base", "20400"),
 	}
 	holder.Stop()
 
