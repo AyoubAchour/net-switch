@@ -145,6 +145,9 @@ func TestCloseHandshakeCompletionOwnsRelease(t *testing.T) {
 	p.ack = h.SequenceNumber() + 1
 	old := <-p.accepted
 	defer old.conn.Close()
+	if g := p.table.Stats(); g.Flows != 1 || g.Handshakes != 1 {
+		t.Fatal("handshake must occupy its slot before the reset", g)
+	}
 	p.inject(p.packet(p.seq, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
 	closeSignal(t, old.closeEntered, "failed handshake completed before deferred remote close")
 	if g := p.table.Stats(); g.Flows != 0 || g.Handshakes != 0 {

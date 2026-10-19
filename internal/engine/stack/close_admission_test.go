@@ -130,6 +130,9 @@ func TestCloseAdmission(t *testing.T) {
 				}
 				p.open(1000)
 				p.upload([]byte("old"))
+				if g := p.table.Stats(); g.Flows != 1 || g.Handshakes != 0 {
+					t.Fatal("old connection must occupy its slot before closing", g)
+				}
 				releaseCleanup := p.holdRelayCleanup()
 				defer releaseCleanup()
 				old := p.current
