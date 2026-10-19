@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { test } from 'node:test';
+import { before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 // The tray icon as a program of its own (tray\bin\NetSwitchTray.exe, built by
@@ -31,6 +31,26 @@ async function exitWithin(run, ms) {
     controller.abort();
   }
 }
+
+// The frozen 0.3.x AnyCPU tray loads the emulated x64 CLR on ARM64. On fresh
+// runners, cold CLR startup/JIT took 5-14.6 seconds before Main ran. Launch it
+// once outside the behaviour tests' clocks, with a 60-second cold-start budget.
+// Bad arguments return before touching any data folder. This is not a retry:
+// a failed warm-up fails the suite, and all existing case deadlines stay put.
+// Keep its duration visible rather than hiding cold-start cost in a timeout.
+before(async () => {
+  if (needsTray.skip) return;
+  const started = performance.now();
+  const child = spawn(TRAY, ['--data-dir'], { stdio: 'ignore' });
+  const run = { exited: once(child, 'exit').then(([code]) => code) };
+  try {
+    assert.equal(await exitWithin(run, 60_000), 2, 'tray warm-up must exit with code 2 within 60 seconds');
+  } finally {
+    console.log(`tray warm-up: ${Math.round(performance.now() - started)} ms; exit=${child.exitCode}; signal=${child.signalCode}`);
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    assert.notEqual(await exitWithin(run, 5000), 'still running', 'tray warm-up survived cleanup');
+  }
+}, { timeout: 70_000 });
 
 // A temporary data folder, and a start() whose processes are stopped (only
 // if still running) and waited for before the folder is removed.
@@ -126,6 +146,17 @@ test('one icon per data folder: another copy, or tray.ps1, leaves at once while 
   await delay(1500);
   assert.equal(first.child.exitCode, null, 'the first copy keeps running');
   assert.equal(log().match(/ started\r?\n/g).length, 1, 'only the first copy started an icon');
+
+  // CI inspects this already-running copy after the startup assertions. An
+  // architecture probe before the suite would silently warm up the runtime.
+  if (process.env.NETSWITCH_TEST_TRAY_RUNTIME === '1') {
+    const probe = start(POWERSHELL, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
+      path.join(ROOT, 'scripts', 'show-tray-runtime.ps1'), '-ProcessId', String(first.child.pid)],
+    { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    probe.child.stdout.on('data', (data) => t.diagnostic(data.toString().trim()));
+    probe.child.stderr.on('data', (data) => t.diagnostic(data.toString().trim()));
+    assert.equal(await exitWithin(probe, 15_000), 0, 'could not inspect the loaded tray runtime');
+  }
 
   // Net Switch removes server.json when it quits; that is how the icon learns it.
   unlinkSync(serverFile);
