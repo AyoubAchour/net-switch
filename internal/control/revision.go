@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
@@ -150,5 +149,3 @@ func (c *Core) ReplayClosures(ctx context.Context) error {
 	}
 	return nil
 }
-
-var _ = time.Time{}

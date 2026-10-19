@@ -96,6 +96,8 @@ type Core struct {
 	closePending                                 map[string]bool
 	connections                                  map[string]int
 	info                                         map[string]map[string]any
+	infoAttempted                                map[string]bool
+	infoRunning                                  bool
 	events                                       []map[string]any
 	generation                                   uint64
 	wanted, quitting, elevated                   bool
@@ -108,6 +110,7 @@ type Core struct {
 	lastStatus                                   string
 	revision                                     uint64
 	applyMu                                      sync.Mutex
+	saveMu                                       sync.Mutex
 }
 
 func New(ctx context.Context, o Options) (*Core, error) {
@@ -147,6 +150,7 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	if o.Tracker != nil {
 		c.tracker = o.Tracker
 	}
+	c.infoAttempted = map[string]bool{}
 	c.laneQueue = newQueue(ctx)
 	c.startQueue = newQueue(ctx)
 	c.setupQueue = newQueue(ctx)
@@ -184,6 +188,8 @@ func (c *Core) pinsLocked() apps.Pins {
 	return p
 }
 func (c *Core) save(changes map[string]any, remove ...string) error {
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
 	if changes == nil {
 		changes = map[string]any{}
 	}
@@ -299,6 +305,7 @@ func (c *Core) syncLanesLocked() {
 			a.target = nil
 			a.delay = nil
 			a.probeAt = nil
+			a.probing = false
 		}
 	}
 	for id := range c.lanes {
@@ -318,6 +325,7 @@ func (c *Core) resetLocked() {
 		l.generation++
 		l.target = nil
 		l.probeAt = nil
+		l.probing = false
 		l.delay = nil
 		l.health.RestartKeeping(l.health.Offline, l.health.AwaitingPass, c.now())
 	}
@@ -430,8 +438,13 @@ func (c *Core) Start(ctx context.Context) error {
 		}
 		c.mu.Lock()
 		c.statusLocked(c.op.Engine.Snapshot())
+		c.sampleLinesLocked(c.op.Engine.Snapshot())
 		c.mu.Unlock()
-		return c.ApplyPolicy(ctx)
+		if err := c.ApplyPolicy(ctx); err != nil {
+			return err
+		}
+		c.scheduleProbes(ctx, nil)
+		return c.ReplayClosures(ctx)
 	})
 }
 func (c *Core) Routing(ctx context.Context, on bool) error {

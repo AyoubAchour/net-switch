@@ -3,6 +3,7 @@ package control
 import (
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -91,6 +92,10 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if len(b) > 0 {
+				if !json.Valid(b) {
+					sendJSON(w, 400, map[string]any{"error": "The request could not be read."})
+					return
+				}
 				v, err := js.Decode(b)
 				if err != nil {
 					sendJSON(w, 400, map[string]any{"error": "The request could not be read."})

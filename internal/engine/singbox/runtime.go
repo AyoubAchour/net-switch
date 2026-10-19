@@ -17,7 +17,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -587,6 +586,9 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 			copy := clonePolicy(p)
 			a.s.StartedWith = &copy
 			a.s.Policy = clonePolicy(p)
+			for _, line := range p.Lines {
+				a.s.Policy.Lanes[line.ID] = line.ID
+			}
 			a.s.StartedAt = time.Now()
 			a.s.Status = "on"
 			a.s.Error = nil
@@ -643,5 +645,3 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	a.status("off", nil)
 	return nil
 }
-
-var _ = reflect.DeepEqual

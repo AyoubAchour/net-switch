@@ -21,7 +21,7 @@ func (c *Core) Action(ctx context.Context, method, path string, b map[string]any
 		case "/api/state":
 			return c.State(), nil
 		case "/api/installed-apps":
-			return c.op.Platform.Call(ctx, "installed-apps", nil)
+			return c.InstalledApps(ctx)
 		}
 	}
 	var err error

@@ -20,48 +20,7 @@ func (c *Core) Poll(ctx context.Context) error {
 	c.syncLanesLocked()
 	now := c.now()
 	items := c.itemsLocked()
-	for _, item := range items {
-		l := c.lanes[item.ID]
-		address := false
-		route := false
-		for _, a := range c.adapters {
-			if a["alias"] != item.Alias {
-				continue
-			}
-			ips := array(a["ipv4s"])
-			address = len(ips) > 0
-			for _, ip := range ips {
-				for _, r := range c.routes {
-					if ip == r["interfaceAddress"] {
-						route = true
-					}
-				}
-			}
-		}
-		if address && now-c.routesAt <= 30000 {
-			l.health.NoteRoute(ptr(route), now)
-		}
-		before := l.health.Up
-		up := l.health.Check(address, now, s.Status == "on" && len(items) > 1)
-		if before != nil && up != nil && *before != *up {
-			if *up {
-				c.noteLocked("up", item.ID, item.Label+" is back.")
-			} else {
-				reason := "it doesn’t work right now"
-				if l.health.Reason != nil {
-					switch *l.health.Reason {
-					case "no address":
-						reason = "it isn’t connected"
-					case "no default route":
-						reason = "Windows has no internet route through it"
-					case "no internet":
-						reason = "it doesn’t reach the internet"
-					}
-				}
-				c.noteLocked("down", item.ID, item.Label+" is down: "+reason+".")
-			}
-		}
-	}
+	c.sampleLinesLocked(s)
 	c.usage.Ingest(items, func(l lines.Line) *usage.Counter {
 		m, ok := c.meters[l.Alias]
 		if !ok || now-m.at > 5000 {
@@ -126,11 +85,69 @@ func (c *Core) Poll(ctx context.Context) error {
 	}
 	c.tracker.Ingest(routed, now)
 	c.mu.Unlock()
+	paths := []string{}
+	for _, connection := range connections {
+		if connection.Metadata.ProcessPath != "" {
+			paths = append(paths, connection.Metadata.ProcessPath)
+		}
+	}
+	c.lookupInfo(paths)
 	if err := c.laneQueue.Do(ctx, func() error { return c.closeExhausted(ctx, connections, gen) }); err != nil {
 		return err
 	}
 	c.scheduleProbes(ctx, connections)
 	return nil
+}
+
+func (c *Core) sampleLinesLocked(s engine.Snapshot) {
+	now := c.now()
+	items := c.itemsLocked()
+	for _, item := range items {
+		l := c.lanes[item.ID]
+		address := false
+		route := false
+		for _, a := range c.adapters {
+			if a["alias"] != item.Alias {
+				continue
+			}
+			ips := array(a["ipv4s"])
+			address = len(ips) > 0
+			for _, ip := range ips {
+				for _, r := range c.routes {
+					if ip == r["interfaceAddress"] {
+						route = true
+					}
+				}
+			}
+		}
+		if address && now-c.routesAt <= 30000 {
+			l.health.NoteRoute(ptr(route), now)
+		}
+		before := l.health.Up
+		recoveredBefore := l.health.RecoveredAt
+		up := l.health.Check(address, now, s.Status == "on" && len(items) > 1)
+		if recoveredBefore != l.health.RecoveredAt {
+			l.probeAt = nil
+		}
+		if before != nil && up != nil && *before != *up {
+			if *up {
+				c.noteLocked("up", item.ID, item.Label+" is back.")
+			} else {
+				reason := "it doesn’t work right now"
+				if l.health.Reason != nil {
+					switch *l.health.Reason {
+					case "no address":
+						reason = "it isn’t connected"
+					case "no default route":
+						reason = "Windows has no internet route through it"
+					case "no internet":
+						reason = "it doesn’t reach the internet"
+					}
+				}
+				c.noteLocked("down", item.ID, item.Label+" is down: "+reason+".")
+			}
+		}
+	}
 }
 func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connection, gen uint64) error {
 	c.mu.Lock()
@@ -314,7 +331,21 @@ func (c *Core) Run() {
 	}
 	every(time.Second, c.Poll)
 	every(time.Second, c.Supervise)
-	every(5*time.Second, c.RefreshAdapters)
+	c.op.Background(func() {
+		c.op.Platform.Stream(c.ctx, "network", func(b []byte) {
+			v, err := js.Decode(b)
+			if err != nil {
+				c.log("network worker returned invalid JSON: %v", err)
+				return
+			}
+			c.mu.Lock()
+			gen := c.generation
+			c.mu.Unlock()
+			if err := c.ApplyNetwork(c.ctx, js.Object(v), gen); err != nil {
+				c.log("adapter scan failed: %v", err)
+			}
+		}, func(err error) { c.log("network worker: %v; keeping last good adapter list", err) })
+	})
 	every(time.Minute, func(context.Context) error { return c.SaveUsage() })
 	for _, mode := range []string{"meters", "outside"} {
 		if mode == "outside" && c.op.Mode == "proxy" {

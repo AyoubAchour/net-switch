@@ -86,6 +86,10 @@ func (c *Core) describeLocked(path string) map[string]any {
 		name = "Windows services"
 		reconnectable = false
 	}
+	switch strings.ToLower(baseName(path)) {
+	case "node", "python", "pythonw", "powershell", "pwsh", "cmd", "wscript", "cscript", "java", "javaw", "dotnet":
+		reconnectable = false
+	}
 	info := c.info[key]
 	if v := js.Text(info["name"]); v != "" && key != `c:\windows\system32\svchost.exe` {
 		name = v
