@@ -108,9 +108,22 @@ func iconPNG(path string) ([]byte, error) {
 		return nil, err
 	}
 	var info shellFileInfo
-	r, _, _ := shell32.NewProc("SHGetFileInfoW").Call(uintptr(unsafe.Pointer(p)), 0, uintptr(unsafe.Pointer(&info)), unsafe.Sizeof(info), 0x100)
-	if r == 0 || info.Icon == 0 {
-		return nil, fmt.Errorf("no associated icon")
+	// The legacy .NET path retains straight RGB in transparent pixels.
+	// Shell image-list icons can lose that information through premultiplication.
+	name, err := windows.UTF16FromString(path)
+	if err != nil {
+		return nil, err
+	}
+	buffer := make([]uint16, max(260, len(name)))
+	copy(buffer, name)
+	var index uint16
+	r, _, _ := shell32.NewProc("ExtractAssociatedIconW").Call(0, uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&index)))
+	info.Icon = windows.Handle(r)
+	if info.Icon == 0 {
+		r, _, _ = shell32.NewProc("SHGetFileInfoW").Call(uintptr(unsafe.Pointer(p)), 0, uintptr(unsafe.Pointer(&info)), unsafe.Sizeof(info), 0x100)
+		if r == 0 || info.Icon == 0 {
+			return nil, fmt.Errorf("no associated icon")
+		}
 	}
 	defer user32.NewProc("DestroyIcon").Call(uintptr(info.Icon))
 	var ii iconInfo

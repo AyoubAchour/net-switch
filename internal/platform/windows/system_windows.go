@@ -83,7 +83,7 @@ func Execute(operation string, a map[string]any) (any, error) {
 		out := []map[string]any{}
 		for _, r := range rows {
 			if r.localPort == uint16(js.Number(a["port"])) {
-				out = append(out, map[string]any{"local": netip.AddrFrom4(r.local).String(), "lport": r.localPort, "remote": netip.AddrFrom4(r.remote).String(), "rport": r.remotePort, "pid": r.pid, "created": formatCreated(r.created), "state": r.state})
+				out = append(out, map[string]any{"local": netip.AddrFrom4(r.local).String(), "lport": r.localPort, "remote": netip.AddrFrom4(r.remote).String(), "rport": r.remotePort, "pid": r.pid, "created": formatCreated(r.created), "processStarted": processStarted(r.pid), "state": r.state})
 			}
 		}
 		return out, nil
@@ -92,13 +92,15 @@ func Execute(operation string, a map[string]any) (any, error) {
 		for _, v := range arrayValue(a["paths"]) {
 			paths = append(paths, js.Text(v))
 		}
-		return appInformation(paths), nil
+		return comThread(func() (any, error) { return appInformation(paths), nil })
 	case "installed-apps":
 		return installedApps()
 	case "autostart":
 		return taskEnabled()
 	case "autostart-set":
 		return nil, setTasks(a)
+	case "autostart-upgrade":
+		return upgradeTask(a)
 	default:
 		return nil, fmt.Errorf("unknown Windows operation %q", operation)
 	}

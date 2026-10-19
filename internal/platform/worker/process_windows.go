@@ -15,12 +15,15 @@ import (
 type process struct {
 	handle, job   windows.Handle
 	output, input *os.File
+	errors        *os.File
 	wait          sync.Once
 	waitErr       error
 	close         sync.Once
 }
 
+func (p *process) Input() io.WriteCloser { return p.input }
 func (p *process) Output() io.ReadCloser { return p.output }
+func (p *process) Errors() io.ReadCloser { return p.errors }
 func (p *process) Kill() error           { return windows.TerminateJobObject(p.job, 1) }
 func (p *process) Wait() error {
 	p.wait.Do(func() {
@@ -41,6 +44,7 @@ func (p *process) Close() error {
 		_ = p.Wait()
 		p.input.Close()
 		p.output.Close()
+		p.errors.Close()
 		windows.CloseHandle(p.handle)
 		windows.CloseHandle(p.job)
 	})
@@ -99,9 +103,19 @@ func Start(executable string, args []string) (Process, error) {
 			hold.Close()
 		}
 	}()
-	// stderr goes to Control's diagnostic sink. Duplicate only these three
+	errorReader, errorWriter, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	defer errorWriter.Close()
+	defer func() {
+		if !ok {
+			errorReader.Close()
+		}
+	}()
+	// stderr has its own pipe, including when Control has no console. Duplicate only these three
 	// handles and use an explicit inheritance list, so jobs/tokens never leak.
-	source := []windows.Handle{windows.Handle(stdin.Fd()), windows.Handle(writer.Fd()), windows.Handle(os.Stderr.Fd())}
+	source := []windows.Handle{windows.Handle(stdin.Fd()), windows.Handle(writer.Fd()), windows.Handle(errorWriter.Fd())}
 	handles := make([]windows.Handle, 3)
 	for i, h := range source {
 		if err := windows.DuplicateHandle(windows.CurrentProcess(), h, windows.CurrentProcess(), &handles[i], 0, true, windows.DUPLICATE_SAME_ACCESS); err != nil {
@@ -155,5 +169,5 @@ func Start(executable string, args []string) (Process, error) {
 		return nil, err
 	}
 	ok = true
-	return &process{handle: pi.Process, job: job, output: reader, input: hold}, nil
+	return &process{handle: pi.Process, job: job, output: reader, input: hold, errors: errorReader}, nil
 }

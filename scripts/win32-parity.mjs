@@ -123,12 +123,42 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { args: { OLD: old.i
       const tuple = await runPowerShellJson(`$c = Get-NetTCPConnection -LocalPort $env:NETSWITCH_PORT -RemotePort $env:NETSWITCH_REMOTE -State Established -ErrorAction Stop | Select-Object -First 1
 [pscustomobject]@{ local=[string]$c.LocalAddress; lport=[int]$c.LocalPort; remote=[string]$c.RemoteAddress; rport=[int]$c.RemotePort; pid=[int]$c.OwningProcess; created=$c.CreationTime.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress`, { args: { PORT: client.localPort, REMOTE: port } });
       assert.equal((await native('close-tcp', { connections: [{ ...tuple, pid: tuple.pid + 1000000 }] })).gone, 1);
-      console.log(`TCP identity parity: ${JSON.stringify({ powerShell: tuple, native: await native('tcp-identity', { port: client.localPort }) })}`);
+      const [precise] = await native('tcp-identity', { port: client.localPort });
+      console.log(`TCP identity parity: ${JSON.stringify({ powerShell: tuple, native: precise })}`);
+      for (const key of ['local', 'lport', 'remote', 'rport', 'pid']) assert.equal(precise[key], tuple[key]);
+      // The CIM provider truncates CreationTime to whole seconds on Windows.
+      // Each implementation must use the identity its own reader supplied;
+      // accepting a coarse timestamp in native close could hit a reused socket.
+      assert.equal(precise.created.slice(0, 19), tuple.created.slice(0, 19));
+      assert.equal((await native('close-tcp', { connections: [{ ...precise, processStarted: '1900-01-01T00:00:00.0000000Z' }] })).gone, 1);
       const closed = once(client, 'close'); client.on('error', () => {});
-      assert.deepEqual(await native('close-tcp', { connections: [tuple] }), { closed: 1, failed: 0, gone: 0, codes: [] });
+      const nativeResult = await native('close-tcp', { connections: [precise] });
+      assert.deepEqual(nativeResult, { closed: 1, failed: 0, gone: 0, codes: [] });
       await closed;
       assert.equal((await windows.closeTcpConnections([tuple])).gone, 1);
+      accepted.destroy();
+      const connectedAgain = once(listener, 'connection'); client = connect(port, '127.0.0.1'); [accepted] = await connectedAgain; await once(client, 'connect');
+      const oldTuple = await runPowerShellJson(`$c = Get-NetTCPConnection -LocalPort $env:NETSWITCH_PORT -RemotePort $env:NETSWITCH_REMOTE -State Established -ErrorAction Stop | Select-Object -First 1
+[pscustomobject]@{ local=[string]$c.LocalAddress; lport=[int]$c.LocalPort; remote=[string]$c.RemoteAddress; rport=[int]$c.RemotePort; pid=[int]$c.OwningProcess; created=$c.CreationTime.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress`, { args: { PORT: client.localPort, REMOTE: port } });
+      const oldClosed = once(client, 'close'); client.on('error', () => {});
+      assert.deepEqual(await windows.closeTcpConnections([oldTuple]), nativeResult);
+      await oldClosed;
     } finally { client?.destroy(); accepted?.destroy(); await new Promise((resolve) => listener.close(resolve)); }
+  });
+  await check('Task Scheduler registration, read and removal', async () => {
+    const args = { on: true, executable, root: path.dirname(executable), userDir: folder, machineDir: folder };
+    try {
+      await native('autostart-set', args);
+      assert.equal(await native('autostart'), true);
+      assert.equal(await windows.readAutostart(), true);
+      const settings = await runPowerShellJson(`$service=New-Object -ComObject Schedule.Service; $service.Connect(); $folder=$service.GetFolder('\\Net Switch')
+$result=foreach($name in 'Server','Sign-in') { $task=$folder.GetTask($name); [xml]$xml=$task.Xml; [pscustomobject]@{ name=$name; logon=[string]$xml.Task.Principals.Principal.LogonType; level=[string]$xml.Task.Principals.Principal.RunLevel; priority=[string]$xml.Task.Settings.Priority; limit=[string]$xml.Task.Settings.ExecutionTimeLimit; battery=[string]$xml.Task.Settings.DisallowStartIfOnBatteries; multiple=[string]$xml.Task.Settings.MultipleInstancesPolicy } }
+ConvertTo-Json -InputObject @($result) -Compress`);
+      assert.deepEqual(settings.map((s) => s.level), ['HighestAvailable', 'LeastPrivilege']);
+      assert(settings.every((s) => s.logon === 'InteractiveToken' && s.priority === '4' && s.limit === 'PT0S' && s.battery === 'false' && s.multiple === 'IgnoreNew'));
+    } finally { await native('autostart-set', { on: false }); }
+    assert.equal(await native('autostart'), false);
+    assert.equal(await windows.readAutostart(), false);
   });
   console.log(`Win32 parity: ${count} cases executed, ${count - failures} passed, ${failures} failed`);
   if (failures) process.exitCode = 1;

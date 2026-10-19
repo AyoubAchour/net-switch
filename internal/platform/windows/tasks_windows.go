@@ -158,3 +158,83 @@ func RunServerTask() error {
 	})
 	return err
 }
+
+// A legacy 0.3.0 task ran node.exe with a console. Keep the existing principal,
+// sign-in type and arguments while applying the same helper upgrade as Node.
+// Unknown task actions are never overwritten during startup.
+func upgradeTask(a map[string]any) (any, error) {
+	return comThread(func() (any, error) {
+		s, err := taskService()
+		if err != nil {
+			return nil, err
+		}
+		defer s.release()
+		folder, err := s.object("GetFolder", 1, `\Net Switch`)
+		if err != nil {
+			if strings.Contains(err.Error(), "80070002") {
+				return "absent", nil
+			}
+			return nil, err
+		}
+		defer folder.release()
+		task, err := folder.object("GetTask", 1, "Server")
+		if err != nil {
+			if strings.Contains(err.Error(), "80070002") {
+				return "absent", nil
+			}
+			return nil, err
+		}
+		defer task.release()
+		definition, err := task.object("Definition", 2)
+		if err != nil {
+			return nil, err
+		}
+		defer definition.release()
+		actions, err := definition.object("Actions", 2)
+		if err != nil {
+			return nil, err
+		}
+		defer actions.release()
+		action, err := actions.object("Item", 2, 1)
+		if err != nil {
+			return nil, err
+		}
+		defer action.release()
+		path, err := action.text("Path")
+		if err != nil {
+			return nil, err
+		}
+		root := js.Text(a["root"])
+		helper := filepath.Join(root, "helper", "netswitch-helper.exe")
+		node := filepath.Join(root, "runtime", "node.exe")
+		if strings.EqualFold(path, helper) || strings.EqualFold(path, js.Text(a["executable"])) {
+			return "current", nil
+		}
+		if !strings.EqualFold(path, node) {
+			return "unknown", nil
+		}
+		args, err := action.text("Arguments")
+		if err != nil {
+			return nil, err
+		}
+		if err := action.discard("Arguments", 4, `run "`+node+`" `+args); err != nil {
+			return nil, err
+		}
+		if err := action.discard("Path", 4, helper); err != nil {
+			return nil, err
+		}
+		principal, err := definition.object("Principal", 2)
+		if err != nil {
+			return nil, err
+		}
+		defer principal.release()
+		logon, err := principal.number("LogonType")
+		if err != nil {
+			return nil, err
+		}
+		if err := folder.discard("RegisterTaskDefinition", 1, "Server", definition, 4, nil, nil, logon, nil); err != nil {
+			return nil, err
+		}
+		return "updated", nil
+	})
+}

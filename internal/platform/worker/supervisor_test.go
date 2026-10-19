@@ -17,8 +17,14 @@ type fakeProcess struct {
 	once   sync.Once
 }
 
-func (p *fakeProcess) Output() io.ReadCloser { return p.reader }
-func (p *fakeProcess) Wait() error           { <-p.killed; return nil }
+type discardInput struct{}
+
+func (discardInput) Write(b []byte) (int, error) { return len(b), nil }
+func (discardInput) Close() error                { return nil }
+func (p *fakeProcess) Input() io.WriteCloser     { return discardInput{} }
+func (p *fakeProcess) Output() io.ReadCloser     { return p.reader }
+func (p *fakeProcess) Errors() io.ReadCloser     { return io.NopCloser(strings.NewReader("")) }
+func (p *fakeProcess) Wait() error               { <-p.killed; return nil }
 func (p *fakeProcess) Kill() error {
 	p.once.Do(func() {
 		if p.writer != nil {

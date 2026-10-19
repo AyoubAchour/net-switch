@@ -4,15 +4,17 @@ package worker
 import (
 	"bufio"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
 type Process interface {
+	Input() io.WriteCloser
 	Output() io.ReadCloser
+	Errors() io.ReadCloser
 	Wait() error
 	Kill() error
 	Close() error
@@ -22,6 +24,7 @@ type Supervisor struct {
 	Executable string
 	Launch     Launch
 	Silent     time.Duration
+	Log        func(error)
 }
 
 func (s Supervisor) launch(args []string) (Process, error) {
@@ -37,25 +40,40 @@ func (s Supervisor) Once(ctx context.Context, operation string, args map[string]
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	p, err := s.launch([]string{"worker", "query", operation, base64.RawURLEncoding.EncodeToString(b)})
+	p, err := s.launch([]string{"worker", "query", operation})
 	if err != nil {
 		return nil, err
 	}
 	defer p.Close()
+	diagnostics := drainErrors(p, s.Log)
 	type result struct {
 		b   []byte
 		err error
 	}
 	done := make(chan result, 1)
 	go func() {
+		if _, err := p.Input().Write(b); err != nil {
+			_ = p.Kill()
+			done <- result{err: err}
+			return
+		}
+		if err := p.Input().Close(); err != nil {
+			_ = p.Kill()
+			done <- result{err: err}
+			return
+		}
 		b, e := io.ReadAll(io.LimitReader(p.Output(), 4*1024*1024+1))
 		if len(b) > 4*1024*1024 {
 			_ = p.Kill()
 			e = fmt.Errorf("worker result exceeds 4 MiB")
 		}
 		wait := p.Wait()
+		detail := <-diagnostics
 		if e == nil {
 			e = wait
+		}
+		if e != nil && detail != "" {
+			e = fmt.Errorf("%w: %s", e, detail)
 		}
 		done <- result{b, e}
 	}()
@@ -94,6 +112,7 @@ func (s Supervisor) Stream(ctx context.Context, mode string, args []string, emit
 		p, err := s.launch(append([]string{"worker", mode}, args...))
 		if err == nil {
 			runCtx, stopReader := context.WithCancel(ctx)
+			diagnostics := drainErrors(p, report)
 			lines := make(chan []byte, 1)
 			done := make(chan error, 1)
 			go func() {
@@ -144,6 +163,7 @@ func (s Supervisor) Stream(ctx context.Context, mode string, args []string, emit
 			stopReader()
 			_ = p.Kill()
 			_ = p.Wait()
+			<-diagnostics
 			_ = p.Close()
 		}
 		if ctx.Err() != nil {
@@ -159,4 +179,35 @@ func (s Supervisor) Stream(ctx context.Context, mode string, args []string, emit
 		}
 		backoff = min(30*time.Second, backoff*2)
 	}
+}
+
+func drainErrors(p Process, report func(error)) <-chan string {
+	done := make(chan string, 1)
+	go func() {
+		reader := p.Errors()
+		defer reader.Close()
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 4096), 64*1024)
+		kept := []string{}
+		last := map[string]time.Time{}
+		for scanner.Scan() {
+			line := scanner.Text()
+			if len(line) > 500 {
+				line = line[:500]
+			}
+			kept = append(kept, line)
+			if len(kept) > 16 {
+				kept = kept[1:]
+			}
+			if report != nil && time.Since(last[line]) >= time.Minute {
+				report(fmt.Errorf("%s", line))
+				last[line] = time.Now()
+			}
+			if len(last) > 128 {
+				last = map[string]time.Time{}
+			}
+		}
+		done <- strings.Join(kept, "; ")
+	}()
+	return done
 }

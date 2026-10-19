@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/AyoubAchour/net-switch/internal/platform/worker"
@@ -16,7 +17,7 @@ type System struct {
 }
 
 func (s *System) Call(ctx context.Context, operation string, args map[string]any) (any, error) {
-	if operation == "autostart-set" {
+	if operation == "autostart-set" || operation == "autostart-upgrade" {
 		copy := map[string]any{}
 		for k, v := range args {
 			copy[k] = v
@@ -37,11 +38,20 @@ func (s *System) Stream(ctx context.Context, mode string, emit func([]byte), rep
 	s.Workers.Stream(ctx, mode, args, emit, report)
 }
 func query(args []string) int {
-	if len(args) != 2 {
+	if len(args) != 1 && len(args) != 2 {
 		fmt.Fprintln(os.Stderr, "worker query needs an operation and encoded arguments")
 		return 2
 	}
-	b, err := base64.RawURLEncoding.DecodeString(args[1])
+	var b []byte
+	var err error
+	if len(args) == 2 {
+		b, err = base64.RawURLEncoding.DecodeString(args[1])
+	} else {
+		b, err = io.ReadAll(io.LimitReader(os.Stdin, 4*1024*1024+1))
+		if len(b) > 4*1024*1024 {
+			err = fmt.Errorf("worker request exceeds 4 MiB")
+		}
+	}
 	var input map[string]any
 	if err == nil {
 		err = json.Unmarshal(b, &input)
