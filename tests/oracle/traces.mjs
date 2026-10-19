@@ -26,13 +26,19 @@ export const scenarios = {
 };
 
 scenarios.combiningNoOpenLine = { initial: { combine: true }, steps: scenarios.capBlockedAndMainException.steps };
+scenarios.savedVersionOrder = { initial: { appLines: { 'C:\\Discord\\app-1.0.9\\Discord.exe': 'a1', 'C:\\Discord\\app-1.0.10\\Discord.exe': 'b2' } }, steps: [http('state')] };
+scenarios.legacyCaseOrder = { initial: { lines: [], mainAlias: 'Ethernet', secondAlias: 'Wi-Fi', cableApps: ['c:\\apps\\x.exe'], secondApps: ['C:\\Apps\\X.exe'] }, steps: [http('state')] };
+scenarios.midnightGap = { timezone: 'America/Santiago', now: Date.parse('2026-09-06T03:59:59Z'), initial: { lines: lines.map((line) => ({ ...line, cap: { bytes: 100, period: 'day' } })) }, steps: [meters(0), tick(1000), meters(200), tick(1000), http('state')] };
+scenarios.busyFailedChecks = { steps: [tick(1000), { kind: 'probes', value: { a1: false } }, ...Array.from({ length: 35 }, (_, index) => [{ kind: 'connections', value: [{ ...flow('busy', 'a1'), download: (index + 1) * 1_000_000 }] }, tick(1000)]).flat(), http('state')] };
 
 export async function recordTrace(name, scenario = scenarios[name]) {
+  const previousTZ = process.env.TZ;
+  process.env.TZ = scenario.timezone ?? 'UTC';
   const entries = [];
   const trace = (direction, kind, value) => entries.push({ seq: entries.length, direction, kind, value });
   const initial = { lines, ...scenario.initial };
   trace('input', 'initial-files', { settings: initial });
-  const run = await oracle({ initial, trace, environment: { interfaces, adapters } });
+  const run = await oracle({ initial, trace, environment: { interfaces, adapters, ...(scenario.now === undefined ? {} : { now: scenario.now }) } });
   for (const step of scenario.steps) {
     if (step.kind === 'http') await run.request(step.method, step.route, step.body);
     else if (step.kind === 'tick') await run.advance(step.ms);
@@ -71,11 +77,21 @@ export async function recordTrace(name, scenario = scenarios[name]) {
     assert.equal(states.at(-2).routing.ipv6, true);
     assert.equal(last.routing.ipv6, false);
   }
+  if (name === 'midnightGap') assert.equal(last.lines[0].usage.periodStart, Date.parse('2026-09-06T04:00:00Z'));
+  if (name === 'busyFailedChecks') {
+    assert.ok(entries.filter((entry) => entry.kind === 'probe-result' && entry.value.status === 503).length >= 3);
+    assert.equal(last.lines[0].target, 'a1');
+    assert.equal(last.lines[0].problem, null);
+  }
+  if (name === 'savedVersionOrder') assert.equal(last.apps.find((app) => /discord/i.test(app.path)).line, 'b2');
+  if (name === 'legacyCaseOrder') assert.equal(last.apps.find((app) => /x.exe/i.test(app.path)).line, last.lines[1].id);
+  if (previousTZ === undefined) delete process.env.TZ;
+  else process.env.TZ = previousTZ;
   return { version: 1, baseline: BASELINE, name, scenario, entries };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const all = {};
-  for (const name of Object.keys(scenarios)) all[name] = await recordTrace(name);
+  for (const name of process.argv[2] ? [process.argv[2]] : Object.keys(scenarios)) all[name] = await recordTrace(name);
   console.log(JSON.stringify(all));
 }

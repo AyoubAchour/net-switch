@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, readdir } from 'node:fs/promises';
 import { test } from 'node:test';
+import { orderedPolicy } from '../tests/oracle/ordered.mjs';
 
 test('recorded controller traces replay in the same input and completion order', async (t) => {
   t.diagnostic(`Node ${process.version}, ${process.execPath}, SHA-256 ${createHash('sha256').update(await readFile(process.execPath)).digest('hex')}`);
@@ -20,7 +21,13 @@ test('recorded controller traces replay in the same input and completion order',
     assert.deepEqual(trace.scenario, expected.scenario, `${name}: input scenario changed`);
     assert.equal(trace.entries.length, expected.entries.length, `${name}: entry count`);
     for (let index = 0; index < expected.entries.length; index++) {
-      assert.deepEqual(trace.entries[index], expected.entries[index], `${name}: first mismatch at sequence ${index}`);
+      assert.deepEqual(orderedPolicy(trace.entries[index]), orderedPolicy(expected.entries[index]), `${name}: first mismatch at sequence ${index}`);
     }
+  }
+});
+
+test('policy comparison rejects reordered pins and shares', () => {
+  for (const key of ['appLines', 'shares']) {
+    assert.notDeepEqual(orderedPolicy({ [key]: { b: 1, a: 2 } }), orderedPolicy({ [key]: { a: 2, b: 1 } }));
   }
 });

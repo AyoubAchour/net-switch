@@ -54,7 +54,10 @@ must serialize to null exactly as Node does. Lists and line priority stay ordere
 
 ## Go comparison: permitted representation differences
 
-The future Go trace adapter may canonicalize JSON object-key order, but never
+The future Go trace adapter may canonicalize JSON object-key order EXCEPT
+`appLines` and `shares`: compare these as ordered `[key, value]` entry lists
+everywhere (including settings writes). Pin order decides which saved version
+wins; share order decides port slices. Never canonicalize these keys or any
 array order, field presence, null, boolean or numeric meaning. Node engine config
 and rule-file bytes must still match while using the sing-box adapter.
 
@@ -89,7 +92,9 @@ routed flows remain required parity.
 
 ## Starter coverage and limits
 
-Ten traces cover physical and probe failure/recovery; exhausted lines moving or
+Traces cover physical and probe failure/recovery; a busy line ignoring failed
+checks; Santiago's nonexistent midnight on 6 September 2026; saved-version and
+legacy case-colliding app choices; exhausted lines moving or
 becoming blocked; main-line exhaustion with no stand-in, also while combining;
 pinned/shared Reconnect
 with outside sockets; weighted combining; IPv6 settling and restarts; and legacy
