@@ -50,6 +50,10 @@ jobs:
           package-manager-cache: false
       - name: Fetch the verified engine
         run: ./scripts/fetch-engine.ps1
+      - name: Unit tests including the UDP probe
+        run: |
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Isolate the PID deletion race without sing-box
         if: matrix.batch == 1
         run: |

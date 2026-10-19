@@ -1,10 +1,8 @@
 // Launched by e2e-tun.mjs using a separate copy of Node, so process pins are real.
-import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
-import { createSocket } from 'node:dgram';
 import { Agent, request } from 'node:https';
 import { connect, createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { udpProbe } from './tun-test-dns.mjs';
 
 if (!process.send) throw new Error('Run this client through e2e-tun.mjs');
 const held = new Map();
@@ -80,48 +78,13 @@ async function reuseProbe() {
   }
   return attempts;
 }
-async function udp(size, server) {
-  const socket = createSocket('udp4');
-  // Ask the runner's own resolver for a reserved .invalid name. The answer is
-  // NXDOMAIN, so neither a public resolver nor a public domain is a dependency.
-  // EDNS padding preserves the 64- and 1800-byte UDP coverage.
-  const question = Buffer.from('096e657473776974636807696e76616c69640000010001', 'hex');
-  const header = Buffer.from('123401000001000000000001', 'hex');
-  randomBytes(2).copy(header);
-  const padding = Math.max(0, size - header.length - question.length - 15);
-  const opt = Buffer.alloc(15 + padding);
-  opt.writeUInt16BE(41, 1); opt.writeUInt16BE(4096, 3);
-  opt.writeUInt16BE(4 + padding, 9); opt.writeUInt16BE(12, 11); opt.writeUInt16BE(padding, 13);
-  const packet = Buffer.concat([header, question, opt]);
-  try {
-    return await new Promise((resolve, reject) => {
-      let done = false;
-      const timer = setTimeout(() => finish(reject,
-        new Error(`Runner DNS ${server}:53 did not answer ${packet.length} UDP bytes`)), 5000);
-      const finish = (fn, value) => { if (done) return; done = true; clearTimeout(timer); fn(value); };
-      socket.on('error', (error) => finish(reject, error));
-      socket.on('message', (reply, peer) => {
-        if (peer.address !== server || peer.port !== 53 || reply.length < 12 || reply.readUInt16BE(0) !== header.readUInt16BE(0)) return;
-        try {
-          assert(reply[2] & 0x80, 'DNS response flag missing');
-          assert.equal(reply[2] & 0x02, 0, 'Truncated DNS response');
-          assert.equal(reply.readUInt16BE(4), 1, 'DNS question count');
-          assert.deepEqual(reply.subarray(12, 12 + question.length), question, 'DNS question changed');
-          assert.equal(reply[3] & 15, 3, 'Reserved .invalid name must return NXDOMAIN');
-          finish(resolve, { server, sent: packet.length, received: reply.length, port: socket.address().port });
-        } catch (error) { finish(reject, error); }
-      });
-      socket.send(packet, 53, server, (error) => { if (error) finish(reject, error); });
-    });
-  } finally { socket.close(); }
-}
 process.on('message', async ({ id, command, count, ids, size, server }) => {
   try {
     let result;
     if (command === 'open') result = await open(count);
     else if (command === 'refresh') result = await Promise.all(ids.map((key) => requestOn(held.get(key))));
     else if (command === 'reuse') result = await reuseProbe();
-    else if (command === 'udp') result = await udp(size, server);
+    else if (command === 'udp') result = await udpProbe({ size, server });
     else if (command === 'close') { for (const item of held.values()) item.agent.destroy(); held.clear(); result = true; }
     else throw new Error(`Unknown command ${command}`);
     process.send({ id, result });
