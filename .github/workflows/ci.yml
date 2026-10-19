@@ -373,6 +373,8 @@ jobs:
           retention-days: 14
       - name: Repeat clock and reopen boundaries 1000 times
         run: node scripts/repeat-close-tests.mjs ${{ matrix.name != 'Windows ARM64' && '--race' || '' }}
+      - name: Check 1000 close repeats in one process without race instrumentation
+        run: node scripts/repeat-close-tests.mjs --batches=1 --count=1000
       - name: Repeat endpoint setup deduplication and cancellation 1000 times
         run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths
