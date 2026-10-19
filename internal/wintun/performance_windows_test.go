@@ -315,10 +315,22 @@ func TestWintunPerformance(t *testing.T) {
 					var value float64
 					var err error
 					var before Stats
-					if s, ok := f.io.(*Session); ok {
-						before = s.Stats()
-					}
-					func() { stop := tcpEcho(t, f); defer stop(); value, err = tcpTransfer(t, streams) }()
+					func() {
+						stop := tcpEcho(t, f)
+						defer stop()
+						// Profiles show both stacks warming over their first two
+						// connections. The engine is long-lived: compare steady
+						// throughput after a fixed, visible warm-up for both paths.
+						for warm := 0; warm < 2; warm++ {
+							rate, warmErr := tcpTransfer(t, 1)
+							must(t, warmErr)
+							report(t, map[string]any{"test": "tcp_warmup", "arch": runtime.GOARCH, "mode": mode, "trial": trial, "streams": streams, "warmup": warm, "MBps": rate})
+						}
+						if s, ok := f.io.(*Session); ok {
+							before = s.Stats()
+						}
+						value, err = tcpTransfer(t, streams)
+					}()
 					if err != nil {
 						if mode != "dll" || !errors.Is(f.fault(), windows.ERROR_INVALID_DATA) {
 							t.Fatal(err)

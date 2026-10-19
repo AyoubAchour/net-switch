@@ -69,7 +69,11 @@ in the distribution. Our path must have zero round trips over 50 ms.
 
 Throughput uses delivered UDP bytes over a fixed interval and complete, hashed
 TCP transfers, with one and eight streams. Three trials alternate implementation
-order. All samples remain in the comparison: a DLL `ERROR_INVALID_DATA` is logged
+order. Each TCP stack first runs two fixed, logged warm-up transfers: CPU profiles
+show both implementations' initial connections warming from roughly 320–450 to
+540–600 MB/s on the same x64 runner. The three measured trials compare the steady
+state of a long-lived engine. All measured samples remain in the comparison:
+a DLL `ERROR_INVALID_DATA` is logged
 as a baseline failure, its partial UDP goodput (or zero for an incomplete TCP
 transfer) is retained, and a fresh DLL session is used only for the next metric.
 No failed sample is retried into a pass. The locked design's 10% performance
@@ -79,7 +83,8 @@ unknown reference errors and failures of our session fail CI.
 Parallel senders verify every test payload. Deterministic malformed-entry tests
 independently prove recovery, even if the driver corruption does not occur in a
 particular stress sample. Lifetime tests count process handles and their kernel
-object types, measure private memory after GC/scavenging, and enumerate PnP
+object types after warming Go's OS-thread cache (six handles per Windows thread),
+measure private memory after GC/scavenging, and enumerate PnP
 records without filtering out non-present devices.
 
 - [Windows high-resolution timing](https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps)
