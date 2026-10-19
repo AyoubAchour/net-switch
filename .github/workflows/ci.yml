@@ -207,6 +207,23 @@ jobs:
       - name: 1000 session cycles and forced crash cleanup, including phantom devices
         if: ${{ !cancelled() }}
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintun(Lifetime|Crash)$'
+      - name: Profile single-stream TCP through both sessions
+        if: ${{ !cancelled() }}
+        run: |
+          foreach ($mode in @('dll', 'ours')) {
+            $env:NETSWITCH_WINTUN_PROFILE = $mode
+            ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintunProfile$' "-test.cpuprofile=bin/wintun-$mode-cpu.pprof"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            go tool pprof -top -nodecount=25 ./bin/wintun.test.exe "bin/wintun-$mode-cpu.pprof"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Keep the CPU profiles
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wintun-cpu-${{ matrix.arch }}
+          path: bin/wintun-*-cpu.pprof
+          retention-days: 14
       - name: Fuzz the ring-entry parser
         if: ${{ !cancelled() }}
         env:

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"runtime"
 	"sort"
 	"sync"
@@ -249,6 +250,26 @@ func shortLatency(t *testing.T) float64 {
 }
 
 func median(values []float64) float64 { sort.Float64s(values); return values[len(values)/2] }
+
+// Run with the test binary's -test.cpuprofile flag. Keep the reference and our
+// session in separate profiles so their CPU costs can be compared directly.
+func TestWintunProfile(t *testing.T) {
+	requireRunner(t)
+	mode := os.Getenv("NETSWITCH_WINTUN_PROFILE")
+	if mode != "dll" && mode != "ours" {
+		t.Skip("explicit profile mode required")
+	}
+	f := newFixture(t, mode, 0)
+	f.stopEcho()
+	f.stopEcho = func() {}
+	stop := tcpEcho(t, f)
+	defer stop()
+	for i := 0; i < 24; i++ {
+		value, err := tcpTransfer(t, 1)
+		must(t, err)
+		t.Logf("profile %s transfer %d: %.2f MB/s", mode, i, value)
+	}
+}
 
 func TestWintunPerformance(t *testing.T) {
 	requireRunner(t)

@@ -658,6 +658,27 @@ func pnpExists(t *testing.T, instance string) bool {
 func TestWintunLifetime(t *testing.T) {
 	requireRunner(t)
 	a := newAdapter(t, MinCapacity)
+	// Go caches OS threads and each Windows M owns six native handles
+	// (runtime/os_windows.go: minit and semacreate). Warm that cache before
+	// taking the process baseline; do not excuse growth by raising the limit.
+	var warm sync.WaitGroup
+	ready := make(chan struct{}, 16)
+	release := make(chan struct{})
+	for i := 0; i < 16; i++ {
+		warm.Add(1)
+		go func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			defer warm.Done()
+			ready <- struct{}{}
+			<-release
+		}()
+	}
+	for i := 0; i < 16; i++ {
+		<-ready
+	}
+	close(release)
+	warm.Wait()
 	for i := 0; i < 100; i++ {
 		s, err := a.StartSession()
 		must(t, err)
