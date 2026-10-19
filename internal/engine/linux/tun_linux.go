@@ -5,8 +5,8 @@ package linux
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
-	"os"
 	"sync"
 
 	"github.com/vishvananda/netlink"
@@ -125,8 +125,11 @@ func (t *Tun) WritePacket(ctx context.Context, packet []byte) error {
 	stop := context.AfterFunc(ctx, func() { t.device.Close() })
 	defer stop()
 	n, err := t.device.Write([][]byte{b}, 10)
-	if err == nil && n != 1 {
-		return os.ErrInvalid
+	// The pinned Linux implementation returns bytes (including virtio's
+	// header), despite Device.Write's comment saying packets. Treat a real
+	// short write as failure, not every successful packet as failure.
+	if err == nil && n != len(b) {
+		return fmt.Errorf("TUN wrote %d of %d bytes: %w",n,len(b),io.ErrShortWrite)
 	}
 	return err
 }
