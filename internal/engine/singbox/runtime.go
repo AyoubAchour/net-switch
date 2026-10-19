@@ -688,7 +688,26 @@ func (a *Adapter) stopOrphan(ctx context.Context) error {
 			return err
 		}
 	}
-	return a.o.Files.Files.Remove(pidFile)
+	a.removePID()
+	return nil
+}
+
+func (a *Adapter) removePID() {
+	if err := a.o.Files.Files.Remove(filepath.Join(a.o.DataDir, "engine.pid")); err != nil && !os.IsNotExist(err) {
+		a.o.Log(fmt.Sprintf("cleanup warning: could not remove engine.pid after routing stopped: %v", err))
+	}
+}
+
+// A child remains owned until its exit goroutine has finished PID cleanup, even
+// after child becomes nil. Never let orphan cleanup compete with that owner.
+func (a *Adapter) stopPrevious(ctx context.Context) error {
+	a.mu.Lock()
+	owned := a.exited != nil
+	a.mu.Unlock()
+	if owned {
+		return a.stopChild(ctx)
+	}
+	return a.stopOrphan(ctx)
 }
 func (a *Adapter) Start(ctx context.Context, p engine.Policy) error {
 	a.lifecycle.Lock()
@@ -723,7 +742,7 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 	if len(p.Lines) == 0 {
 		return fmt.Errorf("No internet connection was found. Connect one, then turn routing on.")
 	}
-	if err := a.stopOrphan(ctx); err != nil {
+	if err := a.stopPrevious(ctx); err != nil {
 		return err
 	}
 	verify := a.o.Verify
@@ -820,6 +839,9 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 	}
 	var readers sync.WaitGroup
 	readers.Add(2)
+	// Publish the PID before an immediate child exit can remove it. Even if
+	// writing fails, install the exit owner so the start failure can await it.
+	pidErr := a.o.Files.Files.WriteFile(filepath.Join(a.o.DataDir, "engine.pid"), []byte(strconv.Itoa(cmd.PID())), 0600)
 	go func() { defer readers.Done(); defer a.o.Crash.Recover("engine stdout"); collect(out) }()
 	go func() { defer readers.Done(); defer a.o.Crash.Recover("engine stderr"); collect(stderr) }()
 	go func() {
@@ -853,11 +875,11 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 		}
 		a.mu.Unlock()
 		if own {
-			_ = a.o.Files.Files.Remove(filepath.Join(a.o.DataDir, "engine.pid"))
+			a.removePID()
 		}
 	}()
-	if err := a.o.Files.Files.WriteFile(filepath.Join(a.o.DataDir, "engine.pid"), []byte(strconv.Itoa(cmd.PID())), 0600); err != nil {
-		return err
+	if pidErr != nil {
+		return pidErr
 	}
 	deadline := a.o.Now().Add(15 * time.Second)
 	for a.o.Now().Before(deadline) {
@@ -894,21 +916,20 @@ func (a *Adapter) stopChild(ctx context.Context) error {
 	a.mu.Lock()
 	child, exited := a.child, a.exited
 	a.mu.Unlock()
-	if child == nil {
+	if exited == nil {
 		return nil
 	}
-	if err := child.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return err
+	if child != nil {
+		if err := child.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
 	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-time.After(8 * time.Second):
-		return fmt.Errorf("routing engine %d did not stop", child.PID())
+		return fmt.Errorf("routing engine did not finish stopping")
 	case <-exited:
-	}
-	if err := a.o.Files.Files.Remove(filepath.Join(a.o.DataDir, "engine.pid")); err != nil && !os.IsNotExist(err) {
-		return err
 	}
 	return nil
 }
@@ -923,11 +944,7 @@ func (a *Adapter) Stop(ctx context.Context) error {
 	a.status("stopping", nil)
 	a.apply.Lock()
 	defer a.apply.Unlock()
-	if err := a.stopChild(ctx); err != nil {
-		a.status("error", err)
-		return err
-	}
-	if err := a.stopOrphan(ctx); err != nil {
+	if err := a.stopPrevious(ctx); err != nil {
 		a.status("error", err)
 		return err
 	}

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { oracle } from './harness.mjs';
 import { BASELINE, lines } from './record.mjs';
+import provenance from './provenance.json' with { type: 'json' };
 
 const interfaces = {
   Ethernet: [{ family: 'IPv4', address: '192.0.2.1', internal: false }],
@@ -134,7 +135,8 @@ export async function recordTrace(name, scenario = scenarios[name]) {
   if (name === 'adapterRename') { assert.equal(last.lines[0].alias, 'LAN'); assert.ok(logs.includes('routing restarts to use LAN, Wi-Fi')); }
   if (previousTZ === undefined) delete process.env.TZ;
   else process.env.TZ = previousTZ;
-  return { version: 1, baseline: BASELINE, name, scenario, entries };
+  const source = provenance.fixtures[name];
+  return { version: 1, baseline: source?.baseline ?? BASELINE, hooks: source?.hooks ?? [], name, scenario, entries };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

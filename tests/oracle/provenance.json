@@ -1,0 +1,264 @@
+{
+  "version": 1,
+  "notes": "Sidecar overrides the legacy baseline header without changing frozen fixture bytes. Original traces use the verified behavior-neutral factory; extended traces include the extra observation hooks listed here.",
+  "fixtures": {
+    "adapterRename": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "ee8bb84545c7f87898dea6f1d9ce954c0addb2494a6d1ba14456889fb8abaa9c"
+    },
+    "appLine": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11"
+    },
+    "busyFailedChecks": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "4a7fa2d2d6bd45de3df51c5fbd3db94906a954631e8bf0939bdd7b15fd0d94a0"
+    },
+    "capBlockedAndMainException": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "a8cdde97f49e55dab076aca4d8b294c15f96e8df77f91637898101717f5df8d5"
+    },
+    "capMoved": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "248a73a61d415c9571d4b82f3c6709982b07c28ec6c5b66fa5be38f3b667be8d"
+    },
+    "capReset": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "a6b9f40014bfd2b3d83b725739877da0f6710a3cbed30e9dd901007a2384960b"
+    },
+    "combining": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "ee481d488900023c07849039154aaa2174f452615e010093f6b1195bf5b65d87"
+    },
+    "combiningNoOpenLine": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "ae1f93d7db2ff793b039bb749b3b43f59b29a671f3f4d0552e774f8c6d78d687"
+    },
+    "failoverFailback": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "a6d7fe68c98f3d5f65c65745463e13646eb6eda4755f9aed1a3ce528b1e3c781"
+    },
+    "hungEngine": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "cd955d79ced641e10312605dfe7079def2bffd582aa97cf7763382f53bb0fa00"
+    },
+    "ipv6": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "a98865fa22b6fbce283549b9ff90a5164ee55a445873c15623ea5bcdba2ef922"
+    },
+    "legacyCaseOrder": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "5a5704acbd30ed32dcc5d3fc78a3df3108b3d4e802e723940ab2e487df9be7eb"
+    },
+    "lineAdd": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "5e6b7eb9758f3ebe657c09704c5b25eb5d7f4579feba61c80f5986eeef0ac098"
+    },
+    "lineOrder": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "eb033450c57f7a8c47a2ba4cfaa18e312977746612c0085562b26da1a090e9b6"
+    },
+    "lineRemove": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "d838b53319eb1b2e79a4867f6a88bde687766ef4503564bab91090336755f887"
+    },
+    "lostDefaultRoute": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "1d1375c4fa889bdd060e478ef4a8342ae75d1cb142a4cdfa66e2f4c270b5847f"
+    },
+    "midnightGap": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "313a35fdeef675e7de2b75f0f8e41cc2646d769a5afcec85d69fe2c2a31d7759"
+    },
+    "migration": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "e026fe09eee7b7b412eb388c091beb89e64c920cdacb023c4f365c48e355a1f3"
+    },
+    "probeFailover": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "192c3331df82c1e657d227b57c12acbb8b50c614bb0e3ee3895c75898671a787"
+    },
+    "quitFailure": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "891a10c081f55206543b7067c6327c6483b00df55e59c9369af3adc22db048fd"
+    },
+    "reconnectPinned": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "ff1004e30238923884c2b25c1ac2af75b65ab7ac947455bc794eadaa6d85b26d"
+    },
+    "reconnectShared": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "15c91cd1ad25dfc2d6d7ad408baf9566f33896a134573d139a34cdfccaa967dc"
+    },
+    "routingAndReads": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "efa644badddcbfe7936c4e9af6ddbd0d9e434dfe7d7646098cf627f0cbf00804"
+    },
+    "savedVersionOrder": {
+      "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+      "recorderCommit": "be5eaea484f97b8e8fdcd68f787946411fc0f819",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording"
+      ],
+      "sha256": "dfc36143eacac78ec0f1a1221f54c53b6ba72fe37fc8bba71a8b651a7e5141c3"
+    },
+    "settingsSetupUpdate": {
+      "baseline": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "recorderCommit": "59f2d9576341c0cb15e115ee0f9dbb99e44aab0d",
+      "hooks": [
+        "hooks.txt exports",
+        "boundary I/O and completion recording",
+        "real directory listing callback",
+        "LineHealth.noteProbe observation",
+        "buildState entry observation"
+      ],
+      "sha256": "e85878e061da850cbe6c1ddb6c55bbe485b1b64f0d7255a43d6205aab9adae73"
+    }
+  }
+}

@@ -100,16 +100,23 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 	for _, test := range []struct {
 		kind       string
 		quarantine bool
+		hideGrant  bool
 	}{
-		{"root", false}, {"root", true},
-		{"child", false}, {"child", true},
-		{"nested-directory", false}, {"nested-directory", true},
+		{"root", false, false}, {"root", true, false},
+		{"child", false, false}, {"child", true, false},
+		{"nested-directory", false, false}, {"nested-directory", true, false},
+		{"root", true, true}, {"child", true, true}, {"nested-directory", true, true},
 	} {
-		t.Run(fmt.Sprintf("%s/quarantine=%t", test.kind, test.quarantine), func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/quarantine=%t/historical=%t", test.kind, test.quarantine, test.hideGrant), func(t *testing.T) {
 			kind := test.kind
 			root := filepath.Join(t.TempDir(), "machine")
 			if err := ProtectDirectory(root); err != nil {
 				t.Fatal(err)
+			}
+			if test.hideGrant {
+				if err := os.Remove(filepath.Join(root, directoryMarkerName)); err != nil {
+					t.Fatal(err)
+				}
 			}
 			target, sentinel := root, filepath.Join(root, "sentinel")
 			if kind != "root" {
@@ -150,6 +157,11 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			var ready metadataAnswer
 			if err := decoder.Decode(&ready); err != nil || !ready.Ready {
 				t.Fatalf("Medium worker could not acquire the original grant: %+v %v", ready, err)
+			}
+			if test.hideGrant {
+				// The retained handle now has authority absent from today's ACL.
+				setProofSecurity(t, target, user.User.Sid.String(), "0x00100000")
+				before, rootBefore = fileSecurity(t, target), fileSecurity(t, root)
 			}
 			blocked := false
 			if test.quarantine {
@@ -206,7 +218,7 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 					t.Fatalf("retry did not quarantine the untrusted tree: %v %v", old, err)
 				}
 				items, err := os.ReadDir(root)
-				if err != nil || len(items) != 0 {
+				if err != nil || len(items) != 1 || items[0].Name() != directoryMarkerName {
 					t.Fatalf("retry kept untrusted data: %v %v", items, err)
 				}
 				t.Log("quarantine succeeded after the descendant handle closed")

@@ -42,6 +42,10 @@ func sendJSON(w http.ResponseWriter, status int, v any) {
 	_, _ = w.Write(b)
 }
 func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// A panic may interrupt a routing transaction while holding state locks.
+	// Log it and stop routing through the fatal crash net instead of letting
+	// net/http recover and keep serving a possibly inconsistent controller.
+	// Ordinary returned errors still use the legacy HTTP error responses.
 	defer h.Core.op.Crash.Recover("HTTP request")
 	allowed := func(host string) bool {
 		return host == "127.0.0.1:"+strconv.Itoa(h.Port) || host == "localhost:"+strconv.Itoa(h.Port)

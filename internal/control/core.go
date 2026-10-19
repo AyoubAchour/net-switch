@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
@@ -65,21 +66,21 @@ type AppTracker interface {
 	ConnectionIDsOffLine(string, string) []string
 }
 type lane struct {
-	alias           string
-	health          linehealth.Health
-	generation      uint64
-	target          *string
-	delay           *float64
-	probeAt         *int64
-	routeReadAt     *int64
-	routeSnapshotAt *int64
-	probing         bool
-	operator        int
-	missingAt       *int64
-	missingReads    int
-	logged          map[string]int64
-	sampled         bool
-	ignoreAck       bool
+	alias         string
+	health        linehealth.Health
+	generation    uint64
+	target        *string
+	delay         *float64
+	probeAt       *int64
+	routeReadAt   *int64
+	routeSequence uint64
+	probing       bool
+	operator      int
+	missingAt     *int64
+	missingReads  int
+	logged        map[string]int64
+	sampled       bool
+	ignoreAck     bool
 }
 type meter struct {
 	counter usage.Counter
@@ -97,7 +98,8 @@ type Core struct {
 	adapters                                     []map[string]any
 	routes                                       []map[string]any
 	routesAt                                     int64
-	networkReadAt                                int64
+	networkSequence, routesSequence              uint64
+	networkIssued                                atomic.Uint64
 	meters                                       map[string]meter
 	outsideAt                                    int64
 	tracker                                      AppTracker
@@ -109,6 +111,7 @@ type Core struct {
 	closePending                                 map[string]bool
 	deferClosures                                map[string]uint64
 	pollSequence                                 uint64
+	initialSampled                               bool
 	connections                                  map[string]int
 	info                                         map[string]map[string]any
 	infoAttempted                                map[string]bool
@@ -374,7 +377,7 @@ func (c *Core) syncLanesLocked() {
 			a.delay = nil
 			a.probeAt = nil
 			a.routeReadAt = nil
-			a.routeSnapshotAt = nil
+			a.routeSequence = 0
 			a.probing = false
 		}
 	}
@@ -398,7 +401,7 @@ func (c *Core) resetLocked() {
 		l.target = nil
 		l.probeAt = nil
 		l.routeReadAt = nil
-		l.routeSnapshotAt = nil
+		l.routeSequence = 0
 		l.probing = false
 		l.delay = nil
 		l.health.RestartKeeping(l.health.Offline, l.health.AwaitingPass, c.now())
@@ -535,6 +538,9 @@ func (c *Core) Start(ctx context.Context) error {
 		c.mu.Lock()
 		c.statusLocked(c.op.Engine.Snapshot())
 		for _, lane := range c.lanes {
+			// Node's wanted() samples an uninitialised LaneSwitch, changing
+			// its generation and discarding the first selector acknowledgement.
+			// New lanes can still need this after an explicit Start/rebind.
 			lane.ignoreAck = !lane.sampled
 		}
 		c.sampleLinesLocked(c.op.Engine.Snapshot())
@@ -652,6 +658,8 @@ func (c *Core) recordLanesLocked(p engine.Policy) {
 		id, target := line.ID, p.Lanes[line.ID]
 		if l := c.lanes[id]; l != nil && (l.target == nil || *l.target != target) {
 			if l.ignoreAck {
+				// Preserve Node's discarded first switch, then force one real
+				// retry even when the adapter already points at this target.
 				l.ignoreAck = false
 				c.forgetLane(id)
 				continue
@@ -699,6 +707,12 @@ func (c *Core) Supervise(ctx context.Context) error {
 	}
 	s := c.op.Engine.Snapshot()
 	c.mu.Lock()
+	// Node runs the initial poll before its supervisor. Both Go loops can be
+	// scheduled first, so make that initial sample an explicit prerequisite.
+	// Otherwise scheduler order decides whether the first lane answer is lost.
+	if !c.initialSampled {
+		c.sampleLinesLocked(s)
+	}
 	c.statusLocked(s)
 	if c.quitting || !c.wanted {
 		c.mu.Unlock()
@@ -868,6 +882,7 @@ func prepareAdapters(v any) ([]map[string]any, error) {
 	return out, nil
 }
 func (c *Core) RefreshAdapters(ctx context.Context) error {
+	sequence := c.networkIssued.Add(1)
 	c.mu.Lock()
 	gen := c.generation
 	c.mu.Unlock()
@@ -878,20 +893,24 @@ func (c *Core) RefreshAdapters(ctx context.Context) error {
 		c.mu.Unlock()
 		return err
 	}
-	return c.ApplyNetwork(ctx, js.Object(v), gen)
+	return c.ApplyNetwork(ctx, js.Object(v), gen, sequence)
 }
-func (c *Core) ApplyNetwork(ctx context.Context, v map[string]any, gen uint64) error {
+func (c *Core) ApplyNetwork(ctx context.Context, v map[string]any, gen, sequence uint64) error {
 	a, err := prepareAdapters(v["adapters"])
 	if err != nil {
 		return err
 	}
 	c.mu.Lock()
 	readAt := int64(js.Number(v["readAt"]))
-	if gen != c.generation || readAt <= c.networkReadAt {
+	// Sequence is owned by Control, so neither wall-clock corrections nor a
+	// restarted worker can move the stream backwards. One-shot reads reserve
+	// their position before dispatch; a late completion cannot overwrite a
+	// streamed update already received while that request was in flight.
+	if gen != c.generation || sequence <= c.networkSequence {
 		c.mu.Unlock()
 		return nil
 	}
-	c.networkReadAt = readAt
+	c.networkSequence = sequence
 	c.adapters = a
 	c.scanFailures = 0
 	if v["policy"] != "unknown" {
@@ -906,6 +925,7 @@ func (c *Core) ApplyNetwork(ctx context.Context, v map[string]any, gen uint64) e
 			c.routes = append(c.routes, js.Object(r))
 		}
 		c.routesAt = readAt
+		c.routesSequence = sequence
 	}
 	c.mu.Unlock()
 	return c.laneQueue.Do(ctx, func() error { return c.followAdapters() })

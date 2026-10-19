@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"slices"
 	"strings"
 	"unicode/utf16"
 
@@ -13,6 +14,7 @@ import (
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/lines"
 	"github.com/AyoubAchour/net-switch/internal/platform"
+	"github.com/AyoubAchour/net-switch/internal/windowsundo"
 )
 
 func (c *Core) Action(ctx context.Context, method, path string, b map[string]any) (any, error) {
@@ -26,6 +28,9 @@ func (c *Core) Action(ctx context.Context, method, path string, b map[string]any
 			return c.InstalledApps(ctx)
 		}
 	}
+	// Once a command is accepted, Node keeps processing it after the browser
+	// disconnects. Queues, worker calls and policy applies share that lifetime.
+	ctx = c.ctx
 	var err error
 	switch path {
 	case "/api/routing":
@@ -488,6 +493,7 @@ func (c *Core) setup(ctx context.Context, action string) error {
 		return fmt.Errorf("Windows undo store not configured")
 	}
 	undo := c.op.Undo.Values()
+	aliases := windowsundo.Aliases(c.op.Undo.RawValues()["metrics"])
 	metrics := js.Object(undo["metrics"])
 	policy := js.Object(undo["policy"])
 	if metrics == nil {
@@ -513,7 +519,10 @@ func (c *Core) setup(ctx context.Context, action string) error {
 					return bad("Windows didn’t say how this connection is set up now, so Net Switch can’t change it safely. Try again in a moment.")
 				}
 				metrics[alias] = before
-				if _, err := c.op.Undo.Update(map[string]any{"metrics": metrics}); err != nil {
+				if !slices.Contains(aliases, alias) {
+					aliases = append(aliases, alias)
+				}
+				if _, err := c.op.Undo.Update(map[string]any{"metrics": windowsundo.MetricsJSON(metrics, aliases)}); err != nil {
 					return err
 				}
 			}
@@ -539,30 +548,43 @@ func (c *Core) setup(ctx context.Context, action string) error {
 		c.refreshPolicy(ctx)
 		return nil
 	case "/api/setup/undo":
+		failed := func(err error) error {
+			c.log("undo failed: %v", err)
+			return bad(fmt.Sprintf("Net Switch couldn’t undo the Windows changes: %v.", err))
+		}
+		if err := windowsundo.Validate(undo, aliases); err != nil {
+			return failed(err)
+		}
 		unreachable := []string{}
 		if v, ok := policy["value"]; ok {
 			if _, err := c.op.Platform.Call(ctx, "policy-set", map[string]any{"value": v}); err != nil {
-				return err
+				return failed(err)
 			}
 			if _, err := c.op.Undo.Update(map[string]any{"policy": map[string]any{}}); err != nil {
-				return err
+				return failed(err)
 			}
 		}
-		for alias, record := range metrics {
-			if _, err := c.op.Platform.Call(ctx, "metrics-restore", map[string]any{"alias": alias, "metrics": record}); err != nil {
-				c.log("could not restore %s's interface metrics: %v", alias, err)
-				unreachable = append(unreachable, alias)
-				continue
+		for _, alias := range aliases {
+			record := metrics[alias]
+			if len(array(record)) > 0 {
+				if _, err := c.op.Platform.Call(ctx, "metrics-restore", map[string]any{"alias": alias, "metrics": record}); err != nil {
+					unreachable = append(unreachable, alias)
+					continue
+				}
 			}
 			delete(metrics, alias)
-			if _, err := c.op.Undo.Update(map[string]any{"metrics": metrics}); err != nil {
-				return err
+			if _, err := c.op.Undo.Update(map[string]any{"metrics": windowsundo.MetricsJSON(metrics, aliases)}); err != nil {
+				return failed(err)
 			}
+		}
+		c.refreshPolicy(ctx)
+		if err := c.RefreshAdapters(ctx); err != nil {
+			return err
 		}
 		if len(unreachable) > 0 {
 			return bad("Connect " + strings.Join(unreachable, " and ") + " again to finish undoing, then press Undo again.")
 		}
-		c.refreshPolicy(ctx)
+		return nil
 	}
 	return c.RefreshAdapters(ctx)
 }

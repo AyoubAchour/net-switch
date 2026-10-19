@@ -133,10 +133,8 @@ func run() (runErr error) {
 		}
 		return fmt.Errorf("server task did not publish its session file")
 	}
-	if err := os.MkdirAll(*user, 0700); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(*machine, 0700); err != nil {
+	protectMachine := *machine != *user && !*dev
+	if err := prepareDataDirectories(*user, *machine, protectMachine); err != nil {
 		return err
 	}
 	log := &logger{path: filepath.Join(*user, "server.log")}
@@ -185,7 +183,7 @@ func run() (runErr error) {
 		return nil
 	}
 	defer lock.Close()
-	if *machine != *user && !*dev {
+	if protectMachine {
 		if _, err := system.Call(ctx, "protect-directory", map[string]any{"path": *machine}); err != nil {
 			log.append("Net Switch cannot start: machine folder protection failed: " + err.Error())
 			return err
@@ -317,6 +315,19 @@ func run() (runErr error) {
 	shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	return server.Shutdown(shutdown)
+}
+
+func prepareDataDirectories(user, machine string, protectMachine bool) error {
+	if err := os.MkdirAll(user, 0700); err != nil {
+		return err
+	}
+	// ProtectDirectory owns protected-at-creation security and recovery. An
+	// eager MkdirAll here both reopens the legacy ACL window and replaces the
+	// missing root identity after an interrupted quarantine, blocking resume.
+	if !protectMachine {
+		return os.MkdirAll(machine, 0700)
+	}
+	return nil
 }
 func applicationRoot(override, executable string) (string, error) {
 	if override == "" {

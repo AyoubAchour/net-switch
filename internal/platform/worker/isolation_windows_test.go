@@ -24,6 +24,7 @@ type isolationRequest struct {
 	TCP    [5]uint32
 }
 type isolationResult struct {
+	Groups                                   map[string]uint32
 	AdminDenyOnly                            bool
 	Integrity                                string
 	ProcessDenied, RegistryDenied, TCPDenied bool
@@ -124,13 +125,14 @@ func TestWorkerBootstrapDiagnostics(t *testing.T) {
 }
 
 func isolationProbe(input isolationRequest) (isolationResult, error) {
-	result := isolationResult{}
+	result := isolationResult{Groups: map[string]uint32{}}
 	token := windows.GetCurrentProcessToken()
 	groups, err := token.GetTokenGroups()
 	if err != nil {
 		return result, err
 	}
 	for _, g := range groups.AllGroups() {
+		result.Groups[g.Sid.String()] = g.Attributes
 		if g.Sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
 			result.AdminDenyOnly = g.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY != 0 && g.Attributes&windows.SE_GROUP_ENABLED == 0
 		}
@@ -267,6 +269,15 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 			} else if !got.AdminDenyOnly || got.Integrity != "S-1-16-8192" || !got.ProcessDenied || !got.RegistryDenied || !got.TCPDenied {
 				t.Fatalf("read worker retained authority: %+v", got)
 			} else {
+				for text, attributes := range got.Groups {
+					sid, err := windows.StringToSid(text)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if elevatedGroup(sid) && (attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 || attributes&(windows.SE_GROUP_ENABLED|windows.SE_GROUP_ENABLED_BY_DEFAULT) != 0) {
+						t.Fatalf("elevated group retained by %s: %s attributes=%x", mode, text, attributes)
+					}
+				}
 				for _, pair := range [][2]net.Conn{{client, accepted}, {accepted, client}} {
 					for _, conn := range pair {
 						if err := conn.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {

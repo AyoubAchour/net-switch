@@ -1,8 +1,18 @@
 # Controller trace contract, version 1
 
-The reference is Node main `0172a6bf345e739ce1854d732934bd5ee9c713db`.
-The unmodified-server fixtures were committed first; the factory must still pass
-them without changes. Traces use that behavior, including its defects.
+The original reference is Node main `0172a6bf345e739ce1854d732934bd5ee9c713db`.
+The original fourteen traces were recorded with the verified behavior-neutral
+factory at `be5eaea484f97b8e8fdcd68f787946411fc0f819`. The eleven added traces use
+the Node source and recorder at `59f2d9576341c0cb15e115ee0f9dbb99e44aab0d`.
+`provenance.json` gives the baseline, recorder commit, observation hooks and
+byte hash for every trace. It overrides the stale baseline headers while keeping
+all 25 fixtures byte-for-byte unchanged. New recorder output uses these corrected
+headers. The original unmodified-server oracle remains the factory's regression
+gate; observation hooks never replace production statements.
+
+The eleven added traces use a corrected directory-list callback and extra
+observations at LineHealth.noteProbe and buildState entry, as named in the
+sidecar. The original fourteen retain their original harness behavior.
 
 Each trace has `version`, `baseline`, `name`, `scenario` and `entries`. Each entry
 has a zero-based contiguous `seq`, `direction` (`input` or `output`), `kind` and
@@ -86,6 +96,37 @@ comparison rules, not changes to the frozen Node files.
 4. Settings persist before the engine changes.
 5. Network changes close only flows on the affected line/address.
 6. TIME_WAIT follows the validated new-engine behavior.
+
+### Milestone-one fixes and explicit lifetime choices (round four)
+
+- PID cleanup fixes a 0.3.x race: the child exit goroutine is its single awaited
+  owner. Stop and Start wait even when the child has already exited but cleanup
+  is unfinished. A missing PID file is success; a failed delete logs a cleanup
+  warning and does not fail Stop or Quit. Replay omits only Node's second
+  removal of that same exited child's PID file, retaining the first removal and
+  all other output ordering. The original fixture bytes remain unchanged.
+- Network snapshots are ordered by a Control-owned monotonic sequence, allocated
+  before one-shot reads and on streamed delivery. Worker restarts and backwards
+  wall-clock steps cannot freeze the adapter list. The read timestamp remains
+  freshness evidence, never the ordering authority. Route votes use that same
+  sequence to count each snapshot once.
+- Node discards a first lane acknowledgement when wanted() initializes a lane
+  and changes its generation during the switch. The port preserves that retry
+  for newly unsampled lanes. Startup explicitly performs Node's initial health
+  sample before supervision, whichever Go loop is scheduled first.
+- An HTTP panic is fatal: it logs the panic and stack, stops routing, and ends
+  Control. Returning a 500 and continuing could use a partially mutated routing
+  transaction. Returned action errors keep Node's ordinary HTTP responses.
+- Accepted mutations, including setup, app/line actions and settings, belong to
+  the service context; closing the browser does not cancel them, as in Node.
+
+`undo.json` adds six focused cases from the unchanged Node production source at
+`4e8b74a0513e6c0ecbaac0282df9e7fa11ea4128`, with only initial-file and failure
+injection added to the harness in round four. Both Node and Go check damaged
+policy/metrics, policy restore and save failures, an ordered partial restore,
+and a legacy empty metric record. The comparison includes HTTP status/error,
+saved Undo, policy, diagnostics and ordered OS calls (including the refresh).
+These cases supplement the 25 full traces; they do not replace them.
 
 ### Milestone-one adapter limitation (owner decision, 2026-10-19)
 

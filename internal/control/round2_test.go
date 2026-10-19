@@ -22,6 +22,7 @@ func TestRepeatedRouteSnapshotDoesNotCountTwice(t *testing.T) {
 	c.routes = []map[string]any{{"interfaceAddress": "192.0.2.2"}}
 	clock.advance(5000)
 	c.routesAt = c.now()
+	c.routesSequence = c.networkIssued.Add(1)
 	c.sampleLinesLocked(e.Snapshot())
 	for i := 0; i < 10; i++ {
 		clock.advance(1000)
@@ -31,6 +32,7 @@ func TestRepeatedRouteSnapshotDoesNotCountTwice(t *testing.T) {
 		t.Fatalf("repeated snapshot changed health: %+v", h)
 	}
 	c.routesAt = c.now()
+	c.routesSequence = c.networkIssued.Add(1)
 	c.sampleLinesLocked(e.Snapshot())
 	clock.advance(1000)
 	c.sampleLinesLocked(e.Snapshot())
@@ -45,15 +47,15 @@ func TestNetworkSnapshotsOnlyMoveForward(t *testing.T) {
 		return map[string]any{"readAt": float64(at), "adapters": []any{map[string]any{"alias": "Ethernet", "status": "Up", "gateway": "192.0.2.254", "metric": metric}}, "defaultRoutes": []any{map[string]any{"interfaceAddress": "192.0.2.1"}}}
 	}
 	at := clock.Now().UnixMilli()
-	for _, input := range []map[string]any{snapshot(at, 10), snapshot(at-1, 99), snapshot(at, 98)} {
-		if err := c.ApplyNetwork(context.Background(), input, c.generation); err != nil {
+	for i, input := range []map[string]any{snapshot(at, 10), snapshot(at+1, 99), snapshot(at, 98)} {
+		if err := c.ApplyNetwork(context.Background(), input, c.generation, []uint64{3, 2, 3}[i]); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if c.adapters[0]["metric"] != float64(10) || c.routesAt != at {
 		t.Fatal("stale snapshot replaced newer data")
 	}
-	if err := c.ApplyNetwork(context.Background(), snapshot(at+1, 11), c.generation); err != nil {
+	if err := c.ApplyNetwork(context.Background(), snapshot(at-3600000, 11), c.generation, 4); err != nil {
 		t.Fatal(err)
 	}
 	if c.adapters[0]["metric"] != float64(11) {

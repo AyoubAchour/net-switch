@@ -22,3 +22,23 @@ func TestDefaultRootIsExecutableFolderEvenFromAnotherDirectory(t *testing.T) {
 		t.Fatalf("override root %s: %v", root, err)
 	}
 }
+
+func TestStartupLeavesProtectedMachineCreationAndRecoveryToWorker(t *testing.T) {
+	base := t.TempDir()
+	user, machine := filepath.Join(base, "user"), filepath.Join(base, "machine")
+	if err := prepareDataDirectories(user, machine, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(machine); !os.IsNotExist(err) {
+		t.Fatal("startup recreated the protected machine folder before migration recovery", err)
+	}
+	if _, err := os.Stat(user); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareDataDirectories(user, machine, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(machine); err != nil {
+		t.Fatal("development data directory missing", err)
+	}
+}

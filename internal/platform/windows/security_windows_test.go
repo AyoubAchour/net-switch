@@ -209,7 +209,7 @@ func TestMachineFolderQuarantinesUntrustedOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	items, err := os.ReadDir(root)
-	if err != nil || len(items) != 0 {
+	if err != nil || len(items) != 1 || items[0].Name() != directoryMarkerName {
 		t.Fatalf("untrusted files retained: %v %v", items, err)
 	}
 	old, err := filepath.Glob(root + ".untrusted-*")

@@ -3,21 +3,38 @@ package winplatform
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"unsafe"
 
+	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	"github.com/AyoubAchour/net-switch/internal/windowsundo"
 	"golang.org/x/sys/windows"
 )
 
-// ProtectDirectory inspects the entire original tree before changing security.
-// Untrusted owners or grants require new objects: changing an old object's DACL
-// cannot revoke a previously opened WRITE_DAC handle. A currently admin-only
-// tree is trusted existing data, not evidence about historical permissions.
-// The caller must hold the single-instance lock before allowing quarantine.
+const directoryMarkerName = ".control-directory-v1"
+
+type directoryMarker struct {
+	Identity, Target, Previous, Quarantine string
+	Notes                                  []string
+}
+
+// ProtectDirectory migrates legacy trees even when their current ACL looks
+// safe: tightening a DACL cannot revoke an old WRITE_DAC handle. Only a marker
+// owned by Administrators, bound to this fresh directory's identity, permits
+// reuse. The caller holds the single-instance lock throughout migration.
 func ProtectDirectory(path string) error {
+	return protectDirectory(path, func(s string) { fmt.Fprintln(os.Stderr, s) }, nil)
+}
+
+func protectDirectory(path string, log func(string), checkpoint func(string) error) error {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return err
@@ -31,6 +48,7 @@ func ProtectDirectory(path string) error {
 	type object struct {
 		file      *os.File
 		directory bool
+		identity  string
 	}
 	open := func(name string, access uint32, share uint32) (object, error) {
 		p, err := windows.UTF16PtrFromString(name)
@@ -59,7 +77,8 @@ func ProtectDirectory(path string) error {
 		if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 && info.NumberOfLinks > 1 {
 			return object{}, fmt.Errorf("%s has multiple hard links, which Net Switch will not change", name)
 		}
-		return object{file: file, directory: info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0}, nil
+		identity := fmt.Sprintf("%08x:%08x%08x", info.VolumeSerialNumber, info.FileIndexHigh, info.FileIndexLow)
+		return object{file: file, directory: info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0, identity: identity}, nil
 	}
 	parents := []string{}
 	for p := filepath.Dir(path); ; p = filepath.Dir(p) {
@@ -82,26 +101,65 @@ func ProtectDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-	for attempt := 0; attempt < 4; attempt++ {
-		p, err := windows.UTF16PtrFromString(path)
+	// A hostile pre-created folder may deny every metadata/read right. DELETE
+	// alone can still be granted by ProgramData's FILE_DELETE_CHILD permission.
+	// Do not add FILE_READ_ATTRIBUTES or alter its ACL to obtain that handle.
+	openDelete := func(name string) (object, error) {
+		p, err := windows.UTF16PtrFromString(name)
 		if err != nil {
-			return err
+			return object{}, err
 		}
-		attrs := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: final}
-		if err := windows.CreateDirectory(p, &attrs); err != nil && err != windows.ERROR_ALREADY_EXISTS {
-			return fmt.Errorf("create protected machine folder: %w", err)
+		var ntName windows.NTUnicodeString
+		if err := windows.RtlDosPathNameToNtPathName(p, &ntName, nil, nil); err != nil {
+			return object{}, err
 		}
-		root, err := open(path, access, windows.FILE_SHARE_READ)
-		if err != nil {
-			return err
+		defer func() {
+			windows.NewLazySystemDLL("ntdll.dll").NewProc("RtlFreeUnicodeString").Call(uintptr(unsafe.Pointer(&ntName)))
+		}()
+		attributes := windows.OBJECT_ATTRIBUTES{Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), ObjectName: &ntName, Attributes: windows.OBJ_CASE_INSENSITIVE}
+		var h windows.Handle
+		var status windows.IO_STATUS_BLOCK
+		// A synchronous CreateFile also asks for SYNCHRONIZE, which the
+		// hostile DACL can deny. The native asynchronous open requests only
+		// DELETE and never follows the final reparse point.
+		if err := windows.NtCreateFile(&h, windows.DELETE, &attributes, &status, nil, 0,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, windows.FILE_OPEN,
+			windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT, 0, 0); err != nil {
+			return object{}, fmt.Errorf("open quarantine DELETE handle: %w", err)
 		}
-		if !root.directory {
-			return fmt.Errorf("machine folder %s is not a directory", path)
+		file := os.NewFile(uintptr(h), name)
+		held = append(held, file)
+		return object{file: file}, nil
+	}
+	quarantineName := func(name string) (string, error) {
+		var nonce [12]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return "", err
 		}
+		return name + ".untrusted-" + hex.EncodeToString(nonce[:]), nil
+	}
+	moveAside := func(item object, destination string) error {
+		if err := renameDirectoryHandle(windows.Handle(item.file.Fd()), destination); err != nil {
+			return fmt.Errorf("move machine folder aside (open descendants can prevent this; refusing to use it): %w", err)
+		}
+		log("machine folder quarantined at " + destination + "; original contents and permissions were retained there")
+		return nil
+	}
+	read := func(item object) ([]byte, error) {
+		if item.directory {
+			return nil, fmt.Errorf("expected a regular file")
+		}
+		data, err := io.ReadAll(io.LimitReader(item.file, 4*1024*1024+1))
+		if len(data) > 4*1024*1024 {
+			return nil, fmt.Errorf("saved file exceeds 4 MiB")
+		}
+		return data, err
+	}
+	inspect := func(root object) ([]object, bool, error) {
 		var tree []object
 		trusted := true
-		var inspect func(object) error
-		inspect = func(item object) error {
+		var walk func(object) error
+		walk = func(item object) error {
 			tree = append(tree, item)
 			sd, err := windows.GetSecurityInfo(windows.Handle(item.file.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 			if err != nil {
@@ -120,16 +178,147 @@ func ProtectDirectory(path string) error {
 				if err != nil {
 					return err
 				}
-				if err := inspect(child); err != nil {
+				if err := walk(child); err != nil {
 					return err
 				}
 			}
 			return nil
 		}
-		if err := inspect(root); err != nil {
+		err := walk(root)
+		return tree, trusted, err
+	}
+	marker := func(root object, tree []object, trusted bool) (directoryMarker, bool) {
+		if !trusted {
+			return directoryMarker{}, false
+		}
+		for _, item := range tree {
+			if item.file.Name() != filepath.Join(root.file.Name(), directoryMarkerName) {
+				continue
+			}
+			sd, err := windows.GetSecurityInfo(windows.Handle(item.file.Fd()), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+			if err != nil {
+				return directoryMarker{}, false
+			}
+			if !trustedMarkerSecurity(sd) {
+				return directoryMarker{}, false
+			}
+			data, err := read(item)
+			var m directoryMarker
+			if err == nil && json.Unmarshal(data, &m) == nil && m.Identity == root.identity && m.Target == path {
+				return m, true
+			}
+		}
+		return directoryMarker{}, false
+	}
+	closeChildren := func(tree []object) {
+		for i := len(tree) - 1; i > 0; i-- {
+			tree[i].file.Close()
+		}
+	}
+	writeFresh := func(dir, name string, data []byte) error {
+		p, err := windows.UTF16PtrFromString(filepath.Join(dir, name))
+		if err != nil {
 			return err
 		}
-		if trusted {
+		attrs := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: final}
+		h, err := windows.CreateFile(p, windows.GENERIC_WRITE, 0, &attrs, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+		if err != nil {
+			return err
+		}
+		file := os.NewFile(uintptr(h), filepath.Join(dir, name))
+		defer file.Close()
+		if _, err := file.Write(data); err != nil {
+			return err
+		}
+		return file.Sync()
+	}
+	stagePath := path + ".migrating"
+	// A complete stage is durable before the old root is renamed. Recover both
+	// crash windows (before/after quarantine) without losing the saved Undo.
+	if staged, stageErr := open(stagePath, access, windows.FILE_SHARE_READ); stageErr == nil {
+		tree, trusted, err := inspect(staged)
+		if err != nil {
+			return err
+		}
+		m, ready := marker(staged, tree, trusted)
+		closeChildren(tree)
+		if ready && strings.HasPrefix(m.Quarantine, path+".untrusted-") && filepath.Dir(m.Quarantine) == filepath.Dir(path) {
+			old, err := open(path, access, windows.FILE_SHARE_READ)
+			if errors.Is(err, windows.ERROR_ACCESS_DENIED) && m.Previous == "" {
+				old, err = openDelete(path)
+			}
+			if err == nil {
+				if old.identity != m.Previous {
+					return fmt.Errorf("pending migration belongs to a different machine folder; retaining both folders")
+				}
+				if err := moveAside(old, m.Quarantine); err != nil {
+					return err
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if err := renameDirectoryHandle(windows.Handle(staged.file.Fd()), path); err != nil {
+				return fmt.Errorf("publish pending machine-folder migration: %w", err)
+			}
+			log("completed pending machine-folder migration; old tree is at " + m.Quarantine)
+			for _, note := range m.Notes {
+				log(note)
+			}
+			return nil
+		}
+		name, err := quarantineName(stagePath)
+		if err != nil {
+			return err
+		}
+		if err := moveAside(staged, name); err != nil {
+			return err
+		}
+	} else if errors.Is(stageErr, windows.ERROR_ACCESS_DENIED) {
+		staged, err := openDelete(stagePath)
+		if err != nil {
+			return err
+		}
+		name, err := quarantineName(stagePath)
+		if err != nil {
+			return err
+		}
+		if err := moveAside(staged, name); err != nil {
+			return err
+		}
+	} else if !errors.Is(stageErr, os.ErrNotExist) {
+		return stageErr
+	}
+	{
+		p, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return err
+		}
+		attrs := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: final}
+		createErr := windows.CreateDirectory(p, &attrs)
+		if createErr != nil && createErr != windows.ERROR_ALREADY_EXISTS {
+			return fmt.Errorf("create protected machine folder: %w", createErr)
+		}
+		root, err := open(path, access, windows.FILE_SHARE_READ)
+		denied := errors.Is(err, windows.ERROR_ACCESS_DENIED)
+		if denied {
+			root, err = openDelete(path)
+		}
+		if err != nil {
+			return err
+		}
+		if !denied && !root.directory {
+			return fmt.Errorf("machine folder %s is not a directory", path)
+		}
+		var tree []object
+		trusted := false
+		if !denied {
+			tree, trusted, err = inspect(root)
+			if err != nil {
+				return err
+			}
+		}
+		_, migrated := marker(root, tree, trusted)
+		if createErr == nil || migrated {
 			// Only now is inheritance safe: no linked outside object or original
 			// untrusted grant remains to be hidden by an ACL rewrite.
 			for i, item := range tree {
@@ -141,22 +330,142 @@ func ProtectDirectory(path string) error {
 					return fmt.Errorf("protect %s: %w", item.file.Name(), err)
 				}
 			}
+			if !migrated {
+				b, _ := json.Marshal(directoryMarker{Identity: root.identity, Target: path})
+				return writeFresh(path, directoryMarkerName, b)
+			}
 			return nil
 		}
-		// Descendant handles can prevent a directory rename. They are no longer
-		// needed: none of these objects will be trusted or have its ACL changed.
-		for i := len(tree) - 1; i > 0; i-- {
-			tree[i].file.Close()
-		}
-		var nonce [12]byte
-		if _, err := rand.Read(nonce[:]); err != nil {
+		oldName, err := quarantineName(path)
+		if err != nil {
 			return err
 		}
-		if err := renameDirectoryHandle(windows.Handle(root.file.Fd()), path+".untrusted-"+hex.EncodeToString(nonce[:])); err != nil {
-			return fmt.Errorf("move untrusted machine folder aside (open descendants can prevent this; refusing to use it): %w", err)
+		saved := map[string][]byte{}
+		for _, item := range tree {
+			name := filepath.Base(item.file.Name())
+			if filepath.Dir(item.file.Name()) != path || (name != "windows-undo.json" && name != "windows-undo.json.bak" && name != "engine.pid") {
+				continue
+			}
+			b, err := read(item)
+			if err == nil && validMigratedFile(name, b) {
+				saved[name] = b
+			}
+		}
+		notes := []string{"generated engine files, old logs and the previous engine's control journal remain quarantined at " + oldName}
+		if saved["windows-undo.json"] == nil && saved["windows-undo.json.bak"] != nil {
+			saved["windows-undo.json"] = saved["windows-undo.json.bak"]
+			notes = append(notes, "restored the validated Windows Undo backup into the fresh machine folder")
+		} else if saved["windows-undo.json"] != nil {
+			notes = append(notes, "restored the validated Windows Undo record into the fresh machine folder")
+		} else {
+			notes = append(notes, "WARNING: no valid readable Windows Undo record could be restored; Undo cannot recover those settings; original data remains at "+oldName)
+		}
+		if saved["engine.pid"] != nil {
+			notes = append(notes, "preserved the engine PID for executable-identity-checked orphan cleanup")
+		}
+		closeChildren(tree)
+		stage, err := windows.UTF16PtrFromString(stagePath)
+		if err != nil {
+			return err
+		}
+		if err := windows.CreateDirectory(stage, &attrs); err != nil {
+			return fmt.Errorf("create fresh migration folder: %w", err)
+		}
+		staged, err := open(stagePath, access, windows.FILE_SHARE_READ)
+		if err != nil {
+			return err
+		}
+		for _, name := range []string{"windows-undo.json", "windows-undo.json.bak", "engine.pid"} {
+			if data := saved[name]; data != nil {
+				if err := writeFresh(stagePath, name, data); err != nil {
+					return fmt.Errorf("copy validated %s: %w", name, err)
+				}
+			}
+		}
+		m := directoryMarker{Identity: staged.identity, Target: path, Previous: root.identity, Quarantine: oldName, Notes: notes}
+		b, _ := json.Marshal(m)
+		if err := writeFresh(stagePath, directoryMarkerName, b); err != nil {
+			return err
+		}
+		if checkpoint != nil {
+			if err := checkpoint("staged"); err != nil {
+				return err
+			}
+		}
+		if err := moveAside(root, oldName); err != nil {
+			return err
+		}
+		if checkpoint != nil {
+			if err := checkpoint("quarantined"); err != nil {
+				return err
+			}
+		}
+		if err := renameDirectoryHandle(windows.Handle(staged.file.Fd()), path); err != nil {
+			return fmt.Errorf("publish fresh machine folder (migration will resume on next start): %w", err)
+		}
+		for _, note := range notes {
+			log(note)
+		}
+		return nil
+	}
+}
+
+func trustedMarkerSecurity(sd *windows.SECURITY_DESCRIPTOR) bool {
+	owner, _, err := sd.Owner()
+	acl, _, aclErr := sd.DACL()
+	if err != nil || aclErr != nil || owner == nil || !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) || acl == nil || acl.AceCount != 2 {
+		return false
+	}
+	seen := map[string]bool{}
+	for i := uint32(0); i < 2; i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(acl, i, &ace) != nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask != 0x1f01ff {
+			return false
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if !sid.IsWellKnown(windows.WinLocalSystemSid) && !sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+			return false
+		}
+		seen[sid.String()] = true
+	}
+	return len(seen) == 2
+}
+
+func validMigratedFile(name string, b []byte) bool {
+	if name == "engine.pid" {
+		pid, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32)
+		return err == nil && pid > 0
+	}
+	if !json.Valid(b) {
+		return false
+	}
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(b, &raw) != nil || raw == nil {
+		return false
+	}
+	v, err := js.Decode(b)
+	values := js.Object(v)
+	aliases := windowsundo.Aliases(raw["metrics"])
+	if err != nil || windowsundo.Validate(values, aliases) != nil {
+		return false
+	}
+	// Copy only values the native readers can actually produce. Policy reads
+	// interpret DWORDs as signed int32; negative values are legitimate.
+	if policy := js.Object(values["policy"])["value"]; policy != nil {
+		n := js.Number(policy)
+		if n < math.MinInt32 || n > math.MaxInt32 {
+			return false
 		}
 	}
-	return fmt.Errorf("machine folder was repeatedly replaced while securing it")
+	for _, rows := range js.Object(values["metrics"]) {
+		for _, row := range rows.([]any) {
+			n := js.Number(js.Object(row)["metric"])
+			if n < 0 || n > math.MaxUint32 || n != math.Trunc(n) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 const fileDeleteChild = 0x00000040 // FILE_DELETE_CHILD (winnt.h)

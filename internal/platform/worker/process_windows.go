@@ -106,34 +106,11 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 		return nil, err
 	}
 	defer token.Close()
-	var restricted windows.Token
-	var disabled windows.SIDAndAttributes
-	var count uintptr
-	var disabledSIDs *windows.SIDAndAttributes
-	if !adminWorker(args) {
-		admin, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
-		if err != nil {
-			return nil, err
-		}
-		disabled.Sid = admin
-		count, disabledSIDs = 1, &disabled
-	}
-	proc := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
-	result, _, callErr := proc.Call(uintptr(token), 1, count, uintptr(unsafe.Pointer(disabledSIDs)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&restricted)))
-	if result == 0 {
-		return nil, fmt.Errorf("restrict worker token: %w", callErr)
+	restricted, err := workerToken(token, adminWorker(args))
+	if err != nil {
+		return nil, err
 	}
 	defer restricted.Close()
-	if !adminWorker(args) {
-		medium, err := windows.CreateWellKnownSid(windows.WinMediumLabelSid)
-		if err != nil {
-			return nil, err
-		}
-		label := windows.Tokenmandatorylabel{Label: windows.SIDAndAttributes{Sid: medium, Attributes: windows.SE_GROUP_INTEGRITY}}
-		if err := windows.SetTokenInformation(restricted, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), label.Size()); err != nil {
-			return nil, fmt.Errorf("lower worker integrity: %w", err)
-		}
-	}
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -222,6 +199,73 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 	}
 	ok = true
 	return &process{handle: pi.Process, job: job, output: reader, input: hold, errors: errorReader}, nil
+}
+
+func workerToken(token windows.Token, administrative bool) (windows.Token, error) {
+	var disabled []windows.SIDAndAttributes
+	if !administrative {
+		groups, err := token.GetTokenGroups()
+		if err != nil {
+			return 0, err
+		}
+		for _, group := range groups.AllGroups() {
+			if elevatedGroup(group.Sid) {
+				disabled = append(disabled, windows.SIDAndAttributes{Sid: group.Sid})
+			}
+		}
+	}
+	var disabledSIDs *windows.SIDAndAttributes
+	if len(disabled) != 0 {
+		disabledSIDs = &disabled[0]
+	}
+	var restricted windows.Token
+	proc := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
+	result, _, callErr := proc.Call(uintptr(token), 1, uintptr(len(disabled)), uintptr(unsafe.Pointer(disabledSIDs)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&restricted)))
+	if result == 0 {
+		return 0, fmt.Errorf("restrict worker token: %w", callErr)
+	}
+	if !administrative {
+		if err := mediumIntegrity(restricted); err != nil {
+			restricted.Close()
+			return 0, err
+		}
+	}
+	return restricted, nil
+}
+
+func mediumIntegrity(token windows.Token) error {
+	medium, err := windows.CreateWellKnownSid(windows.WinMediumLabelSid)
+	if err != nil {
+		return err
+	}
+	label := windows.Tokenmandatorylabel{Label: windows.SIDAndAttributes{Sid: medium, Attributes: windows.SE_GROUP_INTEGRITY}}
+	if err := windows.SetTokenInformation(token, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), label.Size()); err != nil {
+		return fmt.Errorf("lower worker integrity: %w", err)
+	}
+	return nil
+}
+
+// UAC's elevated group set, from Microsoft's "Teach Your Apps To Work With
+// Windows Vista User Account Control", Figure 3. Match the full SID namespace:
+// a foreign-domain privileged group is just as powerful as the local domain's,
+// while an unrelated SID with the same final RID must remain untouched.
+func elevatedGroup(sid *windows.SID) bool {
+	if sid == nil || sid.IdentifierAuthority() != windows.SECURITY_NT_AUTHORITY {
+		return false
+	}
+	if sid.SubAuthorityCount() == 2 && sid.SubAuthority(0) == 32 {
+		switch sid.SubAuthority(1) {
+		case 544, 547, 548, 549, 550, 551, 554, 556:
+			return true
+		}
+	}
+	if sid.SubAuthorityCount() == 5 && sid.SubAuthority(0) == 21 {
+		switch sid.SubAuthority(4) {
+		case 512, 516, 517, 518, 519, 520, 553:
+			return true
+		}
+	}
+	return false
 }
 
 func adminWorker(args []string) bool {

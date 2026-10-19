@@ -88,11 +88,11 @@ ConvertTo-Json -InputObject @($items | ForEach-Object { [pscustomobject]@{ famil
   });
   await check('machine folder ACL SDDL and inherited child ACLs', async () => {
     const old = path.join(folder, 'old'), current = path.join(folder, 'new');
+    // Establish fresh-object provenance before adding legitimate data. Legacy
+    // trees are always migrated; their allowlisted recovery has separate tests.
+    await native('protect-directory', { path: current });
     for (const p of [old, current]) { await mkdir(path.join(p, 'child'), { recursive: true }); await writeFile(path.join(p, 'child', 'record'), 'probe'); }
     await windows.protectMachineDir(old, path.join(folder, 'acl.log'));
-    // Existing legitimate machine data already has the installed admin-only
-    // boundary. Hostile owner/grant fixtures have separate quarantine tests.
-    await windows.protectMachineDir(current, path.join(folder, 'acl.log'));
     await native('protect-directory', { path: current });
     const sddl = async (dir) => runPowerShellJson(`ConvertTo-Json -InputObject @((Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'child')).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'child\\record')).Sddl) -Compress`, { args: { DIR: dir } });
     assert.deepEqual(await sddl(current), await sddl(old));

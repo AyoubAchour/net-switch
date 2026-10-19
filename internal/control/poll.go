@@ -112,6 +112,7 @@ func (c *Core) Poll(ctx context.Context) error {
 }
 
 func (c *Core) sampleLinesLocked(s engine.Snapshot) {
+	c.initialSampled = true
 	now := c.now()
 	items := c.itemsLocked()
 	for _, item := range items {
@@ -144,11 +145,11 @@ func (c *Core) sampleLinesLocked(s engine.Snapshot) {
 		// Node samples health before its background route read completes. Count
 		// each native snapshot once, with the same five-second read spacing.
 		if address && now-c.routesAt <= 30000 &&
-			(l.routeSnapshotAt == nil || c.routesAt > *l.routeSnapshotAt) &&
-			(l.routeReadAt == nil || now-*l.routeReadAt >= linehealth.RouteReadEveryMS) {
+			c.routesSequence > l.routeSequence &&
+			(l.routeReadAt == nil || now < *l.routeReadAt || now-*l.routeReadAt >= linehealth.RouteReadEveryMS) {
 			l.health.NoteRoute(ptr(route), c.routesAt)
 			l.routeReadAt = ptr(now)
-			l.routeSnapshotAt = ptr(c.routesAt)
+			l.routeSequence = c.routesSequence
 		}
 		if before != nil && up != nil && *before != *up {
 			if *up {
@@ -455,7 +456,7 @@ func (c *Core) Run() {
 			c.mu.Lock()
 			gen := c.generation
 			c.mu.Unlock()
-			if err := c.ApplyNetwork(c.ctx, js.Object(v), gen); err != nil {
+			if err := c.ApplyNetwork(c.ctx, js.Object(v), gen, c.networkIssued.Add(1)); err != nil {
 				c.log("adapter scan failed: %v", err)
 			}
 		}, func(err error) { c.log("network worker: %v; keeping last good adapter list", err) })

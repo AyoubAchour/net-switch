@@ -19,6 +19,7 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
     ['/oracle/data/settings.json', JSON.stringify(initial)]]);
   const environment = { now: Date.UTC(2026, 9, 19, 12), adapters: [], interfaces: {}, rates: {}, counters: {}, connections: [], probes: {}, policy: 1 };
   Object.assign(environment, clone(suppliedEnvironment));
+	if (environment.undo) files.set('/oracle/data/windows-undo.json', JSON.stringify(environment.undo));
 	if (environment.userDir) {
 		files.set(`${environment.userDir}/settings.json`, files.get('/oracle/data/settings.json'));
 		files.delete('/oracle/data/settings.json');
@@ -63,7 +64,10 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
       if (!files.has(name)) throw missing();
       return encoding ? files.get(name) : Buffer.from(files.get(name));
     },
-    writeFile: async (name, text) => fileWrite(name, text),
+    writeFile: async (name, text) => {
+      if (environment.undoWriteFailure && name.includes('/windows-undo.json.') && name.endsWith('.tmp')) throw Object.assign(new Error(environment.undoWriteFailure), { code: 'EIO' });
+      return fileWrite(name, text);
+    },
     appendFile: async (name, text) => fileWrite(name, (files.get(name) ?? '') + text),
     rename: async (from, to) => {
       if (!files.has(from)) throw missing();
@@ -183,7 +187,13 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
     } },
     '/oracle/lib/platform/windows.mjs': { windows: platform },
     '/oracle/lib/platform/index.mjs': { platformFor: () => platform },
-    '/oracle/lib/platform/windows-network.mjs': observeAsync({ restoreMetrics: async () => {}, restoreMinimizeConnectionsPolicy: async (value) => { environment.policy = value; } }, 'network'),
+    '/oracle/lib/platform/windows-network.mjs': observeAsync({
+      restoreMetrics: async (alias) => { if (environment.restoreFailures?.[alias]) throw new Error(environment.restoreFailures[alias]); },
+      restoreMinimizeConnectionsPolicy: async (value) => {
+        if (environment.policyFailure) throw new Error(environment.policyFailure);
+        environment.policy = value;
+      },
+    }, 'network'),
     '/oracle/lib/architecture.mjs': { nativeArchitecture: () => 'x64' },
     '/oracle/lib/ps.mjs': { spawnPowerShell: forbidden('PowerShell') },
     '/oracle/lib/logfile.mjs': { createLog: () => observeAsync({ append: async (text) => emit('log', { text }), rotate: async () => {} }, 'log') },

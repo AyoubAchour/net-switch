@@ -117,6 +117,7 @@ func TestRecordedTraceReplay(t *testing.T) {
 			routeReadings := map[int64][]map[string]any{}
 			readTime := clockOrigin(trace)
 			completion := 0
+			pidPresent := false
 			e.replies = []recordedReply{}
 			for i, entry := range trace.Entries {
 				if entry.Seq != i {
@@ -130,6 +131,19 @@ func TestRecordedTraceReplay(t *testing.T) {
 					t.Fatal(err)
 				}
 				m := js.Object(v)
+				if entry.Direction == "output" && filepath.Base(js.Text(m["file"])) == "engine.pid" {
+					if entry.Kind == "write" {
+						pidPresent = true
+					} else if entry.Kind == "remove" {
+						// Deliberate 1.0 fix: only the exit owner removes this PID.
+						// Node's second delete of the same exited child is omitted;
+						// every first delete, and every other removal, still compares.
+						if !pidPresent {
+							continue
+						}
+						pidPresent = false
+					}
+				}
 				if entry.Kind == "http" {
 					snapshotSequence = -1
 				}
@@ -157,7 +171,7 @@ func TestRecordedTraceReplay(t *testing.T) {
 				}
 				if entry.Direction == "output" {
 					key := entry.Kind
-					if key == "write" {
+					if key == "write" || key == "remove" {
 						key += ":" + filepath.Base(js.Text(m["file"]))
 					}
 					if key == "log" {
@@ -267,6 +281,7 @@ func TestRecordedTraceReplay(t *testing.T) {
 				}
 				if latest > c.routesAt {
 					c.routesAt, c.routes = latest, routeReadings[latest]
+					c.routesSequence = c.networkIssued.Add(1)
 				}
 			}
 			injectRoutes()

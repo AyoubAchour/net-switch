@@ -128,18 +128,32 @@ func TestRunLoopsAndRealAdapterConcurrent(t *testing.T) {
 	if a.Snapshot().Status != "on" {
 		t.Fatal("Run supervisor never started adapter")
 	}
+	// Reconnect requires a discovered application. Engine readiness alone
+	// doesn't imply the first statistics poll has populated the app list.
+	for len(array(c.State()["apps"])) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(array(c.State()["apps"])) == 0 {
+		t.Fatal("Run poll never discovered Firefox")
+	}
 	var clients sync.WaitGroup
 	for client := 0; client < 4; client++ {
 		clients.Add(1)
 		go func(index int) {
 			defer clients.Done()
 			for i := 0; i < 15; i++ {
+				var result any
+				var err error
 				if index == 0 {
-					_, _ = c.Action(context.Background(), "POST", "/api/app-line", map[string]any{"path": `C:\Apps\Firefox.exe`, "line": "a1"})
+					result, err = c.Action(context.Background(), "POST", "/api/app-line", map[string]any{"path": `C:\Apps\Firefox.exe`, "line": "a1"})
 				} else if index == 1 {
-					_, _ = c.Action(context.Background(), "POST", "/api/reconnect", map[string]any{"key": `c:\apps\firefox.exe`})
+					result, err = c.Action(context.Background(), "POST", "/api/reconnect", map[string]any{"key": `c:\apps\firefox.exe`})
 				} else {
-					c.State()
+					result = c.State()
+				}
+				if err != nil || result == nil {
+					t.Errorf("client %d action %d: result=%v err=%v", index, i, result, err)
+					return
 				}
 				time.Sleep(3 * time.Millisecond)
 			}

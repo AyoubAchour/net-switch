@@ -97,7 +97,7 @@ func (f *memoryFiles) Remove(p string) error {
 	defer f.mu.Unlock()
 	delete(f.data, p)
 	f.removes = append(f.removes, p)
-	f.order = append(f.order, "remove")
+	f.order = append(f.order, "remove:"+filepath.Base(p))
 	return nil
 }
 
@@ -381,6 +381,7 @@ func testCore(t *testing.T, initial map[string]any) (*Core, *fakeEngine, *fakeCl
 		c.routes = append(c.routes, map[string]any{"interfaceAddress": address})
 	}
 	c.routesAt = c.now()
+	c.routesSequence = c.networkIssued.Add(1)
 	return c, f, clock, files
 }
 func testLines() []lines.Line {
