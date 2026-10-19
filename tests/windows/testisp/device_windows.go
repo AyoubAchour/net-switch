@@ -73,5 +73,7 @@ func (d *observedDevice) Write(data []byte) error {
 func (d *observedDevice) Close() {
 	if err := d.adapter.Close(); err != nil {
 		log.Printf("TestISP session close: %v", err)
+	} else {
+		log.Print("TestISP session and adapter closed normally")
 	}
 }

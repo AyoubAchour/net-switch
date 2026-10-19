@@ -496,6 +496,7 @@ try {
   if (reuseReady && large) await observe('freeze gate: reuse after 100 MB transfer', 'baseline-defect', async () => {
     // The verified transfer is already the warm-up on this exact tuple. Keep
     // the first timed attempt immediately after it to test large-transfer reuse.
+    console.log(`REUSE WARMUP (verified 100 MB transfer) ${JSON.stringify({ port: large[0].port, peerPort: large[0].peerPort, ms: large[0].ms })}`);
     const samples = await client('reuse', { target: responder.virtual, count: 1000, reusePort: large[0].port });
     if (samples.some((sample) => sample.outcome === 'timeout')) throw new BaselineDefect('Port stalls after a verified 100 MB transfer', samples);
     assert(samples.length === 1000 && samples.every((sample) => sample.outcome === 'closed' && sample.ms < 100), JSON.stringify(samples));
