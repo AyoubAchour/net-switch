@@ -40,6 +40,7 @@ type lineState struct {
 	Default4, Default6 bool
 }
 type Platform struct {
+	testClose func()
 	mu                   sync.Mutex
 	ctx                  context.Context
 	Instance             string
@@ -115,6 +116,7 @@ func New(ctx context.Context, dir string) (*Platform, error) {
 }
 
 func (p *Platform) Close() error {
+	if p.testClose!=nil {p.testClose();p.testClose=nil}
 	err := p.Cleanup(context.Background())
 	return errors.Join(err, p.journal.Close())
 }
