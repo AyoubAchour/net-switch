@@ -184,7 +184,7 @@ async function reset({ target }) {
       if (error.code === 'ECONNRESET') resolve({ outcome: error.code });
       else reject(error);
     });
-    socket.on('close', () => clearTimeout(timer));
+    socket.on('close', () => { clearTimeout(timer); reject(new Error('Socket closed without reporting the reset')); });
   });
 }
 

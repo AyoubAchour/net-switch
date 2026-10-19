@@ -155,6 +155,10 @@ During engine checks, outbound firewall rules block the client, MTU, QUIC, ping
 and UDP-rejection probes on both TestISP and the uplink. Engine sockets remain
 allowed. Pre-engine negative controls prove IPv6 UDP, echo and MTU probes cannot
 reach the target through TestISP's remaining IPv6 default route.
+Windows' ICMP API can bypass the program firewall rule. IPv6 ping therefore also
+requires Windows' selected source interface to be NetSwitch and passes that
+address explicitly with `-S`. MTU probes independently reject a direct TestISP
+source address in their socket report.
 
 The socket client cannot inject app-side TCP sequence numbers, stale SYN/data/RST,
 lost final ACKs, disabled timestamps or reordered TUN queues through Winsock.

@@ -124,12 +124,22 @@ async function targetFirewall(action) {
 
 async function ping(host, source, size = 32, df = false) {
   const args = [host.includes(':') ? '-6' : '-4', '-n', '1', '-w', '3000', '-l', String(size)];
+  if (host.includes(':') && !source) {
+    // Windows' ICMP API can bypass program-scoped firewall rules. Require the
+    // selected source to belong to the app TUN and bind ping to that source.
+    const selected = JSON.parse((await run('powershell.exe', ['-NoProfile', '-Command',
+      'Find-NetRoute -RemoteIPAddress $env:ACCEPTANCE_PING_TARGET | Where-Object { $_.PSObject.Properties.Name -contains "IPAddress" } | Select-Object IPAddress,InterfaceAlias | ConvertTo-Json -Compress'],
+    { env: { ACCEPTANCE_PING_TARGET: host } })).stdout);
+    assert.equal(selected.InterfaceAlias, 'NetSwitch', `IPv6 echo would bypass the engine: ${JSON.stringify(selected)}`);
+    assert.notEqual(selected.IPAddress, '2001:db8:19::1', 'IPv6 echo selected TestISP directly');
+    source = selected.IPAddress;
+  }
   if (source && host.includes(':')) args.push('-S', source);
   if (df) args.push('-f');
   args.push(host);
   const result = await run('ping.exe', args, { timeout: 10_000 });
   assert.match(result.stdout, /(?:time[=<]|TTL=)/i, 'Ping had no actual echo reply');
-  return result.stdout;
+  return { output: result.stdout, source };
 }
 
 async function quicProbe(host, source, index) {
@@ -155,8 +165,8 @@ async function mtuProbe(host, size, source, index) {
   return JSON.parse((await run(mtuExe, args, { timeout: 10_000 })).stdout);
 }
 
-async function udpReject(target, count = 100) {
-  return JSON.parse((await run(udpRejectExe, ['--address', `${target.host}:${target.udp[0]}`, '--count', String(count)], { timeout: 10_000 })).stdout);
+async function udpReject(target, count = 100, timeout = 5000) {
+  return JSON.parse((await run(udpRejectExe, ['--address', `${target.host}:${target.udp[0]}`, '--count', String(count), '--timeout', `${Math.ceil(timeout)}ms`], { timeout: 10_000 })).stdout);
 }
 
 try {
@@ -313,22 +323,24 @@ try {
     if (fault === 'withdraw') await harness.network('withdraw');
     else await harness.control('mode', { mode: 'drop' });
     try {
-    const failedOver = await until(async () => {
-      const state = await server.api('state');
-      return state.lines.find((line) => line.id === second.id)?.target === main.id && state.lines;
-    }, 'TestISP failover', 60_000);
-    const before = await harness.control('stats');
-    await client('open', { count: 3 });
-    const byLine = await counts(3); assert.equal(byLine[main.id], 3);
-    const after = await harness.control('stats');
-    exactTraffic(before, after, 0);
-    if (fault === 'withdraw') await harness.network('restore');
-    else await harness.control('mode', { mode: 'running' });
-    const failedBack = await until(async () => {
-      const state = await server.api('state');
-      return state.lines.find((line) => line.id === second.id)?.target === second.id && state.lines;
-    }, 'TestISP failback', 90_000);
-    return { fault, failedOver, byLine, before, after, failedBack, traffic: await newPublicOn(second) };
+      const failedOver = await until(async () => {
+        const state = await server.api('state');
+        return state.lines.find((line) => line.id === second.id)?.target === main.id && state.lines;
+      }, 'TestISP failover', 60_000);
+      const routes = await harness.network('state');
+      assert.equal(routes.defaultRoute, fault === 'drop', 'Fault injection changed the wrong failure domain');
+      const before = await harness.control('stats');
+      await client('open', { count: 3 });
+      const byLine = await counts(3); assert.equal(byLine[main.id], 3);
+      const after = await harness.control('stats');
+      exactTraffic(before, after, 0);
+      if (fault === 'withdraw') await harness.network('restore');
+      else await harness.control('mode', { mode: 'running' });
+      const failedBack = await until(async () => {
+        const state = await server.api('state');
+        return state.lines.find((line) => line.id === second.id)?.target === second.id && state.lines;
+      }, 'TestISP failback', 90_000);
+      return { fault, routes, failedOver, byLine, before, after, failedBack, traffic: await newPublicOn(second) };
     } finally {
       if (fault === 'drop') await harness.control('mode', { mode: 'running' });
       // restore is idempotent when a route is already present.
@@ -377,7 +389,9 @@ try {
       assert(mtuBaselines[host], 'Blocked: the controlled DF baseline failed');
       const small = await mtuProbe(host, 1200);
       assert.equal(small.outcome, 'reply', JSON.stringify(small));
+      if (host.includes(':')) assert(!small.source.startsWith('[2001:db8:19::1]:'), `MTU probe bypassed the TUN: ${JSON.stringify(small)}`);
       const large = await mtuProbe(host, 2000);
+      if (host.includes(':')) assert(!large.source.startsWith('[2001:db8:19::1]:'), `MTU probe bypassed the TUN: ${JSON.stringify(large)}`);
       if (large.outcome === 'reply') throw new BaselineDefect('Oversize UDP succeeds instead of reporting packet too large', { baseline: mtuBaselines[host], small, large });
       assert.equal(large.outcome, 'message-too-large', JSON.stringify(large));
       return { small, large };
@@ -498,9 +512,9 @@ try {
       const blocked = await until(async () => { const state = await server.api('state'); return state.lines.find((line) => line.id === second.id)?.blocked && state.lines; }, 'both caps exhausted and secondary blocked', 30_000);
       const beforeBurst = await harness.control('stats');
       const limitMs = Math.max(...rejectBaseline.tcp.map((sample) => sample.ms), ...rejectBaseline.udp.map((sample) => sample.ms)) + 500;
-      const samples = await client('reject', { target: responder.virtual });
+      const samples = await client('reject', { target: responder.virtual, timeout: limitMs });
       assert(!samples.some((item) => item.outcome === 'connected'), 'A capped app escaped the block');
-      const udp = await udpReject(responder.virtual);
+      const udp = await udpReject(responder.virtual, 100, limitMs);
       const afterBurst = await harness.control('stats');
       exactTraffic(beforeBurst, afterBurst, 0, `${responder.virtual.host}:${responder.virtual.http}`);
       exactTraffic(beforeBurst, afterBurst, 0, `${responder.virtual.host}:${responder.virtual.udp[0]}`);
@@ -510,6 +524,7 @@ try {
       const mainException = await newPublicOn(main);
       await server.api('lines/update', { id: main.id, cap: null });
       await server.api('lines/update', { id: second.id, cap: null });
+      await until(async () => !(await server.api('state')).lines.some((line) => line.exhausted || line.blocked), 'caps cleared before recovery probes');
       await pin(second.id); await client('open', { target: responder.virtual }); await client('close');
       const beforeRecovery = await harness.control('stats');
       const udpAfter = await udpReject(responder.virtual, 3);

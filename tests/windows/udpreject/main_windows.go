@@ -36,9 +36,10 @@ func main() {
 	}
 	address := flag.String("address", "", "Controlled UDP target")
 	count := flag.Int("count", 100, "Concurrent UDP sockets")
+	timeout := flag.Duration("timeout", 5*time.Second, "Per-socket refusal deadline")
 	flag.Parse()
-	if *count < 1 || *count > 100 {
-		fmt.Fprintln(os.Stderr, "count must be between 1 and 100")
+	if *count < 1 || *count > 100 || *timeout <= 0 || *timeout > 5*time.Second {
+		fmt.Fprintln(os.Stderr, "count must be between 1 and 100, timeout between 0 and 5s")
 		os.Exit(1)
 	}
 	peer, err := net.ResolveUDPAddr("udp4", *address)
@@ -49,7 +50,7 @@ func main() {
 	results, failures := make([]sample, *count), make([]error, *count)
 	var work sync.WaitGroup
 	for i := range results {
-		work.Go(func() { results[i], failures[i] = probe(peer) })
+		work.Go(func() { results[i], failures[i] = probe(peer, *timeout) })
 	}
 	work.Wait()
 	if err := errors.Join(failures...); err != nil {
@@ -62,7 +63,7 @@ func main() {
 	}
 }
 
-func probe(peer *net.UDPAddr) (sample, error) {
+func probe(peer *net.UDPAddr, timeout time.Duration) (sample, error) {
 	conn, err := net.DialUDP("udp4", nil, peer)
 	if err != nil {
 		return sample{}, err
@@ -95,11 +96,16 @@ func probe(peer *net.UDPAddr) (sample, error) {
 		return sample{Outcome: outcome, Source: conn.LocalAddr().String(), Sent: sent, MS: float64(time.Since(started).Microseconds()) / 1000}, nil
 	}
 	reply := make([]byte, 256)
-	for time.Since(started) < 5*time.Second {
+	deadline := started.Add(timeout)
+	for time.Now().Before(deadline) {
 		sent++
 		_, err := conn.Write(payload)
 		if err == nil {
-			if err = conn.SetReadDeadline(time.Now().Add(25 * time.Millisecond)); err != nil {
+			readDeadline := time.Now().Add(25 * time.Millisecond)
+			if readDeadline.After(deadline) {
+				readDeadline = deadline
+			}
+			if err = conn.SetReadDeadline(readDeadline); err != nil {
 				return sample{}, err
 			}
 			var n int
