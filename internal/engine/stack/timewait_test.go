@@ -139,7 +139,22 @@ func TestTimeWaitLostFinalACK(t *testing.T) {
 	fin := p.closeActive()
 	// The app lost the final ACK and retransmits near expiry. That ACK resets
 	// TIME_WAIT, so it is still protected at 60 seconds from the initial FIN.
+	id := gv.TransportEndpointID{LocalAddress: remoteAddr, LocalPort: 443, RemoteAddress: appAddr, RemotePort: p.port}
+	ep, ok := p.stack.FindTransportEndpoint(header.IPv4ProtocolNumber, tcp.ProtocolNumber, id, ns.NIC).(*tcp.Endpoint)
+	if !ok {
+		t.Fatal("TIME_WAIT endpoint disappeared before its deadline")
+	}
 	for _, advance := range []time.Duration{59 * time.Second, time.Second} {
+		// The ACK reaches the link before handleTimeWait refreshes its timer.
+		// Finish that critical section before jumping the simulated clock;
+		// otherwise the artificial jump can expire the old timer mid-packet.
+		// This is only a clock barrier: no reuse test waits for endpoint removal.
+		ep.LockUser()
+		state := tcp.EndpointState(ep.State())
+		ep.UnlockUser()
+		if state != tcp.StateTimeWait {
+			t.Fatalf("before advancing %s: endpoint state %s", advance, state)
+		}
 		clock.Advance(advance)
 		p.inject(fin)
 		h := p.wait(header.TCPFlagAck)
