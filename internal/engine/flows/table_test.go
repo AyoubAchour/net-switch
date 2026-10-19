@@ -117,7 +117,7 @@ func TestRejectedAndPredictDoNotAdvance(t *testing.T) {
 }
 
 func TestEveryAdmissionLimit(t *testing.T) {
-	for _, name := range []string{"flows", "handshakes", "udp", "perApp", "udpPerApp", "unknown", "unknownUDP", "timeWait"} {
+	for _, name := range []string{"flows", "handshakes", "udp", "perApp", "udpPerApp", "unknown", "unknownUDP"} {
 		t.Run(name, func(t *testing.T) {
 			l := Defaults()
 			proto, app := "tcp", "known"
@@ -141,8 +141,6 @@ func TestEveryAdmissionLimit(t *testing.T) {
 				l.UnknownUDP = 1
 				proto = "udp"
 				app = ""
-			case "timeWait":
-				l.TimeWait = 1
 			}
 			f := table(t, l)
 			x := admit(t, f, proto, app)

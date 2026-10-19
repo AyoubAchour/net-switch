@@ -6,10 +6,12 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	gtcp "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
 type connection struct {
+	id               stack.TransportEndpointID
 	done             chan struct{}
 	ep               tcpip.Endpoint
 	ticket           flowapi.Ticket
@@ -19,18 +21,16 @@ type connection struct {
 }
 
 // One clock for all flows. Socket limits disable unaccounted autotuning.
-// Reservations survive the relay and are released only after endpoint removal.
+// Only the snapshot uses f.mu; endpoint and table work cannot hold up Handle.
 func (f *Forwarder) maintain() {
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	defer func() {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		for id, c := range f.connections {
+		for _, c := range f.connectionSnapshot() {
 			c.ep.Abort()
 			<-c.done
 			c.ticket.Close()
-			delete(f.connections, id)
+			f.removeConnection(c)
 		}
 	}()
 	for {
@@ -38,27 +38,47 @@ func (f *Forwarder) maintain() {
 		case <-f.ctx.Done():
 			return
 		case now := <-tick.C:
-			f.mu.Lock()
-			for id, c := range f.connections {
-				state := gtcp.EndpointState(c.ep.State())
-				if state == gtcp.StateClose || state == gtcp.StateError {
-					select {
-					case <-c.done:
-						c.ticket.Close()
-						delete(f.connections, id)
-					default:
-					}
-					continue
-				}
-				if state == gtcp.StateTimeWait {
-					if t, ok := c.ticket.(interface{ TimeWait() }); ok {
-						t.TimeWait()
-					}
-				}
-				c.resize(now)
-			}
-			f.mu.Unlock()
+			f.sweep(now)
 		}
+	}
+}
+
+func (f *Forwarder) connectionSnapshot() []*connection {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	items := make([]*connection, 0, len(f.connections)+len(f.retired))
+	for _, c := range f.connections {
+		items = append(items, c)
+	}
+	for c := range f.retired {
+		items = append(items, c)
+	}
+	return items
+}
+
+func (f *Forwarder) removeConnection(c *connection) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// A snapshot can outlive a same-tuple replacement. Remove only its owner.
+	if f.connections[c.id] == c {
+		delete(f.connections, c.id)
+	}
+	delete(f.retired, c)
+}
+
+func (f *Forwarder) sweep(now time.Time) {
+	for _, c := range f.connectionSnapshot() {
+		state := gtcp.EndpointState(c.ep.State())
+		if state == gtcp.StateClose || state == gtcp.StateError {
+			select {
+			case <-c.done:
+				c.ticket.Close()
+				f.removeConnection(c)
+			default:
+			}
+			continue
+		}
+		c.resize(now)
 	}
 }
 
