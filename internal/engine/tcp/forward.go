@@ -177,9 +177,19 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	} else {
 		ticket.Established(netip.Addr{})
 	}
-	if err := Splice(ctx, app, remote, ticket.Add, ep.Abort); err != nil {
+	var up, down atomic.Uint64
+	monitor, stopMonitor := context.WithCancel(ctx)
+	monitorDone := make(chan struct{})
+	go func() { defer close(monitorDone); growBuffers(monitor, ep, ticket, &up, &down) }()
+	defer func() { stopMonitor(); <-monitorDone }()
+	count := func(u, d uint64) { up.Add(u); down.Add(d); ticket.Add(u, d) }
+	if err := Splice(ctx, app, remote, count, ep.Abort); err != nil {
 		ep.Abort()
 	}
+	app.Close()
+	// Close is asynchronous in netstack. Keep the byte reservation until
+	// unacknowledged send data is gone, including the final close exchange.
+	waitForClose(ctx, ep)
 }
 
 // Stop cancels dials and relays. The owner must close the stack before Wait,

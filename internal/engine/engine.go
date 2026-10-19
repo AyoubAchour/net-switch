@@ -41,6 +41,7 @@ type Engine struct {
 	udp       *udp.NAT
 	pumps     sync.WaitGroup
 	lastError error
+	lines     []platform.Line
 }
 
 func New(ctx context.Context, d Dependencies, l flows.Limits, state flows.StateStore) *Engine {
@@ -79,6 +80,7 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	if err != nil {
 		return rollback(err)
 	}
+	e.lines = cloneLines(r.Config.Lines)
 	link := ns.NewLink()
 	s, err := ns.New(link, ns.DefaultOptions())
 	if err != nil {
@@ -110,7 +112,7 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			n, err := tun.ReadPacket(run, b)
 			if err != nil {
 				if run.Err() == nil {
-					e.fail(err)
+					e.fail(link, err)
 				}
 				return
 			}
@@ -136,7 +138,7 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			}
 			if err := tun.WritePacket(run, b); err != nil {
 				if run.Err() == nil {
-					e.fail(err)
+					e.fail(link, err)
 				}
 				return
 			}
@@ -147,8 +149,16 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	}
 	return a, nil
 }
-func (e *Engine) fail(err error) {
-	go func() { e.mu.Lock(); defer e.mu.Unlock(); e.lastError = err; e.stopLocked(context.Background()) }()
+func (e *Engine) fail(link *ns.Link, err error) {
+	go func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.link != link {
+			return
+		}
+		e.lastError = err
+		e.stopLocked(context.Background())
+	}()
 }
 func (e *Engine) Apply(ctx context.Context, r policy.Revision) (policy.Applied, error) {
 	e.mu.Lock()
@@ -171,6 +181,14 @@ func (e *Engine) applyLocked(ctx context.Context, r policy.Revision) (policy.App
 		return policy.Applied{}, err
 	}
 	a, err := e.Table.Apply(r)
+	if err != nil {
+		rollback := e.deps.Routes.Prepare(context.WithoutCancel(ctx), e.lines)
+		if rollback != nil {
+			e.stopLocked(context.WithoutCancel(ctx))
+		}
+		return policy.Applied{}, errors.Join(err, rollback)
+	}
+	e.lines = cloneLines(r.Config.Lines)
 	if err == nil && !r.Config.IPv6 {
 		e.Table.CloseFlows(flows.Selector{IPv6: true}, a.Point)
 	}
@@ -215,10 +233,19 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	e.link = nil
 	e.tun = nil
 	e.cancel = nil
+	e.lines = nil
 	if e.deps.Routes != nil {
 		return e.deps.Routes.Cleanup(ctx)
 	}
 	return nil
+}
+
+func cloneLines(lines []platform.Line) []platform.Line {
+	out := append([]platform.Line(nil), lines...)
+	for i := range out {
+		out[i].Addresses = append(out[i].Addresses[:0:0], out[i].Addresses...)
+	}
+	return out
 }
 func (e *Engine) Stats() any {
 	e.mu.Lock()
