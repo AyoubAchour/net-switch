@@ -20,6 +20,7 @@ import (
 
 type sample struct {
 	Outcome string  `json:"outcome"`
+	Source  string  `json:"source"`
 	Sent    int     `json:"sent"`
 	MS      float64 `json:"ms"`
 }
@@ -91,7 +92,7 @@ func probe(peer *net.UDPAddr) (sample, error) {
 	}
 	started, sent := time.Now(), 0
 	finish := func(outcome string) (sample, error) {
-		return sample{Outcome: outcome, Sent: sent, MS: float64(time.Since(started).Microseconds()) / 1000}, nil
+		return sample{Outcome: outcome, Source: conn.LocalAddr().String(), Sent: sent, MS: float64(time.Since(started).Microseconds()) / 1000}, nil
 	}
 	reply := make([]byte, 256)
 	for time.Since(started) < 5*time.Second {

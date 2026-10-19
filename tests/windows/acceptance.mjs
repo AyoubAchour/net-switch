@@ -190,7 +190,10 @@ try {
   });
   const directReuse = await observe('physical controlled port reuse baseline', 'parity', async () => {
     const samples = await client('reuse', { target: { ...responder.direct, source: harness.uplink.address }, count: 1000 });
-    assert(samples.length === 1000 && samples.every((sample) => sample.outcome === 'closed'), `Physical reuse failed: ${JSON.stringify(samples)}`);
+    const failed = samples.find((sample) => sample.outcome !== 'closed');
+    let sockets;
+    if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection | Where-Object { $_.LocalPort -eq ${failed.port} -or $_.RemotePort -eq ${failed.port} } | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess,CreationTime) | ConvertTo-Json -Compress`]);
+    assert(samples.length === 1000 && !failed, `Physical reuse failed: ${JSON.stringify({ samples, sockets, target: responder.direct })}`);
     return samples;
   });
   if (!harness.testisp.tcpReuseHook) {
@@ -400,8 +403,9 @@ try {
       await server.api('lines/update', { id: main.id, cap: null });
       await server.api('lines/update', { id: second.id, cap: null });
       await pin(second.id); await client('open', { target: responder.virtual }); await client('close');
+      const beforeRecovery = await harness.control('stats');
       const udpAfter = await udpReject(responder.virtual, 3);
-      assert(udpAfter.every((sample) => sample.outcome === 'reply'), JSON.stringify(udpAfter));
+      assert(udpAfter.every((sample) => sample.outcome === 'reply'), JSON.stringify({ udpBefore, udp, udpAfter, state: await server.api('state'), beforeRecovery, afterRecovery: await harness.control('stats') }));
       if (samples.some((item) => item.outcome === 'timeout') || udp.some((item) => item.outcome === 'timeout')) throw new BaselineDefect('Capped TCP/UDP did not fail fast; clearing the caps restored the same target', { rejectBaseline, blocked, samples, udp, udpBefore, udpAfter, mainException });
       return { rejectBaseline, blocked, samples, udp, udpBefore, udpAfter, mainException };
     } finally {
