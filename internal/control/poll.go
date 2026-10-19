@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/lines"
+	"github.com/AyoubAchour/net-switch/internal/updates"
 	"github.com/AyoubAchour/net-switch/internal/usage"
 )
 
@@ -460,29 +462,75 @@ func (c *Core) Run() {
 }
 func (c *Core) CheckUpdate(ctx context.Context, force bool) (string, error) {
 	c.mu.Lock()
-	enabled := c.op.Mode != "proxy" && (force || c.values["checkForUpdates"] == true)
-	c.mu.Unlock()
-	if !enabled {
-		return "off", nil
-	}
-	if c.op.CheckUpdate == nil {
-		return "failed", fmt.Errorf("update checker not configured")
-	}
-	offer, err := c.op.CheckUpdate(ctx)
-	if err != nil {
-		return "failed", err
+	call := c.updateCheck
+	if call == nil {
+		enabled := c.op.Mode != "proxy" && (force || c.values["checkForUpdates"] == true)
+		if !enabled {
+			c.mu.Unlock()
+			return "off", nil
+		}
+		call = &updateCall{done: make(chan struct{})}
+		c.updateCheck = call
+		c.mu.Unlock()
+		// The shared check belongs to Control, not to the first HTTP client's
+		// connection. Its checker supplies the same 15-second deadline as Node.
+		call.result = c.checkUpdateNow(c.ctx)
+		c.mu.Lock()
+		c.updateCheck = nil
+		close(call.done)
+		c.mu.Unlock()
+	} else {
+		c.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return "failed", ctx.Err()
+		case <-call.done:
+		}
 	}
 	c.mu.Lock()
-	c.offer = offer
-	skipped := offer != nil && c.values["skippedUpdate"] == offer.Version
+	skipped := call.result == "available" && c.offer != nil && c.values["skippedUpdate"] == c.offer.Version
 	c.mu.Unlock()
 	if force && skipped {
 		if err := c.save(map[string]any{"skippedUpdate": nil}); err != nil {
 			return "failed", err
 		}
 	}
-	if offer != nil {
-		return "available", nil
+	return call.result, nil
+}
+
+type updateCall struct {
+	done   chan struct{}
+	result string
+}
+
+func (c *Core) checkUpdateNow(ctx context.Context) string {
+	var offer *updates.Offer
+	var err error
+	if c.op.CheckUpdate == nil {
+		err = fmt.Errorf("update checker not configured")
+	} else {
+		offer, err = c.op.CheckUpdate(ctx)
 	}
-	return "latest", nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil {
+		reason := err.Error()
+		if errors.Is(err, context.DeadlineExceeded) {
+			reason = "no answer within 15 seconds"
+		}
+		if reason != c.lastUpdateFailure {
+			c.log("could not check for updates: %s", reason)
+		}
+		c.lastUpdateFailure = reason
+		return "failed"
+	}
+	if offer != nil && (c.offer == nil || c.offer.Version != offer.Version) {
+		c.log("Net Switch %s is available (this is %s)", offer.Version, c.op.Version)
+	}
+	c.offer = offer
+	c.lastUpdateFailure = ""
+	if offer != nil {
+		return "available"
+	}
+	return "latest"
 }

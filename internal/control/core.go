@@ -120,6 +120,8 @@ type Core struct {
 	policy                                       any
 	autostart                                    any
 	offer                                        *updates.Offer
+	updateCheck                                  *updateCall
+	lastUpdateFailure                            string
 	lastStatus                                   string
 	revision                                     uint64
 	applyMu                                      sync.Mutex
