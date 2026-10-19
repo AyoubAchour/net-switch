@@ -293,6 +293,13 @@ func (s *udpSocket) drainErrors() {
 			} else {
 				message.Unreachable = true
 			}
+			// LOCAL errors belong to the synchronous WriteTo failure. Linux
+			// may supply no UDP port or payload there. Keep the MTU above, but
+			// let the sender quote its original packet instead of emitting a
+			// second ICMP response with a fabricated port-zero UDP header.
+			if m.Data[4] == unix.SO_EE_ORIGIN_LOCAL {
+				continue
+			}
 			if (handler != nil && pending != nil) || (handler == nil && len(s.errors) == cap(s.errors)) {
 				continue
 			}

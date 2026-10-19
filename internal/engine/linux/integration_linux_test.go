@@ -260,8 +260,8 @@ func TestKernelPlatform(t *testing.T) {
 			delivered = append(delivered, e)
 		})
 		_, err = sock.WriteTo(make([]byte, 1400), netip.MustParseAddrPort("198.51.100.1:30001"), true)
-		if !errors.As(err, &big) || len(delivered) != 1 || delivered[0].MTU != 1280 || delivered[0].Destination.Port() != 30001 {
-			t.Fatalf("inline real error queue: %v %+v", err, delivered)
+		if !errors.As(err, &big) || big.MTU != 1280 || len(delivered) != 0 {
+			t.Fatalf("local error must use the synchronous original packet, not an incomplete error-queue quote: %v %+v", err, delivered)
 		}
 		if err := netlink.RouteDel(&def); err != nil {
 			t.Fatal(err)
