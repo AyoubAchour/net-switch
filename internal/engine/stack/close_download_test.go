@@ -79,6 +79,9 @@ func BenchmarkCloseDownloadOtherFlow(b *testing.B) {
 				latency = append(latency, downloadWithOtherFlow(b, closing)...)
 			}
 			slices.Sort(latency)
+			if latency[len(latency)/2] <= 0 {
+				b.Fatal("clock cannot resolve the other flow's latency")
+			}
 			b.SetBytes(100_000_000)
 			b.ReportMetric(float64(latency[len(latency)/2].Nanoseconds()), "other-p50-ns")
 			b.ReportMetric(float64(latency[(len(latency)-1)*99/100].Nanoseconds()), "other-p99-ns")
@@ -98,6 +101,7 @@ func downloadWithOtherFlow(t testing.TB, closing bool) []time.Duration {
 	ep := p.endpoint()
 	ep.SocketOptions().SetSendBufferSize(6<<20, true)
 	const total, tail = 100_000_000, 5 << 20
+	clock := newLatencyClock(t)
 	block := bytes.Repeat([]byte{0x5a}, 32<<10)
 	resume := make(chan struct{})
 	unblock := false
@@ -166,11 +170,14 @@ func downloadWithOtherFlow(t testing.TB, closing bool) []time.Duration {
 				t.Fatal("wrong download state", state, want)
 			}
 		}
-		start := time.Now()
-		p.inject(p.windowACK(65535))
-		if received >= total-tail && packets%16 == 0 {
+		ack := p.windowACK(65535)
+		if received >= total-tail && (received == total-tail || packets%16 == 0) {
+			start := clock()
+			p.inject(ack)
 			other.upload([]byte("ping"))
-			latency = append(latency, time.Since(start))
+			latency = append(latency, clock()-start)
+		} else {
+			p.inject(ack)
 		}
 		packets++
 	}
