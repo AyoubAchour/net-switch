@@ -131,11 +131,10 @@
     {
       "seq": 7,
       "direction": "input",
-      "kind": "file-completion",
+      "kind": "socket-completion",
       "value": {
-        "operation": "readFile",
-        "file": "/oracle/data/settings.json",
-        "ok": true
+        "operation": "listen",
+        "port": 47820
       }
     },
     {
@@ -144,7 +143,7 @@
       "kind": "completion",
       "value": {
         "id": 4,
-        "kind": "file-completion"
+        "kind": "socket-completion"
       }
     },
     {
@@ -153,9 +152,8 @@
       "kind": "file-completion",
       "value": {
         "operation": "readFile",
-        "file": "/oracle/data/windows-undo.json",
-        "ok": false,
-        "code": "ENOENT"
+        "file": "/oracle/data/settings.json",
+        "ok": true
       }
     },
     {
@@ -172,9 +170,10 @@
       "direction": "input",
       "kind": "file-completion",
       "value": {
-        "operation": "writeFile",
-        "file": "/oracle/data/windows-undo.json.oracle-1.tmp",
-        "ok": true
+        "operation": "readFile",
+        "file": "/oracle/data/windows-undo.json",
+        "ok": false,
+        "code": "ENOENT"
       }
     },
     {
@@ -188,6 +187,25 @@
     },
     {
       "seq": 13,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/windows-undo.json.oracle-1.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 14,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 7,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 15,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -198,31 +216,12 @@
       }
     },
     {
-      "seq": 14,
+      "seq": 16,
       "direction": "input",
       "kind": "file-completion",
       "value": {
         "operation": "rename",
         "file": "/oracle/data/windows-undo.json.oracle-1.tmp",
-        "ok": true
-      }
-    },
-    {
-      "seq": 15,
-      "direction": "input",
-      "kind": "completion",
-      "value": {
-        "id": 7,
-        "kind": "file-completion"
-      }
-    },
-    {
-      "seq": 16,
-      "direction": "input",
-      "kind": "file-completion",
-      "value": {
-        "operation": "writeFile",
-        "file": "/oracle/data/windows-undo.json.bak.oracle-2.tmp",
         "ok": true
       }
     },
@@ -237,6 +236,25 @@
     },
     {
       "seq": 18,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/windows-undo.json.bak.oracle-2.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 19,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 9,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 20,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -247,31 +265,12 @@
       }
     },
     {
-      "seq": 19,
+      "seq": 21,
       "direction": "input",
       "kind": "file-completion",
       "value": {
         "operation": "rename",
         "file": "/oracle/data/windows-undo.json.bak.oracle-2.tmp",
-        "ok": true
-      }
-    },
-    {
-      "seq": 20,
-      "direction": "input",
-      "kind": "completion",
-      "value": {
-        "id": 9,
-        "kind": "file-completion"
-      }
-    },
-    {
-      "seq": 21,
-      "direction": "input",
-      "kind": "file-completion",
-      "value": {
-        "operation": "writeFile",
-        "file": "/oracle/data/settings.json.oracle-3.tmp",
         "ok": true
       }
     },
@@ -286,6 +285,25 @@
     },
     {
       "seq": 23,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/settings.json.oracle-3.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 24,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 11,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 25,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -296,31 +314,12 @@
       }
     },
     {
-      "seq": 24,
+      "seq": 26,
       "direction": "input",
       "kind": "file-completion",
       "value": {
         "operation": "rename",
         "file": "/oracle/data/settings.json.oracle-3.tmp",
-        "ok": true
-      }
-    },
-    {
-      "seq": 25,
-      "direction": "input",
-      "kind": "completion",
-      "value": {
-        "id": 11,
-        "kind": "file-completion"
-      }
-    },
-    {
-      "seq": 26,
-      "direction": "input",
-      "kind": "file-completion",
-      "value": {
-        "operation": "writeFile",
-        "file": "/oracle/data/settings.json.bak.oracle-4.tmp",
         "ok": true
       }
     },
@@ -335,6 +334,25 @@
     },
     {
       "seq": 28,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/settings.json.bak.oracle-4.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 29,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 13,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 30,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -345,31 +363,12 @@
       }
     },
     {
-      "seq": 29,
+      "seq": 31,
       "direction": "input",
       "kind": "file-completion",
       "value": {
         "operation": "rename",
         "file": "/oracle/data/settings.json.bak.oracle-4.tmp",
-        "ok": true
-      }
-    },
-    {
-      "seq": 30,
-      "direction": "input",
-      "kind": "completion",
-      "value": {
-        "id": 13,
-        "kind": "file-completion"
-      }
-    },
-    {
-      "seq": 31,
-      "direction": "input",
-      "kind": "file-completion",
-      "value": {
-        "operation": "writeFile",
-        "file": "/oracle/data/settings.json.oracle-7.tmp",
         "ok": true
       }
     },
@@ -384,6 +383,25 @@
     },
     {
       "seq": 33,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/settings.json.oracle-7.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 34,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 15,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 35,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -394,31 +412,12 @@
       }
     },
     {
-      "seq": 34,
+      "seq": 36,
       "direction": "input",
       "kind": "file-completion",
       "value": {
         "operation": "rename",
         "file": "/oracle/data/settings.json.oracle-7.tmp",
-        "ok": true
-      }
-    },
-    {
-      "seq": 35,
-      "direction": "input",
-      "kind": "completion",
-      "value": {
-        "id": 15,
-        "kind": "file-completion"
-      }
-    },
-    {
-      "seq": 36,
-      "direction": "input",
-      "kind": "file-completion",
-      "value": {
-        "operation": "writeFile",
-        "file": "/oracle/data/settings.json.bak.oracle-8.tmp",
         "ok": true
       }
     },
@@ -433,6 +432,25 @@
     },
     {
       "seq": 38,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/settings.json.bak.oracle-8.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 39,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 17,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 40,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -443,7 +461,7 @@
       }
     },
     {
-      "seq": 39,
+      "seq": 41,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -453,28 +471,12 @@
       }
     },
     {
-      "seq": 40,
+      "seq": 42,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 17,
+        "id": 18,
         "kind": "file-completion"
-      }
-    },
-    {
-      "seq": 41,
-      "direction": "output",
-      "kind": "log",
-      "value": {
-        "text": "settings moved to lines: Cable (Ethernet), Second connection (Wi-Fi)"
-      }
-    },
-    {
-      "seq": 42,
-      "direction": "output",
-      "kind": "log",
-      "value": {
-        "text": "line readings come from PowerShell: the native helper is not built (npm run build:helper)"
       }
     },
     {
@@ -482,11 +484,96 @@
       "direction": "output",
       "kind": "log",
       "value": {
-        "text": "network readings come from PowerShell and route.exe: the native helper is not built"
+        "text": "settings moved to lines: Cable (Ethernet), Second connection (Wi-Fi)"
       }
     },
     {
       "seq": 44,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "settings moved to lines: Cable (Ethernet), Second connection (Wi-Fi)"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 45,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 19,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 46,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "line readings come from PowerShell: the native helper is not built (npm run build:helper)"
+      }
+    },
+    {
+      "seq": 47,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "network readings come from PowerShell and route.exe: the native helper is not built"
+      }
+    },
+    {
+      "seq": 48,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "line readings come from PowerShell: the native helper is not built (npm run build:helper)"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 49,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 20,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 50,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "network readings come from PowerShell and route.exe: the native helper is not built"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 51,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 21,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 52,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -497,16 +584,55 @@
       }
     },
     {
-      "seq": 45,
+      "seq": 53,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 18,
+        "id": 22,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 46,
+      "seq": 54,
+      "direction": "input",
+      "kind": "socket-completion",
+      "value": {
+        "operation": "listen",
+        "port": 47821
+      }
+    },
+    {
+      "seq": 55,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 23,
+        "kind": "socket-completion"
+      }
+    },
+    {
+      "seq": 56,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.isElevated",
+        "args": [],
+        "ok": true,
+        "value": true,
+        "undefined": false
+      }
+    },
+    {
+      "seq": 57,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 24,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 58,
       "direction": "input",
       "kind": "adapter-snapshot",
       "value": [
@@ -545,16 +671,91 @@
       ]
     },
     {
-      "seq": 47,
+      "seq": 59,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 19,
+        "id": 25,
         "kind": "adapter-snapshot"
       }
     },
     {
-      "seq": 48,
+      "seq": 60,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.detectAdapters",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "id": "a1",
+            "alias": "Ethernet",
+            "guid": null,
+            "label": "Ethernet",
+            "kind": "wired",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "weight": 1,
+            "connected": true,
+            "ipv4s": [
+              "192.0.2.1"
+            ],
+            "metric": 10
+          },
+          {
+            "id": "b2",
+            "alias": "Wi-Fi",
+            "guid": null,
+            "label": "Wi-Fi",
+            "kind": "wifi",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "weight": 1,
+            "connected": true,
+            "ipv4s": [
+              "192.0.2.2"
+            ],
+            "metric": 10
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 61,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 26,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 62,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.readMinimizeConnectionsPolicy",
+        "args": [],
+        "ok": true,
+        "value": 1,
+        "undefined": false
+      }
+    },
+    {
+      "seq": 63,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 27,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 64,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -564,16 +765,16 @@
       }
     },
     {
-      "seq": 49,
+      "seq": 65,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 20,
+        "id": 28,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 50,
+      "seq": 66,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -584,7 +785,7 @@
       }
     },
     {
-      "seq": 51,
+      "seq": 67,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -594,16 +795,16 @@
       }
     },
     {
-      "seq": 52,
+      "seq": 68,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 21,
+        "id": 29,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 53,
+      "seq": 69,
       "direction": "output",
       "kind": "log",
       "value": {
@@ -611,7 +812,30 @@
       }
     },
     {
-      "seq": 54,
+      "seq": 70,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "started on port 47821 (mode tun, elevated true)"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 71,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 30,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 72,
       "direction": "output",
       "kind": "console",
       "value": {
@@ -619,7 +843,7 @@
       }
     },
     {
-      "seq": 55,
+      "seq": 73,
       "direction": "input",
       "kind": "adapter-snapshot",
       "value": [
@@ -658,16 +882,16 @@
       ]
     },
     {
-      "seq": 56,
+      "seq": 74,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 22,
+        "id": 31,
         "kind": "adapter-snapshot"
       }
     },
     {
-      "seq": 57,
+      "seq": 75,
       "direction": "input",
       "kind": "counter-sample",
       "value": {
@@ -676,16 +900,16 @@
       }
     },
     {
-      "seq": 58,
+      "seq": 76,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 23,
+        "id": 32,
         "kind": "counter-sample"
       }
     },
     {
-      "seq": 59,
+      "seq": 77,
       "direction": "input",
       "kind": "counter-sample",
       "value": {
@@ -694,16 +918,126 @@
       }
     },
     {
-      "seq": 60,
+      "seq": 78,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 24,
+        "id": 33,
         "kind": "counter-sample"
       }
     },
     {
-      "seq": 61,
+      "seq": 79,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.detectAdapters",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "id": "a1",
+            "alias": "Ethernet",
+            "guid": null,
+            "label": "Ethernet",
+            "kind": "wired",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "weight": 1,
+            "connected": true,
+            "ipv4s": [
+              "192.0.2.1"
+            ],
+            "metric": 10
+          },
+          {
+            "id": "b2",
+            "alias": "Wi-Fi",
+            "guid": null,
+            "label": "Wi-Fi",
+            "kind": "wifi",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "weight": 1,
+            "connected": true,
+            "ipv4s": [
+              "192.0.2.2"
+            ],
+            "metric": 10
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 80,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 34,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 81,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.readDefaultRoutes",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "interfaceAddress": "192.0.2.1"
+          },
+          {
+            "interfaceAddress": "192.0.2.2"
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 82,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 35,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 83,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.readDefaultRoutes",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "interfaceAddress": "192.0.2.1"
+          },
+          {
+            "interfaceAddress": "192.0.2.2"
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 84,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 36,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 85,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -713,16 +1047,16 @@
       }
     },
     {
-      "seq": 62,
+      "seq": 86,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 25,
+        "id": 37,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 63,
+      "seq": 87,
       "direction": "output",
       "kind": "log",
       "value": {
@@ -730,7 +1064,30 @@
       }
     },
     {
-      "seq": 64,
+      "seq": 88,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "routing starting"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 89,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 38,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 90,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -741,16 +1098,16 @@
       }
     },
     {
-      "seq": 65,
+      "seq": 91,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 26,
+        "id": 39,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 66,
+      "seq": 92,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -761,7 +1118,7 @@
       }
     },
     {
-      "seq": 67,
+      "seq": 93,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -771,16 +1128,52 @@
       }
     },
     {
-      "seq": 68,
+      "seq": 94,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 27,
+        "id": 40,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 69,
+      "seq": 95,
+      "direction": "input",
+      "kind": "socket-completion",
+      "value": {
+        "operation": "listen",
+        "port": 49000
+      }
+    },
+    {
+      "seq": 96,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 41,
+        "kind": "socket-completion"
+      }
+    },
+    {
+      "seq": 97,
+      "direction": "input",
+      "kind": "socket-completion",
+      "value": {
+        "operation": "close",
+        "port": 49000
+      }
+    },
+    {
+      "seq": 98,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 42,
+        "kind": "socket-completion"
+      }
+    },
+    {
+      "seq": 99,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -790,16 +1183,16 @@
       }
     },
     {
-      "seq": 70,
+      "seq": 100,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 28,
+        "id": 43,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 71,
+      "seq": 101,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -810,7 +1203,7 @@
       }
     },
     {
-      "seq": 72,
+      "seq": 102,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -820,16 +1213,16 @@
       }
     },
     {
-      "seq": 73,
+      "seq": 103,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 29,
+        "id": 44,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 74,
+      "seq": 104,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -839,16 +1232,16 @@
       }
     },
     {
-      "seq": 75,
+      "seq": 105,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 30,
+        "id": 45,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 76,
+      "seq": 106,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -859,7 +1252,7 @@
       }
     },
     {
-      "seq": 77,
+      "seq": 107,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -869,16 +1262,16 @@
       }
     },
     {
-      "seq": 78,
+      "seq": 108,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 31,
+        "id": 46,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 79,
+      "seq": 109,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -888,16 +1281,16 @@
       }
     },
     {
-      "seq": 80,
+      "seq": 110,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 32,
+        "id": 47,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 81,
+      "seq": 111,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -907,7 +1300,7 @@
       }
     },
     {
-      "seq": 82,
+      "seq": 112,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -917,16 +1310,16 @@
       }
     },
     {
-      "seq": 83,
+      "seq": 113,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 33,
+        "id": 48,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 84,
+      "seq": 114,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -936,16 +1329,16 @@
       }
     },
     {
-      "seq": 85,
+      "seq": 115,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 34,
+        "id": 49,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 86,
+      "seq": 116,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -956,7 +1349,7 @@
       }
     },
     {
-      "seq": 87,
+      "seq": 117,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -966,16 +1359,16 @@
       }
     },
     {
-      "seq": 88,
+      "seq": 118,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 35,
+        "id": 50,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 89,
+      "seq": 119,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -986,16 +1379,16 @@
       }
     },
     {
-      "seq": 90,
+      "seq": 120,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 36,
+        "id": 51,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 91,
+      "seq": 121,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -1006,7 +1399,7 @@
       }
     },
     {
-      "seq": 92,
+      "seq": 122,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -1016,16 +1409,37 @@
       }
     },
     {
-      "seq": 93,
+      "seq": 123,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 37,
+        "id": 52,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 94,
+      "seq": 124,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.rotate",
+        "args": [],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 125,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 53,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 126,
       "direction": "output",
       "kind": "spawn",
       "value": {
@@ -1039,7 +1453,7 @@
       }
     },
     {
-      "seq": 95,
+      "seq": 127,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -1050,7 +1464,7 @@
       }
     },
     {
-      "seq": 96,
+      "seq": 128,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -1060,16 +1474,16 @@
       }
     },
     {
-      "seq": 97,
+      "seq": 129,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 38,
+        "id": 54,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 98,
+      "seq": 130,
       "direction": "output",
       "kind": "engine",
       "value": {
@@ -1078,7 +1492,7 @@
       }
     },
     {
-      "seq": 99,
+      "seq": 131,
       "direction": "input",
       "kind": "engine-reply",
       "value": {
@@ -1088,16 +1502,16 @@
       }
     },
     {
-      "seq": 100,
+      "seq": 132,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 39,
+        "id": 55,
         "kind": "engine-reply"
       }
     },
     {
-      "seq": 101,
+      "seq": 133,
       "direction": "output",
       "kind": "log",
       "value": {
@@ -1105,7 +1519,30 @@
       }
     },
     {
-      "seq": 102,
+      "seq": 134,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "routing on"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 135,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 56,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 136,
       "direction": "output",
       "kind": "engine",
       "value": {
@@ -1117,7 +1554,7 @@
       }
     },
     {
-      "seq": 103,
+      "seq": 137,
       "direction": "input",
       "kind": "engine-reply",
       "value": {
@@ -1127,16 +1564,44 @@
       }
     },
     {
-      "seq": 104,
+      "seq": 138,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 40,
+        "id": 57,
         "kind": "engine-reply"
       }
     },
     {
-      "seq": 105,
+      "seq": 139,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.readDefaultRoutes",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "interfaceAddress": "192.0.2.1"
+          },
+          {
+            "interfaceAddress": "192.0.2.2"
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 140,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 58,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 141,
       "direction": "output",
       "kind": "engine",
       "value": {
@@ -1145,7 +1610,7 @@
       }
     },
     {
-      "seq": 106,
+      "seq": 142,
       "direction": "input",
       "kind": "probe-result",
       "value": {
@@ -1157,16 +1622,16 @@
       }
     },
     {
-      "seq": 107,
+      "seq": 143,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 41,
+        "id": 59,
         "kind": "probe-result"
       }
     },
     {
-      "seq": 108,
+      "seq": 144,
       "direction": "output",
       "kind": "log",
       "value": {
@@ -1174,7 +1639,53 @@
       }
     },
     {
-      "seq": 109,
+      "seq": 145,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "Cable's apps now use Cable"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 146,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 60,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 147,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "engine./proxies/line-050505/delay.json",
+        "args": [],
+        "ok": true,
+        "value": {
+          "delay": 18
+        },
+        "undefined": false
+      }
+    },
+    {
+      "seq": 148,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 61,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 149,
       "direction": "output",
       "kind": "engine",
       "value": {
@@ -1186,7 +1697,7 @@
       }
     },
     {
-      "seq": 110,
+      "seq": 150,
       "direction": "input",
       "kind": "engine-reply",
       "value": {
@@ -1196,16 +1707,44 @@
       }
     },
     {
-      "seq": 111,
+      "seq": 151,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 42,
+        "id": 62,
         "kind": "engine-reply"
       }
     },
     {
-      "seq": 112,
+      "seq": 152,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.readDefaultRoutes",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "interfaceAddress": "192.0.2.1"
+          },
+          {
+            "interfaceAddress": "192.0.2.2"
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 153,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 63,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 154,
       "direction": "output",
       "kind": "engine",
       "value": {
@@ -1214,7 +1753,7 @@
       }
     },
     {
-      "seq": 113,
+      "seq": 155,
       "direction": "input",
       "kind": "probe-result",
       "value": {
@@ -1226,16 +1765,16 @@
       }
     },
     {
-      "seq": 114,
+      "seq": 156,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 43,
+        "id": 64,
         "kind": "probe-result"
       }
     },
     {
-      "seq": 115,
+      "seq": 157,
       "direction": "output",
       "kind": "log",
       "value": {
@@ -1243,7 +1782,53 @@
       }
     },
     {
-      "seq": 116,
+      "seq": 158,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "Second connection's apps now use Second connection"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 159,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 65,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 160,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "engine./proxies/line-060606/delay.json",
+        "args": [],
+        "ok": true,
+        "value": {
+          "delay": 18
+        },
+        "undefined": false
+      }
+    },
+    {
+      "seq": 161,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 66,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 162,
       "direction": "input",
       "kind": "http",
       "value": {
@@ -1253,7 +1838,7 @@
       }
     },
     {
-      "seq": 117,
+      "seq": 163,
       "direction": "output",
       "kind": "api",
       "value": {
@@ -1384,7 +1969,7 @@
       }
     },
     {
-      "seq": 118,
+      "seq": 164,
       "direction": "input",
       "kind": "http",
       "value": {
@@ -1395,7 +1980,7 @@
       }
     },
     {
-      "seq": 119,
+      "seq": 165,
       "direction": "output",
       "kind": "log",
       "value": {
@@ -1403,7 +1988,25 @@
       }
     },
     {
-      "seq": 120,
+      "seq": 166,
+      "direction": "input",
+      "kind": "process-exit",
+      "value": {
+        "pid": 456,
+        "code": 0
+      }
+    },
+    {
+      "seq": 167,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 67,
+        "kind": "process-exit"
+      }
+    },
+    {
+      "seq": 168,
       "direction": "output",
       "kind": "remove",
       "value": {
@@ -1411,7 +2014,30 @@
       }
     },
     {
-      "seq": 121,
+      "seq": 169,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "routing stopping"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 170,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 68,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 171,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -1421,16 +2047,16 @@
       }
     },
     {
-      "seq": 122,
+      "seq": 172,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 44,
+        "id": 69,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 123,
+      "seq": 173,
       "direction": "output",
       "kind": "remove",
       "value": {
@@ -1438,7 +2064,7 @@
       }
     },
     {
-      "seq": 124,
+      "seq": 174,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -1448,16 +2074,16 @@
       }
     },
     {
-      "seq": 125,
+      "seq": 175,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 45,
+        "id": 70,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 126,
+      "seq": 176,
       "direction": "output",
       "kind": "log",
       "value": {
@@ -1465,7 +2091,30 @@
       }
     },
     {
-      "seq": 127,
+      "seq": 177,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "routing off"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 178,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 71,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 179,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -1475,16 +2124,16 @@
       }
     },
     {
-      "seq": 128,
+      "seq": 180,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 46,
+        "id": 72,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 129,
+      "seq": 181,
       "direction": "output",
       "kind": "write",
       "value": {
@@ -1495,7 +2144,7 @@
       }
     },
     {
-      "seq": 130,
+      "seq": 182,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -1505,16 +2154,16 @@
       }
     },
     {
-      "seq": 131,
+      "seq": 183,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 47,
+        "id": 73,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 132,
+      "seq": 184,
       "direction": "output",
       "kind": "remove",
       "value": {
@@ -1522,7 +2171,7 @@
       }
     },
     {
-      "seq": 133,
+      "seq": 185,
       "direction": "input",
       "kind": "file-completion",
       "value": {
@@ -1532,16 +2181,16 @@
       }
     },
     {
-      "seq": 134,
+      "seq": 186,
       "direction": "input",
       "kind": "completion",
       "value": {
-        "id": 48,
+        "id": 74,
         "kind": "file-completion"
       }
     },
     {
-      "seq": 135,
+      "seq": 187,
       "direction": "output",
       "kind": "log",
       "value": {
@@ -1549,7 +2198,30 @@
       }
     },
     {
-      "seq": 136,
+      "seq": 188,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "quit"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 189,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 75,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 190,
       "direction": "output",
       "kind": "api",
       "value": {

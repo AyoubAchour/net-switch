@@ -25,6 +25,8 @@ export const scenarios = {
   migration: { initial: { lines: [], mainAlias: 'Ethernet', secondAlias: 'Wi-Fi', secondApps: ['C:\\Apps\\Firefox.exe'], setupUndo: { metrics: { Ethernet: [{ family: 'IPv4', automatic: true, metric: 25 }] }, policy: 3 }, unknown: { keep: 1.25 } }, steps: [http('state'), http('quit', {})] },
 };
 
+scenarios.combiningNoOpenLine = { initial: { combine: true }, steps: scenarios.capBlockedAndMainException.steps };
+
 export async function recordTrace(name, scenario = scenarios[name]) {
   const entries = [];
   const trace = (direction, kind, value) => entries.push({ seq: entries.length, direction, kind, value });
@@ -52,10 +54,15 @@ export async function recordTrace(name, scenario = scenarios[name]) {
     assert.deepEqual(deleted, []);
   }
   if (name === 'capMoved') assert.ok(deleted.includes('/connections/phone-flow'));
-  if (name === 'capBlockedAndMainException') {
+  if (name === 'capBlockedAndMainException' || name === 'combiningNoOpenLine') {
     assert.equal(last.lines[0].blocked, false);
     assert.equal(last.lines[1].blocked, true);
     assert.deepEqual(deleted, ['/connections/blocked-flow']);
+  }
+  if (name === 'combiningNoOpenLine') {
+    assert.equal(last.combine.active, false);
+    assert.deepEqual(Object.keys(run.server.oracleHooks.engine.shares), []);
+    assert.equal(run.server.oracleHooks.engine.routesTo({ metadata: { sourcePort: 65535 } }), 'a1');
   }
   if (name === 'reconnectPinned') assert.deepEqual(deleted, ['/connections/off-line']);
   if (name === 'reconnectShared') assert.deepEqual(deleted, []);

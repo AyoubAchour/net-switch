@@ -29,6 +29,23 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, t
     trace?.('input', 'completion', { id, kind });
     return value;
   };
+  const observeAsync = (object, scope) => {
+    if (!trace) return object;
+    for (const [name, original] of Object.entries(object)) {
+      if (original?.constructor?.name !== 'AsyncFunction') continue;
+      object[name] = async (...args) => {
+        try {
+          const value = await original(...args);
+          complete('async-result', { operation: `${scope}.${name}`, args, ok: true, value: value ?? null, undefined: value === undefined });
+          return value;
+        } catch (error) {
+          complete('async-result', { operation: `${scope}.${name}`, args, ok: false, code: error.code ?? null, message: error.message });
+          throw error;
+        }
+      };
+    }
+    return object;
+  };
   const fileWrite = (name, text) => {
     const bytes = Buffer.from(text);
     files.set(name, bytes.toString());
@@ -95,12 +112,12 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, t
       const status = probe && answer === false ? 503 : 200;
       const body = route === '/connections' ? { connections: environment.connections } : probe ? { delay: answer } : {};
       complete(probe ? 'probe-result' : 'engine-reply', { route, status, body });
-      return { ok: status === 200, status, json: async () => clone(body) };
+      return { ok: status === 200, status, ...observeAsync({ json: async () => clone(body) }, `engine.${route}`) };
     },
   });
   const socket = () => Object.assign(new EventEmitter(), {
-    listen(...args) { this.port = typeof args[0] === 'number' ? args[0] || 49000 : args[0].port; args.at(-1)(); },
-    address() { return { port: this.port }; }, unref() {}, close(done) { done?.(); },
+    listen(...args) { this.port = typeof args[0] === 'number' ? args[0] || 49000 : args[0].port; complete('socket-completion', { operation: 'listen', port: this.port }); args.at(-1)(); },
+    address() { return { port: this.port }; }, unref() {}, close(done) { complete('socket-completion', { operation: 'close', port: this.port }); done?.(); },
   });
   class Monitor extends EventEmitter {
     start() {} stop() {} isFresh() { return true; }
@@ -124,8 +141,9 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, t
       describe: (programPath) => ({ name: path.win32.basename(programPath, '.exe'), hasIcon: false, switchable: !!programPath, reconnectable: !!programPath && !/svchost\.exe$/i.test(programPath) }),
       lookupPending() {}, icon: () => null,
     }),
-    createInstalledApps: () => ({ list: async () => [{ path: 'C:\\Apps\\Firefox.exe', name: 'Firefox' }] }),
+    createInstalledApps: () => observeAsync({ list: async () => [{ path: 'C:\\Apps\\Firefox.exe', name: 'Firefox' }] }, 'installedApps'),
   };
+  observeAsync(platform, 'platform');
   const mocks = new Map(Object.entries({
     'node:crypto': { createHash, timingSafeEqual, randomBytes: (size) => Buffer.alloc(size, ++sequence % 256), randomUUID: () => `oracle-${++sequence}` },
     'node:fs/promises': fs,
@@ -135,25 +153,25 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, t
     'node:url': { fileURLToPath: (url) => new URL(url).pathname },
     'node:events': { EventEmitter, once },
     'node:os': { networkInterfaces: () => clone(environment.interfaces) },
-    'node:timers/promises': { setTimeout: (ms) => ms >= 1000 ? new Promise(() => {}) : Promise.resolve() },
+    'node:timers/promises': { setTimeout: (ms) => ms >= 1000 ? new Promise(() => {}) : trace ? Promise.resolve().then(() => { complete('timer-completion', { ms }); }) : Promise.resolve() },
     'node:net': { createServer: socket },
     'node:http': { createServer: (handler) => { httpHandler = handler; return socket(); } },
     'node:child_process': { spawn: (exe, args) => {
       assert.equal(exe, '/oracle/engine/sing-box.exe');
       emit('spawn', { exe, args });
       const child = Object.assign(new EventEmitter(), { pid: 456, exitCode: null, signalCode: null, stdout: new EventEmitter(), stderr: new EventEmitter() });
-      child.kill = () => { child.exitCode = 0; child.emit('exit', 0); };
+      child.kill = () => { child.exitCode = 0; complete('process-exit', { pid: child.pid, code: 0 }); child.emit('exit', 0); };
       return child;
     } },
     '/oracle/lib/platform/windows.mjs': { windows: platform },
     '/oracle/lib/platform/index.mjs': { platformFor: () => platform },
-    '/oracle/lib/platform/windows-network.mjs': { restoreMetrics: async () => {}, restoreMinimizeConnectionsPolicy: async (value) => { environment.policy = value; } },
+    '/oracle/lib/platform/windows-network.mjs': observeAsync({ restoreMetrics: async () => {}, restoreMinimizeConnectionsPolicy: async (value) => { environment.policy = value; } }, 'network'),
     '/oracle/lib/architecture.mjs': { nativeArchitecture: () => 'x64' },
     '/oracle/lib/ps.mjs': { spawnPowerShell: forbidden('PowerShell') },
-    '/oracle/lib/logfile.mjs': { createLog: () => ({ append: async (text) => emit('log', { text }), rotate: async () => {} }) },
+    '/oracle/lib/logfile.mjs': { createLog: () => observeAsync({ append: async (text) => emit('log', { text }), rotate: async () => {} }, 'log') },
     '/oracle/lib/monitor.mjs': { findHelper: () => null, LineMonitor: Monitor },
-    '/oracle/lib/helper.mjs': { NetworkMonitor: Monitor, NetworkUpdates: class {}, quickProbe: async () => ({ ok: true, ms: 18 }), readNetworkOnce: forbidden('helper'), readPolicyOnce: async () => environment.policy },
-    '/oracle/lib/updates.mjs': { UpdateChecker: class { offer = null; start() {} stop() {} async check() { return 'current'; } } },
+    '/oracle/lib/helper.mjs': observeAsync({ NetworkMonitor: Monitor, NetworkUpdates: class {}, quickProbe: async () => ({ ok: true, ms: 18 }), readNetworkOnce: forbidden('helper'), readPolicyOnce: async () => environment.policy }, 'helper'),
+    '/oracle/lib/updates.mjs': { UpdateChecker: class { offer = null; start() {} stop() {} async check() { complete('async-result', { operation: 'updates.check', args: [], ok: true, value: 'current', undefined: false }); return 'current'; } } },
   }));
   const modules = new Map();
   async function load(name) {

@@ -27,6 +27,11 @@ external driver, and entries also freeze all resulting internal I/O completions.
 - `file-completion`: operation, path, success and error code. Temp paths stay
   deterministic. `completion` records the monotonically numbered boundary
   completion and its kind at that exact position in the stream.
+- `async-result`: operation, arguments, success and returned value (with an
+  explicit undefined flag), or error details. This covers platform/helper calls,
+  engine response bodies, installed-app lookup, log writes and update checks.
+- `socket-completion`, `process-exit`, `timer-completion`: fake listener/close
+  callbacks, child exit and resolved delays. Pending operations have no completion.
 
 The initial harness clock, entropy, paths, PID, socket ports and platform are
 deterministic. No live adapter, clock, helper, HTTP service or engine contributes
@@ -84,8 +89,9 @@ routed flows remain required parity.
 
 ## Starter coverage and limits
 
-Nine traces cover physical and probe failure/recovery; exhausted lines moving or
-becoming blocked; main-line exhaustion with no stand-in; pinned/shared Reconnect
+Ten traces cover physical and probe failure/recovery; exhausted lines moving or
+becoming blocked; main-line exhaustion with no stand-in, also while combining;
+pinned/shared Reconnect
 with outside sockets; weighted combining; IPv6 settling and restarts; and legacy
 line/Undo migration with an unknown settings key. Outcome assertions run before
 recording, so a trace cannot silently freeze an unexercised scenario.
