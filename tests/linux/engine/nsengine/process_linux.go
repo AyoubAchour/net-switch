@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
@@ -23,6 +24,7 @@ type engineProcess struct {
 	done                                 chan struct{}
 	err                                  error
 	socket, temporary, state, netns, log string
+	profiles                             string
 }
 
 func (d *Driver) launch(ctx context.Context, env engine.Env) error {
@@ -43,6 +45,11 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 		return err
 	}
 	p := &engineProcess{done: make(chan struct{}), temporary: temp, socket: filepath.Join(temp, "engine.sock"), state: filepath.Join(env.WorkDir, "state"), netns: env.Netns, log: filepath.Join(env.WorkDir, "engine.log")}
+	p.profiles, err = os.MkdirTemp(env.WorkDir, "profiles-")
+	if err != nil {
+		os.RemoveAll(temp)
+		return err
+	}
 	f, err := os.OpenFile(p.log, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		os.RemoveAll(temp)
@@ -54,8 +61,9 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 	const launch = `if [ -f "$1" ]; then mount --bind "$1" /etc/resolv.conf || exit; fi; shift; exec "$@"`
 	p.cmd = exec.Command("nsenter", "--net="+filepath.Join("/run/netns", env.Netns), "--", "unshare", "--mount", "--propagation", "private", "--", "sh", "-c", launch, "nsengine", filepath.Join("/etc/netns", env.Netns, "resolv.conf"), d.exe.Path, "run", "--socket", p.socket, "--state-dir", p.state)
 	p.cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+filepath.Join(filepath.Dir(env.WorkDir), "inet", "probe-ca.pem"))
+	p.cmd.Args = append(p.cmd.Args, "--profile-dir", p.profiles)
 	if os.Getenv("NSACCEPT_PROFILE") == "true" {
-		p.cmd.Env = append(p.cmd.Env, "NETSWITCH_ACCEPTANCE_PROFILE="+filepath.Join(env.WorkDir, "cpu.pprof"))
+		p.cmd.Args = append(p.cmd.Args, "--cpu-profile")
 	}
 	p.cmd.Stdout = f
 	p.cmd.Stderr = f
@@ -137,6 +145,41 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 		case <-tick.C:
 		}
 	}
+}
+
+func (d *Driver) CaptureProfiles(ctx context.Context) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.running() {
+		return errors.New("profile capture requires a running engine")
+	}
+	if err := d.process.cmd.Process.Signal(syscall.SIGUSR1); err != nil {
+		return err
+	}
+	tick := time.NewTicker(20 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if data, err := os.ReadFile(filepath.Join(d.process.profiles, "memory.json")); err == nil && json.Valid(data) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-d.process.done:
+			return errors.New("engine exited during profile capture")
+		case <-tick.C:
+		}
+	}
+}
+
+func (d *Driver) ResolverContents() (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.running() {
+		return "", errors.New("engine is not running")
+	}
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/root/etc/resolv.conf", d.process.cmd.Process.Pid))
+	return string(b), err
 }
 func (d *Driver) running() bool {
 	if d.process == nil {

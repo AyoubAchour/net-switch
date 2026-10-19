@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"maps"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 
@@ -308,7 +307,7 @@ func defaultCIDR(f int) string {
 	return "0.0.0.0/0"
 }
 func namespaceIdentity() (string, string, error) {
-	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	b, err := readKernelFile("/proc/sys/kernel/random/boot_id", 128)
 	if err != nil {
 		return "", "", err
 	}

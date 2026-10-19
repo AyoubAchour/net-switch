@@ -77,6 +77,17 @@ type Env struct {
 
 type caseFunc func(e *Env)
 
+// This is the exhaustive list of cases that mutate engine internals. All other
+// cases run against the release binary, including DNS and capacity profiling.
+func NeedsFaultInjection(id string) bool {
+	switch id {
+	case "udp.identity-without-notifications", "overload.udp-pending-bytes", "overload.unknown-owner-limits", "overload.tun-write-queue", "overload.memory-at-limit":
+		return true
+	default:
+		return false
+	}
+}
+
 type registry struct {
 	cfg   Config
 	cases []*harness.Case
@@ -85,7 +96,17 @@ type registry struct {
 func (r *registry) add(id, title string, label harness.Label, spec string, timeout time.Duration, fn caseFunc) {
 	r.cases = append(r.cases, &harness.Case{
 		ID: id, Title: title, Label: label, Spec: spec, Timeout: timeout,
-		Run: func(t *harness.T) { fn(r.setup(t)) },
+		Run: func(t *harness.T) {
+			e := r.setup(t)
+			fn(e)
+			if strings.HasPrefix(id, "overload.") && id != "overload.unknown-owner-limits" && id != "overload.udp-pending-bytes" {
+				if v, ok := e.Eng.(engine.V1); ok && v.Session() != nil {
+					st, err := v.Session().Stats(e.Ctx())
+					t.Require(err == nil, "read this overload case's lookup window (%v)", err)
+					t.Check(st.LookupCount > 0 && st.LookupMisses*200 <= st.LookupCount, "this overload window identifies at least 99.5%% of lookups (%d misses of %d)", st.LookupMisses, st.LookupCount)
+				}
+			}
+		},
 	})
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"runtime"
 	"runtime/debug"
+	"runtime/metrics"
 	"sync"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
@@ -294,6 +295,15 @@ func (e *Engine) Stats() any {
 	s["stackBytes"] = memory.StackInuse
 	s["heapGoalBytes"] = memory.NextGC
 	s["gcCycles"] = uint64(memory.NumGC)
+	s["gcCPUppm"] = uint64(memory.GCCPUFraction * 1_000_000)
+	s["runtimeBytes"] = memory.Sys - memory.HeapReleased
+	s["goroutines"] = uint64(runtime.NumGoroutine())
+	samples := []metrics.Sample{{Name: "/gc/stack/starting-size:bytes"}, {Name: "/gc/heap/live:bytes"}, {Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/total:cpu-seconds"}}
+	metrics.Read(samples)
+	s["stackStartBytes"] = samples[0].Value.Uint64()
+	s["heapLiveBytes"] = samples[1].Value.Uint64()
+	s["gcCPUNanos"] = uint64(samples[2].Value.Float64() * 1e9)
+	s["totalCPUNanos"] = uint64(samples[3].Value.Float64() * 1e9)
 	if e.lastError != nil {
 		s["fatal"] = e.lastError.Error()
 	}

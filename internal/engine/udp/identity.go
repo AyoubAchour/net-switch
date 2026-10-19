@@ -113,6 +113,16 @@ func (n *NAT) Destroy(source netip.AddrPort, generation string) {
 		return
 	}
 	s.mu.Lock()
+	if !s.closed && s.owner.Generation == "" && generation != "" {
+		// Lookup may have read this cookie before the destroy notification
+		// arrived. Keep it until lookup publishes the generation. Bound the
+		// queue; an overflow requires a fresh kernel snapshot before dialing.
+		if len(s.pendingDestroys) < 32 {
+			s.pendingDestroys = append(s.pendingDestroys, generation)
+		} else {
+			s.destroyOverflow = true
+		}
+	}
 	match := s.owner.Generation == generation && generation != ""
 	s.mu.Unlock()
 	if match {

@@ -83,6 +83,10 @@ func serveProbes(dir string, rec *recorder) error {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"Status":0}`)
 		case "/dns-query":
+			if r.ProtoMajor != 2 {
+				http.Error(w, "Quad9 fixture requires HTTP/2", http.StatusHTTPVersionNotSupported)
+				return
+			}
 			b, err := base64.RawURLEncoding.DecodeString(r.URL.Query().Get("dns"))
 			if err != nil || len(b) < 12 {
 				http.Error(w, "bad DNS query", 400)

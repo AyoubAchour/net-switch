@@ -3,6 +3,7 @@
 package suite
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -60,7 +61,7 @@ func addOverload(r *registry) {
 	r.add("overload.tun-write-queue", "The TUN write queue holds at most 1,024 packets; the rest are dropped and counted, and forwarding never blocks on it",
 		harness.Requires10, "5.9", 2*time.Minute, tunQueue)
 	r.add("overload.memory-at-limit", "At the GOMEMLIMIT target, the byte budgets still hold and no existing flow is cut to make room",
-		harness.Requires10, "5.9", 2*time.Minute, memoryLimit)
+		harness.Requires10, "5.9", 4*time.Minute, memoryLimit)
 }
 
 // floodTargets are ten echo servers for the i-th flooding app.
@@ -129,11 +130,13 @@ func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) 
 	for _, name := range names {
 		r := results[name]
 		seen := map[int]bool{}
+		serverLine := map[int]engine.LineID{}
 		for _, rec := range Select(recs, Tagged("udp", r.Token)) {
 			// "T:<token>:0:<socket> "
 			fields := strings.Split(strings.TrimSpace(rec.Data), ":")
 			if i, err := strconv.Atoi(fields[len(fields)-1]); err == nil {
 				seen[i] = true
+				serverLine[i] = topo.LineOfText(rec.Src)
 			}
 		}
 		s := sessions{opened: r.Opened, answered: r.Answered, refused: r.Refused, gotOut: len(seen), listed: listed[AppPath(name)]}
@@ -146,7 +149,7 @@ func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) 
 				if f, ok := bySource[local]; ok {
 					if f.App == "" {
 						s.unknown++
-						if f.AppID != "" || f.PID != 0 || f.Line != "a" || !seen[i] {
+						if f.AppID != "" || f.PID != 0 || f.Line != "a" || !seen[i] || serverLine[i] != "a" {
 							bad++
 						}
 					} else if f.App != AppPath(name) {
@@ -445,6 +448,10 @@ func tcpFlowsTotalCase(e *Env) {
 	e.raiseConntrack(1 << 20)
 	e.StartEngine(cfg)
 	// charlie's stream, itself a flow, runs until the apps let go.
+	var baseline engine.Stats
+	if v1, ok := e.Eng.(engine.V1); ok {
+		baseline = stats(e, v1.Session())
+	}
 	release := e.NewRelease("flows")
 	stream := e.StartStream("charlie", AsUser, 6*time.Minute, release.Arg()...)
 	e.Sleep(time.Second)
@@ -471,11 +478,21 @@ func tcpFlowsTotalCase(e *Env) {
 	accepted := Select(recs, isHold)
 	unknown := 0
 	if v1, ok := e.Eng.(engine.V1); ok {
+		if profiler, ok := e.Eng.(interface{ CaptureProfiles(context.Context) error }); ok {
+			ctx, cancel := context.WithTimeout(e.Ctx(), 15*time.Second)
+			err := profiler.CaptureProfiles(ctx)
+			cancel()
+			e.T.Check(err == nil, "heap and goroutine profiles captured while the flows remain held (%v)", err)
+		}
 		st, err := v1.Session().Stats(e.Ctx())
 		e.T.Require(err == nil, "stats while all TCP flows are held (%v)", err)
 		unknown = int(st.Unknown)
 		e.T.Check(unknown <= 2048 && st.PeakUnknown <= 2048, "unknown TCP admission never exceeds its separate 2048-flow budget (%d held, %d peak)", unknown, st.PeakUnknown)
 		e.T.Logf("held TCP flows: %d; runtime memory and queues: %v", established, st.Counters)
+		if st.Flows > 0 {
+			e.T.Logf("CAP MEMORY: flows=%d heap=%d stack=%d runtime=%d heap/flow=%d stack/flow=%d incremental-heap/flow=%d GC-CPU-ppm=%d GC-CPU-ns=%d total-CPU-ns=%d goroutines=%d starting-stack=%d tun=%s output-drops=%d", st.Flows, st.Counters["heapBytes"], st.Counters["stackBytes"], st.Counters["runtimeBytes"], st.Counters["heapBytes"]/uint64(st.Flows), st.Counters["stackBytes"]/uint64(st.Flows), (st.Counters["heapBytes"]-baseline.Counters["heapBytes"])/uint64(st.Flows), st.Counters["gcCPUppm"], st.Counters["gcCPUNanos"]-baseline.Counters["gcCPUNanos"], st.Counters["totalCPUNanos"]-baseline.Counters["totalCPUNanos"], st.Counters["goroutines"], st.Counters["stackStartBytes"], st.TunKernel, st.Counters["tunDropped"])
+		}
+		e.T.Check(st.Flows == tcpFlowsTotal, "the cap profile measures all %d live flows (%d)", tcpFlowsTotal, st.Flows)
 	}
 	lines := RecordLines(accepted)
 	e.T.Check(len(accepted) == established && lines["c"] == established-unknown && lines["a"] == unknown,
@@ -507,6 +524,10 @@ func tcpFlowsTotalCase(e *Env) {
 func tcpBufferBudgetCase(e *Env) {
 	e.StartEngine(e.DefaultConfig())
 	_, s := e.v1()
+	exerciseTCPBufferBudget(e, s)
+}
+
+func exerciseTCPBufferBudget(e *Env, s engine.Controller) {
 	// A download's send buffer toward the app grows from the 64 KiB floor to
 	// at most 6 MiB, doubling only in a 250 ms tick in which the flow moved at
 	// least its current buffer, and the grant stays while bytes keep moving

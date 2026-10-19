@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
@@ -40,8 +41,11 @@ type lineState struct {
 	Default4, Default6 bool
 }
 type Platform struct {
-	testClose            func()
-	mu                   sync.Mutex
+	testClose func()
+	// Only lifecycle writers take routeMu. Dials and probes read bindings;
+	// they never wait for netlink or a journal fsync.
+	routeMu              sync.Mutex
+	bindings             atomic.Pointer[bindingSnapshot]
 	ctx                  context.Context
 	Instance             string
 	objects              *objects
@@ -51,6 +55,10 @@ type Platform struct {
 	tunSpec              tunObject
 	lines                map[string]lineState
 	owned                map[string]ownedObject
+	captureOwned         map[string]ownedObject
+	observed             map[string]bool
+	ipv4Only             bool
+	journalDirty         bool
 	monitorCancel        context.CancelFunc
 	monitorDone          chan struct{}
 	Owners               *Owners
@@ -60,6 +68,19 @@ type Platform struct {
 	Fatal          func(error)
 	WrapTun        func(platform.TunDevice) platform.TunDevice
 }
+type bindingSnapshot struct {
+	lines     map[string]lineState
+	capturing bool
+}
+
+func (p *Platform) publishBindings() {
+	view := &bindingSnapshot{lines: make(map[string]lineState, len(p.lines)), capturing: p.capturing}
+	for id, l := range p.lines {
+		view.lines[id] = l
+	}
+	p.bindings.Store(view)
+}
+
 type ownedObject struct {
 	kind string
 	fp   journal.Fingerprint
@@ -125,8 +146,8 @@ func (p *Platform) Close() error {
 	return errors.Join(err, p.journal.Close())
 }
 func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.routeMu.Lock()
+	defer p.routeMu.Unlock()
 	if err := p.Owners.Warm(ctx); err != nil {
 		return nil, err
 	}
@@ -150,6 +171,16 @@ func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 		return rollback(err)
 	}
 	for _, cidr := range []string{"198.18.0.1/30", "fdfe:dcba:9876::1/126"} {
+		if prefix(cidr).IP.To4() == nil {
+			setting, err := readKernelFile("/proc/sys/net/ipv6/conf/"+p.tunSpec.Name+"/disable_ipv6", 32)
+			if errors.Is(err, os.ErrNotExist) || (err == nil && len(setting) > 0 && setting[0] == '1') {
+				p.ipv4Only = true
+				continue
+			}
+			if err != nil {
+				return rollback(err)
+			}
+		}
 		v := addressObject{index, p.tunSpec.Name, p.tunSpec.Alias, cidr}
 		if err := p.journal.Create(ctx, "address", p.objects.fingerprint(v)); err != nil {
 			return rollback(err)
@@ -224,10 +255,10 @@ func (p *Platform) allocate(ctx context.Context, count int) error {
 }
 
 func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
-	p.mu.Lock()
+	p.routeMu.Lock()
 	var replaced []string
 	defer func() {
-		p.mu.Unlock()
+		p.routeMu.Unlock()
 		for _, id := range replaced {
 			if p.LineDown != nil {
 				p.LineDown(id)
@@ -314,8 +345,23 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 func (p *Platform) add(ctx context.Context, kind string, fp journal.Fingerprint) error {
 	key := kind + fp["object"]
 	if _, ok := p.owned[key]; ok {
+		if kind == "binding" || p.observed[key] {
+			return nil
+		}
+		p.journalDirty = true
+		// Network managers can remove our objects. Retire the absent record,
+		// then journal a fresh intent before restoring it. A colliding foreign
+		// object makes Create fail; it is never replaced or claimed.
+		if err := p.journal.Remove(ctx, kind, fp); err != nil {
+			return err
+		}
+		if err := p.journal.Create(ctx, kind, fp); err != nil {
+			return err
+		}
+		p.observed[key] = true
 		return nil
 	}
+	p.journalDirty = true
 	if kind == "route" {
 		var next netlink.Route
 		if err := json.Unmarshal([]byte(fp["object"]), &next); err != nil {
@@ -333,8 +379,17 @@ func (p *Platform) add(ctx context.Context, kind string, fp journal.Fingerprint)
 				if old.Type == unix.RTN_UNREACHABLE && next.Type != old.Type {
 					return errors.New("physical route collides with the reserved unreachable fallback")
 				}
-				if err := p.journal.Replace(ctx, kind, object.fp, fp); err != nil {
-					return err
+				if p.observed[previousKey] {
+					if err := p.journal.Replace(ctx, kind, object.fp, fp); err != nil {
+						return err
+					}
+				} else {
+					if err := p.journal.Remove(ctx, kind, object.fp); err != nil {
+						return err
+					}
+					if err := p.journal.Create(ctx, kind, fp); err != nil {
+						return err
+					}
 				}
 				delete(p.owned, previousKey)
 				p.owned[key] = ownedObject{kind, fp}
@@ -353,6 +408,35 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	p.observed = make(map[string]bool, len(routes)+len(p.owned))
+	var foreignRoutes []netlink.Route
+	var foreignRules []netlink.Rule
+	for _, r := range routes {
+		key := "route" + routeFP(p.objects, r)["object"]
+		p.observed[key] = true
+		if _, owned := p.owned[key]; !owned {
+			foreignRoutes = append(foreignRoutes, r)
+		}
+	}
+	for _, family := range p.families() {
+		rules, err := readRules(ctx, family)
+		if err != nil {
+			return err
+		}
+		for _, r := range rules {
+			key := "rule" + ruleFP(p.objects, r.rule)["object"]
+			_, owned := p.owned[key]
+			if len(r.extra) == 0 {
+				p.observed[key] = true
+			}
+			if !owned || len(r.extra) != 0 {
+				foreignRules = append(foreignRules, r.rule)
+			}
+		}
+	}
+	if !layoutAvailable(p.base, 255, foreignRules, foreignRoutes) {
+		return errors.New("foreign rule or route now conflicts with the engine layout; restoring normal routing")
+	}
 	desired := map[string]ownedObject{}
 	keep := func(kind string, fp journal.Fingerprint) error {
 		desired[kind+fp["object"]] = ownedObject{kind, fp}
@@ -361,7 +445,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 	// Fallback routes exist before every selector and never leave the table
 	// during reconciliation, including when a DHCP default disappears.
 	for _, l := range p.lines {
-		for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
+		for _, fam := range p.families() {
 			r := netlink.Route{Family: fam, Table: l.Table, Dst: prefix(defaultCIDR(fam)), Type: unix.RTN_UNREACHABLE, Protocol: routeProtocol, Priority: int(^uint32(0))}
 			// Linux associates IPv6 reject routes with loopback. Record that
 			// index before creating it, so the live fingerprint matches cleanup.
@@ -378,7 +462,9 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 		}
 	}
 	for id, l := range p.lines {
-		link, err := netlink.LinkByIndex(l.Index)
+		// Interface names are the configured binding. A replug creates a new
+		// index and must recover without requiring a policy revision.
+		link, err := netlink.LinkByName(l.Name)
 		l.Up = false
 		l.Default4 = false
 		l.Default6 = false
@@ -387,6 +473,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			return err
 		}
 		if err == nil && link.Attrs().Name == l.Name {
+			l.Index = link.Attrs().Index
 			l.Up = link.Attrs().Flags&net.FlagUp != 0
 			addrs, err := retryDump(ctx, func() ([]netlink.Addr, error) { return netlink.AddrList(link, netlink.FAMILY_ALL) })
 			if err != nil {
@@ -425,7 +512,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 		if err := keep("binding", binding); err != nil {
 			return err
 		}
-		for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
+		for _, fam := range p.families() {
 			r := netlink.NewRule()
 			r.Family = fam
 			r.Priority = p.base + 10000 + l.N
@@ -465,25 +552,64 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			if _, ok := desired[key]; ok {
 				continue
 			}
+			if _, ok := p.captureOwned[key]; ok {
+				continue
+			}
 			if err := p.journal.Remove(ctx, kind, object.fp); err != nil {
 				return err
 			}
+			p.journalDirty = true
 			delete(p.owned, key)
 		}
 	}
+	// Restore bypass and capture only after physical tables are complete.
+	for _, kind := range []string{"route", "rule"} {
+		for _, object := range p.captureOwned {
+			if object.kind == kind {
+				if err := p.add(ctx, kind, object.fp); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if p.journalDirty {
+		if err := p.journal.Compact(); err != nil {
+			return err
+		}
+		p.journalDirty = false
+	}
+	p.publishBindings()
 	return nil
 }
 
+func (p *Platform) families() []int {
+	if p.ipv4Only {
+		return []int{unix.AF_INET}
+	}
+	return []int{unix.AF_INET, unix.AF_INET6}
+}
+
 func (p *Platform) Capture(ctx context.Context) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.routeMu.Lock()
+	defer p.routeMu.Unlock()
 	if p.capturing {
+		return nil
+	}
+	p.captureOwned = make(map[string]ownedObject)
+	create := func(kind string, fp journal.Fingerprint) error {
+		if err := p.add(ctx, kind, fp); err != nil {
+			return err
+		}
+		p.captureOwned[kind+fp["object"]] = ownedObject{kind, fp}
 		return nil
 	}
 	for _, cidr := range bypass {
 		r := netlink.NewRule()
 		r.Family = unix.AF_INET
 		if prefix(cidr).IP.To4() == nil {
+			if p.ipv4Only {
+				continue
+			}
 			r.Family = unix.AF_INET6
 		}
 		r.Priority = p.base + 9100
@@ -491,17 +617,17 @@ func (p *Platform) Capture(ctx context.Context) error {
 		r.Dst = prefix(cidr)
 		r.Protocol = routeProtocol
 		r.Type = 1
-		if err := p.journal.Create(ctx, "rule", ruleFP(p.objects, *r)); err != nil {
+		if err := create("rule", ruleFP(p.objects, *r)); err != nil {
 			return err
 		}
 	}
-	for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
+	for _, fam := range p.families() {
 		r := netlink.Route{Family: fam, Table: 21000 + p.base, LinkIndex: p.tunSpec.Index, Dst: prefix(defaultCIDR(fam)), Type: unix.RTN_UNICAST, Protocol: routeProtocol, Scope: netlink.SCOPE_LINK}
-		if err := p.journal.Create(ctx, "route", routeFP(p.objects, r)); err != nil {
+		if err := create("route", routeFP(p.objects, r)); err != nil {
 			return err
 		}
 	}
-	for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
+	for _, fam := range p.families() {
 		r := netlink.NewRule()
 		r.Family = fam
 		r.Priority = p.base + 12000
@@ -509,11 +635,12 @@ func (p *Platform) Capture(ctx context.Context) error {
 		r.IifName = "lo"
 		r.Protocol = routeProtocol
 		r.Type = 1
-		if err := p.journal.Create(ctx, "rule", ruleFP(p.objects, *r)); err != nil {
+		if err := create("rule", ruleFP(p.objects, *r)); err != nil {
 			return err
 		}
 	}
 	p.capturing = true
+	p.publishBindings()
 	run, cancel := context.WithCancel(p.ctx)
 	p.monitorCancel = cancel
 	p.monitorDone = make(chan struct{})
@@ -530,7 +657,7 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 			return
 		case <-tick.C:
 		}
-		p.mu.Lock()
+		p.routeMu.Lock()
 		old := make(map[string]lineState, len(p.lines))
 		for id, l := range p.lines {
 			old[id] = l
@@ -541,7 +668,7 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 		if err == nil {
 			for id, before := range old {
 				after := p.lines[id]
-				if before.Up && !after.Up {
+				if before.Up && (!after.Up || before.Index != after.Index) {
 					down = append(down, id)
 				}
 				for _, a := range before.Addresses {
@@ -551,7 +678,10 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 				}
 			}
 		}
-		p.mu.Unlock()
+		if err != nil {
+			p.bindings.Store(nil)
+		}
+		p.routeMu.Unlock()
 		if err != nil {
 			if ctx.Err() == nil && p.Fatal != nil {
 				go p.Fatal(fmt.Errorf("Linux route reconciliation: %w", err))
@@ -571,20 +701,23 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 	}
 }
 func (p *Platform) Cleanup(ctx context.Context) error {
-	p.mu.Lock()
+	p.bindings.Store(nil)
+	p.routeMu.Lock()
 	cancel, done := p.monitorCancel, p.monitorDone
 	p.monitorCancel = nil
 	p.monitorDone = nil
-	p.mu.Unlock()
+	p.routeMu.Unlock()
 	if cancel != nil {
 		cancel()
 		<-done
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.routeMu.Lock()
+	defer p.routeMu.Unlock()
+	p.bindings.Store(nil)
 	err := p.journal.Cleanup(ctx)
 	if err == nil {
 		p.owned = map[string]ownedObject{}
+		p.captureOwned = nil
 		p.lines = map[string]lineState{}
 		p.capturing = false
 		p.allocated = false
@@ -593,9 +726,11 @@ func (p *Platform) Cleanup(ctx context.Context) error {
 }
 
 func (p *Platform) binding(id string, v6 bool) (lineState, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	l, ok := p.lines[id]
+	view := p.bindings.Load()
+	if view == nil {
+		return lineState{}, errors.New("line bindings are unavailable")
+	}
+	l, ok := view.lines[id]
 	if !ok || !l.Up || (!v6 && !l.Default4) || (v6 && !l.Default6) {
 		return l, fmt.Errorf("line %s has no usable default route", id)
 	}

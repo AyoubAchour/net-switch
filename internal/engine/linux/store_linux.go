@@ -33,6 +33,10 @@ func (s diskStore) Records() ([]journal.Record, error) {
 		return nil, err
 	}
 	defer f.Close()
+	// Establish the directory entry once. Append only changes this inode.
+	if err := SyncDir(filepath.Dir(s.path)); err != nil {
+		return nil, err
+	}
 	r := bufio.NewReader(f)
 	var records []journal.Record
 	var offset int64
@@ -79,6 +83,7 @@ func (s diskStore) Append(r journal.Record) error {
 	if err != nil {
 		return err
 	}
+	_, statErr := os.Lstat(s.path)
 	f, err := trustedFile(s.path, unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT)
 	if err != nil {
 		return err
@@ -88,6 +93,49 @@ func (s diskStore) Append(r journal.Record) error {
 		return err
 	}
 	if err := f.Sync(); err != nil {
+		return err
+	}
+	if errors.Is(statErr, os.ErrNotExist) {
+		return SyncDir(filepath.Dir(s.path))
+	}
+	return nil
+}
+
+func (s diskStore) Compact(records []journal.Record) error {
+	f, err := os.CreateTemp(filepath.Dir(s.path), ".engine-journal-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	write := func(r journal.Record) error {
+		b, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(b)
+		return json.NewEncoder(f).Encode(diskRecord{b, hex.EncodeToString(sum[:])})
+	}
+	for _, r := range records {
+		phase := r.Phase
+		r.Phase = "intent"
+		if err := write(r); err != nil {
+			return err
+		}
+		if phase == "created" {
+			r.Phase = phase
+			if err := write(r); err != nil {
+				return err
+			}
+		}
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(f.Name(), s.path); err != nil {
 		return err
 	}
 	return SyncDir(filepath.Dir(s.path))

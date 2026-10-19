@@ -35,6 +35,7 @@ type Forwarder struct {
 	inFlight                      int
 	connections                   map[stack.TransportEndpointID]*connection
 	retired                       map[*connection]struct{}
+	relays                        *relayWorkers
 	control                       flowapi.Controller
 	owners                        platform.OwnerLookup
 	dialer                        platform.LineDialer
@@ -51,6 +52,7 @@ func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Cont
 	ctx, cancel := context.WithCancel(ctx)
 	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]*pendingOpen), connections: make(map[stack.TransportEndpointID]*connection), retired: make(map[*connection]struct{}), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 2*inFlight, f.open)
+	f.relays = newRelayWorkers()
 	s.SetTransportProtocolHandler(gtcp.ProtocolNumber, f.Handle)
 	gtcp.SetTimeWaitHandler(s, f.Handle)
 	drain := gtcp.SetLocalCloseFence(s, localCloseFenceEnabled)
@@ -298,12 +300,23 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	// Keep the pending entry through endpoint setup. A delayed reopen hook
 	// must see either pending or connections, never a gap between them.
 	complete(false)
-	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission, ep: ep, wq: &wq}
 	if a, ok := remote.LocalAddr().(*net.TCPAddr); ok {
 		ticket.Established(a.AddrPort().Addr())
 	} else {
 		ticket.Established(netip.Addr{})
 	}
+	if ready, ok := remote.(platform.ReadyTCP); ok {
+		stopRemote()
+		stopApp()
+		if err := f.startReadyRelay(ctx, c, &wq, ready, closeEndpoint, cancel); err != nil {
+			abort()
+			close(c.done)
+			return
+		}
+		handedOff = true
+		return
+	}
+	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission, ep: ep, wq: &wq}
 	// Lookup, dialing and handshake work can grow this goroutine's stack.
 	// Hand off to a small relay goroutine so every idle connection does not
 	// retain the setup frame, request and its deferred cleanup closures.
@@ -331,7 +344,7 @@ func (f *Forwarder) relay(ctx context.Context, c *connection, app *onceCloseConn
 // Stop cancels dials and relays. The owner must close the stack before Wait,
 // which also unblocks handshakes whose app never sent its final ACK.
 func (f *Forwarder) Stop() { f.mu.Lock(); f.cancel(); f.mu.Unlock() }
-func (f *Forwarder) Wait() { f.wg.Wait() }
+func (f *Forwarder) Wait() { f.wg.Wait(); f.relays.close() }
 
 // gonet.Close delegates directly to Endpoint.Close, which requires one call.
 // Cancellation, splice errors and normal cleanup share this single owner.
