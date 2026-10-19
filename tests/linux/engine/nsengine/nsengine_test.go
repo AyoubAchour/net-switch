@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
@@ -37,6 +38,7 @@ func (r runtime) Stop(context.Context) error {
 type rig struct {
 	d     *Driver
 	table *flows.Table
+	mu    sync.Mutex // sessions renew from their own goroutines
 	seen  map[string]bool
 }
 
@@ -55,7 +57,9 @@ func newRig() *rig {
 		}
 		reply := srv.Handle(ctx, decoded)
 		if reply.Error != "" {
+			r.mu.Lock()
 			r.seen[reply.Error] = true
+			r.mu.Unlock()
 		}
 		return json.Marshal(reply)
 	}
@@ -94,7 +98,9 @@ func (r *rig) attach(t *testing.T) *Session {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return c.(*Session)
+	s := c.(*Session)
+	t.Cleanup(func() { s.SetAutoRenew(false) })
+	return s
 }
 
 // open admits n flows from bravo through the table, as forwarding would.
@@ -232,9 +238,13 @@ func TestRefusalsMatchTheServer(t *testing.T) {
 	}
 	_, err := s.Flows(ctx, "")
 	refused(t, err, engine.RefusedCapacity, "a fifth snapshot at once")
+	c.mu.Lock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for text := range c.seen {
 		r.seen[text] = true
 	}
+	c.mu.Unlock()
 
 	// Every text the table calls a refusal must be one the server produced.
 	var missing []string
@@ -247,6 +257,51 @@ func TestRefusalsMatchTheServer(t *testing.T) {
 	if len(missing) > 0 {
 		t.Errorf("refusals the server never produced (reworded or gone?): %q", missing)
 	}
+}
+
+func TestAttachAdoptsTheNewSession(t *testing.T) {
+	ctx := context.Background()
+	r := newRig()
+	first := r.attach(t)
+	if r.d.Session() != engine.Controller(first) || !first.renewing() {
+		t.Fatal("the first attach is the driver's session, and renews itself")
+	}
+	if _, err := first.Start(ctx, 1, config()); err != nil {
+		t.Fatal(err)
+	}
+	r.d.cfg = config()
+	fresh := r.attach(t)
+	if r.d.Session() != engine.Controller(fresh) {
+		t.Fatal("after a reattach the driver must use the new session")
+	}
+	if first.renewing() || !fresh.renewing() {
+		t.Errorf("the fenced session stops renewing and the new one renews (old %v, new %v)", first.renewing(), fresh.renewing())
+	}
+	// Against a fencing engine, everything the driver does now must go
+	// through the new session.
+	p := config().Policy
+	p.IPv6 = true
+	if err := r.d.Apply(ctx, p); err != nil {
+		t.Fatalf("apply after the reattach: %v", err)
+	}
+	if err := r.d.SetLanes(ctx, map[engine.LineID]engine.LineID{"b": "a"}); err != nil {
+		t.Fatalf("lanes after the reattach: %v", err)
+	}
+	if _, err := r.d.Flows(ctx); err != nil {
+		t.Fatalf("flows after the reattach: %v", err)
+	}
+	if _, err := r.d.CloseFlows(ctx, engine.Selector{Line: "b"}); err != nil {
+		t.Fatalf("closeFlows after the reattach: %v", err)
+	}
+	// Stop reaches the engine through the new session; only waiting for the
+	// process is still the stub's.
+	if err := r.d.Stop(ctx); !errors.Is(err, engine.ErrNotImplemented) {
+		t.Fatalf("stop: %v", err)
+	}
+	if fresh.renewing() {
+		t.Error("a stopped session doesn't renew")
+	}
+	refused(t, fresh.Renew(ctx), engine.RefusedLapsed, "a renewal after the driver stopped the engine")
 }
 
 func TestFlowsPageAndConvert(t *testing.T) {

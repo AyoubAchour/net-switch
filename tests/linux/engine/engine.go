@@ -310,15 +310,17 @@ type FaultAck struct {
 
 // Stats are the engine's counters and gauges (5.6, 5.9, 5.10).
 type Stats struct {
-	// Gauges: what's in use now.
+	// Gauges: what's in use now. TimeWait counts retained TIME_WAIT
+	// endpoints, which aren't live flows (5.9).
 	Flows, Handshakes, UDP, Unknown, UnknownUDP, TimeWait int64
 	// Byte budgets in use (5.9).
 	TCPBytes, PendingBytes, SnapshotBytes int64
 	// Counters since the engine started.
-	Admitted       uint64 // the combining counter k: flows admitted (5.4)
-	Rejected       uint64
-	DroppedNotices uint64 // rejection notices over the rate limit
-	EventsDropped  uint64
+	Admitted        uint64 // the combining counter k: flows admitted (5.4)
+	Rejected        uint64
+	DroppedNotices  uint64 // rejection notices over the rate limit
+	TimeWaitSkipped uint64 // closings that skipped TIME_WAIT at its cap
+	EventsDropped   uint64
 	// Owner lookups (5.6): how many, how many found no owner or several, and
 	// the time they took in total.
 	LookupCount, LookupMisses, LookupAmbiguous uint64
@@ -369,7 +371,9 @@ type V1 interface {
 	Driver
 	// Hello greets the engine on a fresh connection.
 	Hello(ctx context.Context) (Hello, error)
-	// Attach opens a new control session, fencing out the current one.
+	// Attach opens a new control session, fencing out the current one, and
+	// makes it the session the Driver methods use from then on: the old
+	// session stops renewing and the new one renews itself.
 	Attach(ctx context.Context) (Controller, error)
 	// Session is the session the Driver methods use.
 	Session() Controller

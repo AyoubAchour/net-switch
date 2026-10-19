@@ -81,13 +81,23 @@ func PatternSHA256(n int64) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// ParseBulkRequest reads "GET n" or "PUT n".
+// FloodPattern is the endless data a "FLOOD ms" request gets: the server
+// sends it as fast as it can for ms milliseconds, then one byte every 100 ms
+// until the client closes. The client checks every byte against its own copy.
+func FloodPattern() io.Reader { return Pattern(floodLength) }
+
+const floodLength = 1 << 50
+
+// MaxFloodMS bounds a FLOOD request's full-speed part.
+const MaxFloodMS = 60_000
+
+// ParseBulkRequest reads "GET n", "PUT n" (bytes) or "FLOOD n" (ms).
 func ParseBulkRequest(line string) (verb string, n int64, err error) {
 	fields := strings.Fields(line)
-	if len(fields) != 2 || (fields[0] != "GET" && fields[0] != "PUT") {
+	if len(fields) != 2 || (fields[0] != "GET" && fields[0] != "PUT" && fields[0] != "FLOOD") {
 		return "", 0, fmt.Errorf("bad bulk request %q", line)
 	}
-	if _, err := fmt.Sscan(fields[1], &n); err != nil || n < 0 || n > 1<<31 {
+	if _, err := fmt.Sscan(fields[1], &n); err != nil || n < 0 || n > 1<<31 || (fields[0] == "FLOOD" && n > MaxFloodMS) {
 		return "", 0, fmt.Errorf("bad bulk size in %q", line)
 	}
 	return fields[0], n, nil

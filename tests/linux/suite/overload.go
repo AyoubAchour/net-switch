@@ -45,10 +45,14 @@ func addOverload(r *registry) {
 		noLimits, "5.9", 3*time.Minute, tcpHandshakesCase)
 	r.defect("overload.tcp-flows-total", "Nine apps hold 7,600 connections each, all under their own limit: together at most 65,536 flows are admitted and the rest refused",
 		noLimits, "5.9", 6*time.Minute, tcpFlowsTotalCase)
-	r.add("overload.tcp-buffer-budget", "Forty fast transfers at once: TCP buffer growth stays within its 256 MiB budget and every transfer arrives intact",
-		harness.Requires10, "5.9", 3*time.Minute, tcpBufferBudgetCase)
-	r.add("overload.rejection-notice-rate", "Six capped apps open thousands of UDP sessions a second: refusal notices stay within 1,000 a second per app and 5,000 in total, and the rest are counted",
-		harness.Requires10, "5.3, 5.9", 2*time.Minute, rejectionNoticeRate)
+	r.add("overload.tcp-buffer-budget", "64 downloads that each earn the 6 MiB send buffer and keep it: growth fills the 256 MiB budget, is refused beyond it, and every byte arrives intact",
+		harness.Requires10, "5.9", 4*time.Minute, tcpBufferBudgetCase)
+	r.add("overload.rejection-notices-per-app", "One capped app opens 3,000 UDP sessions a second on its own: it gets about 1,000 refusal notices a second, never more, and the rest are counted",
+		harness.Requires10, "5.3, 5.9", 2*time.Minute, rejectionNoticesPerApp)
+	r.add("overload.rejection-notices-total", "Eight capped apps open 800 UDP sessions a second each, all under their own limit: together they get about 5,000 refusal notices a second, never more",
+		harness.Requires10, "5.3, 5.9", 2*time.Minute, rejectionNoticesTotal)
+	r.add("overload.timewait-cap", "5,000 server-closed connections in 15 s: TIME_WAIT holds at most 4,096 endpoints, they aren't live flows, the rest skip it, and no connection is refused",
+		harness.Requires10, "5.9", 3*time.Minute, timeWaitCap)
 	r.pending("overload.udp-pending-bytes", "Pending UDP stays within 32 MiB in total and each new session's first-packet queue within 64 datagrams and 256 KiB; the excess is dropped and counted",
 		"5.3, 5.9", "a test-build hook that holds owner lookups, so new sessions stay pending long enough to fill their queues on purpose")
 	r.pending("overload.unknown-owner-limits", "Flows whose owner is unknown are capped at 2,048, and their UDP sessions at 512",
@@ -82,10 +86,87 @@ func (e *Env) udpFlood(names []string, n int, release Release) (map[string]*Bg, 
 	for _, name := range names {
 		var r app.FloodResult
 		bgs[name].WaitHeld(e, "", 3*time.Minute, &r)
-		e.T.Check(r.Opened == n && len(r.OpenErrors) == 0, "%s opened its %d sockets (%d, errors %v)", name, n, r.Opened, r.OpenErrors)
+		e.T.Check(r.Opened == n && r.Sent == n && len(r.OpenErrors) == 0 && len(r.SendErrors) == 0,
+			"%s opened its %d sockets and sent on each (%d opened, %d sent, errors %v %v)", name, n, r.Opened, r.Sent, r.OpenErrors, r.SendErrors)
 		results[name] = r
 	}
 	return bgs, results
+}
+
+// sessions is what one app's flood became, from three sides that don't
+// depend on each other: the app (answers and ICMP refusals, per socket), the
+// servers (which sockets' datagrams reached them) and the engine (the UDP
+// sessions it lists while every socket is still held). Admission is counted
+// from the servers and the engine, refusals only from ICMP, and anything
+// else is delivery loss, kept apart: a lost datagram can neither pass for a
+// refusal nor hide an admitted session the engine still lists.
+type sessions struct {
+	opened, answered, refused int
+	gotOut                    int // sockets whose datagram reached a server
+	listed                    int // UDP sessions the engine lists for the app
+	refusedButOut             int // refused, yet the datagram got out anyway
+	lostOut, lostBack         int // never reached a server and never refused; or reached one and never answered
+}
+
+func (s sessions) admitted() int { return max(s.gotOut, s.listed) }
+func (s sessions) lost() int     { return s.lostOut + s.lostBack }
+
+// floodSessions gathers the three sides while the floods still hold their
+// sockets.
+func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) map[string]sessions {
+	listed := map[string]int{}
+	for _, f := range e.Flows() {
+		if f.Protocol == "udp" {
+			listed[f.App]++
+		}
+	}
+	recs := e.Records()
+	out := map[string]sessions{}
+	for _, name := range names {
+		r := results[name]
+		seen := map[int]bool{}
+		for _, rec := range Select(recs, Tagged("udp", r.Token)) {
+			// "T:<token>:0:<socket> "
+			fields := strings.Split(strings.TrimSpace(rec.Data), ":")
+			if i, err := strconv.Atoi(fields[len(fields)-1]); err == nil {
+				seen[i] = true
+			}
+		}
+		s := sessions{opened: r.Opened, answered: r.Answered, refused: r.Refused, gotOut: len(seen), listed: listed[AppPath(name)]}
+		for _, i := range r.RefusedSockets {
+			if seen[i] {
+				s.refusedButOut++
+			}
+		}
+		s.lostOut = r.Opened - s.gotOut - (s.refused - s.refusedButOut)
+		s.lostBack = s.gotOut - r.Answered
+		out[name] = s
+	}
+	return out
+}
+
+// checkSessions makes the mandatory checks on every app's flood: no refused
+// session got out, and delivery loss stays small enough that the admission
+// counts mean something.
+func (e *Env) checkSessions(names []string, all map[string]sessions) {
+	refusedButOut, lost, opened := 0, 0, 0
+	for _, name := range names {
+		s := all[name]
+		refusedButOut += s.refusedButOut
+		lost += s.lost()
+		opened += s.opened
+	}
+	e.T.Check(refusedButOut == 0, "no session the engine refused got its datagram out (%d did; %s)", refusedButOut, describeSessions(names, all))
+	e.T.Check(lost*50 <= opened, "delivery loss, counted apart from admission and refusal, stays within 2%% (%d of %d; %s)", lost, opened, describeSessions(names, all))
+}
+
+func describeSessions(names []string, all map[string]sessions) string {
+	var parts []string
+	for _, name := range names {
+		s := all[name]
+		parts = append(parts, fmt.Sprintf("%s: %d reached servers, engine lists %d, %d refused, %d lost out, %d replies lost", name, s.gotOut, s.listed, s.refused, s.lostOut, s.lostBack))
+	}
+	return strings.Join(parts, "; ")
 }
 
 // keptOpen is the mandatory half of "other traffic carries on" under
@@ -118,15 +199,6 @@ func (e *Env) holding(bgs map[string]*Bg, release Release) {
 	}
 }
 
-func describeFloods(names []string, results map[string]app.FloodResult) string {
-	var parts []string
-	for _, name := range names {
-		r := results[name]
-		parts = append(parts, fmt.Sprintf("%s %d answered, %d refused, %d silent", name, r.Answered, r.Refused, r.Silent))
-	}
-	return strings.Join(parts, "; ")
-}
-
 func udpSessionsPerAppCase(e *Env) {
 	e.StartEngine(e.DefaultConfig())
 	// The stream runs until the flood lets go.
@@ -139,24 +211,25 @@ func udpSessionsPerAppCase(e *Env) {
 	names := []string{"alpha", "bravo"}
 	bgs, results := e.udpFlood(names, perApp, release)
 	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
-	minAnswered, maxAnswered, minRefused, total := perApp, 0, perApp, 0
+	all := e.floodSessions(names, results)
+	e.checkSessions(names, all)
+	least, most, total, fewestRefused := perApp, 0, 0, perApp
 	for _, name := range names {
-		r := results[name]
-		minAnswered, maxAnswered, minRefused = min(minAnswered, r.Answered), max(maxAnswered, r.Answered), min(minRefused, r.Refused)
-		total += r.Answered
+		s := all[name]
+		least, most, total = min(least, s.gotOut), max(most, s.admitted()), total+s.admitted()
+		fewestRefused = min(fewestRefused, s.refused)
 	}
-	e.T.Check(total < udpSessionsTotal*3/4, "the two apps together stay far from the total limit (%d answered)", total)
-	e.T.Check(minAnswered >= udpSessionsPerApp*95/100, "each app still got at least 95%% of its allowed %d sessions served (least: %d; %s)", udpSessionsPerApp, minAnswered, describeFloods(names, results))
+	e.T.Check(total < udpSessionsTotal*3/4, "the two apps together stay far from the total limit (%d admitted)", total)
+	e.T.Check(least >= udpSessionsPerApp*95/100, "each app still got at least 95%% of its allowed %d sessions out to the servers (least %d; %s)", udpSessionsPerApp, least, describeSessions(names, all))
 	e.holding(bgs, release)
 	var s Stream
 	stream.WaitJSON(e, 30*time.Second, &s)
 	e.keptOpen("charlie's stream through the flood", s, "c")
 	e.T.Check(e.Eng.Running(), "the engine is still running")
-	// Losing sessions at random isn't a limit: the excess must be refused.
 	excess := perApp - udpSessionsPerApp
-	e.T.Expect(maxAnswered <= udpSessionsPerApp && minRefused >= excess*9/10 && responsive(s),
-		"no app gets more than %d sessions and each app's %d extra are refused, while charlie's stream never waits 2 s for an answer (most for one app %d, fewest refused %d, longest silence %d ms; %s)",
-		udpSessionsPerApp, excess, maxAnswered, minRefused, s.MaxGapMS, describeFloods(names, results))
+	e.T.Expect(most <= udpSessionsPerApp && fewestRefused >= excess*9/10 && responsive(s),
+		"no app has more than %d sessions, by the servers or the engine, and each app's %d extra are refused, while charlie's stream never waits 2 s for an answer (most for one app %d, fewest refused %d, longest silence %d ms; %s)",
+		udpSessionsPerApp, excess, most, fewestRefused, s.MaxGapMS, describeSessions(names, all))
 }
 
 func udpSessionsTotalCase(e *Env) {
@@ -170,12 +243,22 @@ func udpSessionsTotalCase(e *Env) {
 	names := []string{"alpha", "bravo", "delta", "golf", "hotel"}
 	bgs, results := e.udpFlood(names, perApp, release)
 	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
-	total, refused := 0, 0
+	all := e.floodSessions(names, results)
+	e.checkSessions(names, all)
+	gotOut, listed, refused := 0, 0, 0
 	for _, name := range names {
-		total += results[name].Answered
-		refused += results[name].Refused
+		gotOut += all[name].gotOut
+		listed += all[name].listed
+		refused += all[name].refused
 	}
-	e.T.Check(total >= udpSessionsTotal*95/100, "together the apps still got at least 95%% of the %d sessions allowed in total (%d; %s)", udpSessionsTotal, total, describeFloods(names, results))
+	// 1.0 also counts its live UDP sessions itself.
+	if v1, ok := e.Eng.(engine.V1); ok && v1.Session() != nil {
+		st, err := v1.Session().Stats(e.Ctx())
+		e.T.Require(err == nil, "stats while the sessions are held (%v)", err)
+		listed = max(listed, int(st.UDP))
+	}
+	admitted := max(gotOut, listed)
+	e.T.Check(gotOut >= udpSessionsTotal*95/100, "together the apps still got at least 95%% of the %d sessions allowed in total out to the servers (%d; %s)", udpSessionsTotal, gotOut, describeSessions(names, all))
 	e.holding(bgs, release)
 	var s Stream
 	stream.WaitJSON(e, 30*time.Second, &s)
@@ -183,9 +266,9 @@ func udpSessionsTotalCase(e *Env) {
 	e.T.Check(e.Eng.Running(), "the engine is still running")
 	asked := perApp * len(names)
 	excess := asked - udpSessionsTotal
-	e.T.Expect(total <= udpSessionsTotal && refused >= excess*9/10 && responsive(s),
-		"all together no more than %d of the %d sessions are admitted and the %d extra are refused, while charlie's stream never waits 2 s for an answer (%d answered, %d refused, longest silence %d ms; %s)",
-		udpSessionsTotal, asked, excess, total, refused, s.MaxGapMS, describeFloods(names, results))
+	e.T.Expect(admitted <= udpSessionsTotal && refused >= excess*9/10 && responsive(s),
+		"all together no more than %d of the %d sessions are admitted, by the servers or the engine, and the %d extra are refused, while charlie's stream never waits 2 s for an answer (%d reached servers, engine lists %d, %d refused, longest silence %d ms; %s)",
+		udpSessionsTotal, asked, excess, gotOut, listed, refused, s.MaxGapMS, describeSessions(names, all))
 }
 
 func tcpStorm(e *Env) {
@@ -347,48 +430,73 @@ func tcpFlowsTotalCase(e *Env) {
 func tcpBufferBudgetCase(e *Env) {
 	e.StartEngine(e.DefaultConfig())
 	_, s := e.v1()
-	// Forty 64 MiB downloads at once want more buffer than the budget: up to
-	// 14 MiB each above the 64 KiB floor (5.9).
-	const transfers, size = 40, 64 << 20
+	// A download's send buffer toward the app grows from the 64 KiB floor to
+	// at most 6 MiB, doubling only in a 250 ms tick in which the flow moved at
+	// least its current buffer, and the grant stays while bytes keep moving
+	// (internal/engine/tcp/buffers.go). So each flow gets 2.5 s at full speed,
+	// four flows at a time, then a byte every 100 ms: 64 flows that each earn
+	// the full 5.94 MiB of growth want 380 MiB at once, half again the 256 MiB
+	// budget (5.9), and keep wanting it. Only the budget can refuse them.
+	const flows, perWave, burstMS = 64, 4, 2500
+	const maxGrowth = int64(6<<20 - 64<<10)
+	release := e.NewRelease("buffers")
 	var bgs []*Bg
-	for range transfers {
-		bgs = append(bgs, e.Start(Run{App: "charlie", Args: []string{"bulk", "--to", To(topo.Server4, wire.PortBulk), "--bytes", strconv.Itoa(size), "--timeout", "120000"}}))
+	for i := range flows {
+		delay := (i / perWave) * burstMS
+		bgs = append(bgs, e.Start(Run{App: "charlie", Args: append([]string{"bulkhold", "--to", To(topo.Server4, wire.PortBulk),
+			"--flood", strconv.Itoa(burstMS), "--delay", strconv.Itoa(delay)}, release.Arg()...)}))
 	}
+	ramp := time.Duration(flows/perWave*burstMS)*time.Millisecond + 3*time.Second
 	most, samples := int64(0), 0
-	for {
+	var held []int64
+	for start := time.Now(); time.Since(start) < ramp+3*time.Second && e.Ctx().Err() == nil; {
 		st, err := s.Stats(e.Ctx())
-		e.T.Require(err == nil, "stats during the transfers (%v)", err)
+		e.T.Require(err == nil, "stats while the downloads run (%v)", err)
 		most = max(most, st.TCPBytes)
 		samples++
-		running := 0
-		for _, bg := range bgs {
-			if bg.Running() {
-				running++
-			}
-		}
-		if running == 0 || e.Ctx().Err() != nil {
-			break
+		if time.Since(start) >= ramp {
+			held = append(held, st.TCPBytes)
 		}
 		e.Sleep(100 * time.Millisecond)
 	}
-	intact := 0
+	release.Open(e)
+	intact, open, earned := 0, 0, 0
 	for _, bg := range bgs {
-		var r app.BulkResult
+		var r app.BulkHoldResult
 		bg.WaitJSON(e, time.Minute, &r)
-		if r.OK {
+		if r.Intact {
 			intact++
 		}
+		if r.Open {
+			open++
+		}
+		// 24 MiB/s sustained: enough to double up to the 6 MiB cap.
+		if r.BurstBytes >= int64(burstMS)*24<<20/1000 {
+			earned++
+		}
 	}
-	e.T.Check(intact == transfers, "all %d transfers arrived intact (%d)", transfers, intact)
-	e.T.Check(most > 0, "the transfers grew buffers above the floor at some point (%d samples, most %d bytes)", samples, most)
+	least := most
+	for _, b := range held {
+		least = min(least, b)
+	}
+	e.T.Check(intact == flows && open == flows, "all %d downloads arrived intact, every byte checked, and were open until released (%d intact, %d open)", flows, intact, open)
+	e.T.Check(earned == flows, "every download ran fast enough in its burst to earn the full 6 MiB buffer, so together they wanted %.0f MiB (%d of %d did)",
+		float64(flows*maxGrowth)/(1<<20), earned, flows)
 	e.T.Check(most <= tcpBufferBudget, "buffer growth never went over the %d MiB budget (most %.1f MiB over %d samples)", tcpBufferBudget>>20, float64(most)/(1<<20), samples)
+	e.T.Check(len(held) > 0 && least >= tcpBufferBudget-maxGrowth,
+		"once every flow had asked, growth filled the budget to within one flow's grant and stayed there, so the rest was refused (least %.1f MiB over %d samples, most %.1f MiB)",
+		float64(least)/(1<<20), len(held), float64(most)/(1<<20))
 }
 
-func rejectionNoticeRate(e *Env) {
-	// Six capped apps, each opening 2,500 new sessions a second: 2.5 times
-	// the per-app budget, and 15,000 a second all together, three times the
-	// total.
-	names := []string{"alpha", "bravo", "delta", "foxtrot", "golf", "hotel"}
+// cappedFloods runs apps pinned to a blocked line, each opening sockets new
+// UDP sessions at rate a second for long enough to cover several whole
+// seconds, and checks what doesn't depend on the limits: every socket opened
+// and sent, at the rate asked (a slow sender would fake a limit), nothing
+// got out, nothing was answered, and the notices held back were counted.
+// It returns refusals and sends per app per Unix second (the engine's
+// limiters count by the same clock), and the seconds in which every app was
+// sending throughout.
+func (e *Env) cappedFloods(names []string, sockets, rate int) (refusals, sends map[string]map[int64]int, whole []int64) {
 	cfg := e.DefaultConfig()
 	cfg.Policy.Pins = nil
 	for _, name := range names {
@@ -399,40 +507,135 @@ func rejectionNoticeRate(e *Env) {
 	_, s := e.v1()
 	before, err := s.Stats(e.Ctx())
 	e.T.Require(err == nil, "stats (%v)", err)
-	from := time.Now().UnixMilli()
+	from := e.Mark()
 	bgs := map[string]*Bg{}
 	for i, name := range names {
-		bgs[name] = e.Start(Run{App: name, Args: []string{"udpflood", "--to", floodTargets(i, wire.PortUDPEcho), "--sockets", "5000", "--rate", "2500", "--timeout", "2000", "--times"}})
+		bgs[name] = e.Start(Run{App: name, Args: []string{"udpflood", "--to", floodTargets(i, wire.PortUDPEcho), "--sockets", strconv.Itoa(sockets),
+			"--rate", strconv.Itoa(rate), "--timeout", "2000", "--times"}})
 	}
-	perSecond := map[int64]int{}
-	worstApp, sent, notified := 0, 0, 0
+	refusals, sends = map[string]map[int64]int{}, map[string]map[int64]int{}
+	firstWhole, lastWhole := int64(0), int64(1<<62)
+	sent, refused := 0, 0
 	for _, name := range names {
 		var r app.FloodResult
-		bgs[name].WaitJSON(e, time.Minute, &r)
-		sent += r.Opened
-		notified += r.Refused
-		mine := map[int64]int{}
+		bgs[name].WaitJSON(e, 2*time.Minute, &r)
+		refusals[name], sends[name] = map[int64]int{}, map[int64]int{}
 		for _, t := range r.RefusedAt {
-			mine[t/1000]++
-			perSecond[t/1000]++
+			refusals[name][t/1000]++
 		}
-		for _, n := range mine {
-			worstApp = max(worstApp, n)
+		for _, t := range r.SentAt {
+			sends[name][t/1000]++
 		}
+		ok := r.Opened == sockets && r.Sent == sockets && len(r.OpenErrors) == 0 && len(r.SendErrors) == 0 && len(r.SentAt) == sockets
+		span := 0.0
+		if ok {
+			first, last := r.SentAt[0], r.SentAt[len(r.SentAt)-1]
+			span = float64(last-first) / 1000
+			firstWhole, lastWhole = max(firstWhole, first/1000+1), min(lastWhole, last/1000-1)
+		}
+		e.T.Check(ok && span > 0 && float64(sockets)/span >= float64(rate)*9/10,
+			"capped %s opened %d sockets and sent on each at %d a second or more (%d opened, %d sent over %.2f s, errors %v %v)", name, sockets, rate*9/10, r.Opened, r.Sent, span, r.OpenErrors, r.SendErrors)
 		e.T.Check(r.Answered == 0, "none of capped %s's datagrams was answered (%d)", name, r.Answered)
+		sent += r.Sent
+		refused += r.Refused
 	}
-	worst := 0
-	for _, n := range perSecond {
-		worst = max(worst, n)
+	for sec := firstWhole; sec <= lastWhole; sec++ {
+		whole = append(whole, sec)
 	}
+	e.T.Require(len(whole) >= 2, "the apps were all sending through at least two whole seconds (%v)", whole)
 	e.Sleep(500 * time.Millisecond)
 	escaped := Select(e.Records(), func(r inet.Record) bool { return r.Kind == "udp" && r.T >= from })
 	e.T.Check(len(escaped) == 0, "nothing the capped apps sent got out (%d datagrams reached the servers)", len(escaped))
 	after, err := s.Stats(e.Ctx())
 	e.T.Require(err == nil, "stats (%v)", err)
+	dropped := after.DroppedNotices - before.DroppedNotices
+	e.T.Check(dropped >= uint64(sent-refused)*9/10, "the notices held back were counted (%d sessions, %d told, %d counted as dropped)", sent, refused, dropped)
+	return refusals, sends, whole
+}
+
+func rejectionNoticesPerApp(e *Env) {
+	// One app alone, three times its own budget and well under the total's:
+	// only the per-app limiter can hold it to about 1,000 a second.
+	refusals, sends, whole := e.cappedFloods([]string{"alpha"}, 12000, 3000)
+	worst := 0
+	for _, n := range refusals["alpha"] {
+		worst = max(worst, n)
+	}
 	// A notice sent just before a second ends can arrive just after it.
-	e.T.Check(worstApp <= noticesPerApp*105/100, "no app got more than %d refusal notices in any second (most %d)", noticesPerApp, worstApp)
-	e.T.Check(worst <= noticesTotal*105/100, "all together no more than %d refusal notices in any second (most %d)", noticesTotal, worst)
-	e.T.Check(notified > 0 && after.DroppedNotices-before.DroppedNotices >= uint64(sent-notified)*9/10,
-		"the notices held back were counted (%d sessions refused, %d told, %d counted as dropped)", sent, notified, after.DroppedNotices-before.DroppedNotices)
+	e.T.Check(worst <= noticesPerApp*105/100, "alpha got no more than %d refusal notices in any second (most %d, per second %v)", noticesPerApp, worst, refusals["alpha"])
+	var low []string
+	for _, sec := range whole {
+		if sends["alpha"][sec] < 2500 || refusals["alpha"][sec] < noticesPerApp*9/10 {
+			low = append(low, fmt.Sprintf("%d: %d sent, %d told", sec, sends["alpha"][sec], refusals["alpha"][sec]))
+		}
+	}
+	e.T.Check(len(low) == 0, "in every whole second alpha sent at least 2,500 and was told about 1,000 times (short: %s)", strings.Join(low, "; "))
+}
+
+func rejectionNoticesTotal(e *Env) {
+	// Eight apps, each under its own budget at 800 a second: 6,400 a second
+	// together, so only the total limiter can hold them to about 5,000.
+	names := []string{"alpha", "bravo", "delta", "foxtrot", "golf", "hotel", "india", "juliett"}
+	refusals, sends, whole := e.cappedFloods(names, 3200, 800)
+	total := map[int64]int{}
+	for _, name := range names {
+		for sec, n := range refusals[name] {
+			total[sec] += n
+		}
+	}
+	worst := 0
+	for _, n := range total {
+		worst = max(worst, n)
+	}
+	e.T.Check(worst <= noticesTotal*105/100, "together the apps got no more than %d refusal notices in any second (most %d, per second %v)", noticesTotal, worst, total)
+	var low []string
+	for _, sec := range whole {
+		sent := 0
+		for _, name := range names {
+			sent += sends[name][sec]
+		}
+		if sent < 6000 || total[sec] < noticesTotal*9/10 {
+			low = append(low, fmt.Sprintf("%d: %d sent, %d told", sec, sent, total[sec]))
+		}
+	}
+	e.T.Check(len(low) == 0, "in every whole second the apps sent at least 6,000 together and were told about 5,000 times (short: %s)", strings.Join(low, "; "))
+}
+
+func timeWaitCap(e *Env) {
+	e.StartEngine(e.DefaultConfig())
+	_, s := e.v1()
+	before, err := s.Stats(e.Ctx())
+	e.T.Require(err == nil, "stats (%v)", err)
+	// The whoami server closes first, so the engine's end toward the app is
+	// the one that waits. 5,000 closings at about 330 a second all fall
+	// inside the 60 s wait: 4,096 fill the cap and the rest must skip it.
+	const n, timeWaitLimit = 5000, 4096
+	bg := e.Start(Run{App: "alpha", Args: []string{"tcp", "--to", To(topo.Server4, wire.PortWhoami), "--count", strconv.Itoa(n),
+		"--concurrency", "4", "--gap", "10", "--timeout", "5000", "--port-base", strconv.Itoa(e.ports(n))}})
+	peak := int64(0)
+	for bg.Running() && e.Ctx().Err() == nil {
+		st, err := s.Stats(e.Ctx())
+		e.T.Require(err == nil, "stats during the connections (%v)", err)
+		peak = max(peak, st.TimeWait)
+		e.Sleep(200 * time.Millisecond)
+	}
+	var r app.TCPResult
+	bg.WaitJSON(e, time.Minute, &r)
+	after, err := s.Stats(e.Ctx())
+	e.T.Require(err == nil, "stats (%v)", err)
+	peak = max(peak, after.TimeWait)
+	e.T.Check(r.OK == n, "all %d connections succeeded: TIME_WAIT never refuses a new one (%d, errors %v)", n, r.OK, r.Errors)
+	e.T.Check(peak <= timeWaitLimit && peak >= timeWaitLimit*95/100, "TIME_WAIT filled its own cap of %d and never went over it (most %d)", timeWaitLimit, peak)
+	skipped := after.TimeWaitSkipped - before.TimeWaitSkipped
+	e.T.Check(skipped >= uint64(n-timeWaitLimit)*9/10, "closings past the cap skipped TIME_WAIT, counted (%d skipped)", skipped)
+	var live []string
+	for _, f := range e.Flows() {
+		if f.App == AppPath("alpha") {
+			live = append(live, f.Protocol+" "+f.Source.String()+" -> "+f.Destination.String())
+		}
+	}
+	e.T.Check(len(live) == 0 && after.Flows <= 2, "waiting endpoints aren't live flows: none of alpha's is listed and the engine counts %d flows beside %d waiting (%s)",
+		after.Flows, after.TimeWait, strings.Join(upTo(live, 3), "; "))
+	e.ExpectTCP("alpha's new connections with TIME_WAIT full", "alpha", AsUser, "a", topo.Server4, 50)
+	e.ExpectTCP("bravo's new connections with TIME_WAIT full", "bravo", AsUser, "b", topo.Server4, 10)
 }

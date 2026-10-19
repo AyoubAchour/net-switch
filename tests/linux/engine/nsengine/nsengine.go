@@ -255,12 +255,23 @@ func (d *Driver) Hello(ctx context.Context) (engine.Hello, error) {
 	return out, nil
 }
 
-// Attach implements engine.V1: the engine hands out the session's epoch.
+// Attach implements engine.V1: the engine hands out the session's epoch, and
+// the new session becomes the driver's. Everything the driver does next
+// (apply, lanes, flows, stop) goes through it; the fenced session's renewals
+// stop and the new one renews itself.
 func (d *Driver) Attach(ctx context.Context) (engine.Controller, error) {
 	s, err := d.attach(ctx)
 	if err != nil {
 		return nil, err
 	}
+	d.mu.Lock()
+	old := d.session
+	d.session = s
+	d.mu.Unlock()
+	if old != nil {
+		old.SetAutoRenew(false)
+	}
+	s.SetAutoRenew(true)
 	return s, nil
 }
 

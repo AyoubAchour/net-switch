@@ -531,14 +531,21 @@ func runUDPBurst(args []string) (any, error) {
 
 // FloodResult is the udpflood mode's answer.
 type FloodResult struct {
+	// Token marks every datagram: socket i sends "T:<token>:0:<i> ".
+	Token      string         `json:"token"`
 	Sockets    int            `json:"sockets"`
 	Opened     int            `json:"opened"`
+	Sent       int            `json:"sent"` // datagrams the kernel took
 	Answered   int            `json:"answered"`
 	Refused    int            `json:"refused"`
 	Silent     int            `json:"silent"`
 	OpenErrors map[string]int `json:"openErrors"`
 	SendErrors map[string]int `json:"sendErrors"`
-	// RefusedAt is when each refusal arrived (Unix ms), with --times.
+	// RefusedSockets are the sockets, by index, that got an ICMP unreachable.
+	RefusedSockets []int `json:"refusedSockets"`
+	// With --times, when each datagram went and each refusal arrived (Unix
+	// ms).
+	SentAt    []int64 `json:"sentAt,omitempty"`
 	RefusedAt []int64 `json:"refusedAt,omitempty"`
 }
 
@@ -561,8 +568,8 @@ func runUDPFlood(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := FloodResult{Sockets: *sockets, OpenErrors: map[string]int{}, SendErrors: map[string]int{}}
-	tok := token()
+	r := FloodResult{Token: token(), Sockets: *sockets, OpenErrors: map[string]int{}, SendErrors: map[string]int{}, RefusedSockets: []int{}}
+	tok := r.Token
 	var conns []net.Conn
 	for i := range *sockets {
 		c, err := net.Dial("udp", list[i%len(list)].String())
@@ -589,11 +596,17 @@ func runUDPFlood(args []string) (any, error) {
 			time.Sleep(wait)
 		}
 		next = next.Add(tick)
-		if _, err := c.Write(payload(tok, 0, i, 0)); err != nil {
-			mu.Lock()
+		_, err := c.Write(payload(tok, 0, i, 0))
+		mu.Lock()
+		if err != nil {
 			r.SendErrors[Code(err)]++
-			mu.Unlock()
+		} else {
+			r.Sent++
+			if *times {
+				r.SentAt = append(r.SentAt, nowMS())
+			}
 		}
+		mu.Unlock()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -607,6 +620,7 @@ func runUDPFlood(args []string) (any, error) {
 				r.Answered++
 			case "ECONNREFUSED":
 				r.Refused++
+				r.RefusedSockets = append(r.RefusedSockets, i)
 				if *times {
 					r.RefusedAt = append(r.RefusedAt, nowMS())
 				}

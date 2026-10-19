@@ -75,6 +75,13 @@ func (s *Session) SetAutoRenew(on bool) {
 	}()
 }
 
+// renewing reports whether the session renews itself.
+func (s *Session) renewing() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopRenew != nil
+}
+
 // Start implements engine.Controller.
 func (s *Session) Start(ctx context.Context, n uint64, cfg engine.Config) (engine.Applied, error) {
 	return s.revision(ctx, "start", n, cfg)
@@ -318,7 +325,7 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		Flows: int64(g.Flows), Handshakes: int64(g.Handshakes), UDP: int64(g.UDP),
 		Unknown: int64(g.Unknown), UnknownUDP: int64(g.UnknownUDP), TimeWait: int64(g.TimeWait),
 		TCPBytes: g.TCPBytes, PendingBytes: g.PendingBytes, SnapshotBytes: g.SnapshotBytes,
-		Admitted: g.Admitted, Rejected: g.Rejected, DroppedNotices: g.DroppedNotices,
+		Admitted: g.Admitted, Rejected: g.Rejected, DroppedNotices: g.DroppedNotices, TimeWaitSkipped: g.TimeWaitSkipped,
 		EventsDropped: top.EventsDropped + g.EventsDropped,
 		LookupCount:   g.LookupCount, LookupMisses: g.LookupMisses, LookupAmbiguous: g.LookupAmbiguous,
 		LookupTime: time.Duration(g.LookupNanoseconds),

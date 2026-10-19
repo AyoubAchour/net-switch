@@ -240,6 +240,8 @@ func bulk(conn net.Conn) {
 	switch verb {
 	case "GET":
 		_, _ = io.Copy(conn, wire.Pattern(n))
+	case "FLOOD":
+		flood(conn, time.Duration(n)*time.Millisecond)
 	case "PUT":
 		h := sha256.New()
 		got, err := io.CopyN(h, reader, n)
@@ -248,6 +250,33 @@ func bulk(conn net.Conn) {
 			return
 		}
 		_, _ = io.WriteString(conn, hex.EncodeToString(h.Sum(nil))+"\n")
+	}
+}
+
+// flood sends wire.FloodPattern as fast as the connection takes it for d,
+// then one byte of it every 100 ms, so the flow keeps moving, until the
+// client closes (or 10 minutes pass).
+func flood(conn net.Conn, d time.Duration) {
+	src := wire.FloodPattern()
+	buf := make([]byte, 64<<10)
+	for end := time.Now().Add(d); time.Now().Before(end); {
+		if _, err := io.ReadFull(src, buf); err != nil {
+			return
+		}
+		if _, err := conn.Write(buf); err != nil {
+			return
+		}
+	}
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
+	one := buf[:1]
+	for {
+		if _, err := io.ReadFull(src, one); err != nil {
+			return
+		}
+		if _, err := conn.Write(one); err != nil {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

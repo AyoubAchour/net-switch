@@ -109,4 +109,16 @@ func TestPatternAndEcho(t *testing.T) {
 	if _, _, err := ParseBulkRequest("DELETE 1"); err == nil {
 		t.Fatal("unknown bulk verbs must be rejected")
 	}
+	if verb, n, err := ParseBulkRequest("FLOOD 2500"); err != nil || verb != "FLOOD" || n != 2500 {
+		t.Fatalf("flood request: %s %d %v", verb, n, err)
+	}
+	if _, _, err := ParseBulkRequest("FLOOD 600000"); err == nil {
+		t.Fatal("a flood longer than MaxFloodMS must be rejected")
+	}
+	a, b := make([]byte, 4096), make([]byte, 4096)
+	_, _ = io.ReadFull(FloodPattern(), a)
+	_, _ = io.ReadFull(FloodPattern(), b)
+	if !bytes.Equal(a, b) {
+		t.Fatal("both ends must generate the same flood pattern")
+	}
 }

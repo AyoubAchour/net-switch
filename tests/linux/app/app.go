@@ -35,6 +35,7 @@ var modes = map[string]mode{
 	"udpflood":    {runUDPFlood, "one datagram on each of thousands of UDP sockets"},
 	"stream":      {runStream, "one long TCP connection, pinging"},
 	"bulk":        {runBulk, "a hashed TCP download or upload"},
+	"bulkhold":    {runBulkHold, "a full-speed download that then trickles, every byte checked, held until released"},
 	"http":        {runHTTP, "one HTTP GET; the body is the source the server saw"},
 	"udp":         {runUDP, "UDP datagrams to echo servers"},
 	"udpstream":   {runUDPStream, "continuous UDP from one source port"},

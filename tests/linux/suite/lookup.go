@@ -32,11 +32,14 @@ const (
 func init() { register(50, addLookup) }
 
 func addLookup(r *registry) {
-	const slow = "sing-box scans every open file of the socket's user on each new connection (about 3 µs per file), and now and then misses the owner"
-	r.defect("lookup.gate-terminal", "Owner lookup with 10,000 open files, from a plain terminal: p95 under 10 ms, owner found for 99.5%", slow, "5.6", 4*time.Minute,
+	const slow = "sing-box scans every open file of the socket's user on each new connection (about 3 µs per file), so its estimated p95 lookup is well over 10 ms"
+	r.defect("lookup.gate-terminal", "Owner lookup with 10,000 open files, from a plain terminal: owner found for 99.5% (p95: an estimate here, measured in lookup.p95-measured)", slow, "5.6", 4*time.Minute,
 		func(e *Env) { lookupGate(e, false) })
-	r.defect("lookup.gate-app-scope", "Owner lookup with 10,000 open files, app in its own scope: p95 under 10 ms, owner found for 99.5%", slow, "5.6", 4*time.Minute,
+	r.defect("lookup.gate-app-scope", "Owner lookup with 10,000 open files, app in its own scope: owner found for 99.5% (p95: an estimate here, measured in lookup.p95-measured)", slow, "5.6", 4*time.Minute,
 		func(e *Env) { lookupGate(e, true) })
+	r.pending("lookup.p95-measured", "The engine's own p95 owner-lookup time stays under 10 ms with 10,000 open files, in an app scope and from a plain terminal",
+		"5.6", "per-lookup timings in stats (a latency histogram): main's stats carry a lookup count and total time only, which give a mean, not a p95; "+
+			"the baseline's p95 is an estimate from outside and can't pass this gate")
 	r.add("lookup.fork-exec", "A program started by another (fork and exec) is attributed to itself", harness.Parity, "5.6", 0, forkExec)
 	r.add("lookup.inherited-socket", "A socket inherited by a child that alone holds it is the child's", harness.Parity, "5.6", 0, inheritedSocket)
 	r.defect("lookup.ambiguous-holders", "A socket held by two apps on different lines at once is treated as unknown",
@@ -99,7 +102,7 @@ func lookupGate(e *Env, scoped bool) {
 	}
 	holder.Stop()
 
-	// Section 5.6's gate is both numbers, per phase: owner found (the
+	// Section 5.6's gate is two numbers, per phase: owner found (the
 	// connection on bravo's line b, as the servers saw it) for 99.5%, and
 	// p95 lookup under 10 ms. Completing the connections is a prerequisite.
 	var verdicts []string
@@ -110,29 +113,36 @@ func lookupGate(e *Env, scoped bool) {
 		ok = ok && found >= gateFound
 		verdicts = append(verdicts, fmt.Sprintf("%s: owner found for %.1f%%", p.label, 100*found))
 	}
-	for _, p := range phases {
-		// p95 from outside, the same way for every engine: what the open
-		// files add to connection setup. The engine's stats give only a total
-		// time (5.10), so they can't give a p95.
-		extra := p.r.Connect.P95 - control.r.Connect.P50
-		ok = ok && extra < gateLatencyMS
-		verdicts = append(verdicts, fmt.Sprintf("%s: estimated %.2f ms (setup p95 %.2f minus %.2f without the files)", p.label, extra, p.r.Connect.P95, control.r.Connect.P50))
-		if session != nil {
-			// 1.0's own counters for exactly this phase: every connection
-			// was looked up, and owners were found as the servers saw.
-			e.T.Check(p.lookups >= gateConnections, "the engine counted %d lookups %s (at least %d)", p.lookups, p.label, gateConnections)
-			found := 1.0
-			mean := time.Duration(0)
-			if p.lookups > 0 {
-				found = 1 - float64(p.misses)/float64(p.lookups)
-				mean = p.lookupTime / time.Duration(p.lookups)
-			}
-			ok = ok && found >= gateFound && float64(mean.Microseconds())/1000 < gateLatencyMS
-			verdicts = append(verdicts, fmt.Sprintf("%s: engine found %.1f%% of %d owners, mean %v", p.label, 100*found, p.lookups, mean))
+	if session == nil {
+		// The baseline reports no lookup timings, so its p95 can only be
+		// estimated from outside: what the open files add to connection setup
+		// (setup p95 with them minus the median without). An estimate can show
+		// the baseline missing the gate; it can never pass 1.0's, which needs
+		// the engine's own per-lookup timings (lookup.p95-measured).
+		for _, p := range phases {
+			extra := p.r.Connect.P95 - control.r.Connect.P50
+			ok = ok && extra < gateLatencyMS
+			verdicts = append(verdicts, fmt.Sprintf("%s: p95 ESTIMATED at %.2f ms (setup p95 %.2f minus %.2f without the files)", p.label, extra, p.r.Connect.P95, control.r.Connect.P50))
 		}
+		e.T.Expect(ok, "with %d open files, each phase finds the owner for at least %.1f%%, and the outside estimate of p95 lookup is under %.0f ms (%s)",
+			gateFiles, 100*gateFound, gateLatencyMS, strings.Join(verdicts, "; "))
+		return
 	}
-	e.T.Expect(ok, "with %d open files, each phase finds the owner for at least %.1f%% and keeps p95 lookup under %.0f ms (%s)",
-		gateFiles, 100*gateFound, gateLatencyMS, strings.Join(verdicts, "; "))
+	// 1.0: the engine's own counts for exactly each phase must agree that
+	// the owners were found. Its p95 is lookup.p95-measured's to prove;
+	// nothing here stands in for it.
+	for _, p := range phases {
+		e.T.Check(p.lookups >= gateConnections, "the engine counted %d lookups %s (at least %d)", p.lookups, p.label, gateConnections)
+		found, mean := 0.0, time.Duration(0)
+		if p.lookups > 0 {
+			found = 1 - float64(p.misses)/float64(p.lookups)
+			mean = p.lookupTime / time.Duration(p.lookups)
+		}
+		ok = ok && found >= gateFound
+		verdicts = append(verdicts, fmt.Sprintf("%s: the engine found %.1f%% of %d owners (mean lookup %v, for the record)", p.label, 100*found, p.lookups, mean))
+	}
+	e.T.Expect(ok, "with %d open files, each phase finds the owner for at least %.1f%%, as the servers and the engine both count (%s)",
+		gateFiles, 100*gateFound, strings.Join(verdicts, "; "))
 }
 
 func forkExec(e *Env) {

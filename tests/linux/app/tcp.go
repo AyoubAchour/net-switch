@@ -4,6 +4,7 @@ package app
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -295,6 +296,96 @@ func runTCPHold(args []string) (any, error) {
 			r.LocalPorts = append(r.LocalPorts, int(ap.Port()))
 		}
 		conn.Close()
+	}
+	return r, nil
+}
+
+// BulkHoldResult is the bulkhold mode's answer.
+type BulkHoldResult struct {
+	Bytes      int64   `json:"bytes"`      // everything received
+	BurstBytes int64   `json:"burstBytes"` // received during the full-speed part
+	BurstMS    float64 `json:"burstMs"`
+	Intact     bool    `json:"intact"` // every byte matched the pattern
+	Open       bool    `json:"open"`   // still open when released
+	Err        string  `json:"err,omitempty"`
+}
+
+// runBulkHold asks the bulk server for a flood: the pattern at full speed for
+// --flood ms, then a byte every 100 ms. It checks every byte, and keeps the
+// connection until --release-file exists.
+func runBulkHold(args []string) (any, error) {
+	fs := flag.NewFlagSet("bulkhold", flag.ContinueOnError)
+	to := fs.String("to", "", "bulk server ip:port")
+	floodMS := fs.Int("flood", 2500, "ms of full-speed download")
+	delay := fs.Int("delay", 0, "ms to wait before connecting")
+	release := fs.String("release-file", "", "close once this file exists")
+	if err := parse(fs, args); err != nil {
+		return nil, err
+	}
+	list, err := targets(*to)
+	if err != nil {
+		return nil, err
+	}
+	if *release == "" {
+		return nil, usageError{fmt.Errorf("--release-file is required")}
+	}
+	time.Sleep(time.Duration(*delay) * time.Millisecond)
+	r := BulkHoldResult{Intact: true}
+	conn, err := net.DialTimeout("tcp", list[0].String(), 10*time.Second)
+	if err != nil {
+		r.Err, r.Intact = Code(err), false
+		return r, nil
+	}
+	defer conn.Close()
+	start := time.Now()
+	burstEnd := start.Add(time.Duration(*floodMS) * time.Millisecond)
+	if _, err := fmt.Fprintf(conn, "FLOOD %d\n", *floodMS); err != nil {
+		r.Err, r.Intact = Code(err), false
+		return r, nil
+	}
+	var mu sync.Mutex
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		want := wire.FloodPattern()
+		buf, exp := make([]byte, 64<<10), make([]byte, 64<<10)
+		for {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				_, _ = io.ReadFull(want, exp[:n])
+				mu.Lock()
+				r.Bytes += int64(n)
+				if time.Now().Before(burstEnd) {
+					r.BurstBytes += int64(n)
+				}
+				if !bytes.Equal(buf[:n], exp[:n]) {
+					r.Intact = false
+				}
+				mu.Unlock()
+			}
+			if err != nil {
+				mu.Lock()
+				if r.Err == "" {
+					r.Err = Code(err)
+				}
+				mu.Unlock()
+				return
+			}
+		}
+	}()
+	if err := waitFile(*release, ReleaseTimeout); err != nil {
+		return nil, err
+	}
+	mu.Lock()
+	r.Open = r.Err == ""
+	r.BurstMS = float64(*floodMS)
+	mu.Unlock()
+	_ = conn.Close()
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if r.Open {
+		r.Err = "" // our own close
 	}
 	return r, nil
 }
