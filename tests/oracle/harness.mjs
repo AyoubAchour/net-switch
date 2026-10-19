@@ -12,7 +12,7 @@ const root = new URL('../../', import.meta.url);
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const forbidden = (name) => () => { throw new Error(`Oracle forbids host ${name}`); };
 
-export async function oracle({ initial = {}, mode = 'tun', importOnly = false } = {}) {
+export async function oracle({ initial = {}, mode = 'tun', importOnly = false, argvEntry = '/oracle/server.mjs' } = {}) {
   assert.ok(vm.SourceTextModule, 'Run with --experimental-vm-modules');
   const outputs = [];
   const files = new Map([['/oracle/package.json', await readFile(new URL('package.json', root), 'utf8')],
@@ -60,7 +60,7 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
     clearTimeout: (timer) => { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1); },
     setInterval: forbidden('setInterval'), clearInterval: () => {},
     console: { log: (text) => emit('console', { text }) },
-    process: { argv: ['node', importOnly ? '/oracle/test.mjs' : '/oracle/server.mjs', ...(mode === 'proxy' ? ['--dev-proxy'] : [])],
+    process: { argv: ['node', importOnly ? '/oracle/test.mjs' : argvEntry, ...(mode === 'proxy' ? ['--dev-proxy'] : [])],
       pid: 123, execPath: '/oracle/node', platform: 'win32', arch: 'x64', env: {},
       on: () => {}, exit: (code) => emit('exit', { code }) },
     fetch: async (url, options = {}) => {
@@ -139,7 +139,7 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
       assert.ok(name.startsWith('/oracle/'), `Unapproved import: ${name}`);
       let source = await readFile(new URL(name.slice('/oracle/'.length), root), 'utf8');
       // Observation hooks only; no existing statement is changed or skipped.
-      if (name === '/oracle/server.mjs') {
+      if (name === '/oracle/lib/server-factory.mjs') {
         const hooks = await readFile(new URL('tests/oracle/hooks.txt', root), 'utf8');
         if (source.includes('export async function createServer')) {
           source = source.replace('return { server, buildState, shutdown };', hooks.replace('export const oracleHooks =', 'globalThis.oracleHooks =') + '\nreturn { server, buildState, shutdown };');
@@ -161,11 +161,13 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false } 
   const { Engine } = await evaluate('/oracle/lib/engine.mjs');
   // Binary verification is covered by engine tests. No executable exists here.
   Engine.prototype.verifyEngineFiles = async () => {};
-  const server = await evaluate('/oracle/server.mjs');
+  const server = await evaluate(importOnly ? '/oracle/lib/server-factory.mjs' : '/oracle/server.mjs');
   const settle = async () => { for (let n = 0; n < 100; n++) await Promise.resolve(); };
   await settle();
   const result = {
-    environment, outputs, files, server: { ...server, oracleHooks: context.oracleHooks ?? server.oracleHooks }, settle,
+    environment, outputs, files, fs, process: context.process, Engine, platform,
+    helper: { ...mocks.get('/oracle/lib/monitor.mjs'), ...mocks.get('/oracle/lib/helper.mjs') },
+    server: { ...server, oracleHooks: context.oracleHooks ?? server.oracleHooks }, settle,
     async start(options = {}) {
       const instance = await server.createServer(options);
       result.server.oracleHooks = context.oracleHooks;
