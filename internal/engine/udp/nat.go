@@ -267,7 +267,23 @@ func (s *session) run() {
 	s.ticket.SetCancel(cancel)
 	lookup, cl := context.WithTimeout(ctx, 50*time.Millisecond)
 	lookupStart := time.Now()
-	owner, err := n.owners.UDP(lookup, s.source)
+	var owner platform.Owner
+	var err error
+	if owners, ok := n.owners.(platform.DatagramOwnerLookup); ok {
+		s.mu.Lock()
+		var destination netip.AddrPort
+		if len(s.queue) > 0 {
+			destination = s.queue[0].destination
+		}
+		s.mu.Unlock()
+		if !destination.IsValid() {
+			cl()
+			return
+		}
+		owner, err = owners.UDPFor(lookup, platform.Tuple{Source: s.source, Destination: destination})
+	} else {
+		owner, err = n.owners.UDP(lookup, s.source)
+	}
 	if observer, ok := n.control.(interface {
 		Lookup(time.Duration, error, platform.Owner)
 	}); ok {

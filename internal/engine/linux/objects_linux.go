@@ -206,9 +206,10 @@ type addressObject struct {
 	Name, Alias, CIDR string
 }
 type tunObject struct {
-	Index       int
-	Name, Alias string
-	MTU         int
+	Index        int
+	Name, Alias  string
+	MTU          int
+	IngressQueue int
 }
 
 func (d objectDriver) Create(ctx context.Context, f journal.Fingerprint) error {

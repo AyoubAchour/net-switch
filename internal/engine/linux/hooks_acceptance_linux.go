@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,10 +22,17 @@ import (
 
 // This file, including every fault implementation, is absent from production.
 func (p *Platform) InstallAcceptanceHooks(e *engine.Engine, s *protocol.Server) {
-	if path:=os.Getenv("NETSWITCH_ACCEPTANCE_PROFILE");path!=""{
-		f,err:=os.OpenFile(path,os.O_CREATE|os.O_EXCL|os.O_WRONLY,0600);if err!=nil{panic(err)}
-		if err:=pprof.StartCPUProfile(f);err!=nil{f.Close();panic(err)}
-		p.testClose=func(){pprof.StopCPUProfile();f.Close()}
+	if path := os.Getenv("NETSWITCH_ACCEPTANCE_PROFILE"); path != "" {
+		path = strings.TrimSuffix(path, filepath.Ext(path)) + "-" + p.Instance + ".pprof"
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			panic(err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			f.Close()
+			panic(err)
+		}
+		p.testClose = func() { pprof.StopCPUProfile(); f.Close() }
 	}
 	var gates sync.Mutex
 	var lookupGate, writeGate chan struct{}

@@ -79,6 +79,11 @@ func openTun(v tunObject) (*Tun, error) {
 	if err := netlink.LinkSetMTU(l, v.MTU); err != nil {
 		return nil, err
 	}
+	// This is the kernel-to-engine ingress ring, distinct from the engine's
+	// 1,024-packet output queue. Hold a full admission burst in wire order.
+	if err := netlink.LinkSetTxQLen(l, v.IngressQueue); err != nil {
+		return nil, err
+	}
 	if err := netlink.LinkSetUp(l); err != nil {
 		return nil, err
 	}

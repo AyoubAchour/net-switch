@@ -52,6 +52,9 @@ func TestKernelPlatform(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tun.Close()
+	if l, err := netlink.LinkByIndex(p.tunSpec.Index); err != nil || l.Attrs().TxQLen != 16384 {
+		t.Fatalf("bounded kernel ingress ring wasn't configured: %v %v", l, err)
+	}
 
 	t.Run("TunWriteAndOrderedReader", func(t *testing.T) {
 		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("198.18.0.1")})

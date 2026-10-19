@@ -231,6 +231,44 @@ func TestDualStackUDPOwnerAndReconciliation(t *testing.T) {
 	}
 }
 
+func TestUDPFirstDestinationUsesOneExactQuery(t *testing.T) {
+	for _, connected := range []bool{false, true} {
+		t.Run(fmt.Sprint(connected), func(t *testing.T) {
+			server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer server.Close()
+			var client *net.UDPConn
+			if connected {
+				client, err = net.DialUDP("udp4", nil, server.LocalAddr().(*net.UDPAddr))
+			} else {
+				client, err = net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			source := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(client.LocalAddr().(*net.UDPAddr).Port))
+			tuple := platform.Tuple{Source: source, Destination: server.LocalAddr().(*net.UDPAddr).AddrPort()}
+			o := NewOwners()
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := o.Warm(ctx); err != nil {
+				t.Fatal(err)
+			}
+			before := diagSequence.Load()
+			owner, err := o.UDPFor(ctx, tuple)
+			if err != nil || owner.PID != uint32(os.Getpid()) {
+				t.Fatalf("exact UDP ownership: %+v %v", owner, err)
+			}
+			if requests := diagSequence.Load() - before; requests != 1 {
+				t.Fatalf("new UDP socket used %d diagnostic requests; expected one exact lookup", requests)
+			}
+		})
+	}
+}
+
 func TestHoldSameProgramSocket(t *testing.T) {
 	if os.Getenv("NETSWITCH_TEST_HOLD_SOCKET") != "1" {
 		t.Skip("inherited socket helper")
