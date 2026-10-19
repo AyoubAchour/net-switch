@@ -37,15 +37,21 @@ func (n *NAT) Reconcile(ctx context.Context) {
 	active := make([]*session, 0, len(sessions))
 	for _, s := range sessions {
 		s.mu.Lock()
-		ready := (s.active || s.rejected) && !s.closed
+		closed := s.closed
+		ready := (s.active || s.rejected) && !closed
 		idle := started.Sub(s.last) >= IdleTimeout || (s.rejected && started.Sub(s.rejectedAt) >= RejectLifetime)
 		s.mu.Unlock()
 		if idle {
 			s.close()
 			continue
 		}
-		if ready {
+		// Pending lookups may already have published their owner before the
+		// egress socket is ready. Keep that cache reference too, while only
+		// validating active/rejected sessions below.
+		if !closed {
 			keys = append(keys, s.source)
+		}
+		if ready {
 			active = append(active, s)
 		}
 	}
@@ -56,7 +62,13 @@ func (n *NAT) Reconcile(ctx context.Context) {
 		n.IdentityErrors.Add(1)
 		return
 	}
-	owners, err := n.identities.Snapshot(ctx, keys)
+	var owners map[netip.AddrPort]platform.Owner
+	var err error
+	if timed, ok := n.identities.(platform.UDPIdentityAt); ok {
+		owners, err = timed.SnapshotAt(ctx, keys, started)
+	} else {
+		owners, err = n.identities.Snapshot(ctx, keys)
+	}
 	if err != nil {
 		n.IdentityErrors.Add(1)
 		return
