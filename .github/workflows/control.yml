@@ -51,6 +51,13 @@ jobs:
         run: node scripts/win32-parity.mjs ./bin/netswitch.exe
       - name: Fetch verified sing-box
         run: ./scripts/fetch-engine.ps1
+      - name: Build the two-path TUN harness and fetch its signed driver
+        run: |
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Routing against the selected control executable
         run: |
           $server = if ('${{ matrix.control }}' -eq 'go') { (Resolve-Path bin/netswitch.exe).Path } else { (Get-Command node).Source }

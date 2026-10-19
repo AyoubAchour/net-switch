@@ -9,13 +9,18 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { ControlUnderTest } from './tun-control-adapter.mjs';
 import { lineOutbound } from '../lib/apps.mjs';
-import { testLocalUdp } from './tun-test-udp.mjs';
+import { launchSpec } from './server-under-test.mjs';
+import { recordLaunch } from '../tests/windows/launch.mjs';
+import { startHarness } from '../tests/windows/testisp/harness.mjs';
+import { targets } from '../tests/windows/targets.mjs';
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
   throw new Error('TUN tests may run only on disposable GitHub-hosted Windows runners.');
 }
 const dir = path.resolve('dist/tun-test');
 await mkdir(dir, { recursive: true });
+await recordLaunch(launchSpec, path.join(dir, 'executables.json'));
+console.log(`Launcher: the selected control service (${launchSpec.server}) owns the routing lifecycle.`);
 // A distinct executable path exercises process discovery and app pinning.
 const clientExe = path.join(dir, 'test-app.exe');
 await copyFile(process.execPath, clientExe);
@@ -102,6 +107,7 @@ async function clean(label, firstReadTimeout = 45_000) {
   assert.fail(`${label}: leftovers ${JSON.stringify(state)}`);
 }
 let adapter;
+let harness, responder;
 let restoreDns = false;
 try {
   const pins = JSON.parse(await readFile('packaging/versions.json', 'utf8'));
@@ -111,13 +117,17 @@ try {
   // every subsequent read and every routing/cleanup assertion keeps its bound.
   await clean('before start', process.arch === 'arm64' ? 90_000 : 45_000);
   adapter = await network('inspect');
+  harness = await startHarness(path.join(dir, 'testisp'));
+  responder = await targets(harness.uplink.address);
+  await harness.control('targets', { ports: [responder.direct.http, ...responder.direct.udp] });
+  const udpTarget = { host: responder.virtual.host, port: responder.virtual.udp[0] };
   log(`Physical adapter: ${JSON.stringify(adapter)}`);
   log(`PORT-REUSE direct baseline: ${JSON.stringify(await client('reuse'))}`);
-  await testLocalUdp({ client, clientExe, adapter, dataDir: dir, log });
-  await clean('after local UDP fixture');
-  // Hosted runners have one physical internet adapter. Two independently tagged
-  // outbounds on that adapter let the Clash API prove which line was selected.
-  const lines = ['aa', 'bb'].map((id) => ({ id, alias: adapter.alias }));
+  const udpSizes = [64, 1800];
+  for (const size of udpSizes) {
+    log(`UDP direct baseline: ${JSON.stringify(await client('udp', { size, target: udpTarget, localAddress: harness.testisp.address }))}`);
+  }
+  const lines = [{ id: 'aa', alias: adapter.alias }, { id: 'bb', alias: 'TestISP' }];
   await engine.setAppLines({ [clientExe]: 'bb' });
   await engine.start({ lines });
   alive();
@@ -164,6 +174,11 @@ try {
   log(`ok - selector PUT ${elapsed.toFixed(1)} ms with 100 open connections; all old sockets reused, new connections use bb`);
   await client('close');
 
+  for (const size of udpSizes) {
+    const result = await client('udp', { size, target: udpTarget });
+    await routed([result], 'bb');
+    log(`ok - UDP through TUN: ${JSON.stringify(result)}`);
+  }
   const reuse = await client('reuse');
   log(`PORT-REUSE TUN: ${JSON.stringify(reuse)}`);
   alive();
@@ -227,5 +242,10 @@ try {
   catch (error) { log(`CLEANUP FAILED: ${error.stack}`); process.exitCode = 1; }
   try { await engine.quit(); }
   catch (error) { log(`CONTROL QUIT FAILED: ${error.stack}`); process.exitCode = 1; }
+  if (harness) {
+    try { log(`TestISP counters: ${JSON.stringify(await harness.control('stats'))}`); await harness.close(); }
+    catch (error) { log(`TESTISP CLEANUP FAILED: ${error.stack}`); process.exitCode = 1; }
+  }
+  if (responder) await responder.close();
   await writeFile(path.join(dir, 'report.txt'), `${report.join('\n')}\n`);
 }

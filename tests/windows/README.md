@@ -36,7 +36,8 @@ accepted as evidence.
 
 ## Launch contract
 
-The runner takes `--server-exe`, optional `--server-entry`, and `--engine-exe`.
+The runner takes `--server-exe` (also `--server-executable`), optional
+`--server-entry`, and `--engine-exe` (also `--engine-executable`).
 Today these select Node, `server.mjs` and the pinned sing-box binary. A native
 server omits `--server-entry`. Version commands can be supplied as JSON arrays
 with `--server-version-args` and `--engine-version-args`.
@@ -45,15 +46,18 @@ Each run records absolute paths, versions and SHA-256 hashes before starting.
 The Node entry file is separately hashed. The running engine PID's executable
 path is checked too, so passing a different engine cannot silently test the
 bundled one. The current launch adapter uses `--user-data`, `--machine-data`,
-`--engine-dir`, `server.json` and `engine.pid`. Service launch adapters belong to
+`server.json` and `engine.pid`. Production Node entries use `--engine-dir`;
+the Node e2e shim and Go control use the exact `--engine-executable` path.
+Native control receives `--root` and defaults to `--version` for identification.
+Service launch adapters belong to
 milestone 2; traffic assertions use only the app API and observed packets.
 
 `scripts/e2e-routing.mjs` uses the same launcher and retains its assertions.
-`scripts/e2e-tun.mjs` retains its direct `Engine` adapter assertions, now with a
-real TestISP line and mandatory controlled DNS probes. It explicitly refuses a
-different control executable and names itself as the driver in its identity
-record. Use `acceptance.mjs` for control-executable comparisons; the historical
-direct-adapter test must not pretend to test a Go control server.
+`scripts/e2e-tun.mjs` retains its engine assertions with a real TestISP line and
+mandatory controlled DNS probes. Startup and app choices go through the selected
+Node or Go control service; selector checks still use the engine API directly.
+Its identity record names the actual control binary and Node entry when used.
+`acceptance.mjs` provides the broader packet-level acceptance suite.
 
 ## Classification
 

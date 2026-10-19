@@ -21,14 +21,13 @@ import { connect as tlsConnect } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { killTree, runPowerShellJson } from '../lib/ps.mjs';
-import { launchServer, recordServerAndEngine, isNodeServer } from './server-under-test.mjs';
+import { launchServer, recordServerAndEngine, isNodeServer, launchSpec } from './server-under-test.mjs';
+import { verifyEngineProcess } from '../tests/windows/launch.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Windows names a program by its real path; Node may run through a link (nvm).
 const SELF = realpathSync.native(process.execPath);
 const TARGET = { host: '1.1.1.1', port: 443, path: '/cdn-cgi/trace' };
-const engineIndex = process.argv.indexOf('--engine-dir');
-const engineDir = engineIndex > 0 ? process.argv[engineIndex + 1] : null;
 
 const dataDir = await mkdtemp(path.join(tmpdir(), 'net-switch-e2e-'));
 await recordServerAndEngine();
@@ -195,6 +194,7 @@ let failed = false;
 try {
   session = await until('the server starting', async () => JSON.parse(await readFile(path.join(dataDir, 'server.json'), 'utf8')), 60);
   let state = await routingOn();
+  await verifyEngineProcess(launchSpec, dataDir);
   if (staleSystemPID) check(Number(await readFile(path.join(dataDir, 'engine.pid'), 'utf8')) !== staleSystemPID, 'start replaced a stale SYSTEM svchost PID');
   if (staleSystemPID && !isNodeServer) {
     const { stdout, stderr } = await promisify(execFile)('go', ['test', '-v', '-count=1', '-timeout=90s', '-run=^TestReadWorkerCannotWriteControlHKLMOrTCP$', './internal/platform/worker'], {

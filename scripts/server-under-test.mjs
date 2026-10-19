@@ -6,19 +6,16 @@ import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { launchOptions, serverCommand } from '../tests/windows/launch.mjs';
 
 const run = promisify(execFile);
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const flag = (name) => {
-  const index = process.argv.indexOf(name);
-  if (index < 0) return null;
-  if (!process.argv[index + 1]) throw new Error(`${name} requires a path`);
-  return path.resolve(process.argv[index + 1]);
-};
-export const serverExecutable = flag('--server-executable') ?? process.execPath;
-export const engineExecutable = flag('--engine-executable') ?? path.join(flag('--engine-dir') ?? path.join(root, 'engine'), 'sing-box.exe');
-export const isNodeServer = /^(?:node|nodejs)(?:\.exe)?$/i.test(path.basename(serverExecutable));
 export const nodeEntry = path.join(root, 'scripts', 'server-under-test-node.mjs');
+export const launchSpec = launchOptions();
+if (launchSpec.entry && !process.argv.includes('--server-entry')) launchSpec.entry = nodeEntry;
+export const serverExecutable = launchSpec.server;
+export const engineExecutable = launchSpec.engine;
+export const isNodeServer = launchSpec.entry !== null;
 
 export async function recordExecutable(label, executable, args = ['--version']) {
   const resolved = await realpath(executable);
@@ -29,20 +26,15 @@ export async function recordExecutable(label, executable, args = ['--version']) 
   return { path: resolved, version, sha256 };
 }
 export async function recordServerAndEngine() {
-  await recordExecutable('SERVER UNDER TEST', serverExecutable);
+  await recordExecutable('SERVER UNDER TEST', serverExecutable, launchSpec.serverVersionArgs);
   if (isNodeServer) {
-    for (const entry of [nodeEntry, path.join(root, 'lib', 'server-factory.mjs')]) {
+    for (const entry of [launchSpec.entry, path.join(root, 'lib', 'server-factory.mjs')]) {
       console.log(`NODE ENTRY: ${JSON.stringify({ path: entry, sha256: createHash('sha256').update(await readFile(entry)).digest('hex') })}`);
     }
   }
-  await recordExecutable('ENGINE UNDER TEST', engineExecutable, ['version']);
+  await recordExecutable('ENGINE UNDER TEST', engineExecutable, launchSpec.engineVersionArgs);
 }
 export function launchServer(dataDir, mode = 'proxy') {
-  const args = [
-    ...(isNodeServer ? [nodeEntry] : ['--root', root]),
-    ...(mode === 'proxy' ? ['--dev-proxy'] : []),
-    '--user-data', dataDir, '--machine-data', dataDir,
-    '--engine-executable', engineExecutable,
-  ];
-  return spawn(serverExecutable, args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const [executable, args] = serverCommand(launchSpec, dataDir, { proxy: mode === 'proxy' });
+  return spawn(executable, args, { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
 }
