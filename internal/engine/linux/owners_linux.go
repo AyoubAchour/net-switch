@@ -387,6 +387,11 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	expired := func() bool { return ctx.Err() != nil || (timed && !time.Now().Before(deadline)) }
 	var result platform.Owner
 	var found []holder
+	var scanWait time.Duration
+	var scannedPIDs, scannedFDs, hinted int
+	var lastPID, lastUID, waitPID uint32
+	var lastIndexed bool
+	var lastPosition int64
 	seen := map[uint32]bool{}
 	accept := func(h holder) error {
 		if expired() {
@@ -433,6 +438,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	o.mu.Lock()
 	cached := append([]holder(nil), o.cache[r.cookie].holders...)
 	cached = append(cached, o.inodes[r.inode]...)
+	hinted += len(cached)
 	recent := append([]uint32(nil), o.recent[r.uid]...)
 	o.mu.Unlock()
 	for _, h := range cached {
@@ -451,6 +457,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return nil
 		}
 		seen[pid] = true
+		scannedPIDs++
 		if !complete && result.AppID != "" {
 			o.mu.Lock()
 			observed := o.windows[pid].observed
@@ -489,13 +496,18 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 			wait := window.scanning
 			o.mu.Unlock()
+			waiting := time.Now()
+			waitPID = pid
 			select {
 			case <-ctx.Done():
+				scanWait += time.Since(waiting)
 				return nil
 			case <-wait:
 			}
+			scanWait += time.Since(waiting)
 			o.mu.Lock()
 			hints := append([]holder(nil), o.inodes[r.inode]...)
+			hinted += len(hints)
 			o.mu.Unlock()
 			for _, h := range hints {
 				if err := accept(h); err != nil {
@@ -521,6 +533,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		defer f.Close()
 		var metadata unix.Stat_t
 		canIndex := (unix.Fstat(int(f.Fd()), &metadata) == nil && metadata.Uid == r.uid) || slices.Contains(recent, pid)
+		lastPID, lastUID, lastIndexed = pid, metadata.Uid, canIndex
 		o.mu.Lock()
 		window := o.windows[pid]
 		if window.start != start {
@@ -534,6 +547,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return nil
 		}
 		position := window.next
+		lastPosition = window.high
 		window.next += 64
 		o.windows[pid] = window
 		o.mu.Unlock()
@@ -550,6 +564,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				if expired() {
 					break
 				}
+				scannedFDs++
 				if number, err := strconv.ParseInt(fd, 10, 64); err == nil && advancing {
 					maxFD = max(maxFD, number)
 				}
@@ -692,7 +707,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	finish := func() (platform.Owner, error) {
 		if result.AppID == "" {
 			if expired() {
-				return result, context.DeadlineExceeded
+				return result, fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d scanWait=%s waitPID=%d lastPID=%d fdUID=%d indexed=%t frontier=%d)", context.DeadlineExceeded, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, scanWait, waitPID, lastPID, lastUID, lastIndexed, lastPosition)
 			}
 			return result, os.ErrNotExist
 		}
