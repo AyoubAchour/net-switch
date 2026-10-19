@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -275,7 +274,9 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		if spins < 8 {
 			spins++
 			s.mu.RUnlock()
-			runtime.Gosched()
+			// Poll briefly, then park in the native wait below. Gosched here
+			// schedules unrelated Go work rather than yielding to the driver,
+			// adding eight scheduler round trips to a sparse packet stream.
 			continue
 		}
 		// 0.14.1 TunSendNetBufferLists signals Send.TailMoved every time it
