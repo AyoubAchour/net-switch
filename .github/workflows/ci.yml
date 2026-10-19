@@ -117,6 +117,12 @@ jobs:
         run: go test -race ./internal/... ./cmd/... ./tests/...
       - name: Record the complete TIME_WAIT candidate gate
         run: go test -v -count=1 -run TimeWait ./internal/engine/stack
+      - name: Fuzz unprivileged packet and protocol paths
+        if: matrix.name == 'Linux x64'
+        run: |
+          go test -run '^$' -fuzz '^FuzzPackets$' -fuzztime 30s -parallel 2 ./internal/engine/packet
+          go test -run '^$' -fuzz '^FuzzUDPHandler$' -fuzztime 30s -parallel 2 ./internal/engine/udp
+          go test -run '^$' -fuzz '^FuzzProtocol$' -fuzztime 30s -parallel 2 ./internal/engine/protocol
 
   linux:
     name: Linux / Node ${{ matrix.node }} (shared code)

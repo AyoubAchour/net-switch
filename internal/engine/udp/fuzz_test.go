@@ -1,0 +1,50 @@
+package udp
+
+import (
+	"context"
+	"errors"
+	"net/netip"
+	"testing"
+
+	"github.com/AyoubAchour/net-switch/internal/engine/packet"
+	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
+	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
+)
+
+func FuzzUDPHandler(f *testing.F) {
+	f.Add(packet.UDP(local, dest, []byte("seed")), false)
+	f.Add(packet.UDP(netip.MustParseAddrPort("[2001:db8::1]:40000"), netip.MustParseAddrPort("[2001:db8::2]:80"), []byte("v6")), true)
+	f.Fuzz(func(t *testing.T, raw []byte, v6 bool) {
+		off := 20
+		protocol := header.IPv4ProtocolNumber
+		src, dst := local, dest
+		if v6 {
+			off = 40
+			protocol = header.IPv6ProtocolNumber
+			src = netip.MustParseAddrPort("[2001:db8::1]:40000")
+			dst = netip.MustParseAddrPort("[2001:db8::2]:80")
+		}
+		if len(raw) < off+8 || len(raw) > 65535 {
+			return
+		}
+		control := &testfake.Controller{Err: errors.New("capacity")}
+		out := testfake.Output{Packets: make(chan []byte, 1)}
+		n := New(context.Background(), nil, control, &testfake.Owners{}, nil, testfake.Dialer{}, out, 9000)
+		defer n.Close()
+		p := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), raw...))})
+		defer p.DecRef()
+		p.NetworkProtocolNumber = protocol
+		p.NetworkHeader().Consume(off)
+		p.TransportHeader().Consume(8)
+		id := stack.TransportEndpointID{RemoteAddress: tcpip.AddrFromSlice(src.Addr().AsSlice()), LocalAddress: tcpip.AddrFromSlice(dst.Addr().AsSlice()), RemotePort: src.Port(), LocalPort: dst.Port()}
+		if !n.Handle(id, p) {
+			t.Fatal("NAT declined datagram")
+		}
+		if control.Pending.Load() != 0 {
+			t.Fatal("fuzz path leaked bytes")
+		}
+	})
+}
