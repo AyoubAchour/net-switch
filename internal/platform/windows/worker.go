@@ -1,30 +1,8 @@
-// Command netswitch-helper reads what Net Switch's server needs from Windows
-// and prints each reading as one line of JSON. Its modes are:
-//
-//   - meters: bytes per network adapter, so the line meters show the real load.
-//   - outside: TCP connections that go around the routing engine, for example
-//     a download that was already running when routing started.
-//   - network: adapters, default routes and policy on Windows change notifications.
-//   - probe: concurrent TCP tests bound to one interface.
-//   - policy: read only the Wi-Fi policy, for setup and Undo.
-//   - run: start a program with no console window and wait for it (see run_windows.go).
-//
-// Usage:
-//
-//	netswitch-helper.exe meters  [--parent PID] [--once]
-//	netswitch-helper.exe outside [--parent PID] [--engine PATH] [--once]
-//	netswitch-helper.exe run PROGRAM [ARGUMENTS...]
-//
-// It is built as a windowless program (no console), so the startup task can
-// run it without a window appearing. Its output still reaches the server,
-// which starts it with pipes.
-//
-// It replaces long-running PowerShell processes that printed the same
-// lines and used about a hundred megabytes each. The server still runs each
-// mode as its own process, so one Windows call that gets stuck can't blind the
-// other. The reading modes end when the server (--parent) exits, and when
-// their standard input closes. Only readings go to standard output; anything
-// else goes to standard error.
+// The netswitch worker subcommand folds the helper's meter, outside, network,
+// probe and policy modes into the control executable. Each runs independently
+// with pipe-only output and bounded lifetime; workers cannot launch programs.
+// query-supervised exercises the same restricted-process boundary as Control,
+// including its deadline and stderr handling, for native parity diagnostics.
 package winplatform
 
 import (
@@ -51,17 +29,21 @@ type options struct {
 }
 
 const usage = `usage:
-  netswitch-helper.exe meters  [--parent PID] [--once]
-  netswitch-helper.exe outside [--parent PID] [--engine PATH] [--once]
-  netswitch-helper.exe network [--parent PID] [--once]
-  netswitch-helper.exe probe --interface-index N --targets IP:PORT,IP:PORT [--timeout-ms 2000]
-  netswitch-helper.exe policy
-  netswitch-helper.exe run PROGRAM [ARGUMENTS...]`
+  netswitch worker meters  [--parent PID] [--once]
+  netswitch worker outside [--parent PID] [--engine PATH] [--once]
+  netswitch worker network [--parent PID] [--once]
+  netswitch worker probe --interface-index N --targets IP:PORT,IP:PORT [--timeout-ms 2000]
+  netswitch worker policy
+  netswitch worker query OPERATION [BASE64URL_ARGS]
+  netswitch worker query-supervised OPERATION [BASE64URL_ARGS]`
 
 // Run executes one blocking read mode in a disposable worker process.
 func Run(args []string) int {
 	if len(args) > 0 && args[0] == "query" {
-		return query(args[1:])
+		return query(args[1:], false)
+	}
+	if len(args) > 0 && args[0] == "query-supervised" {
+		return query(args[1:], true)
 	}
 	return run(args)
 }

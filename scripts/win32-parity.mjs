@@ -27,7 +27,7 @@ await recordExecutable('WIN32 IMPLEMENTATION UNDER TEST', executable);
 const run = promisify(execFile);
 const native = async (name, args = {}) => {
   const payload = Buffer.from(JSON.stringify(args)).toString('base64url');
-  const { stdout } = await run(executable, ['worker', 'query', name, payload], { windowsHide: true, timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
+  const { stdout } = await run(executable, ['worker', 'query-supervised', name, payload], { windowsHide: true, timeout: 45_000, maxBuffer: 8 * 1024 * 1024 });
   const value = JSON.parse(stdout);
   if (value.error) throw new Error(`${name}: ${value.error}`);
   return value.value;

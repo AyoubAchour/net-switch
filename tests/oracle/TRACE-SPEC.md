@@ -97,6 +97,14 @@ milestones 3–4. It is not permission to discard failed applies or early closur
 from replay. Journal writes and settings-before-apply ordering are explicit 1.0
 outputs, separate from the frozen Node writes.
 
+The replay names the ordering changes imposed by that revision boundary:
+settings and their backup move ahead of the immediately preceding rule batch;
+lane and share-change diagnostics wait for the whole batch acknowledgement;
+and a statistics read that Node completed during queued rule writes completes
+after that acknowledged batch in Go. These are bounded adjacent-operation
+mappings. They cannot move a closure, API response, event, or another policy
+across the batch, and they cannot reorder, drop or coalesce rule-file writes.
+
 ### Milestone-one line-check expectations
 
 The defaults are Cloudflare `1.1.1.1:443`, Google `8.8.8.8:443`, and Quad9
@@ -149,9 +157,13 @@ consumer. All 14 traces, 4,772 entries and 1,793 completion records are checked.
 The real Go controller and sing-box adapter run with an in-memory filesystem,
 fake clock/process and recorded engine replies. Replies are consumed in their
 recorded order; unexpected calls and leftover replies fail the test. Comparison
-covers all 25 API outputs, ordered engine requests, events, control writes,
+covers all 25 API outputs through the real HTTP handler (status, headers and
+body), ordered engine requests, events, control writes,
 config/rule SHA-256 values, removals, spawns, outside-close selectors and logs.
-`appLines` and `shares` retain their ordered-entry comparison.
+`appLines` and `shares` retain their ordered-entry comparison. A combined output
+ledger also compares ordering across these kinds, with only the explicit
+revision-boundary and named line-check mappings above. Initial usage saving and
+the minute timer complete at the recorded startup and same-deadline boundaries.
 
 The two startup diagnostic mappings replace the missing-PowerShell-helper
 messages with the corresponding native-worker messages. Other recorded log

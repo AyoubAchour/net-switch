@@ -36,7 +36,21 @@ type memoryFiles struct {
 	spawns        []map[string]any
 	outsideCloses []any
 	events        []any
+	order         []string
 }
+
+func (f *memoryFiles) recordOrder(kind string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.order = append(f.order, kind)
+}
+
+func (f *memoryFiles) recordWriteOrder(path string) {
+	if controlFile(path) || engineFile(path) {
+		f.order = append(f.order, "write:"+filepath.Base(path))
+	}
+}
+
 type recordedWrite struct {
 	Path  string
 	Bytes []byte
@@ -60,6 +74,7 @@ func (f *memoryFiles) WriteFile(p string, b []byte, _ fs.FileMode) error {
 	f.data[p] = append([]byte{}, b...)
 	if !strings.HasSuffix(p, ".tmp") {
 		f.writes = append(f.writes, recordedWrite{Path: p, Bytes: append([]byte{}, b...)})
+		f.recordWriteOrder(p)
 	}
 	return nil
 }
@@ -72,6 +87,7 @@ func (f *memoryFiles) Rename(a, b string) error {
 	}
 	f.data[b] = v
 	f.writes = append(f.writes, recordedWrite{Path: b, Bytes: append([]byte{}, v...)})
+	f.recordWriteOrder(b)
 	delete(f.data, a)
 	return nil
 }
@@ -80,6 +96,7 @@ func (f *memoryFiles) Remove(p string) error {
 	defer f.mu.Unlock()
 	delete(f.data, p)
 	f.removes = append(f.removes, p)
+	f.order = append(f.order, "remove")
 	return nil
 }
 
@@ -119,6 +136,7 @@ type fakeEngine struct {
 	readConnections func(context.Context) ([]engine.Connection, error)
 	replies         []recordedReply
 	resourceIDs     map[string]string
+	beforeStart     func()
 }
 type recordedReply struct {
 	Route  string
@@ -146,6 +164,9 @@ func (f *fakeEngine) Fail(err error) {
 	f.s.Error = &text
 }
 func (f *fakeEngine) Start(ctx context.Context, p engine.Policy) error {
+	if f.beforeStart != nil {
+		f.beforeStart()
+	}
 	if f.real != nil {
 		return f.real.Start(ctx, p)
 	}
@@ -316,11 +337,18 @@ func testCore(t *testing.T, initial map[string]any) (*Core, *fakeEngine, *fakeCl
 		b, _ := js.Marshal(v)
 		decoded, _ := js.Decode(b)
 		files.outsideCloses = append(files.outsideCloses, decoded)
+		files.recordOrder("outside-close")
 	}}
-	c, err := New(context.Background(), Options{Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: time.UTC, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, LineID: func() string { return fmt.Sprintf("%06x", serial.Add(1)) }, Background: func(fn func()) { fn() }, Log: func(s string) { files.mu.Lock(); files.logs = append(files.logs, s); files.mu.Unlock() }, Event: func(v map[string]any) {
+	c, err := New(context.Background(), Options{Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: time.UTC, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, LineID: func() string { return fmt.Sprintf("%06x", serial.Add(1)) }, Background: func(fn func()) { fn() }, Log: func(s string) {
+		files.mu.Lock()
+		files.logs = append(files.logs, s)
+		files.order = append(files.order, traceLogKey(s))
+		files.mu.Unlock()
+	}, Event: func(v map[string]any) {
 		b, _ := js.Marshal(v)
 		out, _ := js.Decode(b)
 		files.events = append(files.events, out)
+		files.recordOrder("event")
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -844,10 +872,14 @@ func TestStateMatchesEveryFrozenTrayScenario(t *testing.T) {
 			}
 			c.values["appLines"] = pins
 			c.tracker = tracker
-			actual, err := js.Marshal(c.State())
-			if err != nil {
-				t.Fatal(err)
+			request := httptest.NewRequest("GET", "http://127.0.0.1:47821/api/state", nil)
+			request.Header.Set("X-Token", "contract-token")
+			recorder := httptest.NewRecorder()
+			(&HTTP{Core: c, Port: 47821, Token: "contract-token"}).ServeHTTP(recorder, request)
+			if recorder.Code != 200 {
+				t.Fatalf("state HTTP status %d", recorder.Code)
 			}
+			actual := recorder.Body.Bytes()
 			got, err := js.Decode(actual)
 			if err != nil {
 				t.Fatal(err)

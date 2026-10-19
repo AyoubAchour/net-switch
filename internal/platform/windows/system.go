@@ -37,7 +37,7 @@ func (s *System) Stream(ctx context.Context, mode string, emit func([]byte), rep
 	}
 	s.Workers.Stream(ctx, mode, args, emit, report)
 }
-func query(args []string) int {
+func query(args []string, supervised bool) int {
 	if len(args) != 1 && len(args) != 2 {
 		fmt.Fprintln(os.Stderr, "worker query needs an operation and encoded arguments")
 		return 2
@@ -58,7 +58,15 @@ func query(args []string) int {
 	}
 	var value any
 	if err == nil {
-		value, err = Execute(args[0], input)
+		if supervised {
+			var executable string
+			executable, err = os.Executable()
+			if err == nil {
+				value, err = (worker.Supervisor{Executable: executable}).Once(context.Background(), args[0], input)
+			}
+		} else {
+			value, err = Execute(args[0], input)
+		}
 	}
 	result := map[string]any{"value": value}
 	if err != nil {

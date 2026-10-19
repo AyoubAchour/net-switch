@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -41,8 +42,9 @@ type recordedTrace struct {
 			Kind                string `json:"kind"`
 			MS                  int64  `json:"ms"`
 			Method, Route, Line string
-			Body                json.RawMessage `json:"body"`
-			Value               json.RawMessage `json:"value"`
+			Body                json.RawMessage   `json:"body"`
+			Headers             map[string]string `json:"headers"`
+			Value               json.RawMessage   `json:"value"`
 		} `json:"steps"`
 	} `json:"scenario"`
 }
@@ -105,6 +107,7 @@ func TestRecordedTraceReplay(t *testing.T) {
 			var expectedOutside []any
 			var expectedConsole string
 			var expectedEvents []any
+			var expectedOrder []string
 			var adapters []map[string]any
 			completion := 0
 			e.replies = []recordedReply{}
@@ -120,6 +123,21 @@ func TestRecordedTraceReplay(t *testing.T) {
 					t.Fatal(err)
 				}
 				m := js.Object(v)
+				if entry.Direction == "output" {
+					key := entry.Kind
+					if key == "write" {
+						key += ":" + filepath.Base(js.Text(m["file"]))
+					}
+					if key == "log" {
+						key = traceLogKey(js.Text(m["text"]))
+					}
+					if key == "engine" {
+						key += ":" + js.Text(m["method"]) + ":" + js.Text(m["route"])
+					}
+					if entry.Kind != "engine" || !strings.HasSuffix(js.Text(m["route"]), "/delay") {
+						expectedOrder = append(expectedOrder, key)
+					}
+				}
 				if entry.Kind == "completion" {
 					completion++
 					if int(js.Number(m["id"])) != completion {
@@ -232,6 +250,7 @@ func TestRecordedTraceReplay(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			fs.recordOrder("console")
 			probes := map[string]any{}
 			e.probe = func(r engine.ProbeRequest) engine.ProbeResult {
 				value, ok := probes[r.Line]
@@ -247,10 +266,15 @@ func TestRecordedTraceReplay(t *testing.T) {
 			if err := c.Poll(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			if err := c.Start(context.Background()); err != nil {
-				t.Fatal(err)
+			// The initial usage timer completes while start awaits the first
+			// engine file operation. Deliver that completion at the same boundary.
+			e.beforeStart = func() {
+				e.beforeStart = nil
+				if err := c.SaveUsage(); err != nil {
+					t.Fatal(err)
+				}
 			}
-			if err := c.SaveUsage(); err != nil {
+			if err := c.Start(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			responses := 0
@@ -280,16 +304,18 @@ func TestRecordedTraceReplay(t *testing.T) {
 					for nextPoll <= end {
 						clock.at = time.UnixMilli(nextPoll)
 						c.routesAt = c.now()
+						// The long-period timer was inserted before the recursively
+						// scheduled poll at this same deadline in the Node recorder.
+						if (nextPoll-clockOrigin(trace))%60000 == 0 {
+							if err := c.SaveUsage(); err != nil {
+								t.Fatal(err)
+							}
+						}
 						if err := c.Poll(context.Background()); err != nil {
 							t.Fatal(err)
 						}
 						if err := c.Supervise(context.Background()); err != nil {
 							t.Fatal(err)
-						}
-						if (nextPoll-clockOrigin(trace))%60000 == 0 {
-							if err := c.SaveUsage(); err != nil {
-								t.Fatal(err)
-							}
 						}
 						nextPoll += 1000
 					}
@@ -330,38 +356,34 @@ func TestRecordedTraceReplay(t *testing.T) {
 						a["ipv4s"] = ips
 					}
 				case "http":
-					body := map[string]any{}
-					if len(step.Body) > 0 {
-						v, err := js.Decode(step.Body)
-						if err != nil {
-							t.Fatal(err)
-						}
-						body = js.Object(v)
-					}
-					got, err := c.Action(context.Background(), step.Method, step.Route, body)
-					status := 200
-					if err != nil {
-						status = 500
-						if client, ok := err.(*ClientError); ok {
-							status = 400
-							got = map[string]any{"error": client.Message}
+					request := httptest.NewRequest(step.Method, "http://127.0.0.1:47821"+step.Route, bytes.NewReader(step.Body))
+					request.Header.Set("X-Token", strings.Repeat("ab", 24))
+					for name, value := range step.Headers {
+						if strings.EqualFold(name, "host") {
+							request.Host = value
 						} else {
-							t.Fatal(err)
+							request.Header.Set(name, value)
 						}
 					}
+					recorder := httptest.NewRecorder()
+					(&HTTP{Core: c, Port: 47821, Token: strings.Repeat("ab", 24)}).ServeHTTP(recorder, request)
+					fs.recordOrder("api")
 					if responses >= len(expected) {
 						t.Fatal("unexpected API output")
 					}
 					want := expected[responses]
 					responses++
-					if status != int(js.Number(want["status"])) {
-						t.Fatalf("status %d != %v", status, want["status"])
+					if recorder.Code != int(js.Number(want["status"])) {
+						t.Fatalf("status %d != %v", recorder.Code, want["status"])
 					}
-					encoded, err := js.Marshal(got)
-					if err != nil {
-						t.Fatal(err)
+					headers := map[string]any{}
+					for key, values := range recorder.Header() {
+						headers[key] = strings.Join(values, ", ")
 					}
-					actual, err := js.Decode(encoded)
+					if !reflect.DeepEqual(headers, want["headers"]) {
+						t.Fatalf("API headers differ: %v != %v", headers, want["headers"])
+					}
+					actual, err := js.Decode(recorder.Body.Bytes())
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -572,9 +594,113 @@ func TestRecordedTraceReplay(t *testing.T) {
 					t.Fatalf("engine write %d %s SHA-256 differs: %x != %s\n%s", i, name, sum, want["sha256"], normalized)
 				}
 			}
+			actualOrder := make([]string, len(fs.order))
+			for i, key := range fs.order {
+				prefix, value, ok := strings.Cut(key, ":")
+				if prefix == "engine" {
+					method, route, _ := strings.Cut(value, ":")
+					value = normalizeResourceString(route, mapping)
+					prefix += ":" + method
+				}
+				if ok {
+					actualOrder[i] = prefix + ":" + normalizeResourceString(value, mapping)
+				} else {
+					actualOrder[i] = key
+				}
+			}
+			expectedOrder = revisionOutputOrder(expectedOrder)
+			if trace.Name == "probeFailover" {
+				const from, to = 46, 36
+				if !reflect.DeepEqual(expectedOrder[from:from+4], []string{"log", "event", "engine:PUT:/proxies/lane-a1", "lane-log"}) {
+					t.Fatal("three-operator transition order expectation no longer matches")
+				}
+				for _, key := range expectedOrder[to:from] {
+					if key != "engine:GET:/connections" {
+						t.Fatal("probe deadline mapping crosses another effect")
+					}
+				}
+				transition := append([]string{}, expectedOrder[from:from+4]...)
+				copy(expectedOrder[to+4:from+4], expectedOrder[to:from])
+				copy(expectedOrder[to:to+4], transition)
+			}
+			if !reflect.DeepEqual(actualOrder, expectedOrder) {
+				for i := range actualOrder {
+					if i >= len(expectedOrder) || actualOrder[i] != expectedOrder[i] {
+						t.Fatalf("output order at %d: got %v; want %v", i, actualOrder[i:min(i+12, len(actualOrder))], expectedOrder[min(i, len(expectedOrder)):min(i+12, len(expectedOrder))])
+					}
+				}
+				t.Fatalf("output order length: %d != %d", len(actualOrder), len(expectedOrder))
+			}
 			t.Logf("%s: %d entries, %d completion records, %d API outputs", trace.Name, len(trace.Entries), completion, responses)
 		})
 	}
+}
+
+func traceLogKey(text string) string {
+	if strings.Contains(text, "'s apps now use ") {
+		return "lane-log"
+	}
+	if strings.HasPrefix(text, "combining shares:") {
+		return "shares-log"
+	}
+	if strings.Contains(text, "their new connections are refused until the cap resets") {
+		return "blocked-log"
+	}
+	return "log"
+}
+
+// The revision boundary deliberately commits settings before apply and reports
+// lane changes after the whole revision acknowledges. Preserve all other order.
+func revisionOutputOrder(in []string) []string {
+	out := append([]string{}, in...)
+	for i := 0; i+1 < len(out); i++ {
+		if out[i] == "lane-log" && strings.HasPrefix(out[i+1], "engine:PUT:/proxies/lane-") {
+			out[i], out[i+1] = out[i+1], out[i]
+		}
+	}
+	for i := 0; i < len(out); i++ {
+		j := i
+		for j < len(out) && strings.HasPrefix(out[j], "write:") && engineFile(strings.TrimPrefix(out[j], "write:")) && out[j] != "write:engine.pid" {
+			j++
+		}
+		if j > i && j+1 < len(out) && out[j] == "write:settings.json" && out[j+1] == "write:settings.json.bak" {
+			copy(out[i+2:j+2], out[i:j])
+			out[i], out[i+1] = "write:settings.json", "write:settings.json.bak"
+			i = j + 1
+		}
+	}
+	// Reads in Node can complete while its queued rule writes are pending.
+	// The revision adapter acknowledges that batch first; the subsequent read
+	// is still fenced by startedBefore and is never allowed to admit new flows.
+	for i := 0; i < len(out); i++ {
+		if out[i] != "engine:GET:/connections" {
+			continue
+		}
+		j := i + 1
+		for j < len(out) && ((strings.HasPrefix(out[j], "write:") && engineFile(strings.TrimPrefix(out[j], "write:"))) || out[j] == "shares-log" || out[j] == "blocked-log") {
+			j++
+		}
+		if j > i+1 {
+			copy(out[i:j-1], out[i+1:j])
+			out[j-1] = "engine:GET:/connections"
+		}
+	}
+	// Both rule batches belong to one revision. Report their conditions only
+	// after acknowledgement, without changing either batch's bytes or order.
+	for i := 0; i < len(out); i++ {
+		if out[i] != "shares-log" {
+			continue
+		}
+		j := i + 1
+		for j < len(out) && strings.HasPrefix(out[j], "write:") && engineFile(strings.TrimPrefix(out[j], "write:")) {
+			j++
+		}
+		if j > i+1 {
+			copy(out[i:j-1], out[i+1:j])
+			out[j-1] = "shares-log"
+		}
+	}
+	return out
 }
 
 func knownTraceEntry(e traceEntry) error {
@@ -583,7 +709,7 @@ func knownTraceEntry(e traceEntry) error {
 	case "input":
 		allowed = " initial-files http helper-line interfaces connections probes adapter-snapshot counter-sample engine-reply probe-result clock-tick file-completion completion async-result socket-completion process-exit timer-completion "
 	case "output":
-		allowed = " api event engine spawn write remove outside-close log console exit "
+		allowed = " api event engine spawn write remove outside-close log console "
 	default:
 		return fmt.Errorf("unknown trace direction %q", e.Direction)
 	}
@@ -635,6 +761,7 @@ func installReplayAdapter(t *testing.T, c *Core, e *fakeEngine, clock *fakeClock
 			request["body"] = body
 		}
 		e.requests = append(e.requests, request)
+		files.recordOrder("engine:" + r.Method + ":" + r.URL.Path)
 		route := r.URL.Path
 		if strings.HasPrefix(route, "/proxies/lane-") {
 			id := strings.TrimPrefix(route, "/proxies/lane-")
@@ -661,6 +788,7 @@ func installReplayAdapter(t *testing.T, c *Core, e *fakeEngine, clock *fakeClock
 	}
 	e.real = singbox.New(singbox.Options{Executable: "/test/engine/sing-box.exe", DataDir: "/test", Mode: "tun", Platform: c.op.Platform, HTTP: client, Files: c.op.IO, Now: clock.Now, Sleep: func(context.Context, time.Duration) error { return nil }, FreePort: func() (int, error) { return 49000, nil }, ID: c.op.ID, Verify: func() error { return nil }, StartProcess: func(exe, config, dir string) (singbox.Child, error) {
 		files.spawns = append(files.spawns, map[string]any{"exe": exe, "args": []string{"run", "-c", config, "--disable-color"}})
+		files.recordOrder("spawn")
 		return &replayChild{closed: make(chan struct{})}, nil
 	}, ListFiles: func(dir string) ([]string, error) {
 		files.mu.Lock()
