@@ -533,12 +533,11 @@ try {
     return { changed, held, beforePID, afterPID, refreshes };
   });
   await report.test('cap exhaustion closes old secondary flows and preserves main flows', 'parity', async () => {
-    const pinReadiness = [];
     const prepare = async (stage, fn) => {
       try { return await fn(); }
       catch (cause) {
         const error = new Error(`${stage}: ${cause.message}`, { cause });
-        error.evidence = { stage, pinReadiness,
+        error.evidence = { stage,
           state: await server.api('state').catch((error) => ({ error: error.message })),
           gateway: await harness.control('stats').catch((error) => ({ error: error.message })) };
         throw error;
@@ -547,18 +546,6 @@ try {
     await pin(main.id);
     const mainHeld = await prepare('opening the main-line HTTPS flows', () => client('open', { count: 2 }));
     await pinApp(clientExe, second.id);
-    if (options.profile === 'baseline') {
-      // 0.3.x acknowledges the rule-file writes, while sing-box reloads each
-      // file asynchronously. Establish the secondary pin before testing caps.
-      // This probe closes its own socket and leaves the main held flows alone.
-      // The v1 applied-state contract gets no readiness allowance.
-      await prepare('waiting for the secondary pin before cap setup', () => until(async () => {
-        const [sample] = await client('reuse', { target: responder.virtual, count: 1 });
-        pinReadiness.push({ port: sample.port, outcome: sample.outcome, ms: sample.ms });
-        return sample.outcome === 'closed' && sample;
-      }, 'secondary pin reaches the controlled responder', 30_000));
-      console.log(`CAP PIN READINESS ${JSON.stringify(pinReadiness)}`);
-    }
     const secondHeld = await prepare('opening the controlled secondary-line HTTP flows',
       () => client('open', { count: 2, target: responder.virtual }));
     await counts(4);
@@ -577,7 +564,7 @@ try {
       }, 'flows admitted before the secondary cap closed');
       await client('refresh', { ids: mainHeld.map((item) => item.id) });
       assert.equal(blocked.find((line) => line.id === main.id).blocked, false);
-      return { mainHeld, secondHeld, closed, blocked, pinReadiness };
+      return { mainHeld, secondHeld, closed, blocked };
     } finally {
       await server.api('lines/update', { id: main.id, cap: null });
       await server.api('lines/update', { id: second.id, cap: null, strict: false });
