@@ -266,9 +266,9 @@ func TestKernelPlatform(t *testing.T) {
 		if err := netlink.RouteDel(&def); err != nil {
 			t.Fatal(err)
 		}
-		p.mu.Lock()
+		p.routeMu.Lock()
 		err = p.reconcileLocked(ctx)
-		p.mu.Unlock()
+		p.routeMu.Unlock()
 		if err != nil {
 			t.Fatal(err)
 		}

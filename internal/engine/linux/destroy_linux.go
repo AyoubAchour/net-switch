@@ -75,7 +75,7 @@ func (o *Owners) listenDestroy(ctx context.Context, destroy func(netip.AddrPort,
 				destroy(r.local, r.generation())
 				o.mu.Lock()
 				delete(o.cache, r.cookie)
-				group := o.ambiguousPorts[r.local.Port()]
+				group := time.Now().Before(o.ambiguousPorts[r.local.Port()])
 				o.mu.Unlock()
 				// A set generation is revalidated from live cookies. A delayed
 				// member event therefore cannot close a replacement mapping.

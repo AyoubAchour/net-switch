@@ -58,7 +58,7 @@ type Owners struct {
 	inodes          map[uint32]inodeHolders
 	waiters         map[uint32]*inodeWaiter
 	windows         map[uint32]fdWindow
-	ambiguousPorts  map[uint16]bool
+	ambiguousPorts  map[uint16]time.Time
 	// Fault callbacks are assigned only by the acceptance build.
 	fault        func(context.Context) error
 	destroyFault func(context.Context, socketRow, func())
@@ -133,7 +133,7 @@ func (o *Owners) Warm(ctx context.Context) error {
 func NewOwners() *Owners {
 	// Allocate the bounded index's backing tables before capture. Growing
 	// them under the shared lock can turn one GC assist into many timeouts.
-	return &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32][]uint32, 64), cache: make(map[uint64]cachedHolders, 65536), inodes: make(map[uint32]inodeHolders, 131072), waiters: make(map[uint32]*inodeWaiter, 32768), windows: make(map[uint32]fdWindow, 4096), ambiguousPorts: map[uint16]bool{}}
+	return &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32][]uint32, 64), cache: make(map[uint64]cachedHolders, 65536), inodes: make(map[uint32]inodeHolders, 131072), waiters: make(map[uint32]*inodeWaiter, 32768), windows: make(map[uint32]fdWindow, 4096), ambiguousPorts: map[uint16]time.Time{}}
 }
 
 func (o *Owners) Close() { o.queries.close() }
@@ -204,7 +204,10 @@ func (o *Owners) udpOwner(ctx context.Context, tuple platform.Tuple) (owner plat
 		return platform.Owner{}, fmt.Errorf("UDP exact query: %w", err)
 	}
 	o.mu.Lock()
-	ambiguous := o.ambiguousPorts[source.Port()]
+	ambiguous := time.Now().Before(o.ambiguousPorts[source.Port()])
+	if !ambiguous {
+		delete(o.ambiguousPorts, source.Port())
+	}
 	o.mu.Unlock()
 	if err == nil && tuple.Destination.IsValid() && !ambiguous {
 		if r, e := matchUDP(exact, source); e == nil {
@@ -225,7 +228,7 @@ func (o *Owners) udpOwner(ctx context.Context, tuple platform.Tuple) (owner plat
 	r, err := matchUDP(rows, source)
 	if errors.Is(err, errSocketAmbiguous) {
 		o.mu.Lock()
-		o.ambiguousPorts[source.Port()] = true
+		o.ambiguousPorts[source.Port()] = time.Now().Add(2 * time.Second)
 		o.mu.Unlock()
 		return platform.Owner{Generation: cookieSet(rows, source)}, platform.ErrAmbiguous
 	}
@@ -294,7 +297,7 @@ func processOwner(pid uint32) (platform.Owner, error) {
 // after reading executable metadata, without a redundant third stat read.
 func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 	root := fmt.Sprintf("/proc/%d/", pid)
-	exe, err := os.Readlink(root + "exe")
+	exe, err := readProcLink(root + "exe")
 	if err != nil {
 		return platform.Owner{}, err
 	}
@@ -303,10 +306,8 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 	storage := processBuffers.Get().(*[16 << 10]byte)
 	// Flatpak's mount namespace metadata identifies apps that have identical
 	// /app/bin executable paths. It belongs to the holder, never to the socket.
-	info, infoErr := readInto(root+"root/.flatpak-info", storage[:])
-	if errors.Is(infoErr, errKernelFileLimit) {
-		info, infoErr = os.ReadFile(root + "root/.flatpak-info")
-	}
+	flatpak := flatpakBuffers.Get().(*[64 << 10]byte)
+	info, infoErr := readFlatpakInfo(root+"root", flatpak[:])
 	if b, err := info, infoErr; err == nil {
 		section := ""
 		for _, line := range strings.Split(string(b), "\n") {
@@ -341,6 +342,7 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 			}
 		}
 	}
+	flatpakBuffers.Put(flatpak)
 	processBuffers.Put(storage)
 	end, err := processStart(pid)
 	if err != nil || end != start {
@@ -451,7 +453,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		if err != nil || start != h.start {
 			return nil
 		}
-		got, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd))
+		got, err := readProcLink(fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd))
 		if err != nil || got != target {
 			return nil
 		}
@@ -534,7 +536,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	// seen along the way. The index is only a hint; accept rechecks the live fd
 	// and PID start time on every use. Regular files never enter the index.
 	var heavy []uint32
-	var busyWait <-chan struct{}
 	scan := func(pid uint32, complete bool) error {
 		if err := checkHints(); err != nil {
 			return err
@@ -582,14 +583,34 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}
 		current := o.windows[pid]
-		if current.scanning != nil {
-			// A busy candidate must not prevent searching another PID. Its
-			// scanner will notify this lookup if it finds the wanted inode.
-			busyWait = current.scanning
+		for current.scanning != nil {
+			// Do not mark a busy candidate as searched and walk unrelated
+			// processes. Wait for its bounded scan (or our own deadline),
+			// consume published matches, then scan this same PID's next window.
+			// A channel wake, rather than a sub-millisecond timer, avoids both
+			// scheduler rounding and losing the useful candidate under load.
+			busy := current.scanning
 			waitPID = pid
-			heavy = append(heavy, pid)
 			o.mu.Unlock()
-			return nil
+			waiting := time.Now()
+			var ready <-chan struct{}
+			if notice != nil && result.AppID == "" {
+				ready = notice.ready
+			}
+			select {
+			case <-busy:
+			case <-ready:
+			case <-ctx.Done():
+			}
+			scanWait += time.Since(waiting)
+			if err := checkHints(); err != nil {
+				return err
+			}
+			if hasHolder(pid) || expired() {
+				return nil
+			}
+			o.mu.Lock()
+			current = o.windows[pid]
 		}
 		current.scanning = gate
 		o.windows[pid] = current
@@ -652,7 +673,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 						maxFD = max(maxFD, number)
 					}
 				}
-				got, err := os.Readlink(dir + "/" + fd)
+				got, err := readProcLink(dir + "/" + fd)
 				if err != nil || !strings.HasPrefix(got, "socket:[") || !strings.HasSuffix(got, "]") {
 					continue
 				}
@@ -857,21 +878,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return platform.Owner{}, err
 		}
 	}
-	if result.AppID == "" && busyWait != nil && !expired() {
-		waiting := time.Now()
-		timer := time.NewTimer(250 * time.Microsecond)
-		select {
-		case <-notice.ready:
-		case <-busyWait:
-		case <-timer.C:
-		case <-ctx.Done():
-		}
-		timer.Stop()
-		scanWait += time.Since(waiting)
-		if err := checkHints(); err != nil {
-			return platform.Owner{}, err
-		}
-	}
 	if result.AppID != "" {
 		return finish()
 	}
@@ -885,6 +891,17 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	}
 	groupHeavy := append([]uint32(nil), heavy...)
 	for _, pid := range groupHeavy {
+		delete(seen, pid)
+		if err := scan(pid, true); err != nil {
+			return platform.Owner{}, err
+		}
+		if result.AppID != "" {
+			return finish()
+		}
+	}
+	// Recent real holders are stronger hints than directory order, including
+	// hosts without delegated cgroups. Exhaust their targeted pass first.
+	for _, pid := range recent {
 		delete(seen, pid)
 		if err := scan(pid, true); err != nil {
 			return platform.Owner{}, err
@@ -964,7 +981,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		return finish()
 	}
 	for len(heavy) > 0 && !expired() {
-		before := scannedFDs
 		pending := heavy
 		heavy = nil
 		visited := map[uint32]bool{}
@@ -975,21 +991,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			visited[pid] = true
 			delete(seen, pid)
 			if err := scan(pid, true); err != nil {
-				return platform.Owner{}, err
-			}
-			if result.AppID != "" {
-				return finish()
-			}
-		}
-		if scannedFDs == before && busyWait != nil && !expired() {
-			waiting := time.Now()
-			select {
-			case <-notice.ready:
-			case <-busyWait:
-			case <-ctx.Done():
-			}
-			scanWait += time.Since(waiting)
-			if err := checkHints(); err != nil {
 				return platform.Owner{}, err
 			}
 			if result.AppID != "" {
@@ -1098,7 +1099,7 @@ func (o *Owners) SnapshotAt(ctx context.Context, keys []netip.AddrPort, started 
 				live[candidate.cookie] = true
 			}
 			o.mu.Lock()
-			o.ambiguousPorts[k.Port()] = true
+			o.ambiguousPorts[k.Port()] = time.Now().Add(2 * time.Second)
 			o.mu.Unlock()
 			out[k] = platform.Owner{Generation: cookieSet(byPort[k.Port()], k)}
 			continue
@@ -1126,7 +1127,7 @@ func (o *Owners) SnapshotAt(ctx context.Context, keys []netip.AddrPort, started 
 			if v.StartTime != h.start || v.AppID == "" {
 				continue
 			}
-			link, err := os.Readlink(fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd))
+			link, err := readProcLink(fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd))
 			if err != nil || link != "socket:["+strconv.FormatUint(uint64(r.inode), 10)+"]" {
 				continue
 			}
@@ -1144,6 +1145,11 @@ func (o *Owners) SnapshotAt(ctx context.Context, keys []netip.AddrPort, started 
 		}
 	}
 	o.mu.Lock()
+	for port, until := range o.ambiguousPorts {
+		if !time.Now().Before(until) {
+			delete(o.ambiguousPorts, port)
+		}
+	}
 	for cookie, cached := range o.cache {
 		if !live[cookie] && cached.observed.Before(started) {
 			delete(o.cache, cookie)

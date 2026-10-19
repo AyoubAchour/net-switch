@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -26,6 +28,8 @@ type Tun struct {
 	bufs             [][]byte
 	sizes            []int
 	next, count, mtu int
+	readErrors       atomic.Uint64
+	closedRead       error
 }
 
 func openTun(v tunObject) (*Tun, error) {
@@ -104,7 +108,7 @@ func (t *Tun) Stats() any {
 	if s == nil {
 		return nil
 	}
-	return map[string]uint64{"ingressPackets": s.TxPackets, "ingressDropped": s.TxDropped, "egressPackets": s.RxPackets, "egressDropped": s.RxDropped}
+	return map[string]uint64{"ingressPackets": s.TxPackets, "ingressDropped": s.TxDropped, "egressPackets": s.RxPackets, "egressDropped": s.RxDropped, "readDrops": t.readErrors.Load()}
 }
 func (t *Tun) Close() error { return t.device.Close() }
 func (t *Tun) ReadPacket(ctx context.Context, out []byte) (int, error) {
@@ -114,11 +118,24 @@ func (t *Tun) ReadPacket(ctx context.Context, out []byte) (int, error) {
 		return 0, err
 	}
 	if t.next == t.count {
+		if t.closedRead != nil {
+			return 0, t.closedRead
+		}
 		stop := context.AfterFunc(ctx, func() { t.device.Close() })
 		defer stop()
 		n, err := t.device.Read(t.bufs, t.sizes, 0)
 		if err != nil {
-			return 0, err
+			if errors.Is(err, os.ErrClosed) || errors.Is(err, unix.EBADF) || errors.Is(err, unix.EBADFD) {
+				t.closedRead = err
+				if n == 0 {
+					return 0, err
+				}
+			} else {
+				// A malformed/offload-overflow batch is a packet drop, not a
+				// device failure. Read can return valid leading segments with
+				// ErrTooManySegments; drain those in order before reading again.
+				t.readErrors.Add(1)
+			}
 		}
 		t.next, t.count = 0, n
 	}
@@ -126,11 +143,12 @@ func (t *Tun) ReadPacket(ctx context.Context, out []byte) (int, error) {
 		return 0, nil
 	}
 	n := t.sizes[t.next]
-	if n > len(out) {
-		return 0, io.ErrShortBuffer
-	}
-	copy(out, t.bufs[t.next][:n])
 	t.next++
+	if n > len(out) {
+		t.readErrors.Add(1)
+		return 0, nil
+	}
+	copy(out, t.bufs[t.next-1][:n])
 	return n, nil
 }
 func (t *Tun) WritePacket(ctx context.Context, packet []byte) error {

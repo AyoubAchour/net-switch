@@ -41,6 +41,8 @@ type session struct {
 	queue           []datagram
 	bytes           int
 	owner           platform.Owner
+	pendingDestroys []string
+	destroyOverflow bool
 	validated, last time.Time
 	active, closed  bool
 	rejected        bool
@@ -299,7 +301,29 @@ func (s *session) run() {
 	}
 	s.mu.Lock()
 	s.owner = owner
+	destroyed := false
+	for _, generation := range s.pendingDestroys {
+		if generation == owner.Generation {
+			destroyed = true
+		}
+	}
+	verify := s.destroyOverflow
+	s.pendingDestroys = nil
 	s.mu.Unlock()
+	if destroyed {
+		return
+	}
+	if verify {
+		if n.identities == nil {
+			n.IdentityErrors.Add(1)
+			return
+		}
+		live, err := n.identities.Snapshot(ctx, []netip.AddrPort{s.source})
+		if err != nil || !same(live[s.source], owner) {
+			n.IdentityErrors.Add(1)
+			return
+		}
+	}
 	// No generation means we cannot prove this socket is still the same one.
 	if owner.Generation == "" {
 		n.IdentityErrors.Add(1)

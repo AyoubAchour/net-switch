@@ -52,6 +52,9 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	forwarding, cancelForwarding := context.WithCancel(ctx)
 	defer cancelForwarding()
 	p.ctx = forwarding
+	if err := pingPermission(); err != nil {
+		log.Print(err)
+	}
 	defer p.Close()
 	e := engine.New(forwarding, engine.Dependencies{OpenTun: p.OpenTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners}, flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncDir})
 	runtime := serviceRuntime{Engine: e, cancel: cancelForwarding}

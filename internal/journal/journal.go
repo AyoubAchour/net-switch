@@ -29,6 +29,10 @@ type Store interface {
 	Records() ([]Record, error)
 	Append(Record) error
 }
+
+// Compactor atomically replaces the log with the supplied live records. The
+// old or the new complete log must survive a crash, including directory fsync.
+type Compactor interface{ Compact([]Record) error }
 type Locker interface {
 	Acquire(context.Context) (release func() error, err error)
 }
@@ -188,12 +192,39 @@ func (s *Session) Cleanup(ctx context.Context) error {
 		}
 		// Missing and replaced objects no longer belong to us.
 		r.Phase = "removed"
-		if err := s.j.Store.Append(r); err != nil {
+		if _, compact := s.j.Store.(Compactor); !compact {
+			if err := s.j.Store.Append(r); err != nil {
+				return err
+			}
+		}
+	}
+	if store, ok := s.j.Store.(Compactor); ok {
+		// Until this atomic checkpoint, recovery sees the original intents
+		// and rechecks every fingerprint. No per-object durable mark is
+		// needed after a deletion, unlike before a creation.
+		if err := store.Compact(nil); err != nil {
 			return err
 		}
 	}
 	s.failed = false
 	return nil
+}
+
+func (s *Session) Compact() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.failed {
+		return errors.New("journal session closed or requires recovery")
+	}
+	store, ok := s.j.Store.(Compactor)
+	if !ok {
+		return nil
+	}
+	live, err := s.j.live()
+	if err != nil {
+		return err
+	}
+	return store.Compact(live)
 }
 func (s *Session) Close() error {
 	s.mu.Lock()

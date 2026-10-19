@@ -91,6 +91,8 @@ func unknownLimits(e *Env) {
 	bgs, results := e.udpFlood([]string{"alpha"}, 700, release)
 	st = stats(e, s)
 	r := results["alpha"]
+	seen := Select(e.Records(), Tagged("udp", r.Token))
+	e.T.Check(len(seen) >= r.Answered && RecordLines(seen)["a"] == len(seen), "all unknown UDP sessions use the main line as seen by the server (%s)", Describe(RecordLines(seen)))
 	e.T.Check(st.UnknownUDP == 512 && st.Unknown == 512 && r.Answered >= 500 && r.Answered <= 512, "unknown UDP fills 512 sessions (%d counted, %d answered)", st.UnknownUDP, r.Answered)
 	e.T.Check(r.Refused >= 188, "unknown UDP excess receives refusal (%d)", r.Refused)
 	e.holding(bgs, release)
@@ -117,7 +119,7 @@ func tunQueue(e *Env) {
 func memoryLimit(e *Env) {
 	e.StartEngine(e.DefaultConfig())
 	_, s := e.v1()
-	stream := e.StartStream("charlie", AsUser, 15*time.Second)
+	stream := e.StartStream("charlie", AsUser, 100*time.Second)
 	e.streamUp("charlie", stream)
 	fault(e, s, "heap-pressure", "on")
 	fault(e, s, "heap-pressure", "collect")
@@ -125,14 +127,24 @@ func memoryLimit(e *Env) {
 	e.T.Check(st.Counters["heapBytes"] >= 512<<20, "the live heap reached the 512 MiB GC target (%d bytes)", st.Counters["heapBytes"])
 	e.ExpectTCP("new flows under memory pressure", "bravo", AsUser, "b", topo.Server4, 20)
 	e.ExpectUDP("new UDP under memory pressure", "bravo", AsUser, "b", topo.Server4, 20)
+	// Keep the pressure allocation live while demanding 380 MiB of TCP
+	// growth. Without the real 256 MiB budget this same workload must fail.
+	exerciseTCPBufferBudget(e, s)
+	fault(e, s, "owner-lookups", "hold")
+	release := e.NewRelease("memory-pending")
+	queues, _ := queueSender(e, release, 256, 80, 4000)
 	for i := 0; i < 10; i++ {
 		st = stats(e, s)
 		e.T.Check(st.Counters["heapBytes"] >= 512<<20, "memory pressure remains live during traffic (%d bytes)", st.Counters["heapBytes"])
 		e.T.Check(st.TCPBytes <= 256<<20 && st.PendingBytes <= 32<<20, "byte budgets hold under memory pressure (TCP %d, UDP %d)", st.TCPBytes, st.PendingBytes)
+		e.T.Check(st.PendingBytes >= 31<<20 && st.Counters["udpDropped"] > 0, "the pending byte budget is active under pressure (%d bytes, %d drops)", st.PendingBytes, st.Counters["udpDropped"])
 		e.Sleep(100 * time.Millisecond)
 	}
+	fault(e, s, "owner-lookups", "off")
+	release.Open(e)
+	queues.Wait(e, 30*time.Second)
 	fault(e, s, "heap-pressure", "off")
 	var alive Stream
-	stream.WaitJSON(e, 20*time.Second, &alive)
+	stream.WaitJSON(e, 110*time.Second, &alive)
 	e.CheckStreamSurvived(fmt.Sprintf("existing stream at %d MiB", 512), alive, "c")
 }

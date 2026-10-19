@@ -20,10 +20,8 @@ import (
 
 func (p *Platform) Probe(ctx context.Context, line, operator string) (platform.ProbeResult, error) {
 	started := time.Now()
-	p.mu.Lock()
-	available := p.capturing
-	p.mu.Unlock()
-	if !available {
+	view := p.bindings.Load()
+	if view == nil || !view.capturing {
 		return platform.ProbeResult{Outcome: "engineUnavailable", Error: "routing engine is not running"}, nil
 	}
 	quick := strings.HasPrefix(operator, "quick:")

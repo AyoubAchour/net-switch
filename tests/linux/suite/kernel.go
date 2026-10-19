@@ -301,7 +301,7 @@ func uplinkDown(e *Env) {
 		after, err := v1.Session().Stats(e.Ctx())
 		e.T.Require(err == nil, "stats after the bound dials (%v)", err)
 		unknown = int(after.AdmittedUnknown - before.AdmittedUnknown)
-		e.T.Require(unknown < 2, "at least one attempt was identified and actually exercised line b (%d unknown)", unknown)
+		e.T.Require(unknown == 0, "both attempts were identified and exercised line b (%d unknown)", unknown)
 		e.T.Check(after.Counters["tcpDialFailed"]-before.Counters["tcpDialFailed"] == uint64(2-unknown), "every identified attempt failed in the bound physical dial (%d failures for %d attempts)", after.Counters["tcpDialFailed"]-before.Counters["tcpDialFailed"], 2-unknown)
 		e.T.Check(Lines(r.Seen)["a"] == unknown, "only separately counted unknown flows used the main lane (%s; %d unknown)", Describe(Lines(r.Seen)), unknown)
 	}
@@ -443,14 +443,15 @@ func dnsChange(e *Env) {
 	}
 	e.StartEngine(e.DefaultConfig())
 	visible := func(want string) {
-		if v1, ok := e.Eng.(engine.V1); ok {
-			ack, err := v1.Session().InjectFault(e.Ctx(), engine.Fault{Kind: "resolver", Mode: "read"})
-			e.T.Require(err == nil && ack.Description == want, "the engine sees the actual resolver-file contents (%q; %v)", ack.Description, err)
+		if reader, ok := e.Eng.(interface{ ResolverContents() (string, error) }); ok {
+			got, err := reader.ResolverContents()
+			e.T.Require(err == nil && got == want, "the engine sees the actual resolver-file contents (%q; %v)", got, err)
 		}
 	}
 	visible("nameserver " + topo.Server4.String() + "\n")
 	release := e.NewRelease("dns-streams")
 	streams := map[string]*Bg{}
+	retries := 0
 	for name, line := range map[string]engine.LineID{"alpha": "a", "bravo": "b", "charlie": "c"} {
 		for attempt := 0; attempt < 3; attempt++ {
 			stream := e.StartStream(name, AsUser, time.Minute, release.Arg()...)
@@ -469,10 +470,16 @@ func dnsChange(e *Env) {
 				streams[name] = stream
 				break
 			}
+			_, unknown := e.WaitFlow(100*time.Millisecond, func(f engine.Flow) bool {
+				return f.Source.Port() == uint16(port) && f.Protocol == "tcp" && f.Destination.Port() == wire.PortStream && f.App == "" && f.AppID == "" && f.PID == 0 && f.Line == "a" && f.Up > 0 && f.Down > 0
+			})
+			e.T.Require(unknown, "%s retry %d discards only an explicitly unknown, data-carrying stream", name, attempt+1)
+			retries++
 			stream.Stop()
 		}
 		e.T.Require(streams[name] != nil, "%s has a live data-carrying stream on %s before the DNS change", name, line)
 	}
+	e.T.Logf("DNS precondition retried %d explicitly unknown streams; the original no-retry precondition would pass: %t", retries, retries == 0)
 	e.Sleep(2 * time.Second)
 	if err := os.WriteFile(conf, []byte("nameserver "+topo.Server4b.String()+"\nnameserver "+topo.Server6.String()+"\n"), 0o644); err != nil {
 		e.T.Fatalf("%v", err)

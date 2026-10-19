@@ -21,6 +21,8 @@ func run(args []string) error {
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	socket := f.String("socket", "/run/netswitch/engine.sock", "root-only control socket")
 	state := f.String("state-dir", "/var/lib/netswitch", "private ownership/state directory")
+	profiles := f.String("profile-dir", "", "private diagnostics directory; SIGUSR1 captures heap and goroutine profiles")
+	cpuProfile := f.Bool("cpu-profile", false, "record CPU profile in the diagnostics directory")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -41,5 +43,10 @@ func run(args []string) error {
 		}
 		return p.Close()
 	}
+	stopProfiles, err := startProfiles(*profiles, *cpuProfile)
+	if err != nil {
+		return err
+	}
+	defer stopProfiles()
 	return linux.Serve(ctx, *socket, *state, installTestHooks)
 }

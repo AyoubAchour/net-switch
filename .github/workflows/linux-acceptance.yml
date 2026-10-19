@@ -17,13 +17,18 @@ on:
         description: 'Only cases whose id matches this regular expression (empty: all)'
         required: false
         default: ''
+      engine_build:
+        description: 'Both ordinary release cases and tagged fault cases, or a focused build'
+        type: choice
+        options: [all, release, faults]
+        default: all
 
 permissions:
   contents: read
 
 concurrency:
   group: linux-acceptance-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   linux:
@@ -33,6 +38,7 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         runner: [ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm]
     env:
@@ -89,7 +95,8 @@ jobs:
           GOFLAGS: -mod=vendor
         run: |
           go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
-          go build -trimpath -tags acceptance -o "$RUNNER_TEMP/netswitch-engine" ./cmd/netswitch-engine
+          go build -trimpath -o "$RUNNER_TEMP/netswitch-engine" ./cmd/netswitch-engine
+          go build -trimpath -tags acceptance -o "$RUNNER_TEMP/netswitch-engine-faults" ./cmd/netswitch-engine
           go test -c -o "$RUNNER_TEMP/linux-platform.test" ./internal/engine/linux
       - name: Test Linux kernel interfaces and crash recovery in a private namespace
         run: sudo unshare --net -- env NETSWITCH_ISOLATED_NETNS=1 "$RUNNER_TEMP/linux-platform.test" -test.v
@@ -110,8 +117,8 @@ jobs:
           go build -trimpath -o "$RUNNER_TEMP/nsquic" .
       # In a transient scope with Delegate=yes: systemd lets a program create
       # cgroups only in a subtree delegated to it, and the lookup cases need some.
-      - name: Run the acceptance suite as root
-        if: ${{ (success() || inputs.profile) && steps.harness.outcome == 'success' && steps.quic.outcome == 'success' }}
+      - name: Run ordinary acceptance against the release binary
+        if: ${{ !cancelled() && inputs.engine_build != 'faults' && steps.harness.outcome == 'success' && steps.quic.outcome == 'success' }}
         env:
           RUN_FILTER: ${{ inputs.run }}
           PROFILE: ${{ inputs.profile }}
@@ -121,14 +128,35 @@ jobs:
           "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs"
           "NSACCEPT_PROFILE=$PROFILE"
           "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine"
-          --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance"
+          --build-mode release
+          --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance/release"
           --quic "$RUNNER_TEMP/nsquic"
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
+      - name: Run fault-injection acceptance against the tagged binary
+        if: ${{ !cancelled() && inputs.engine_build != 'release' && steps.harness.outcome == 'success' && steps.quic.outcome == 'success' }}
+        env:
+          RUN_FILTER: ${{ inputs.run }}
+        run: >-
+          sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-faults-${{ github.run_id }}-${{ strategy.job-index }}" --
+          env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
+          "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs"
+          "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine-faults"
+          --build-mode faults
+          --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance/faults"
+          --quic "$RUNNER_TEMP/nsquic"
+          --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
+      - name: Summarize capacity heap and goroutine profiles
+        if: ${{ always() }}
+        run: |
+          if test -d "$RUNNER_TEMP/acceptance"; then
+            find "$RUNNER_TEMP/acceptance" -name 'heap.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -nodecount=30 "$RUNNER_TEMP/netswitch-engine" {} \;
+            find "$RUNNER_TEMP/acceptance" -name 'goroutine.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -nodecount=20 "$RUNNER_TEMP/netswitch-engine" {} \;
+          fi
       - name: Summarize the requested CPU profiles
         if: ${{ always() && inputs.profile }}
         run: |
           if test -d "$RUNNER_TEMP/acceptance"; then
-            find "$RUNNER_TEMP/acceptance" -name 'cpu-*.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodecount=35 "$RUNNER_TEMP/netswitch-engine" {} \;
+            find "$RUNNER_TEMP/acceptance" -name 'cpu.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodecount=35 "$RUNNER_TEMP/netswitch-engine" {} \;
             find "$RUNNER_TEMP/acceptance" -name 'block-*.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodefraction=0 -focus='Owners' -nodecount=20 "$RUNNER_TEMP/netswitch-engine" {} \;
           fi
       - name: Make root-produced evidence readable by the artifact uploader

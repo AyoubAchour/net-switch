@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -337,6 +339,11 @@ func (p *Platform) Echo(ctx context.Context, id string, dst netip.Addr, request 
 	}
 	fd, err := unix.Socket(family, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, proto)
 	if err != nil {
+		if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) {
+			if reason := pingPermission(); reason != nil {
+				return nil, reason
+			}
+		}
 		return nil, err
 	}
 	f := os.NewFile(uintptr(fd), "ping socket")
@@ -382,4 +389,24 @@ func (p *Platform) Echo(ctx context.Context, id string, dst netip.Addr, request 
 		}
 		return b[:n], nil
 	}
+}
+
+func pingPermission() error {
+	b, err := readKernelFile("/proc/sys/net/ipv4/ping_group_range", 128)
+	if err != nil {
+		return fmt.Errorf("cannot read ping_group_range: %w", err)
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) != 2 {
+		return errors.New("invalid ping_group_range")
+	}
+	low, e1 := strconv.ParseUint(fields[0], 10, 32)
+	high, e2 := strconv.ParseUint(fields[1], 10, 32)
+	if e1 != nil || e2 != nil {
+		return errors.New("invalid ping_group_range")
+	}
+	if low > 0 || high < low {
+		return fmt.Errorf("ICMP echo unavailable: net.ipv4.ping_group_range=%s excludes engine gid 0; configure a range including 0", strings.TrimSpace(string(b)))
+	}
+	return nil
 }

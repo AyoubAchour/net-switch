@@ -151,6 +151,7 @@ type options struct {
 	quic                                        string
 	uid, gid                                    int
 	run, labels                                 string
+	buildMode                                   string
 	github                                      bool
 }
 
@@ -167,6 +168,7 @@ func runMain(args []string) int {
 	fs.IntVar(&o.uid, "app-uid", envInt("SUDO_UID", -1), "the desktop user apps run as")
 	fs.IntVar(&o.gid, "app-gid", envInt("SUDO_GID", -1), "and their group")
 	fs.StringVar(&o.run, "run", "", "only cases whose id matches this regular expression")
+	fs.StringVar(&o.buildMode, "build-mode", "all", "all, release (ordinary cases), or faults (cases needing injection)")
 	fs.StringVar(&o.labels, "labels", "", "only cases with these labels (comma-separated)")
 	fs.BoolVar(&o.github, "github", os.Getenv("GITHUB_ACTIONS") == "true", "GitHub annotations and step summary")
 	if err := fs.Parse(args); err != nil {
@@ -303,6 +305,19 @@ func run(o options, report *harness.Report) (int, error) {
 	if err != nil {
 		return 1, err
 	}
+	if o.buildMode != "all" && o.buildMode != "release" && o.buildMode != "faults" {
+		return 1, errors.New("invalid build-mode")
+	}
+	if o.buildMode != "all" {
+		kept := selected[:0]
+		for _, c := range selected {
+			if suite.NeedsFaultInjection(c.ID) == (o.buildMode == "faults") {
+				kept = append(kept, c)
+			}
+		}
+		selected = kept
+	}
+	report.System["engine-build-mode"] = o.buildMode
 	if len(selected) == 0 {
 		return 1, errors.New("no case matches the filters")
 	}
