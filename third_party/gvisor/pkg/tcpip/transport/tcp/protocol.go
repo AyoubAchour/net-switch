@@ -205,6 +205,10 @@ func (p *protocol) drainLocalClose() *Endpoint {
 			handleConnectedLocked(ep)
 		default:
 			ep.mu.Unlock()
+			if state == StateClose || state == StateError {
+				// Finish a concurrent processor's hangup before admission.
+				ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
+			}
 			return ep
 		}
 		if ep.segmentQueue.empty() {

@@ -8,9 +8,10 @@ const expected = ['total', 'app', 'unknown'].flatMap(cap => paths.map(path => `T
 expected.push('TestCloseIdleAdmission', 'TestCloseBeforeFinalACK/last_ack', 'TestCloseBeforeFinalACK/closing', 'TestCloseHandshakeCap/1', 'TestCloseHandshakeCap/2048');
 expected.push('TestCloseKeepsQueuedDataCounted/last_ack', 'TestCloseKeepsQueuedDataCounted/closing', 'TestCloseRSTDuringHandshake');
 expected.push('TestCloseHandshakeCompletionOwnsRelease');
+expected.push('TestCloseHandshakeBeforeHangupNotification/handshake', 'TestCloseHandshakeBeforeHangupNotification/setup');
 const result = spawnSync(process.env.GO_BINARY || 'go', [
   'test', '-json', '-count=1', '-timeout=120s', '-tags=close_admission_disabled',
-  '-run', '^Test(CloseAdmission|CloseIdleAdmission|CloseBeforeFinalACK|CloseHandshakeCap|CloseKeepsQueuedDataCounted|CloseRSTDuringHandshake|CloseHandshakeCompletionOwnsRelease)$',
+  '-run', '^Test(CloseAdmission|CloseIdleAdmission|CloseBeforeFinalACK|CloseHandshakeCap|CloseKeepsQueuedDataCounted|CloseRSTDuringHandshake|CloseHandshakeCompletionOwnsRelease|CloseHandshakeBeforeHangupNotification)$',
   './internal/engine/stack',
 ], { encoding: 'utf8', windowsHide: true, maxBuffer: 16 << 20 });
 assert.equal(result.error, undefined, result.error?.message);

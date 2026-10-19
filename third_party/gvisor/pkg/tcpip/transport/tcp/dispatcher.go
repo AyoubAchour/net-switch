@@ -525,7 +525,8 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
 	// on the TCP processor; FINs themselves always fence the state change.
 	state := ep.EndpointState()
 	closingACK := s.flags.Contains(header.TCPFlagAck) && (state == StateLastAck || state == StateClosing)
-	if ep.protocol.localCloseEnabled.Load() && state != StateTimeWait && (s.flags&(header.TCPFlagRst|header.TCPFlagFin) != 0 || closingACK) {
+	canDrain := state.connecting() || (state.connected() && state != StateTimeWait)
+	if ep.protocol.localCloseEnabled.Load() && canDrain && (s.flags&(header.TCPFlagRst|header.TCPFlagFin) != 0 || closingACK) {
 		ep.protocol.localClose.Store(ep)
 		return // The ingress owner processes this endpoint; no processor wakeup.
 	}

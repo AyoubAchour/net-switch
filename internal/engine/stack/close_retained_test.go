@@ -4,11 +4,16 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
+	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
+	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 func TestCloseRetainedCap(t *testing.T) {
@@ -159,5 +164,113 @@ func TestCloseHandshakeCompletionOwnsRelease(t *testing.T) {
 	p.upload([]byte("replacement"))
 	if p.table.Stats().Rejected != 0 || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
 		t.Fatal(p.diagnostics())
+	}
+}
+
+func TestCloseHandshakeBeforeHangupNotification(t *testing.T) {
+	for _, stage := range []string{"handshake", "setup"} {
+		t.Run(stage, func(t *testing.T) {
+			limits := flows.Defaults()
+			limits.Flows, limits.Handshakes = 1, 1
+			p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+			releaseRemote := p.holdRelayCleanup()
+			defer releaseRemote()
+			setup := make(chan struct{})
+			releaseSetup := sync.OnceFunc(func() { close(setup) })
+			defer releaseSetup()
+			p.setupGate, p.setupEntered = setup, make(chan struct{}, 1)
+			p.seq = 1000
+			p.inject(p.packet(p.seq, 0, header.TCPFlagSyn, nil))
+			synACK := p.wait(header.TCPFlagSyn | header.TCPFlagAck)
+			p.seq++
+			p.ack = synACK.SequenceNumber() + 1
+			p.current = <-p.accepted
+			defer p.current.conn.Close()
+			if stage == "setup" {
+				p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+				closeSignal(t, p.setupEntered, "pending endpoint setup")
+			}
+			ep := p.endpoint()
+			if g := p.table.Stats(); g.Flows != 1 || g.Handshakes != 1 {
+				t.Fatal("handshake must occupy its slot before closing", g)
+			}
+			entered, resume := make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(resume) })
+			defer release()
+			// The queued SYN is only a barrier: this callback runs after the old
+			// processor publishes ERROR and unlocks, but before its waiter notification.
+			tcp.SetTimeWaitHandler(p.stack, func(gv.TransportEndpointID, *gv.PacketBuffer) bool {
+				close(entered)
+				<-resume
+				return true
+			})
+			ep.LockUser()
+			queue := func(raw []byte) {
+				pkt := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(raw)})
+				defer pkt.DecRef()
+				pkt.NetworkHeader().Consume(header.IPv4MinimumSize)
+				pkt.TransportHeader().Consume(header.TCPMinimumSize)
+				pkt.NetworkProtocolNumber, pkt.NICID = header.IPv4ProtocolNumber, ns.NIC
+				p.stack.TransportProtocolInstance(tcp.ProtocolNumber).(interface {
+					QueuePacket(gv.TransportEndpoint, gv.TransportEndpointID, *gv.PacketBuffer)
+				}).QueuePacket(ep, ep.TransportEndpointInfo.ID, pkt)
+			}
+			queue(p.packet(p.seq, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
+			queue(p.packet(500, 0, header.TCPFlagSyn, nil))
+			ep.UnlockUser()
+			closeSignal(t, entered, "processor paused before hangup notification")
+			if state := tcp.EndpointState(ep.State()); state != tcp.StateError {
+				t.Fatal("barrier did not follow endpoint removal", state)
+			}
+			// Run the normal after-ingress fence on that already-closed endpoint.
+			// This extra RST to the unregistered tuple is ignored by normal TCP.
+			p.inject(p.packet(p.seq, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
+			if g := p.table.Stats(); g.Flows != 0 || g.Handshakes != 0 {
+				t.Fatal("close fence retained admission until a delayed notification", g)
+			}
+			p.port++
+			p.open(2000)
+			release()
+			releaseSetup()
+			releaseRemote()
+			p.upload([]byte("replacement"))
+			if g := p.table.Stats(); g.Flows != 1 || g.Rejected != 0 || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
+				t.Fatal("replacement was rejected or under-counted", p.diagnostics())
+			}
+			p.closeActive()
+		})
+	}
+}
+
+func TestCloseFencePreservesListenerProcessing(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			p := newPeer(t, false)
+			tcp.SetLocalCloseFence(p.stack, enabled)
+			var wq waiter.Queue
+			ep, err := p.stack.NewEndpoint(tcp.ProtocolNumber, header.IPv4ProtocolNumber, &wq)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ep.Close()
+			if err := ep.Bind(tcpip.FullAddress{Port: 443}); err != nil {
+				t.Fatal(err)
+			}
+			if err := ep.Listen(1); err != nil {
+				t.Fatal(err)
+			}
+			p.stack.SetTransportProtocolHandler(tcp.ProtocolNumber, func(gv.TransportEndpointID, *gv.PacketBuffer) bool {
+				t.Error("packet bypassed the listener")
+				return true
+			})
+			p.stack.Pause()
+			// LISTEN rejects an unexpected ACK with a reset. FIN must not
+			// divert it to a fence which only processes connecting/live flows.
+			p.inject(p.packet(1000, 500, header.TCPFlagFin|header.TCPFlagAck, nil))
+			p.stack.Resume()
+			if h := p.read(time.Second); h == nil || !h.Flags().Contains(header.TCPFlagRst) {
+				t.Fatal("listener lost its normal invalid-ACK response")
+			}
+		})
 	}
 }
