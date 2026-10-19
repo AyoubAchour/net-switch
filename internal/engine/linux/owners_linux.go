@@ -36,6 +36,8 @@ type cachedHolders struct {
 type fdWindow struct {
 	start uint64
 	next  int64
+	high int64
+	observed time.Time
 }
 type Owners struct {
 	mu      sync.Mutex
@@ -320,6 +322,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		if window.start != start {
 			window = fdWindow{start: start}
 		}
+		// Once a live holder is known, reuse other processes' very recent
+		// search windows. A burst must not rescan the same 64 descriptors in
+		// every concurrent lookup. Positive hints are always revalidated above.
+		if !complete && result.AppID!="" && time.Since(window.observed)<5*time.Millisecond {
+			o.mu.Unlock()
+			return nil
+		}
 		position := window.next
 		window.next += 64
 		o.windows[pid] = window
@@ -333,11 +342,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}
 		remember := map[uint32]holder{}
+		maxFD:=window.high
 		visit := func(names []string) error {
 			for _, fd := range names {
 				if expired() {
 					break
 				}
+				if number,err:=strconv.ParseInt(fd,10,64);err==nil {maxFD=max(maxFD,number)}
 				got, err := os.Readlink(dir + "/" + fd)
 				if err != nil || !strings.HasPrefix(got, "socket:[") || !strings.HasSuffix(got, "]") {
 					continue
@@ -359,6 +370,11 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		defer func() {
 			o.mu.Lock()
 			defer o.mu.Unlock()
+			if current:=o.windows[pid];current.start==start {
+				current.high=max(current.high,maxFD)
+				current.observed=time.Now()
+				o.windows[pid]=current
+			}
 			if len(o.inodes) > 65536 {
 				clear(o.inodes)
 			}
@@ -379,8 +395,8 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 			if readErr != nil {
 				o.mu.Lock()
-				if current := o.windows[pid]; current == window {
-					current.next = 0
+				if current := o.windows[pid]; current.start==start {
+					current.next = max(0,max(current.high,maxFD)-32)+2
 					o.windows[pid] = current
 				}
 				o.mu.Unlock()
