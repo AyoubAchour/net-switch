@@ -1,0 +1,1265 @@
+[
+  {
+    "name": "only complete version folders normalize; years, app names and files stay literal",
+    "calls": [
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\slack\\app-4.40.126\\slack.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\slack\\app-*\\slack.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\slack\\app-4.41.0\\slack.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\slack\\app-*\\slack.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-0\\243.21565.199\\bin\\idea64.exe"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-0\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-0\\251.23774.435\\bin\\idea64.exe"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-0\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Browser\\Application\\131.0.6778.86\\browser.exe"
+        ],
+        "result": "c:\\program files\\browser\\application\\*\\browser.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Browser\\Application\\132.0.6834.83\\browser.exe"
+        ],
+        "result": "c:\\program files\\browser\\application\\*\\browser.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\v1.2\\tool.exe"
+        ],
+        "result": "c:\\tools\\v*\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\V2.10.3\\tool.exe"
+        ],
+        "result": "c:\\tools\\v*\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.22.10352.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe"
+        ],
+        "result": "c:\\program files\\microsoft visual studio\\2022\\community\\common7\\ide\\devenv.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Microsoft Visual Studio\\2019\\Community\\Common7\\IDE\\devenv.exe"
+        ],
+        "result": "c:\\program files\\microsoft visual studio\\2019\\community\\common7\\ide\\devenv.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Steam\\steamapps\\common\\Game 2\\game.exe"
+        ],
+        "result": "c:\\steam\\steamapps\\common\\game 2\\game.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Steam\\steamapps\\common\\Game 3\\game.exe"
+        ],
+        "result": "c:\\steam\\steamapps\\common\\game 3\\game.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1\\tool.exe"
+        ],
+        "result": "c:\\tools\\1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\app-1\\tool.exe"
+        ],
+        "result": "c:\\tools\\app-1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\v1\\tool.exe"
+        ],
+        "result": "c:\\tools\\v1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1.2-beta\\tool.exe"
+        ],
+        "result": "c:\\tools\\1.2-beta\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1x2\\tool.exe"
+        ],
+        "result": "c:\\tools\\1x2\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\release-1.2\\tool.exe"
+        ],
+        "result": "c:\\tools\\release-1.2\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1.2"
+        ],
+        "result": "c:\\tools\\1.2"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\a (x86)\\b+c.exe"
+        ],
+        "result": "c:\\a (x86)\\b+c.exe"
+      }
+    ]
+  },
+  {
+    "name": "identity agrees with the routing pattern for every pair in the path table",
+    "calls": [
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe"
+        ],
+        "result": "(?i)^C:\\\\Users\\\\Ayoub\\\\AppData\\\\Local\\\\Discord\\\\app-[0-9]+(?:\\.[0-9]+)+\\\\Discord\\.exe$"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\USERS\\AYOUB\\APPDATA\\LOCAL\\DISCORD\\APP-1.0.9164\\DISCORD.EXE"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe.bak"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\discord.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe"
+        ],
+        "result": "d:\\users\\ayoub\\appdata\\local\\discord\\app-*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\USERS\\AYOUB\\APPDATA\\LOCAL\\DISCORD\\APP-1.0.9165\\DISCORD.EXE"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe.bak"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\discord.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe"
+        ],
+        "result": "d:\\users\\ayoub\\appdata\\local\\discord\\app-*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\slack\\app-4.40.126\\slack.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\slack\\app-*\\slack.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\USERS\\AYOUB\\APPDATA\\LOCAL\\SLACK\\APP-4.40.126\\SLACK.EXE"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\slack\\app-*\\slack.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\slack\\app-4.40.126\\slack.exe.bak"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\slack\\app-*\\slack.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Users\\Ayoub\\AppData\\Local\\slack\\app-4.40.126\\slack.exe"
+        ],
+        "result": "d:\\users\\ayoub\\appdata\\local\\slack\\app-*\\slack.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\slack\\app-4.41.0\\slack.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\slack\\app-*\\slack.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\USERS\\AYOUB\\APPDATA\\LOCAL\\SLACK\\APP-4.41.0\\SLACK.EXE"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\slack\\app-*\\slack.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\slack\\app-4.41.0\\slack.exe.bak"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\slack\\app-*\\slack.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Users\\Ayoub\\AppData\\Local\\slack\\app-4.41.0\\slack.exe"
+        ],
+        "result": "d:\\users\\ayoub\\appdata\\local\\slack\\app-*\\slack.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-0\\243.21565.199\\bin\\idea64.exe"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-0\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JETBRAINS\\TOOLBOX\\APPS\\IDEA-U\\CH-0\\243.21565.199\\BIN\\IDEA64.EXE"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-0\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-0\\243.21565.199\\bin\\idea64.exe.bak"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-0\\*\\bin\\idea64.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-0\\243.21565.199\\bin\\idea64.exe"
+        ],
+        "result": "d:\\jetbrains\\toolbox\\apps\\idea-u\\ch-0\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-0\\251.23774.435\\bin\\idea64.exe"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-0\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JETBRAINS\\TOOLBOX\\APPS\\IDEA-U\\CH-0\\251.23774.435\\BIN\\IDEA64.EXE"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-0\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-0\\251.23774.435\\bin\\idea64.exe.bak"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-0\\*\\bin\\idea64.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-0\\251.23774.435\\bin\\idea64.exe"
+        ],
+        "result": "d:\\jetbrains\\toolbox\\apps\\idea-u\\ch-0\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Browser\\Application\\131.0.6778.86\\browser.exe"
+        ],
+        "result": "c:\\program files\\browser\\application\\*\\browser.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\PROGRAM FILES\\BROWSER\\APPLICATION\\131.0.6778.86\\BROWSER.EXE"
+        ],
+        "result": "c:\\program files\\browser\\application\\*\\browser.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Browser\\Application\\131.0.6778.86\\browser.exe.bak"
+        ],
+        "result": "c:\\program files\\browser\\application\\*\\browser.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Program Files\\Browser\\Application\\131.0.6778.86\\browser.exe"
+        ],
+        "result": "d:\\program files\\browser\\application\\*\\browser.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Browser\\Application\\132.0.6834.83\\browser.exe"
+        ],
+        "result": "c:\\program files\\browser\\application\\*\\browser.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\PROGRAM FILES\\BROWSER\\APPLICATION\\132.0.6834.83\\BROWSER.EXE"
+        ],
+        "result": "c:\\program files\\browser\\application\\*\\browser.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Browser\\Application\\132.0.6834.83\\browser.exe.bak"
+        ],
+        "result": "c:\\program files\\browser\\application\\*\\browser.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Program Files\\Browser\\Application\\132.0.6834.83\\browser.exe"
+        ],
+        "result": "d:\\program files\\browser\\application\\*\\browser.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\v1.2\\tool.exe"
+        ],
+        "result": "c:\\tools\\v*\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\TOOLS\\V1.2\\TOOL.EXE"
+        ],
+        "result": "c:\\tools\\v*\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\v1.2\\tool.exe.bak"
+        ],
+        "result": "c:\\tools\\v*\\tool.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Tools\\v1.2\\tool.exe"
+        ],
+        "result": "d:\\tools\\v*\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\V2.10.3\\tool.exe"
+        ],
+        "result": "c:\\tools\\v*\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\TOOLS\\V2.10.3\\TOOL.EXE"
+        ],
+        "result": "c:\\tools\\v*\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\V2.10.3\\tool.exe.bak"
+        ],
+        "result": "c:\\tools\\v*\\tool.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Tools\\V2.10.3\\tool.exe"
+        ],
+        "result": "d:\\tools\\v*\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\PROGRAM FILES\\WINDOWSAPPS\\MICROSOFT.WINDOWSTERMINAL_1.21.3231.0_X64__8WEKYB3D8BBWE\\WINDOWSTERMINAL.EXE"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe.bak"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__8wekyb3d8bbwe\\windowsterminal.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "d:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.22.10352.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\PROGRAM FILES\\WINDOWSAPPS\\MICROSOFT.WINDOWSTERMINAL_1.22.10352.0_X64__8WEKYB3D8BBWE\\WINDOWSTERMINAL.EXE"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.22.10352.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe.bak"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__8wekyb3d8bbwe\\windowsterminal.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.22.10352.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "d:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe"
+        ],
+        "result": "c:\\program files\\microsoft visual studio\\2022\\community\\common7\\ide\\devenv.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\PROGRAM FILES\\MICROSOFT VISUAL STUDIO\\2022\\COMMUNITY\\COMMON7\\IDE\\DEVENV.EXE"
+        ],
+        "result": "c:\\program files\\microsoft visual studio\\2022\\community\\common7\\ide\\devenv.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe.bak"
+        ],
+        "result": "c:\\program files\\microsoft visual studio\\2022\\community\\common7\\ide\\devenv.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe"
+        ],
+        "result": "d:\\program files\\microsoft visual studio\\2022\\community\\common7\\ide\\devenv.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Microsoft Visual Studio\\2019\\Community\\Common7\\IDE\\devenv.exe"
+        ],
+        "result": "c:\\program files\\microsoft visual studio\\2019\\community\\common7\\ide\\devenv.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\PROGRAM FILES\\MICROSOFT VISUAL STUDIO\\2019\\COMMUNITY\\COMMON7\\IDE\\DEVENV.EXE"
+        ],
+        "result": "c:\\program files\\microsoft visual studio\\2019\\community\\common7\\ide\\devenv.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Microsoft Visual Studio\\2019\\Community\\Common7\\IDE\\devenv.exe.bak"
+        ],
+        "result": "c:\\program files\\microsoft visual studio\\2019\\community\\common7\\ide\\devenv.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Program Files\\Microsoft Visual Studio\\2019\\Community\\Common7\\IDE\\devenv.exe"
+        ],
+        "result": "d:\\program files\\microsoft visual studio\\2019\\community\\common7\\ide\\devenv.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Steam\\steamapps\\common\\Game 2\\game.exe"
+        ],
+        "result": "c:\\steam\\steamapps\\common\\game 2\\game.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\STEAM\\STEAMAPPS\\COMMON\\GAME 2\\GAME.EXE"
+        ],
+        "result": "c:\\steam\\steamapps\\common\\game 2\\game.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Steam\\steamapps\\common\\Game 2\\game.exe.bak"
+        ],
+        "result": "c:\\steam\\steamapps\\common\\game 2\\game.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Steam\\steamapps\\common\\Game 2\\game.exe"
+        ],
+        "result": "d:\\steam\\steamapps\\common\\game 2\\game.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Steam\\steamapps\\common\\Game 3\\game.exe"
+        ],
+        "result": "c:\\steam\\steamapps\\common\\game 3\\game.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\STEAM\\STEAMAPPS\\COMMON\\GAME 3\\GAME.EXE"
+        ],
+        "result": "c:\\steam\\steamapps\\common\\game 3\\game.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Steam\\steamapps\\common\\Game 3\\game.exe.bak"
+        ],
+        "result": "c:\\steam\\steamapps\\common\\game 3\\game.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Steam\\steamapps\\common\\Game 3\\game.exe"
+        ],
+        "result": "d:\\steam\\steamapps\\common\\game 3\\game.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1\\tool.exe"
+        ],
+        "result": "c:\\tools\\1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\TOOLS\\1\\TOOL.EXE"
+        ],
+        "result": "c:\\tools\\1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1\\tool.exe.bak"
+        ],
+        "result": "c:\\tools\\1\\tool.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Tools\\1\\tool.exe"
+        ],
+        "result": "d:\\tools\\1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\app-1\\tool.exe"
+        ],
+        "result": "c:\\tools\\app-1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\TOOLS\\APP-1\\TOOL.EXE"
+        ],
+        "result": "c:\\tools\\app-1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\app-1\\tool.exe.bak"
+        ],
+        "result": "c:\\tools\\app-1\\tool.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Tools\\app-1\\tool.exe"
+        ],
+        "result": "d:\\tools\\app-1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\v1\\tool.exe"
+        ],
+        "result": "c:\\tools\\v1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\TOOLS\\V1\\TOOL.EXE"
+        ],
+        "result": "c:\\tools\\v1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\v1\\tool.exe.bak"
+        ],
+        "result": "c:\\tools\\v1\\tool.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Tools\\v1\\tool.exe"
+        ],
+        "result": "d:\\tools\\v1\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1.2-beta\\tool.exe"
+        ],
+        "result": "c:\\tools\\1.2-beta\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\TOOLS\\1.2-BETA\\TOOL.EXE"
+        ],
+        "result": "c:\\tools\\1.2-beta\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1.2-beta\\tool.exe.bak"
+        ],
+        "result": "c:\\tools\\1.2-beta\\tool.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Tools\\1.2-beta\\tool.exe"
+        ],
+        "result": "d:\\tools\\1.2-beta\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1x2\\tool.exe"
+        ],
+        "result": "c:\\tools\\1x2\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\TOOLS\\1X2\\TOOL.EXE"
+        ],
+        "result": "c:\\tools\\1x2\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1x2\\tool.exe.bak"
+        ],
+        "result": "c:\\tools\\1x2\\tool.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Tools\\1x2\\tool.exe"
+        ],
+        "result": "d:\\tools\\1x2\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\release-1.2\\tool.exe"
+        ],
+        "result": "c:\\tools\\release-1.2\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\TOOLS\\RELEASE-1.2\\TOOL.EXE"
+        ],
+        "result": "c:\\tools\\release-1.2\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\release-1.2\\tool.exe.bak"
+        ],
+        "result": "c:\\tools\\release-1.2\\tool.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Tools\\release-1.2\\tool.exe"
+        ],
+        "result": "d:\\tools\\release-1.2\\tool.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1.2"
+        ],
+        "result": "c:\\tools\\1.2"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\TOOLS\\1.2"
+        ],
+        "result": "c:\\tools\\1.2"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Tools\\1.2.bak"
+        ],
+        "result": "c:\\tools\\1.2.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Tools\\1.2"
+        ],
+        "result": "d:\\tools\\1.2"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\a (x86)\\b+c.exe"
+        ],
+        "result": "c:\\a (x86)\\b+c.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\A (X86)\\B+C.EXE"
+        ],
+        "result": "c:\\a (x86)\\b+c.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\a (x86)\\b+c.exe.bak"
+        ],
+        "result": "c:\\a (x86)\\b+c.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\a (x86)\\b+c.exe"
+        ],
+        "result": "d:\\a (x86)\\b+c.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\v1.0.9164\\Discord.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\v*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\USERS\\AYOUB\\APPDATA\\LOCAL\\DISCORD\\V1.0.9164\\DISCORD.EXE"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\v*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\v1.0.9164\\Discord.exe.bak"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\v*\\discord.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Users\\Ayoub\\AppData\\Local\\Discord\\v1.0.9164\\Discord.exe"
+        ],
+        "result": "d:\\users\\ayoub\\appdata\\local\\discord\\v*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\1.0.9164\\Discord.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\USERS\\AYOUB\\APPDATA\\LOCAL\\DISCORD\\1.0.9164\\DISCORD.EXE"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\1.0.9164\\Discord.exe.bak"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\*\\discord.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Users\\Ayoub\\AppData\\Local\\Discord\\1.0.9164\\Discord.exe"
+        ],
+        "result": "d:\\users\\ayoub\\appdata\\local\\discord\\*\\discord.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9164\\Update.exe"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\update.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\USERS\\AYOUB\\APPDATA\\LOCAL\\DISCORD\\APP-1.0.9164\\UPDATE.EXE"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\update.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9164\\Update.exe.bak"
+        ],
+        "result": "c:\\users\\ayoub\\appdata\\local\\discord\\app-*\\update.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9164\\Update.exe"
+        ],
+        "result": "d:\\users\\ayoub\\appdata\\local\\discord\\app-*\\update.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-1\\243.21565.199\\bin\\idea64.exe"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-1\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JETBRAINS\\TOOLBOX\\APPS\\IDEA-U\\CH-1\\243.21565.199\\BIN\\IDEA64.EXE"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-1\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-1\\243.21565.199\\bin\\idea64.exe.bak"
+        ],
+        "result": "c:\\jetbrains\\toolbox\\apps\\idea-u\\ch-1\\*\\bin\\idea64.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-1\\243.21565.199\\bin\\idea64.exe"
+        ],
+        "result": "d:\\jetbrains\\toolbox\\apps\\idea-u\\ch-1\\*\\bin\\idea64.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_arm64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_arm64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\PROGRAM FILES\\WINDOWSAPPS\\MICROSOFT.WINDOWSTERMINAL_1.21.3231.0_ARM64__8WEKYB3D8BBWE\\WINDOWSTERMINAL.EXE"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_arm64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_arm64__8wekyb3d8bbwe\\WindowsTerminal.exe.bak"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_arm64__8wekyb3d8bbwe\\windowsterminal.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_arm64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "d:\\program files\\windowsapps\\microsoft.windowsterminal_*_arm64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_x64__anotherpublisher\\WindowsTerminal.exe"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__anotherpublisher\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\PROGRAM FILES\\WINDOWSAPPS\\MICROSOFT.WINDOWSTERMINAL_1.21.3231.0_X64__ANOTHERPUBLISHER\\WINDOWSTERMINAL.EXE"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__anotherpublisher\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_x64__anotherpublisher\\WindowsTerminal.exe.bak"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__anotherpublisher\\windowsterminal.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_x64__anotherpublisher\\WindowsTerminal.exe"
+        ],
+        "result": "d:\\program files\\windowsapps\\microsoft.windowsterminal_*_x64__anotherpublisher\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminalPreview_1.21.3231.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminalpreview_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\PROGRAM FILES\\WINDOWSAPPS\\MICROSOFT.WINDOWSTERMINALPREVIEW_1.21.3231.0_X64__8WEKYB3D8BBWE\\WINDOWSTERMINAL.EXE"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminalpreview_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminalPreview_1.21.3231.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe.bak"
+        ],
+        "result": "c:\\program files\\windowsapps\\microsoft.windowsterminalpreview_*_x64__8wekyb3d8bbwe\\windowsterminal.exe.bak"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "D:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminalPreview_1.21.3231.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "d:\\program files\\windowsapps\\microsoft.windowsterminalpreview_*_x64__8wekyb3d8bbwe\\windowsterminal.exe"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe"
+        ],
+        "result": "(?i)^C:\\\\Users\\\\Ayoub\\\\AppData\\\\Local\\\\Discord\\\\app-[0-9]+(?:\\.[0-9]+)+\\\\Discord\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\slack\\app-4.40.126\\slack.exe"
+        ],
+        "result": "(?i)^C:\\\\Users\\\\Ayoub\\\\AppData\\\\Local\\\\slack\\\\app-[0-9]+(?:\\.[0-9]+)+\\\\slack\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\slack\\app-4.41.0\\slack.exe"
+        ],
+        "result": "(?i)^C:\\\\Users\\\\Ayoub\\\\AppData\\\\Local\\\\slack\\\\app-[0-9]+(?:\\.[0-9]+)+\\\\slack\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-0\\243.21565.199\\bin\\idea64.exe"
+        ],
+        "result": "(?i)^C:\\\\JetBrains\\\\Toolbox\\\\apps\\\\IDEA-U\\\\ch-0\\\\[0-9]+(?:\\.[0-9]+)+\\\\bin\\\\idea64\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-0\\251.23774.435\\bin\\idea64.exe"
+        ],
+        "result": "(?i)^C:\\\\JetBrains\\\\Toolbox\\\\apps\\\\IDEA-U\\\\ch-0\\\\[0-9]+(?:\\.[0-9]+)+\\\\bin\\\\idea64\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Program Files\\Browser\\Application\\131.0.6778.86\\browser.exe"
+        ],
+        "result": "(?i)^C:\\\\Program Files\\\\Browser\\\\Application\\\\[0-9]+(?:\\.[0-9]+)+\\\\browser\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Program Files\\Browser\\Application\\132.0.6834.83\\browser.exe"
+        ],
+        "result": "(?i)^C:\\\\Program Files\\\\Browser\\\\Application\\\\[0-9]+(?:\\.[0-9]+)+\\\\browser\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Tools\\v1.2\\tool.exe"
+        ],
+        "result": "(?i)^C:\\\\Tools\\\\v[0-9]+(?:\\.[0-9]+)+\\\\tool\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Tools\\V2.10.3\\tool.exe"
+        ],
+        "result": "(?i)^C:\\\\Tools\\\\V[0-9]+(?:\\.[0-9]+)+\\\\tool\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "(?i)^C:\\\\Program Files\\\\WindowsApps\\\\Microsoft\\.WindowsTerminal_[0-9]+(?:\\.[0-9]+)+_x64__8wekyb3d8bbwe\\\\WindowsTerminal\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.22.10352.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "(?i)^C:\\\\Program Files\\\\WindowsApps\\\\Microsoft\\.WindowsTerminal_[0-9]+(?:\\.[0-9]+)+_x64__8wekyb3d8bbwe\\\\WindowsTerminal\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe"
+        ],
+        "result": "(?i)^C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2022\\\\Community\\\\Common7\\\\IDE\\\\devenv\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Program Files\\Microsoft Visual Studio\\2019\\Community\\Common7\\IDE\\devenv.exe"
+        ],
+        "result": "(?i)^C:\\\\Program Files\\\\Microsoft Visual Studio\\\\2019\\\\Community\\\\Common7\\\\IDE\\\\devenv\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Steam\\steamapps\\common\\Game 2\\game.exe"
+        ],
+        "result": "(?i)^C:\\\\Steam\\\\steamapps\\\\common\\\\Game 2\\\\game\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Steam\\steamapps\\common\\Game 3\\game.exe"
+        ],
+        "result": "(?i)^C:\\\\Steam\\\\steamapps\\\\common\\\\Game 3\\\\game\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Tools\\1\\tool.exe"
+        ],
+        "result": "(?i)^C:\\\\Tools\\\\1\\\\tool\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Tools\\app-1\\tool.exe"
+        ],
+        "result": "(?i)^C:\\\\Tools\\\\app-1\\\\tool\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Tools\\v1\\tool.exe"
+        ],
+        "result": "(?i)^C:\\\\Tools\\\\v1\\\\tool\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Tools\\1.2-beta\\tool.exe"
+        ],
+        "result": "(?i)^C:\\\\Tools\\\\1\\.2-beta\\\\tool\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Tools\\1x2\\tool.exe"
+        ],
+        "result": "(?i)^C:\\\\Tools\\\\1x2\\\\tool\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Tools\\release-1.2\\tool.exe"
+        ],
+        "result": "(?i)^C:\\\\Tools\\\\release-1\\.2\\\\tool\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Tools\\1.2"
+        ],
+        "result": "(?i)^C:\\\\Tools\\\\1\\.2$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\a (x86)\\b+c.exe"
+        ],
+        "result": "(?i)^C:\\\\a \\(x86\\)\\\\b\\+c\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\v1.0.9164\\Discord.exe"
+        ],
+        "result": "(?i)^C:\\\\Users\\\\Ayoub\\\\AppData\\\\Local\\\\Discord\\\\v[0-9]+(?:\\.[0-9]+)+\\\\Discord\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\1.0.9164\\Discord.exe"
+        ],
+        "result": "(?i)^C:\\\\Users\\\\Ayoub\\\\AppData\\\\Local\\\\Discord\\\\[0-9]+(?:\\.[0-9]+)+\\\\Discord\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Users\\Ayoub\\AppData\\Local\\Discord\\app-1.0.9164\\Update.exe"
+        ],
+        "result": "(?i)^C:\\\\Users\\\\Ayoub\\\\AppData\\\\Local\\\\Discord\\\\app-[0-9]+(?:\\.[0-9]+)+\\\\Update\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\JetBrains\\Toolbox\\apps\\IDEA-U\\ch-1\\243.21565.199\\bin\\idea64.exe"
+        ],
+        "result": "(?i)^C:\\\\JetBrains\\\\Toolbox\\\\apps\\\\IDEA-U\\\\ch-1\\\\[0-9]+(?:\\.[0-9]+)+\\\\bin\\\\idea64\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_arm64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "(?i)^C:\\\\Program Files\\\\WindowsApps\\\\Microsoft\\.WindowsTerminal_[0-9]+(?:\\.[0-9]+)+_arm64__8wekyb3d8bbwe\\\\WindowsTerminal\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminal_1.21.3231.0_x64__anotherpublisher\\WindowsTerminal.exe"
+        ],
+        "result": "(?i)^C:\\\\Program Files\\\\WindowsApps\\\\Microsoft\\.WindowsTerminal_[0-9]+(?:\\.[0-9]+)+_x64__anotherpublisher\\\\WindowsTerminal\\.exe$"
+      },
+      {
+        "name": "appPathPattern",
+        "args": [
+          "C:\\Program Files\\WindowsApps\\Microsoft.WindowsTerminalPreview_1.21.3231.0_x64__8wekyb3d8bbwe\\WindowsTerminal.exe"
+        ],
+        "result": "(?i)^C:\\\\Program Files\\\\WindowsApps\\\\Microsoft\\.WindowsTerminalPreview_[0-9]+(?:\\.[0-9]+)+_x64__8wekyb3d8bbwe\\\\WindowsTerminal\\.exe$"
+      }
+    ]
+  }
+]

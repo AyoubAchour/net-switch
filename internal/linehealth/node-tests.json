@@ -1,0 +1,4078 @@
+[
+  {
+    "name": "the first poll decides at once, in either direction",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          0
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 0,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "LineHealth",
+        "id": 2,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 2,
+        "args": [
+          false,
+          0
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 0,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "one poll without an address is a glitch, two in a row are an outage",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1002000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1002000,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1003000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1002000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1004000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1002000,
+          "lastPollAt": 1004000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "the line is back at the first good poll",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1002000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1003000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "a route read that failed says nothing, so it never takes the line down",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1005000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1005000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1005000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1010000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1005000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1010000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1010000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1015000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1010000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1015000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1015000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1020000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1015000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1020000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1020000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1025000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1020000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1025000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1025000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1030000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1025000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1030000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1030000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1035000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1030000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1035000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1035000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1040000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1035000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1040000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1040000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1045000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1040000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1045000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1045000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1050000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1045000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1050000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1050000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "two route reads in a row that worked and found no default route take the line down",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1001000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1002000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1001000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1007000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1007000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1008000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1007000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1008000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          true,
+          1013000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": {
+            "present": true,
+            "at": 1013000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1008000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1014000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": {
+            "present": true,
+            "at": 1013000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1014000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "a failed read between two misses does not reset them, a good read does",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1001000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          null,
+          1002000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1001000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1003000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1003000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1004000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1003000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1004000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "LineHealth",
+        "id": 2,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 2,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 2,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1001000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 2,
+        "args": [
+          true,
+          1002000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": {
+            "present": true,
+            "at": 1002000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 2,
+        "args": [
+          false,
+          1003000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1003000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 2,
+        "args": [
+          true,
+          1004000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1003000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1004000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "a route reading that is too old is ignored",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1000000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1000000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1001000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1032000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1001000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1032000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "a route reading from the outage does not keep the line down once the address is back",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1002000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1002000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1003000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1002000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1004000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1004000,
+          "lastPollAt": 1004000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "a line with an address but no default route stays down, and does not flap",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1001000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1002000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1002000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1003000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1002000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1008000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 3,
+          "route": {
+            "present": false,
+            "at": 1008000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1009000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 3,
+          "route": {
+            "present": false,
+            "at": 1008000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1009000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1014000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 4,
+          "route": {
+            "present": false,
+            "at": 1014000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1009000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1015000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 4,
+          "route": {
+            "present": false,
+            "at": 1014000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1015000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1020000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 5,
+          "route": {
+            "present": false,
+            "at": 1020000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1015000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1021000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 5,
+          "route": {
+            "present": false,
+            "at": 1020000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1021000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1026000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 6,
+          "route": {
+            "present": false,
+            "at": 1026000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1021000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1027000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 6,
+          "route": {
+            "present": false,
+            "at": 1026000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1027000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1032000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 7,
+          "route": {
+            "present": false,
+            "at": 1032000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1027000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1033000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 7,
+          "route": {
+            "present": false,
+            "at": 1032000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1033000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1038000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 8,
+          "route": {
+            "present": false,
+            "at": 1038000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1033000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1039000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 8,
+          "route": {
+            "present": false,
+            "at": 1038000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1039000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      }
+    ]
+  },
+  {
+    "name": "two polls closer than the minimum gap count once",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001399
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1002000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "reset forgets everything, so the next poll decides at once",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "reset",
+        "id": 1,
+        "args": [],
+        "result": null,
+        "state": {
+          "up": null,
+          "hadAddress": null,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": null,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a miss that is old by the time the next one arrives does not add up with it",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1000000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1000000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1031000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1031000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1032000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1031000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1032000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1037000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1037000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1032000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1038000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1037000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1038000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      }
+    ]
+  },
+  {
+    "name": "route misses from before an address outage do not add up with one new miss afterwards",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1001000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1002000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1002000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1003000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1002000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1004000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1002000
+          },
+          "recoveredAt": null,
+          "lastPollAt": 1004000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1064000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1064000,
+          "lastPollAt": 1064000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1065000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1065000
+          },
+          "recoveredAt": 1064000,
+          "lastPollAt": 1064000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1066000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 1,
+          "route": {
+            "present": false,
+            "at": 1065000
+          },
+          "recoveredAt": 1064000,
+          "lastPollAt": 1066000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1071000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1071000
+          },
+          "recoveredAt": 1064000,
+          "lastPollAt": 1066000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1072000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 2,
+          "route": {
+            "present": false,
+            "at": 1071000
+          },
+          "recoveredAt": 1064000,
+          "lastPollAt": 1072000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "no default route"
+        }
+      }
+    ]
+  },
+  {
+    "name": "while lines are tested, a line whose address returns stays down until a test passes",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1002000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1003000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "inDoubt",
+        "id": 1,
+        "args": [],
+        "result": true,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1004000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1004000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "noteProbe",
+        "id": 1,
+        "args": [
+          true,
+          1003500
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1004000,
+          "probeFails": 0,
+          "probePasses": 1,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": 1003500,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1005000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1005000,
+          "probeFails": 0,
+          "probePasses": 1,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": 1003500,
+          "reason": null
+        }
+      },
+      {
+        "name": "inDoubt",
+        "id": 1,
+        "args": [],
+        "result": false,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1005000,
+          "probeFails": 0,
+          "probePasses": 1,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": 1003500,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "without tests, a line is back at the first poll with an address",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000,
+          {
+            "tested": false
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000,
+          {
+            "tested": false
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1002000,
+          {
+            "tested": false
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1003000,
+          {
+            "tested": false
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "a returning line whose tests fail stays down, and three failures make it offline",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1002000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1003000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "noteProbe",
+        "id": 1,
+        "args": [
+          false,
+          1008000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 1,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": 1008000,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "noteProbe",
+        "id": 1,
+        "args": [
+          false,
+          1013000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 2,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": 1013000,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "noteProbe",
+        "id": 1,
+        "args": [
+          false,
+          1018000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 3,
+          "probePasses": 0,
+          "offline": true,
+          "awaitingPass": true,
+          "lastAnswerAt": 1018000,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1063000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1063000,
+          "probeFails": 3,
+          "probePasses": 0,
+          "offline": true,
+          "awaitingPass": true,
+          "lastAnswerAt": 1018000,
+          "reason": "no internet"
+        }
+      }
+    ]
+  },
+  {
+    "name": "a returning line is trusted on its address once no test could say anything for a while",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1002000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1003000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "noteProbe",
+        "id": 1,
+        "args": [
+          null,
+          1008000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1032000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1032000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1033000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1033000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "one failed test, then tests that can’t run, doesn’t leave a returning line checking forever",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1002000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1003000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "noteProbe",
+        "id": 1,
+        "args": [
+          false,
+          1008000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 1,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": 1008000,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1037000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1037000,
+          "probeFails": 1,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": 1008000,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1038000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1038000,
+          "probeFails": 1,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": 1008000,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "a routing restart keeps a returning line waiting for its first passing test",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1002000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1003000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "restartKeeping",
+        "id": 1,
+        "args": [
+          {
+            "offline": false,
+            "awaitingPass": true
+          },
+          1004000
+        ],
+        "result": null,
+        "state": {
+          "up": null,
+          "hadAddress": null,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1004000,
+          "lastPollAt": null,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1005000,
+          {
+            "tested": true
+          }
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1004000,
+          "lastPollAt": 1005000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "noteProbe",
+        "id": 1,
+        "args": [
+          true,
+          1006000
+        ],
+        "result": null,
+        "state": {
+          "up": false,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1004000,
+          "lastPollAt": 1005000,
+          "probeFails": 0,
+          "probePasses": 1,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": 1006000,
+          "reason": "checking"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1007000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1004000,
+          "lastPollAt": 1007000,
+          "probeFails": 0,
+          "probePasses": 1,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": 1006000,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "a single poll without an address is a glitch and asks for no test afterwards",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1002000,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1002000,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "the first poll after a reset never waits for a test",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          0,
+          {
+            "tested": true
+          }
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 0,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  },
+  {
+    "name": "a route read that started before the address came back is ignored, whenever it ends",
+    "calls": [
+      {
+        "name": "LineHealth",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1000000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1000000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1001000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": false,
+          "addressMisses": 1,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1001000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          false,
+          1002000
+        ],
+        "result": false,
+        "state": {
+          "up": false,
+          "hadAddress": false,
+          "addressMisses": 2,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": null,
+          "lastPollAt": 1002000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": false,
+          "lastAnswerAt": null,
+          "reason": "no address"
+        }
+      },
+      {
+        "name": "check",
+        "id": 1,
+        "args": [
+          true,
+          1003000
+        ],
+        "result": true,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      },
+      {
+        "name": "noteRoute",
+        "id": 1,
+        "args": [
+          false,
+          1002000
+        ],
+        "result": null,
+        "state": {
+          "up": true,
+          "hadAddress": true,
+          "addressMisses": 0,
+          "routeMisses": 0,
+          "route": null,
+          "recoveredAt": 1003000,
+          "lastPollAt": 1003000,
+          "probeFails": 0,
+          "probePasses": 0,
+          "offline": false,
+          "awaitingPass": true,
+          "lastAnswerAt": null,
+          "reason": null
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,1467 @@
+[
+  {
+    "name": "each line has its own outbound and selector tags",
+    "calls": [
+      {
+        "name": "lineOutbound",
+        "args": [
+          "b2"
+        ],
+        "result": "line-b2"
+      },
+      {
+        "name": "laneSelector",
+        "args": [
+          "b2"
+        ],
+        "result": "lane-b2"
+      }
+    ]
+  },
+  {
+    "name": "the outbound that carries a connection decides its line, even behind another line’s selector",
+    "calls": [
+      {
+        "name": "connectionLine",
+        "args": [
+          {
+            "chains": [
+              "line-b2",
+              "lane-b2"
+            ]
+          }
+        ],
+        "result": "b2"
+      },
+      {
+        "name": "connectionLine",
+        "args": [
+          {
+            "chains": [
+              "line-a1",
+              "lane-b2"
+            ]
+          }
+        ],
+        "result": "a1"
+      },
+      {
+        "name": "connectionLine",
+        "args": [
+          {
+            "chains": [
+              "line-a1"
+            ]
+          }
+        ],
+        "result": "a1"
+      },
+      {
+        "name": "connectionLine",
+        "args": [
+          {
+            "chains": [
+              "direct"
+            ]
+          }
+        ],
+        "result": null
+      },
+      {
+        "name": "connectionLine",
+        "args": [
+          {
+            "chains": []
+          }
+        ],
+        "result": null
+      },
+      {
+        "name": "connectionLine",
+        "args": [
+          null
+        ],
+        "result": null
+      }
+    ]
+  },
+  {
+    "name": "speeds come from byte growth between polls, split by line",
+    "calls": [
+      {
+        "name": "AppTracker",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "a",
+              "metadata": {
+                "processPath": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+              },
+              "download": 5000000,
+              "upload": 0,
+              "chains": [
+                "line-a1"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            },
+            {
+              "id": "b",
+              "metadata": {
+                "processPath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+              },
+              "download": 1000,
+              "upload": 0,
+              "chains": [
+                "line-a1"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            }
+          ],
+          1791331260000
+        ],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "a",
+              "metadata": {
+                "processPath": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+              },
+              "download": 6000000,
+              "upload": 0,
+              "chains": [
+                "line-a1"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            },
+            {
+              "id": "c",
+              "metadata": {
+                "processPath": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+              },
+              "download": 500000,
+              "upload": 0,
+              "chains": [
+                "line-b2",
+                "lane-b2"
+              ],
+              "start": "2026-10-07T00:01:00.500Z"
+            },
+            {
+              "id": "b",
+              "metadata": {
+                "processPath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+              },
+              "download": 1000,
+              "upload": 0,
+              "chains": [
+                "line-a1"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            }
+          ],
+          1791331261000
+        ],
+        "result": null
+      },
+      {
+        "name": "snapshot",
+        "id": 1,
+        "args": [
+          {
+            "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe": "b2"
+          }
+        ],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe",
+            "line": "b2",
+            "rate": {
+              "down": 900000,
+              "up": 0
+            },
+            "lineDown": {
+              "a1": 600000,
+              "b2": 300000
+            },
+            "sortScore": 375000,
+            "connections": {
+              "a1": 1,
+              "b2": 1
+            }
+          },
+          {
+            "key": "c:\\program files\\google\\chrome\\application\\chrome.exe",
+            "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "line": null,
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {
+              "a1": 0
+            },
+            "sortScore": 0,
+            "connections": {
+              "a1": 1
+            }
+          }
+        ]
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+        ],
+        "result": "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe"
+      },
+      {
+        "name": "lineRate",
+        "id": 1,
+        "args": [
+          "a1"
+        ],
+        "result": {
+          "down": 1000000,
+          "up": 0
+        }
+      },
+      {
+        "name": "lineRate",
+        "id": 1,
+        "args": [
+          "b2"
+        ],
+        "result": {
+          "down": 500000,
+          "up": 0
+        }
+      },
+      {
+        "name": "lineRate",
+        "id": 1,
+        "args": [
+          "zz"
+        ],
+        "result": {
+          "down": 0,
+          "up": 0
+        }
+      }
+    ]
+  },
+  {
+    "name": "pinned apps stay listed even when they are not running, in any letter case",
+    "calls": [
+      {
+        "name": "AppTracker",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "a",
+              "metadata": {
+                "processPath": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+              },
+              "download": 0,
+              "upload": 0,
+              "chains": [
+                "line-a1"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            }
+          ],
+          1791331260000
+        ],
+        "result": null
+      },
+      {
+        "name": "snapshot",
+        "id": 1,
+        "args": [
+          {
+            "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe": "b2",
+            "C:\\PROGRAM FILES\\GOOGLE\\CHROME\\APPLICATION\\CHROME.EXE": "a1"
+          }
+        ],
+        "result": [
+          {
+            "key": "c:\\program files\\google\\chrome\\application\\chrome.exe",
+            "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            "line": "a1",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {
+              "a1": 0
+            },
+            "sortScore": 0,
+            "connections": {
+              "a1": 1
+            }
+          },
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe",
+            "line": "b2",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {},
+            "sortScore": 0,
+            "connections": {}
+          }
+        ]
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+        ],
+        "result": "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe"
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        ],
+        "result": "c:\\program files\\google\\chrome\\application\\chrome.exe"
+      }
+    ]
+  },
+  {
+    "name": "an old pin follows an update, merges both versions, and keeps the current program path",
+    "calls": [
+      {
+        "name": "AppTracker",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "snapshot",
+        "id": 1,
+        "args": [
+          {
+            "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe": "b2"
+          }
+        ],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe",
+            "line": "b2",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {},
+            "sortScore": 0,
+            "connections": {}
+          }
+        ]
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "old",
+              "metadata": {
+                "processPath": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe"
+              },
+              "download": 0,
+              "upload": 0,
+              "chains": [
+                "line-a1"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            }
+          ],
+          1000
+        ],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "new",
+              "metadata": {
+                "processPath": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe"
+              },
+              "download": 0,
+              "upload": 0,
+              "chains": [
+                "line-a1"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            }
+          ],
+          2000
+        ],
+        "result": null
+      },
+      {
+        "name": "OutsideTracker",
+        "id": 2,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 2,
+        "args": [
+          [
+            {
+              "id": "outside",
+              "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe",
+              "line": "a1",
+              "down": 0,
+              "up": 0,
+              "beforeRouting": true
+            }
+          ],
+          2000
+        ],
+        "result": null
+      },
+      {
+        "name": "snapshot",
+        "id": 1,
+        "args": [
+          {
+            "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe": "b2"
+          }
+        ],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe",
+            "line": "b2",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {
+              "a1": 0
+            },
+            "sortScore": 0,
+            "connections": {
+              "a1": 1
+            }
+          }
+        ]
+      },
+      {
+        "name": "entries",
+        "id": 2,
+        "args": [],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe",
+            "lines": {},
+            "connections": 1,
+            "beforeRouting": true,
+            "measured": true,
+            "ids": [
+              {
+                "id": "outside",
+                "line": "a1"
+              }
+            ],
+            "sortScore": 0
+          }
+        ]
+      },
+      {
+        "name": "get",
+        "id": 2,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe"
+        ],
+        "result": {
+          "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+          "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe",
+          "lines": {},
+          "connections": 1,
+          "beforeRouting": true,
+          "measured": true,
+          "ids": [
+            {
+              "id": "outside",
+              "line": "a1"
+            }
+          ],
+          "sortScore": 0
+        }
+      },
+      {
+        "name": "mergeRows",
+        "args": [
+          [
+            {
+              "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+              "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe",
+              "line": "b2",
+              "rate": {
+                "down": 0,
+                "up": 0
+              },
+              "lineDown": {
+                "a1": 0
+              },
+              "sortScore": 0,
+              "connections": {
+                "a1": 1
+              }
+            }
+          ],
+          {
+            "ref": 2
+          },
+          {
+            "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe": "b2"
+          }
+        ],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe",
+            "line": "b2",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {
+              "a1": 0
+            },
+            "sortScore": 0,
+            "connections": {
+              "a1": 1
+            },
+            "outside": {
+              "connections": 1,
+              "byLine": {
+                "a1": 1
+              },
+              "beforeRouting": true,
+              "measured": true,
+              "rate": {
+                "down": 0,
+                "up": 0
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe"
+        ],
+        "result": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe"
+      },
+      {
+        "name": "connectionIdsOffLine",
+        "id": 1,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+          "b2"
+        ],
+        "result": [
+          "new"
+        ]
+      },
+      {
+        "name": "snapshot",
+        "id": 1,
+        "args": [
+          {
+            "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe": "b2",
+            "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe": "a1"
+          }
+        ],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe",
+            "line": "a1",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {
+              "a1": 0
+            },
+            "sortScore": 0,
+            "connections": {
+              "a1": 1
+            }
+          }
+        ]
+      },
+      {
+        "name": "entries",
+        "id": 2,
+        "args": [],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe",
+            "lines": {},
+            "connections": 1,
+            "beforeRouting": true,
+            "measured": true,
+            "ids": [
+              {
+                "id": "outside",
+                "line": "a1"
+              }
+            ],
+            "sortScore": 0
+          }
+        ]
+      },
+      {
+        "name": "get",
+        "id": 2,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe"
+        ],
+        "result": {
+          "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+          "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe",
+          "lines": {},
+          "connections": 1,
+          "beforeRouting": true,
+          "measured": true,
+          "ids": [
+            {
+              "id": "outside",
+              "line": "a1"
+            }
+          ],
+          "sortScore": 0
+        }
+      },
+      {
+        "name": "mergeRows",
+        "args": [
+          [],
+          {
+            "ref": 2
+          },
+          {
+            "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe": "b2",
+            "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe": "a1"
+          }
+        ],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe",
+            "line": "a1",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {},
+            "sortScore": 0,
+            "connections": {},
+            "outside": {
+              "connections": 1,
+              "byLine": {
+                "a1": 1
+              },
+              "beforeRouting": true,
+              "measured": true,
+              "rate": {
+                "down": 0,
+                "up": 0
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "ingest",
+        "id": 2,
+        "args": [
+          [
+            {
+              "id": "outside-new",
+              "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe",
+              "line": "a1",
+              "down": 0,
+              "up": 0,
+              "beforeRouting": true
+            }
+          ],
+          3000
+        ],
+        "result": null
+      },
+      {
+        "name": "AppTracker",
+        "id": 3,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "snapshot",
+        "id": 3,
+        "args": [
+          {
+            "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe": "b2"
+          }
+        ],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe",
+            "line": "b2",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {},
+            "sortScore": 0,
+            "connections": {}
+          }
+        ]
+      },
+      {
+        "name": "entries",
+        "id": 2,
+        "args": [],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe",
+            "lines": {},
+            "connections": 1,
+            "beforeRouting": true,
+            "measured": true,
+            "ids": [
+              {
+                "id": "outside-new",
+                "line": "a1"
+              }
+            ],
+            "sortScore": 0
+          }
+        ]
+      },
+      {
+        "name": "get",
+        "id": 2,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe"
+        ],
+        "result": {
+          "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+          "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe",
+          "lines": {},
+          "connections": 1,
+          "beforeRouting": true,
+          "measured": true,
+          "ids": [
+            {
+              "id": "outside-new",
+              "line": "a1"
+            }
+          ],
+          "sortScore": 0
+        }
+      },
+      {
+        "name": "mergeRows",
+        "args": [
+          [
+            {
+              "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+              "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe",
+              "line": "b2",
+              "rate": {
+                "down": 0,
+                "up": 0
+              },
+              "lineDown": {},
+              "sortScore": 0,
+              "connections": {}
+            }
+          ],
+          {
+            "ref": 2
+          },
+          {
+            "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9164\\Discord.exe": "b2"
+          }
+        ],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\discord\\app-*\\discord.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Discord\\app-1.0.9165\\Discord.exe",
+            "line": "b2",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {},
+            "sortScore": 0,
+            "connections": {},
+            "outside": {
+              "connections": 1,
+              "byLine": {
+                "a1": 1
+              },
+              "beforeRouting": true,
+              "measured": true,
+              "rate": {
+                "down": 0,
+                "up": 0
+              }
+            }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "name": "a download that started before routing is measured, merged into its app row and counted on its line",
+    "calls": [
+      {
+        "name": "OutsideTracker",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "192.168.1.11:50799>172.67.69.92:443",
+              "path": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe",
+              "line": "a1",
+              "down": 10000000,
+              "up": 1000,
+              "beforeRouting": true
+            }
+          ],
+          1791335400000
+        ],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "192.168.1.11:50799>172.67.69.92:443",
+              "path": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe",
+              "line": "a1",
+              "down": 10750000,
+              "up": 1000,
+              "beforeRouting": true
+            }
+          ],
+          1791335401000
+        ],
+        "result": null
+      },
+      {
+        "name": "AppTracker",
+        "id": 2,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "snapshot",
+        "id": 2,
+        "args": [],
+        "result": []
+      },
+      {
+        "name": "entries",
+        "id": 1,
+        "args": [],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe",
+            "lines": {
+              "a1": {
+                "down": 450000,
+                "up": 0
+              }
+            },
+            "connections": 1,
+            "beforeRouting": true,
+            "measured": true,
+            "ids": [
+              {
+                "id": "192.168.1.11:50799>172.67.69.92:443",
+                "line": "a1"
+              }
+            ],
+            "sortScore": 187500
+          }
+        ]
+      },
+      {
+        "name": "get",
+        "id": 1,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe"
+        ],
+        "result": {
+          "key": "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+          "path": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe",
+          "lines": {
+            "a1": {
+              "down": 450000,
+              "up": 0
+            }
+          },
+          "connections": 1,
+          "beforeRouting": true,
+          "measured": true,
+          "ids": [
+            {
+              "id": "192.168.1.11:50799>172.67.69.92:443",
+              "line": "a1"
+            }
+          ],
+          "sortScore": 187500
+        }
+      },
+      {
+        "name": "mergeRows",
+        "args": [
+          [],
+          {
+            "ref": 1
+          },
+          {
+            "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe": "a1"
+          }
+        ],
+        "result": [
+          {
+            "key": "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+            "path": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe",
+            "line": "a1",
+            "rate": {
+              "down": 450000,
+              "up": 0
+            },
+            "lineDown": {
+              "a1": 450000
+            },
+            "sortScore": 187500,
+            "connections": {},
+            "outside": {
+              "connections": 1,
+              "byLine": {
+                "a1": 1
+              },
+              "beforeRouting": true,
+              "measured": true,
+              "rate": {
+                "down": 450000,
+                "up": 0
+              }
+            }
+          }
+        ]
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+        ],
+        "result": "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe"
+      },
+      {
+        "name": "idsOffLine",
+        "id": 1,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+          "b2"
+        ],
+        "result": [
+          "192.168.1.11:50799>172.67.69.92:443"
+        ]
+      },
+      {
+        "name": "idsOffLine",
+        "id": 1,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+          "a1"
+        ],
+        "result": []
+      }
+    ]
+  },
+  {
+    "name": "outside connections Windows cannot measure are still counted, and vanish when they close",
+    "calls": [
+      {
+        "name": "OutsideTracker",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "a",
+              "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+              "line": "a1",
+              "down": null,
+              "up": null,
+              "beforeRouting": false
+            }
+          ],
+          1791335400000
+        ],
+        "result": null
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        ],
+        "result": "c:\\program files\\google\\chrome\\application\\chrome.exe"
+      },
+      {
+        "name": "get",
+        "id": 1,
+        "args": [
+          "c:\\program files\\google\\chrome\\application\\chrome.exe"
+        ],
+        "result": {
+          "key": "c:\\program files\\google\\chrome\\application\\chrome.exe",
+          "path": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+          "lines": {},
+          "connections": 1,
+          "beforeRouting": false,
+          "measured": false,
+          "ids": [
+            {
+              "id": "a",
+              "line": "a1"
+            }
+          ],
+          "sortScore": 0
+        }
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [],
+          1791335401000
+        ],
+        "result": null
+      },
+      {
+        "name": "get",
+        "id": 1,
+        "args": [
+          "c:\\program files\\google\\chrome\\application\\chrome.exe"
+        ],
+        "result": null
+      }
+    ]
+  },
+  {
+    "name": "reconnect finds the right connections: engine ids per line, and outside connections by tuple and owner",
+    "calls": [
+      {
+        "name": "AppTracker",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "old",
+              "metadata": {
+                "processPath": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+              },
+              "download": 0,
+              "upload": 0,
+              "chains": [
+                "line-a1",
+                "lane-b2"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            },
+            {
+              "id": "new",
+              "metadata": {
+                "processPath": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+              },
+              "download": 0,
+              "upload": 0,
+              "chains": [
+                "line-b2",
+                "lane-b2"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            },
+            {
+              "id": "phone",
+              "metadata": {
+                "processPath": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+              },
+              "download": 0,
+              "upload": 0,
+              "chains": [
+                "line-c3",
+                "lane-b2"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            }
+          ],
+          1791335400000
+        ],
+        "result": null
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+        ],
+        "result": "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe"
+      },
+      {
+        "name": "connectionIdsFor",
+        "id": 1,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+          "a1"
+        ],
+        "result": [
+          "old"
+        ]
+      },
+      {
+        "name": "connectionIdsFor",
+        "id": 1,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+          "b2"
+        ],
+        "result": [
+          "new"
+        ]
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        ],
+        "result": "c:\\program files\\google\\chrome\\application\\chrome.exe"
+      },
+      {
+        "name": "connectionIdsFor",
+        "id": 1,
+        "args": [
+          "c:\\program files\\google\\chrome\\application\\chrome.exe",
+          "a1"
+        ],
+        "result": []
+      },
+      {
+        "name": "connectionIdsOffLine",
+        "id": 1,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+          "b2"
+        ],
+        "result": [
+          "old",
+          "phone"
+        ]
+      },
+      {
+        "name": "parseOutsideId",
+        "args": [
+          "192.168.1.11:50799>172.67.69.92:443|13284|2026-10-06T22:40:31.0000000Z"
+        ],
+        "result": {
+          "local": "192.168.1.11",
+          "lport": 50799,
+          "remote": "172.67.69.92",
+          "rport": 443,
+          "pid": 13284,
+          "created": "2026-10-06T22:40:31.0000000Z"
+        }
+      },
+      {
+        "name": "parseOutsideId",
+        "args": [
+          "[fe80::1]:1>x|1|y"
+        ],
+        "result": null
+      }
+    ]
+  },
+  {
+    "name": "while combining, reconnect can take every outside connection of an app, on any line",
+    "calls": [
+      {
+        "name": "OutsideTracker",
+        "id": 1,
+        "args": [],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "192.168.1.11:1>9.9.9.9:443",
+              "path": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe",
+              "line": "a1",
+              "down": 0,
+              "up": 0,
+              "beforeRouting": true
+            },
+            {
+              "id": "192.168.1.21:2>9.9.9.9:443",
+              "path": "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe",
+              "line": "b2",
+              "down": 0,
+              "up": 0,
+              "beforeRouting": true
+            }
+          ],
+          0
+        ],
+        "result": null
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Users\\Admin\\AppData\\Local\\Programs\\LM Studio\\LM Studio.exe"
+        ],
+        "result": "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe"
+      },
+      {
+        "name": "idsOffLine",
+        "id": 1,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe",
+          "a1"
+        ],
+        "result": [
+          "192.168.1.21:2>9.9.9.9:443"
+        ]
+      },
+      {
+        "name": "idsOf",
+        "id": 1,
+        "args": [
+          "c:\\users\\admin\\appdata\\local\\programs\\lm studio\\lm studio.exe"
+        ],
+        "result": [
+          "192.168.1.11:1>9.9.9.9:443",
+          "192.168.1.21:2>9.9.9.9:443"
+        ]
+      },
+      {
+        "name": "appKey",
+        "args": [
+          "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+        ],
+        "result": "c:\\program files\\google\\chrome\\application\\chrome.exe"
+      },
+      {
+        "name": "idsOf",
+        "id": 1,
+        "args": [
+          "c:\\program files\\google\\chrome\\application\\chrome.exe"
+        ],
+        "result": []
+      }
+    ]
+  },
+  {
+    "name": "idle apps disappear after the keep window; connections without a path become one unknown app",
+    "calls": [
+      {
+        "name": "AppTracker",
+        "id": 1,
+        "args": [
+          {
+            "idleKeepMs": 60000
+          }
+        ],
+        "result": null
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [
+            {
+              "id": "x",
+              "metadata": {
+                "processPath": ""
+              },
+              "download": 0,
+              "upload": 0,
+              "chains": [
+                "line-a1"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            },
+            {
+              "id": "y",
+              "metadata": {
+                "processPath": ""
+              },
+              "download": 0,
+              "upload": 0,
+              "chains": [
+                "line-a1"
+              ],
+              "start": "2026-10-07T00:00:00Z"
+            }
+          ],
+          1791331260000
+        ],
+        "result": null
+      },
+      {
+        "name": "snapshot",
+        "id": 1,
+        "args": [],
+        "result": [
+          {
+            "key": "unknown",
+            "path": "",
+            "line": null,
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {
+              "a1": 0
+            },
+            "sortScore": 0,
+            "connections": {
+              "a1": 2
+            }
+          }
+        ]
+      },
+      {
+        "name": "snapshot",
+        "id": 1,
+        "args": [],
+        "result": [
+          {
+            "key": "unknown",
+            "path": "",
+            "line": null,
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {
+              "a1": 0
+            },
+            "sortScore": 0,
+            "connections": {
+              "a1": 2
+            }
+          }
+        ]
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [],
+          1791331290000
+        ],
+        "result": null
+      },
+      {
+        "name": "snapshot",
+        "id": 1,
+        "args": [],
+        "result": [
+          {
+            "key": "unknown",
+            "path": "",
+            "line": null,
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "lineDown": {},
+            "sortScore": 0,
+            "connections": {}
+          }
+        ]
+      },
+      {
+        "name": "ingest",
+        "id": 1,
+        "args": [
+          [],
+          1791331321000
+        ],
+        "result": null
+      },
+      {
+        "name": "snapshot",
+        "id": 1,
+        "args": [],
+        "result": []
+      }
+    ]
+  }
+]

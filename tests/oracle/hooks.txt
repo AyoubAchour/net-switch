@@ -1,0 +1,43 @@
+export const oracleHooks = {
+  settings, usage, engine, tracker, outside, monitor, lanes,
+  pollConnections, saveUsage, tickLanes, noteUsage, followBlockedSoon,
+  closeExhaustedConnections, followShares, refreshAdapters,
+  async settle() { await laneQueue; await startQueue; await setupQueue; },
+  seed(value) {
+    const scenario = JSON.parse(value);
+    settings.values.lines = scenario.lines.map(({ id, alias, label, kind, metered, strict, cap, weight }) => ({ id, alias, label, kind, metered, strict, cap, weight, guid: null }));
+    settings.values.appLines = Object.fromEntries(scenario.apps.filter((app) => app.line).map((app) => [app.path, app.line]));
+    engine.status = scenario.routing.status;
+    engine.error = scenario.routing.error;
+    wantRouting = scenario.routing.wanted;
+    engine.startedWith = { lines: settings.values.lines, ipv6: false };
+    engine.lines = settings.values.lines;
+    engine.combine = scenario.combine.on;
+    engine.shares = Object.fromEntries(scenario.lines.filter((line) => line.share !== null).map((line) => [line.id, line.share]));
+    exhaustedIds = new Set(scenario.lines.filter((line) => line.exhausted).map((line) => line.id));
+    adapters = scenario.lines.map((line) => ({ alias: line.alias, kind: line.kind, ssid: line.ssid, connected: line.connected }));
+    lanes.clear();
+    syncLanes();
+    for (const line of scenario.lines) {
+      const lane = lanes.get(line.id);
+      lane.alias = line.alias;
+      lane.health.lastPollAt = Date.now();
+      lane.health.up = line.connected;
+      lane.health.reason = line.problem;
+      lane.delay = line.ping;
+      lane.target = line.target;
+      lineConnections[line.id] = line.connections;
+      usage.lines[line.id] = { bytes: line.usage.bytes, periodStart: Date.parse(line.usage.periodStart) };
+    }
+    tracker.apps.clear();
+    for (const app of scenario.apps) {
+      const key = appKey(app.path, platform);
+      tracker.apps.set(key, { key, path: app.path, lines: { [app.line ?? scenario.lines[0].id]: app.rate }, sortScore: app.sortScore, connections: app.connections, ids: {}, lastSeen: Date.now() });
+    }
+  },
+};
+const pushEvent = events.push;
+events.push = function (...items) {
+  for (const item of items) globalThis.oracleEvent?.(item);
+  return pushEvent.apply(this, items);
+};

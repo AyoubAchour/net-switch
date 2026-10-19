@@ -1,0 +1,1260 @@
+[
+  {
+    "name": "a new line is named after what its adapter is, and a second of a kind gets a number",
+    "calls": [
+      {
+        "name": "lineLabel",
+        "args": [
+          {
+            "alias": "Wi-Fi",
+            "kind": "wifi",
+            "guid": "{Wi-Fi}",
+            "metric": 25,
+            "routeMetric": 0,
+            "connected": true,
+            "virtual": false
+          }
+        ],
+        "result": "Wi-Fi"
+      },
+      {
+        "name": "lineLabel",
+        "args": [
+          {
+            "alias": "Ethernet 3",
+            "kind": "phone",
+            "guid": "{Ethernet 3}",
+            "metric": 25,
+            "routeMetric": 0,
+            "connected": true,
+            "virtual": false
+          }
+        ],
+        "result": "Phone"
+      },
+      {
+        "name": "lineLabel",
+        "args": [
+          {
+            "alias": "Ethernet",
+            "kind": "wired",
+            "guid": "{Ethernet}",
+            "metric": 25,
+            "routeMetric": 0,
+            "connected": true,
+            "virtual": false
+          }
+        ],
+        "result": "Cable"
+      },
+      {
+        "name": "uniqueLabel",
+        "args": [
+          "Wi-Fi",
+          [
+            {
+              "label": "Wi-Fi"
+            },
+            {
+              "label": "Wi-Fi 2"
+            }
+          ]
+        ],
+        "result": "Wi-Fi 3"
+      },
+      {
+        "name": "newLine",
+        "args": [
+          {
+            "alias": "Ethernet 3",
+            "kind": "phone",
+            "guid": "{Ethernet 3}",
+            "metric": 25,
+            "routeMetric": 0,
+            "connected": true,
+            "virtual": false
+          },
+          [
+            {
+              "id": "a1",
+              "label": "Cable"
+            }
+          ]
+        ],
+        "result": {
+          "id": "010101",
+          "alias": "Ethernet 3",
+          "guid": "{Ethernet 3}",
+          "label": "Phone",
+          "kind": "phone",
+          "metered": true,
+          "strict": false,
+          "cap": null,
+          "weight": 1
+        }
+      }
+    ]
+  },
+  {
+    "name": "the first line is whatever Windows uses for the internet now, wired or not; a cable wins a tie",
+    "calls": [
+      {
+        "name": "pickFirstAdapter",
+        "args": [
+          [
+            {
+              "alias": "Ethernet",
+              "kind": "wired",
+              "guid": "{Ethernet}",
+              "metric": 35,
+              "routeMetric": 0,
+              "connected": true,
+              "virtual": false
+            },
+            {
+              "alias": "Wi-Fi",
+              "kind": "wifi",
+              "guid": "{Wi-Fi}",
+              "metric": 25,
+              "routeMetric": 0,
+              "connected": true,
+              "virtual": false
+            }
+          ]
+        ],
+        "result": {
+          "alias": "Wi-Fi",
+          "kind": "wifi",
+          "guid": "{Wi-Fi}",
+          "metric": 25,
+          "routeMetric": 0,
+          "connected": true,
+          "virtual": false
+        }
+      },
+      {
+        "name": "pickFirstAdapter",
+        "args": [
+          [
+            {
+              "alias": "Wi-Fi",
+              "kind": "wifi",
+              "guid": "{Wi-Fi}",
+              "metric": 25,
+              "routeMetric": 0,
+              "connected": true,
+              "virtual": false
+            },
+            {
+              "alias": "Ethernet",
+              "kind": "wired",
+              "guid": "{Ethernet}",
+              "metric": 25,
+              "routeMetric": 0,
+              "connected": true,
+              "virtual": false
+            }
+          ]
+        ],
+        "result": {
+          "alias": "Ethernet",
+          "kind": "wired",
+          "guid": "{Ethernet}",
+          "metric": 25,
+          "routeMetric": 0,
+          "connected": true,
+          "virtual": false
+        }
+      },
+      {
+        "name": "pickFirstAdapter",
+        "args": [
+          [
+            {
+              "alias": "vEthernet",
+              "kind": "wired",
+              "guid": "{vEthernet}",
+              "metric": 5,
+              "routeMetric": 0,
+              "connected": true,
+              "virtual": true
+            },
+            {
+              "alias": "Wi-Fi",
+              "kind": "wifi",
+              "guid": "{Wi-Fi}",
+              "metric": 25,
+              "routeMetric": 0,
+              "connected": false,
+              "virtual": false
+            }
+          ]
+        ],
+        "result": null
+      }
+    ]
+  },
+  {
+    "name": "0.2.0 settings become two lines, with every app choice kept",
+    "calls": [
+      {
+        "name": "migrateSettings",
+        "args": [
+          {
+            "mainAlias": "Ethernet",
+            "mainGuid": "{e}",
+            "secondAlias": "Wi-Fi",
+            "secondGuid": "{w}",
+            "secondLabel": "Wi-Fi stick",
+            "secondKind": "wifi",
+            "secondApps": [
+              "C:\\Games\\steam.exe"
+            ],
+            "cableApps": [
+              "C:\\Discord\\Discord.exe"
+            ],
+            "combine": true
+          }
+        ],
+        "result": {
+          "lines": [
+            {
+              "id": "010101",
+              "alias": "Ethernet",
+              "guid": "{e}",
+              "label": "Cable",
+              "kind": "wired",
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            },
+            {
+              "id": "020202",
+              "alias": "Wi-Fi",
+              "guid": "{w}",
+              "label": "Wi-Fi stick",
+              "kind": "wifi",
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            }
+          ],
+          "appLines": {
+            "C:\\Discord\\Discord.exe": "010101",
+            "C:\\Games\\steam.exe": "020202"
+          },
+          "waitingApps": null,
+          "mainAlias": null,
+          "mainGuid": null,
+          "secondAlias": null,
+          "secondGuid": null,
+          "secondLabel": null,
+          "secondKind": null,
+          "secondApps": null,
+          "cableApps": null
+        }
+      },
+      {
+        "name": "migrateSettings",
+        "args": [
+          {
+            "mainAlias": "Ethernet",
+            "secondAlias": null,
+            "secondApps": [
+              "C:\\Games\\steam.exe"
+            ]
+          }
+        ],
+        "result": {
+          "lines": [
+            {
+              "id": "030303",
+              "alias": "Ethernet",
+              "guid": null,
+              "label": "Cable",
+              "kind": "wired",
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            }
+          ],
+          "appLines": {},
+          "waitingApps": [
+            "C:\\Games\\steam.exe"
+          ],
+          "mainAlias": null,
+          "mainGuid": null,
+          "secondAlias": null,
+          "secondGuid": null,
+          "secondLabel": null,
+          "secondKind": null,
+          "secondApps": null,
+          "cableApps": null
+        }
+      },
+      {
+        "name": "migrateSettings",
+        "args": [
+          {
+            "mainAlias": "Ethernet",
+            "secondAlias": "Wi-Fi",
+            "secondApps": [
+              "a.exe"
+            ]
+          }
+        ],
+        "result": {
+          "lines": [
+            {
+              "id": "040404",
+              "alias": "Ethernet",
+              "guid": null,
+              "label": "Cable",
+              "kind": "wired",
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            },
+            {
+              "id": "050505",
+              "alias": "Wi-Fi",
+              "guid": null,
+              "label": "Second connection",
+              "kind": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            }
+          ],
+          "appLines": {
+            "a.exe": "050505"
+          },
+          "waitingApps": null,
+          "mainAlias": null,
+          "mainGuid": null,
+          "secondAlias": null,
+          "secondGuid": null,
+          "secondLabel": null,
+          "secondKind": null,
+          "secondApps": null,
+          "cableApps": null
+        }
+      },
+      {
+        "name": "placeWaitingApps",
+        "args": [
+          [
+            "C:\\Games\\steam.exe",
+            "C:\\Kept.exe"
+          ],
+          {
+            "c:\\kept.exe": "a1"
+          },
+          "b2"
+        ],
+        "result": {
+          "c:\\kept.exe": "a1",
+          "C:\\Games\\steam.exe": "b2"
+        }
+      },
+      {
+        "name": "placeWaitingApps",
+        "args": [
+          null,
+          {},
+          "b2"
+        ],
+        "result": null
+      },
+      {
+        "name": "migrateSettings",
+        "args": [
+          {
+            "mainAlias": "Ethernet",
+            "secondAlias": "Ethernet 3",
+            "secondKind": "phone"
+          }
+        ],
+        "result": {
+          "lines": [
+            {
+              "id": "060606",
+              "alias": "Ethernet",
+              "guid": null,
+              "label": "Cable",
+              "kind": "wired",
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            },
+            {
+              "id": "070707",
+              "alias": "Ethernet 3",
+              "guid": null,
+              "label": "Second connection",
+              "kind": "phone",
+              "metered": true,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            }
+          ],
+          "appLines": {},
+          "waitingApps": null,
+          "mainAlias": null,
+          "mainGuid": null,
+          "secondAlias": null,
+          "secondGuid": null,
+          "secondLabel": null,
+          "secondKind": null,
+          "secondApps": null,
+          "cableApps": null
+        }
+      },
+      {
+        "name": "migrateSettings",
+        "args": [
+          {
+            "mainAlias": "Ethernet",
+            "secondAlias": null
+          }
+        ],
+        "result": {
+          "lines": [
+            {
+              "id": "080808",
+              "alias": "Ethernet",
+              "guid": null,
+              "label": "Cable",
+              "kind": "wired",
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            }
+          ],
+          "appLines": {},
+          "waitingApps": null,
+          "mainAlias": null,
+          "mainGuid": null,
+          "secondAlias": null,
+          "secondGuid": null,
+          "secondLabel": null,
+          "secondKind": null,
+          "secondApps": null,
+          "cableApps": null
+        }
+      },
+      {
+        "name": "migrateSettings",
+        "args": [
+          {
+            "lines": [],
+            "mainAlias": "Ethernet"
+          }
+        ],
+        "result": {
+          "lines": [
+            {
+              "id": "090909",
+              "alias": "Ethernet",
+              "guid": null,
+              "label": "Cable",
+              "kind": "wired",
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            }
+          ],
+          "appLines": {},
+          "waitingApps": null,
+          "mainAlias": null,
+          "mainGuid": null,
+          "secondAlias": null,
+          "secondGuid": null,
+          "secondLabel": null,
+          "secondKind": null,
+          "secondApps": null,
+          "cableApps": null
+        }
+      },
+      {
+        "name": "migrateSettings",
+        "args": [
+          {
+            "lines": [
+              {
+                "id": "a1",
+                "alias": "Ethernet"
+              }
+            ],
+            "mainAlias": "Ethernet"
+          }
+        ],
+        "result": null
+      },
+      {
+        "name": "migrateSettings",
+        "args": [
+          {
+            "lines": [],
+            "mainAlias": null,
+            "secondAlias": null
+          }
+        ],
+        "result": null
+      }
+    ]
+  },
+  {
+    "name": "lines from the settings file are repaired or dropped, and the main line is never kept to its own apps",
+    "calls": [
+      {
+        "name": "normalizeLines",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "strict": true,
+              "label": "  Fibre  ",
+              "cap": {
+                "bytes": 0
+              }
+            },
+            {
+              "id": "a1",
+              "alias": "Duplicate"
+            },
+            {
+              "id": "../../evil",
+              "alias": "Wi-Fi"
+            },
+            {
+              "id": "b2",
+              "alias": ""
+            },
+            {
+              "id": "c3",
+              "alias": "Ethernet 3",
+              "kind": "phone",
+              "metered": true,
+              "strict": true,
+              "weight": -2,
+              "cap": {
+                "bytes": 5000000000,
+                "period": "day"
+              }
+            },
+            {
+              "id": 12,
+              "alias": "Number"
+            },
+            "Wi-Fi"
+          ]
+        ],
+        "result": [
+          {
+            "id": "a1",
+            "alias": "Ethernet",
+            "guid": null,
+            "label": "Fibre",
+            "kind": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "weight": 1
+          },
+          {
+            "id": "c3",
+            "alias": "Ethernet 3",
+            "guid": null,
+            "label": "Ethernet 3",
+            "kind": "phone",
+            "metered": true,
+            "strict": true,
+            "cap": {
+              "bytes": 5000000000,
+              "period": "day"
+            },
+            "weight": 1
+          }
+        ]
+      },
+      {
+        "name": "normalizeLines",
+        "args": [
+          null
+        ],
+        "result": []
+      }
+    ]
+  },
+  {
+    "name": "a data cap is an amount per day, or per month from a reset day",
+    "calls": [
+      {
+        "name": "validCap",
+        "args": [
+          {
+            "bytes": 10.4,
+            "period": "month"
+          }
+        ],
+        "result": {
+          "bytes": 10,
+          "period": "month",
+          "resetDay": 1
+        }
+      },
+      {
+        "name": "validCap",
+        "args": [
+          {
+            "bytes": 10,
+            "period": "month",
+            "resetDay": 15
+          }
+        ],
+        "result": {
+          "bytes": 10,
+          "period": "month",
+          "resetDay": 15
+        }
+      },
+      {
+        "name": "validCap",
+        "args": [
+          {
+            "bytes": 10,
+            "resetDay": 31
+          }
+        ],
+        "result": {
+          "bytes": 10,
+          "period": "month",
+          "resetDay": 1
+        }
+      },
+      {
+        "name": "validCap",
+        "args": [
+          {
+            "bytes": 10,
+            "period": "day",
+            "resetDay": 3
+          }
+        ],
+        "result": {
+          "bytes": 10,
+          "period": "day"
+        }
+      },
+      {
+        "name": "validCap",
+        "args": [
+          {
+            "bytes": -1
+          }
+        ],
+        "result": null
+      },
+      {
+        "name": "validCap",
+        "args": [
+          {
+            "bytes": "lots"
+          }
+        ],
+        "result": null
+      },
+      {
+        "name": "validCap",
+        "args": [
+          null
+        ],
+        "result": null
+      }
+    ]
+  },
+  {
+    "name": "a line’s apps use it while it is up, else the first other line that is up and may take them",
+    "calls": [
+      {
+        "name": "laneTarget",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "strict": false
+            },
+            {
+              "id": "b2",
+              "strict": false
+            },
+            {
+              "id": "c3",
+              "strict": true
+            },
+            {
+              "id": "d4",
+              "strict": false
+            }
+          ],
+          "b2",
+          {
+            "a1": true,
+            "b2": true,
+            "c3": false,
+            "d4": false
+          }
+        ],
+        "result": "b2"
+      },
+      {
+        "name": "laneTarget",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "strict": false
+            },
+            {
+              "id": "b2",
+              "strict": false
+            },
+            {
+              "id": "c3",
+              "strict": true
+            },
+            {
+              "id": "d4",
+              "strict": false
+            }
+          ],
+          "b2",
+          {
+            "a1": true,
+            "b2": false,
+            "c3": false,
+            "d4": false
+          }
+        ],
+        "result": "a1"
+      },
+      {
+        "name": "laneTarget",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "strict": false
+            },
+            {
+              "id": "b2",
+              "strict": false
+            },
+            {
+              "id": "c3",
+              "strict": true
+            },
+            {
+              "id": "d4",
+              "strict": false
+            }
+          ],
+          "b2",
+          {
+            "a1": false,
+            "b2": false,
+            "c3": true,
+            "d4": true
+          }
+        ],
+        "result": "d4"
+      },
+      {
+        "name": "laneTarget",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "strict": false
+            },
+            {
+              "id": "b2",
+              "strict": false
+            },
+            {
+              "id": "c3",
+              "strict": true
+            },
+            {
+              "id": "d4",
+              "strict": false
+            }
+          ],
+          "c3",
+          {
+            "a1": true,
+            "b2": false,
+            "c3": false,
+            "d4": false
+          }
+        ],
+        "result": "a1"
+      },
+      {
+        "name": "laneTarget",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "strict": false
+            },
+            {
+              "id": "b2",
+              "strict": false
+            },
+            {
+              "id": "c3",
+              "strict": true
+            },
+            {
+              "id": "d4",
+              "strict": false
+            }
+          ],
+          "b2",
+          {
+            "a1": false,
+            "b2": false,
+            "c3": true,
+            "d4": false
+          }
+        ],
+        "result": "b2"
+      },
+      {
+        "name": "laneTarget",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "strict": false
+            },
+            {
+              "id": "b2",
+              "strict": false
+            },
+            {
+              "id": "c3",
+              "strict": true
+            },
+            {
+              "id": "d4",
+              "strict": false
+            }
+          ],
+          "b2",
+          {
+            "a1": true,
+            "b2": true,
+            "c3": false,
+            "d4": true
+          },
+          [
+            "b2",
+            "a1"
+          ]
+        ],
+        "result": "d4"
+      },
+      {
+        "name": "laneTarget",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "strict": false
+            },
+            {
+              "id": "b2",
+              "strict": false
+            },
+            {
+              "id": "c3",
+              "strict": true
+            },
+            {
+              "id": "d4",
+              "strict": false
+            }
+          ],
+          "zz",
+          {
+            "a1": true,
+            "b2": false,
+            "c3": false,
+            "d4": false
+          }
+        ],
+        "result": null
+      }
+    ]
+  },
+  {
+    "name": "every open line takes part in combining, the main line too until it is out of data",
+    "calls": [
+      {
+        "name": "sharingLines",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "strict": false
+            },
+            {
+              "id": "b2",
+              "strict": false
+            },
+            {
+              "id": "c3",
+              "strict": true
+            },
+            {
+              "id": "d4",
+              "strict": false
+            }
+          ]
+        ],
+        "result": [
+          {
+            "id": "a1",
+            "strict": false
+          },
+          {
+            "id": "b2",
+            "strict": false
+          },
+          {
+            "id": "d4",
+            "strict": false
+          }
+        ]
+      },
+      {
+        "name": "sharingLines",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "strict": false
+            },
+            {
+              "id": "b2",
+              "strict": false
+            },
+            {
+              "id": "c3",
+              "strict": true
+            },
+            {
+              "id": "d4",
+              "strict": false
+            }
+          ],
+          [
+            "a1",
+            "b2"
+          ]
+        ],
+        "result": [
+          {
+            "id": "d4",
+            "strict": false
+          }
+        ]
+      },
+      {
+        "name": "sharingLines",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "strict": true
+            },
+            {
+              "id": "b2",
+              "strict": false
+            },
+            {
+              "id": "c3",
+              "strict": true
+            },
+            {
+              "id": "d4",
+              "strict": false
+            }
+          ]
+        ],
+        "result": [
+          {
+            "id": "a1",
+            "strict": true
+          },
+          {
+            "id": "b2",
+            "strict": false
+          },
+          {
+            "id": "d4",
+            "strict": false
+          }
+        ]
+      },
+      {
+        "name": "isOpenLine",
+        "args": [
+          {
+            "id": "c3",
+            "strict": true
+          }
+        ],
+        "result": false
+      }
+    ]
+  },
+  {
+    "name": "shares follow the weights in 5% steps, and every sharing line keeps at least one step",
+    "calls": [
+      {
+        "name": "sharesFromWeights",
+        "args": [
+          [
+            {
+              "id": "a1"
+            },
+            {
+              "id": "b2"
+            }
+          ],
+          {
+            "a1": 1,
+            "b2": 1
+          }
+        ],
+        "result": {
+          "a1": 0.5,
+          "b2": 0.5
+        }
+      },
+      {
+        "name": "sharesFromWeights",
+        "args": [
+          [
+            {
+              "id": "a1"
+            },
+            {
+              "id": "b2"
+            }
+          ],
+          {
+            "a1": 3,
+            "b2": 1
+          }
+        ],
+        "result": {
+          "a1": 0.75,
+          "b2": 0.25
+        }
+      },
+      {
+        "name": "sharesFromWeights",
+        "args": [
+          [
+            {
+              "id": "a1"
+            },
+            {
+              "id": "b2"
+            },
+            {
+              "id": "c3"
+            }
+          ],
+          {}
+        ],
+        "result": {
+          "a1": 0.35,
+          "b2": 0.35,
+          "c3": 0.3
+        }
+      },
+      {
+        "name": "sharesFromWeights",
+        "args": [
+          [
+            {
+              "id": "a1"
+            },
+            {
+              "id": "b2"
+            },
+            {
+              "id": "c3"
+            }
+          ],
+          {
+            "a1": 100,
+            "b2": 0,
+            "c3": 0
+          }
+        ],
+        "result": {
+          "a1": 0.9,
+          "b2": 0.05,
+          "c3": 0.05
+        }
+      },
+      {
+        "name": "sharesFromWeights",
+        "args": [
+          [
+            {
+              "id": "a1"
+            },
+            {
+              "id": "b2"
+            },
+            {
+              "id": "c3"
+            }
+          ],
+          {
+            "a1": 0,
+            "b2": 0,
+            "c3": 0
+          }
+        ],
+        "result": {
+          "a1": 0.35,
+          "b2": 0.35,
+          "c3": 0.3
+        }
+      },
+      {
+        "name": "sharesFromWeights",
+        "args": [
+          [
+            {
+              "id": "a1",
+              "weight": 1
+            },
+            {
+              "id": "b2",
+              "weight": 4
+            }
+          ]
+        ],
+        "result": {
+          "a1": 0.2,
+          "b2": 0.8
+        }
+      },
+      {
+        "name": "sharesFromWeights",
+        "args": [
+          []
+        ],
+        "result": {}
+      },
+      {
+        "name": "sharesFromWeights",
+        "args": [
+          [
+            {
+              "id": "a1"
+            },
+            {
+              "id": "b2"
+            },
+            {
+              "id": "c3"
+            }
+          ],
+          {
+            "a1": 1,
+            "b2": 2,
+            "c3": 3
+          }
+        ],
+        "result": {
+          "a1": 0.15,
+          "b2": 0.35,
+          "c3": 0.5
+        }
+      },
+      {
+        "name": "sharesFromWeights",
+        "args": [
+          [
+            {
+              "id": "a1"
+            },
+            {
+              "id": "b2"
+            },
+            {
+              "id": "c3"
+            }
+          ],
+          {
+            "a1": 7,
+            "b2": 0.1,
+            "c3": 0.1
+          }
+        ],
+        "result": {
+          "a1": 0.9,
+          "b2": 0.05,
+          "c3": 0.05
+        }
+      },
+      {
+        "name": "sharesFromWeights",
+        "args": [
+          [
+            {
+              "id": "a1"
+            },
+            {
+              "id": "b2"
+            },
+            {
+              "id": "c3"
+            }
+          ],
+          {
+            "a1": 1000000000,
+            "b2": 1,
+            "c3": 1
+          }
+        ],
+        "result": {
+          "a1": 0.9,
+          "b2": 0.05,
+          "c3": 0.05
+        }
+      }
+    ]
+  }
+]
