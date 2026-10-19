@@ -145,6 +145,9 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	cancelDial()
 	if err != nil {
 		f.DialFailed.Add(1)
+		if observer, ok := f.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil {
+			observer.LineError(decision.Line, err)
+		}
 		return
 	}
 	defer remote.Close()
@@ -159,7 +162,8 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		return
 	}
 	complete(false)
-	defer ep.Close()
+	closeEndpoint := sync.OnceFunc(ep.Close)
+	defer closeEndpoint()
 	stopApp := context.AfterFunc(ctx, ep.Abort)
 	defer stopApp()
 	if ctx.Err() != nil {
@@ -170,8 +174,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	ep.SocketOptions().SetReceiveBufferSize(int64(rx), true)
 	ep.SocketOptions().SetSendBufferSize(int64(tx), true)
 	ep.SocketOptions().SetKeepAlive(true)
-	app := gonet.NewTCPConn(&wq, ep)
-	defer app.Close()
+	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint}
 	if a, ok := remote.LocalAddr().(*net.TCPAddr); ok {
 		ticket.Established(a.AddrPort().Addr())
 	} else {
@@ -196,3 +199,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 // which also unblocks handshakes whose app never sent its final ACK.
 func (f *Forwarder) Stop() { f.mu.Lock(); f.cancel(); f.mu.Unlock() }
 func (f *Forwarder) Wait() { f.wg.Wait() }
+
+// gonet.Close delegates directly to Endpoint.Close, which requires one call.
+// Cancellation, splice errors and normal cleanup share this single owner.
+type onceCloseConn struct {
+	platform.TCPConn
+	close func()
+}
+
+func (c *onceCloseConn) Close() error { c.close(); return nil }
