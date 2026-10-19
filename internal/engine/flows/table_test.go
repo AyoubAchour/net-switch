@@ -257,6 +257,31 @@ func TestRejectionNoticeLimits(t *testing.T) {
 	}
 }
 
+func TestUnattributedRefusalsShareOnlyTheGlobalBudget(t *testing.T) {
+	f := table(t, Defaults())
+	fixed := time.Now()
+	f.now = func() time.Time { return fixed }
+	for range 1000 {
+		if !f.AllowReject("known") {
+			t.Fatal("early known app limit")
+		}
+	}
+	if f.AllowReject("known") {
+		t.Fatal("known app exceeded its own limit")
+	}
+	for range 4000 {
+		if !f.AllowReject("") {
+			t.Fatal("unattributed apps were collapsed into one app bucket")
+		}
+	}
+	if f.AllowReject("") || f.AllowReject("another") {
+		t.Fatal("global limit was exceeded")
+	}
+	if f.Stats().DroppedNotices != 3 {
+		t.Fatal("dropped notices weren't counted")
+	}
+}
+
 type failStore struct{}
 
 func (failStore) SaveApplied(policy.Applied) error { return errors.New("fsync failed") }

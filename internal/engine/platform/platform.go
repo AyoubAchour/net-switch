@@ -106,6 +106,13 @@ type UDPErrorQueue interface {
 	ReadError(context.Context) (DatagramError, error)
 }
 
+// UDPErrorHandler lets an adapter deliver errors from its existing I/O paths.
+// Install the handler before the first read or write. It must not block or
+// call back into the socket. Error-queue state is unlocked before invocation.
+type UDPErrorHandler interface {
+	SetErrorHandler(func(DatagramError))
+}
+
 type LineDialer interface {
 	DialTCP(context.Context, string, netip.AddrPort) (TCPConn, error)
 	OpenUDP(context.Context, string, bool) (UDPConn, error)
