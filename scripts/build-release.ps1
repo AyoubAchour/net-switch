@@ -32,7 +32,7 @@ $rootFiles = @(
 )
 $trees = @('lib', 'ui', 'tools', 'licenses', 'docs')
 $required = $rootFiles + $trees + @(
-  'lib/tray.cs', 'ui/index.html', 'ui/app.js', 'ui/styles.css', 'ui/favicon.svg',
+  'lib/server-factory.mjs', 'lib/tray.cs', 'ui/index.html', 'ui/app.js', 'ui/styles.css', 'ui/favicon.svg',
   'tools/stop.ps1', 'tools/restore-windows.mjs', 'tools/remove-autostart.mjs', 'tools/update-autostart.mjs', 'licenses/lucide-ISC.txt', 'docs/user-guide.md',
   # Kept in the repository rather than downloaded: gnu.org refuses connections
   # from GitHub's runners. Its hash is still checked against the pin below.

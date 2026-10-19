@@ -102,6 +102,19 @@ jobs:
       - run: go vet ./internal/... ./cmd/... ./tests/...
       - run: go test ./internal/... ./cmd/... ./tests/...
       - run: go build ./internal/... ./cmd/... ./tests/...
+      - name: Race checks for the control packages
+        if: runner.os == 'Linux' || matrix.name == 'Windows x64'
+        run: go test -race ./internal/... ./tests/...
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: runner.os == 'Linux'
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Compare random inputs against the Node oracle
+        if: runner.os == 'Linux'
+        run: |
+          go build -o ./bin/differential ./tests/differential/runner
+          node tests/differential/run.mjs ./bin/differential
 
   linux:
     name: Linux / Node ${{ matrix.node }} (shared code)
