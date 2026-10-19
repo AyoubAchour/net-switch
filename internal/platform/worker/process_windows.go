@@ -55,6 +55,12 @@ func (p *process) Close() error {
 // outside (which enables TCP counters) retain admin access with privileges
 // stripped. Both enter a bounded worker-only job before they can execute.
 func Start(executable string, args []string) (Process, error) {
+	return start(executable, args, nil, windows.CREATE_NO_WINDOW, 255)
+}
+
+// The explicit startup inputs let hosted tests distinguish loader, desktop and
+// job failures. Production callers always go through Start's fixed policy.
+func start(executable string, args []string, desktop *uint16, creationFlags, uiLimits uint32) (Process, error) {
 	if !filepath.IsAbs(executable) || len(args) < 2 || args[0] != "worker" {
 		return nil, fmt.Errorf("worker launcher requires its absolute executable and a worker mode")
 	}
@@ -78,11 +84,7 @@ func Start(executable string, args []string) (Process, error) {
 	if _, err = windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
 		return nil, err
 	}
-	ui := windows.JOBOBJECT_BASIC_UI_RESTRICTIONS{UIRestrictionsClass: windows.JOB_OBJECT_UILIMIT_DESKTOP | windows.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
-		windows.JOB_OBJECT_UILIMIT_EXITWINDOWS | windows.JOB_OBJECT_UILIMIT_GLOBALATOMS |
-		windows.JOB_OBJECT_UILIMIT_HANDLES | windows.JOB_OBJECT_UILIMIT_READCLIPBOARD |
-		windows.JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | windows.JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
-	}
+	ui := windows.JOBOBJECT_BASIC_UI_RESTRICTIONS{UIRestrictionsClass: uiLimits}
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectBasicUIRestrictions, uintptr(unsafe.Pointer(&ui)), uint32(unsafe.Sizeof(ui))); err != nil {
 		return nil, fmt.Errorf("limit worker UI access: %w", err)
 	}
@@ -177,6 +179,7 @@ func Start(executable string, args []string) (Process, error) {
 		return nil, err
 	}
 	si := windows.StartupInfoEx{StartupInfo: windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfoEx{})), Flags: windows.STARTF_USESTDHANDLES, StdInput: handles[0], StdOutput: handles[1], StdErr: handles[2]}, ProcThreadAttributeList: attrs.List()}
+	si.Desktop = desktop
 	quoted := []string{windows.EscapeArg(executable)}
 	for _, a := range args {
 		quoted = append(quoted, windows.EscapeArg(a))
@@ -190,7 +193,7 @@ func Start(executable string, args []string) (Process, error) {
 		return nil, err
 	}
 	var pi windows.ProcessInformation
-	if err = windows.CreateProcessAsUser(restricted, app, cmd, nil, nil, true, windows.CREATE_SUSPENDED|windows.CREATE_NO_WINDOW|windows.EXTENDED_STARTUPINFO_PRESENT, nil, nil, &si.StartupInfo, &pi); err != nil {
+	if err = windows.CreateProcessAsUser(restricted, app, cmd, nil, nil, true, windows.CREATE_SUSPENDED|creationFlags|windows.EXTENDED_STARTUPINFO_PRESENT, nil, nil, &si.StartupInfo, &pi); err != nil {
 		return nil, err
 	}
 	defer windows.CloseHandle(pi.Thread)

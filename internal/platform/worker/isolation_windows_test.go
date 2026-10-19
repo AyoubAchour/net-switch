@@ -38,6 +38,14 @@ func TestMain(m *testing.M) {
 		if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 			os.Exit(2)
 		}
+		if len(os.Args) > 2 && os.Args[2] == "bootstrap-proof" {
+			dll, err := windows.LoadLibraryEx("user32.dll", 0, windows.LOAD_LIBRARY_SEARCH_SYSTEM32)
+			fmt.Printf("Go reached main; USER32=%v; error=%v\n", dll, err)
+			if err != nil {
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
 		var input isolationRequest
 		if err := json.NewDecoder(os.Stdin).Decode(&input); err != nil {
 			os.Exit(2)
@@ -50,6 +58,51 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+func TestWorkerBootstrapDiagnostics(t *testing.T) {
+	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Skip("requires disposable hosted Windows")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user32 := windows.NewLazySystemDLL("user32.dll")
+	station, _, _ := user32.NewProc("GetProcessWindowStation").Call()
+	desktop, _, _ := user32.NewProc("GetThreadDesktop").Call(uintptr(windows.GetCurrentThreadId()))
+	for name, handle := range map[string]uintptr{"station": station, "desktop": desktop} {
+		sd, err := windows.GetSecurityInfo(windows.Handle(handle), windows.SE_WINDOW_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.LABEL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Logf("%s security: %v", name, err)
+		} else {
+			t.Logf("%s security: %s", name, sd.String())
+		}
+	}
+	var empty uint16
+	for _, test := range []struct {
+		name string
+		desktop *uint16
+		flags, ui uint32
+	}{
+		{"inherited/no-window/all-UI-limits", nil, windows.CREATE_NO_WINDOW, 255},
+		{"inherited/no-window/no-UI-limits", nil, windows.CREATE_NO_WINDOW, 0},
+		{"inherited/detached/all-UI-limits", nil, windows.DETACHED_PROCESS, 255},
+		{"automatic/no-window/all-UI-limits", &empty, windows.CREATE_NO_WINDOW, 255},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p, err := start(exe, []string{"worker", "bootstrap-proof"}, test.desktop, test.flags, test.ui)
+			if err != nil {
+				t.Logf("create: %v", err)
+				return
+			}
+			defer p.Close()
+			p.Input().Close()
+			b, _ := io.ReadAll(io.LimitReader(p.Output(), 65536))
+			e, _ := io.ReadAll(io.LimitReader(p.Errors(), 65536))
+			t.Logf("exit=%v; stdout=%s; stderr=%s", p.Wait(), b, e)
+		})
+	}
 }
 
 func isolationProbe(input isolationRequest) (isolationResult, error) {
