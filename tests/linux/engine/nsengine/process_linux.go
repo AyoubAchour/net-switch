@@ -48,10 +48,11 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 		os.RemoveAll(temp)
 		return err
 	}
-	// ip netns exec replaces /sys and hides its cgroup2 submount. Enter only
-	// the network namespace so the real engine can resolve kernel cgroup IDs,
-	// exactly as it does when running as a host service.
-	p.cmd = exec.Command("nsenter", "--net="+filepath.Join("/run/netns", env.Netns), "--", d.exe.Path, "run", "--socket", p.socket, "--state-dir", p.state)
+	// Preserve /sys/fs/cgroup while isolating the fixture's resolver mount.
+	// ip netns exec remounts all of /sys and hides cgroup2. Every path below
+	// is a separate positional argument; no path becomes shell source.
+	const launch = `if [ -f "$1" ]; then mount --bind "$1" /etc/resolv.conf || exit; fi; shift; exec "$@"`
+	p.cmd = exec.Command("nsenter", "--net="+filepath.Join("/run/netns", env.Netns), "--", "unshare", "--mount", "--propagation", "private", "--", "sh", "-c", launch, "nsengine", filepath.Join("/etc/netns", env.Netns, "resolv.conf"), d.exe.Path, "run", "--socket", p.socket, "--state-dir", p.state)
 	p.cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+filepath.Join(filepath.Dir(env.WorkDir), "inet", "probe-ca.pem"))
 	if os.Getenv("NSACCEPT_PROFILE") == "true" {
 		p.cmd.Env = append(p.cmd.Env, "NETSWITCH_ACCEPTANCE_PROFILE="+filepath.Join(env.WorkDir, "cpu.pprof"))

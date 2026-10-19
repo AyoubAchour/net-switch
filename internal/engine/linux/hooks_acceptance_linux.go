@@ -109,6 +109,13 @@ func (p *Platform) InstallAcceptanceHooks(e *engine.Engine, s *protocol.Server) 
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return nil, err
 		}
+		if f.Kind == "resolver" && f.Mode == "read" {
+			data, err := os.ReadFile("/etc/resolv.conf")
+			return struct {
+				Active      bool
+				Description string
+			}{false, string(data)}, err
+		}
 		ack := func() any {
 			return struct {
 				Active      bool

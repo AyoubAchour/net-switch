@@ -181,7 +181,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 	}()
 	ctx, cancel := context.WithCancel(f.ctx)
-	defer cancel()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cancel()
+		}
+	}()
 	ticket.SetCancel(cancel)
 	t := tuple(id)
 	lookup, cancelLookup := context.WithTimeout(ctx, 50*time.Millisecond)
@@ -212,9 +217,17 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 		return
 	}
-	defer remote.Close()
+	defer func() {
+		if !handedOff {
+			remote.Close()
+		}
+	}()
 	stopRemote := context.AfterFunc(ctx, func() { remote.SetLinger(0); remote.Close() })
-	defer stopRemote()
+	defer func() {
+		if !handedOff {
+			stopRemote()
+		}
+	}()
 	if ctx.Err() != nil {
 		return
 	}
@@ -241,9 +254,17 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		ep.Abort()
 	}
 	closeEndpoint := sync.OnceFunc(ep.Close)
-	defer closeEndpoint()
+	defer func() {
+		if !handedOff {
+			closeEndpoint()
+		}
+	}()
 	stopApp := context.AfterFunc(ctx, abort)
-	defer stopApp()
+	defer func() {
+		if !handedOff {
+			stopApp()
+		}
+	}()
 	if ctx.Err() != nil {
 		// The handshake succeeded; Abort owns the reset, not admission.
 		discardHandshake()
@@ -277,22 +298,34 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	// Keep the pending entry through endpoint setup. A delayed reopen hook
 	// must see either pending or connections, never a gap between them.
 	complete(false)
-	defer close(c.done)
 	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission, ep: ep, wq: &wq}
 	if a, ok := remote.LocalAddr().(*net.TCPAddr); ok {
 		ticket.Established(a.AddrPort().Addr())
 	} else {
 		ticket.Established(netip.Addr{})
 	}
-	count := func(u, d uint64) { c.up.Add(u); c.down.Add(d); ticket.Add(u, d) }
+	// Lookup, dialing and handshake work can grow this goroutine's stack.
+	// Hand off to a small relay goroutine so every idle connection does not
+	// retain the setup frame, request and its deferred cleanup closures.
+	f.wg.Go(func() { f.relay(ctx, c, app, remote, cancel, stopRemote, stopApp, abort) })
+	handedOff = true
+	// TIME_WAIT releases admission at the state transition. The monitor keeps
+	// this ticket until removal and relay completion for final byte accounting.
+}
+
+func (f *Forwarder) relay(ctx context.Context, c *connection, app *onceCloseConn, remote platform.TCPConn, cancel context.CancelFunc, stopRemote, stopApp func() bool, abort func()) {
+	// Publish completion only after both sockets and cancellation hooks have
+	// finished cleanup. Wait includes this goroutine as well as setup.
+	defer close(c.done)
+	defer cancel()
+	defer remote.Close()
+	defer func() { app.Close(); c.releaseAdmission() }()
+	defer stopRemote()
+	defer stopApp()
+	count := func(u, d uint64) { c.up.Add(u); c.down.Add(d); c.ticket.Add(u, d) }
 	if err := Splice(ctx, app, remote, count, abort); err != nil {
 		abort()
 	}
-	app.Close()
-	c.releaseAdmission()
-	// TCP releases admission once both directions end and payload drains, or
-	// on reset/removal. Keep the ticket until removal and relay completion
-	// for final byte accounting.
 }
 
 // Stop cancels dials and relays. The owner must close the stack before Wait,

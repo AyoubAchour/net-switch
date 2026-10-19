@@ -104,20 +104,24 @@ type sessions struct {
 	opened, answered, refused int
 	gotOut                    int // sockets whose datagram reached a server
 	listed                    int // UDP sessions the engine lists for the app
+	unknown                   int // matched by the client's own local endpoint, never by its label
 	refusedButOut             int // refused, yet the datagram got out anyway
 	lostOut, lostBack         int // never reached a server and never refused; or reached one and never answered
 }
 
-func (s sessions) admitted() int { return max(s.gotOut, s.listed) }
-func (s sessions) lost() int     { return s.lostOut + s.lostBack }
+func (s sessions) admitted() int   { return max(s.gotOut, s.listed) }
+func (s sessions) identified() int { return max(s.gotOut-s.unknown, s.listed) }
+func (s sessions) lost() int       { return s.lostOut + s.lostBack }
 
 // floodSessions gathers the three sides while the floods still hold their
 // sockets.
 func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) map[string]sessions {
 	listed := map[string]int{}
+	bySource := map[string]engine.Flow{}
 	for _, f := range e.Flows() {
 		if f.Protocol == "udp" {
 			listed[f.App]++
+			bySource[f.Source.String()] = f
 		}
 	}
 	recs := e.Records()
@@ -133,6 +137,25 @@ func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) 
 			}
 		}
 		s := sessions{opened: r.Opened, answered: r.Answered, refused: r.Refused, gotOut: len(seen), listed: listed[AppPath(name)]}
+		if _, ok := e.Eng.(engine.V1); ok {
+			e.T.Require(len(r.Locals) == r.Opened, "%s reports every local UDP endpoint (%d of %d)", name, len(r.Locals), r.Opened)
+			unique := map[string]bool{}
+			bad := 0
+			for i, local := range r.Locals {
+				unique[local] = true
+				if f, ok := bySource[local]; ok {
+					if f.App == "" {
+						s.unknown++
+						if f.AppID != "" || f.PID != 0 || f.Line != "a" || !seen[i] {
+							bad++
+						}
+					} else if f.App != AppPath(name) {
+						bad++
+					}
+				}
+			}
+			e.T.Check(len(unique) == r.Opened && bad == 0, "%s's UDP endpoints match their own identified or unknown sessions (%d unique, %d unknown, %d invalid)", name, len(unique), s.unknown, bad)
+		}
 		for _, i := range r.RefusedSockets {
 			if seen[i] {
 				s.refusedButOut++
@@ -164,7 +187,7 @@ func describeSessions(names []string, all map[string]sessions) string {
 	var parts []string
 	for _, name := range names {
 		s := all[name]
-		parts = append(parts, fmt.Sprintf("%s: %d reached servers, engine lists %d, %d refused, %d lost out, %d replies lost", name, s.gotOut, s.listed, s.refused, s.lostOut, s.lostBack))
+		parts = append(parts, fmt.Sprintf("%s: %d reached servers, engine lists %d identified and %d unknown, %d refused, %d lost out, %d replies lost", name, s.gotOut, s.listed, s.unknown, s.refused, s.lostOut, s.lostBack))
 	}
 	return strings.Join(parts, "; ")
 }
@@ -213,12 +236,19 @@ func udpSessionsPerAppCase(e *Env) {
 	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
 	all := e.floodSessions(names, results)
 	e.checkSessions(names, all)
-	least, most, total, fewestRefused := perApp, 0, 0, perApp
+	least, most, total, fewestRefused, totalUnknown := perApp, 0, 0, perApp, 0
+	refusalsEnough := true
 	for _, name := range names {
 		s := all[name]
-		least, most, total = min(least, s.gotOut), max(most, s.admitted()), total+s.admitted()
+		least, most, total = min(least, s.gotOut-s.unknown), max(most, s.identified()), total+s.admitted()
 		fewestRefused = min(fewestRefused, s.refused)
+		totalUnknown += s.unknown
+		refusalsEnough = refusalsEnough && s.refused >= max(0, perApp-udpSessionsPerApp-s.unknown)*9/10
+		if _, ok := e.Eng.(engine.V1); ok {
+			e.T.Check(s.listed >= udpSessionsPerApp, "identified %s sessions actually fill their %d-session cap (%d)", name, udpSessionsPerApp, s.listed)
+		}
 	}
+	e.T.Check(totalUnknown <= 512, "unknown UDP sessions remain in their separate 512-session pool (%d)", totalUnknown)
 	e.T.Check(total < udpSessionsTotal*3/4, "the two apps together stay far from the total limit (%d admitted)", total)
 	e.T.Check(least >= udpSessionsPerApp*95/100, "each app still got at least 95%% of its allowed %d sessions out to the servers (least %d; %s)", udpSessionsPerApp, least, describeSessions(names, all))
 	e.holding(bgs, release)
@@ -227,8 +257,8 @@ func udpSessionsPerAppCase(e *Env) {
 	e.keptOpen("charlie's stream through the flood", s, "c")
 	e.T.Check(e.Eng.Running(), "the engine is still running")
 	excess := perApp - udpSessionsPerApp
-	e.T.Expect(most <= udpSessionsPerApp && fewestRefused >= excess*9/10 && responsive(s),
-		"no app has more than %d sessions, by the servers or the engine, and each app's %d extra are refused, while charlie's stream never waits 2 s for an answer (most for one app %d, fewest refused %d, longest silence %d ms; %s)",
+	e.T.Expect(most <= udpSessionsPerApp && refusalsEnough && responsive(s),
+		"no identified app has more than %d sessions and its %d extra attempts, apart from explicitly counted unknown admissions, are refused, while charlie stays responsive (most identified %d, fewest refused %d, longest silence %d ms; %s)",
 		udpSessionsPerApp, excess, most, fewestRefused, s.MaxGapMS, describeSessions(names, all))
 }
 
