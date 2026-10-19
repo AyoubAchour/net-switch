@@ -83,6 +83,16 @@ func TestCloseAtCapUnderLoad(t *testing.T) {
 			t.Fatal("false budget reset", p.diagnostics())
 		}
 	}
+	// Exercise admission after the final close too. A timer-driven close is
+	// reclaimed by the next admission, so stopping on idle must not mistake
+	// a deferred reservation for a rejection, or leave that last reuse untested.
+	p.port++
+	p.open(1000 + uint32(n))
+	p.upload([]byte("load"))
+	p.inject(p.packet(p.seq, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
+	p.current.conn.Close()
+	counts["app_rst"]++
+	n++
 	if g := p.table.Stats(); g.Admitted != uint64(n) || g.Flows != 0 || g.TimeWait != 0 || p.dials.Load() != uint64(n) {
 		t.Fatal(p.diagnostics())
 	}
