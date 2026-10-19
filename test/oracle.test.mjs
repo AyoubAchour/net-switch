@@ -10,7 +10,7 @@ test('server matches the frozen pre-refactor Node oracle', async () => {
   });
   assert.equal(run.status, 0, run.stderr);
   assert.deepEqual(JSON.parse(run.stdout), fixture);
-  const source = await readFile(new URL('../server.mjs', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../lib/server-factory.mjs', import.meta.url), 'utf8');
   const routes = [...source.matchAll(/'(GET|POST) (\/api\/[^']+)':/g)].map((match) => `${match[1]} ${match[2]}`);
   for (const route of routes) assert.ok(fixture.routes.some((entry) => `${entry.method} ${entry.route}` === route), `Unrecorded route: ${route}`);
   for (const name of ['settings.json', 'settings.json.bak', 'usage.json', 'windows-undo.json', 'windows-undo.json.bak', 'engine-config.json']) {
