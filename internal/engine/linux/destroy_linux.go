@@ -73,6 +73,9 @@ func (o *Owners) listenDestroy(ctx context.Context, destroy func(netip.AddrPort,
 				// A wildcard app socket can back a NAT session using any local
 				// address. The NAT handles wildcard destroys by cookie, never by port alone.
 				destroy(r.local, r.generation())
+				o.mu.Lock()
+				delete(o.cache, r.cookie)
+				o.mu.Unlock()
 			}
 			if o.destroyFault != nil {
 				o.destroyFault(ctx, r, deliver)

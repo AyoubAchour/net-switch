@@ -32,6 +32,19 @@ var Windows = Rules{
 	},
 }
 
+// Linux paths are case-sensitive. Package identities (Flatpak, Snap and
+// registered AppImage names) take precedence over this path fallback.
+var Linux = Rules{
+	Separator: "/", VersionPattern: version,
+	FoldCase: func(s string) string { return s },
+	VersionFolder: func(s string) (string, string, bool) {
+		if m := folder.FindStringSubmatch(s); m != nil {
+			return m[1], "", true
+		}
+		return "", "", false
+	},
+}
+
 func parts(s string, rules Rules, pattern bool) string {
 	segments := strings.Split(s, rules.Separator)
 	for i, segment := range segments {

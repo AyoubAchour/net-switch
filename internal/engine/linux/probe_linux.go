@@ -20,6 +20,12 @@ import (
 
 func (p *Platform) Probe(ctx context.Context, line, operator string) (platform.ProbeResult, error) {
 	started := time.Now()
+	p.mu.Lock()
+	available := p.capturing
+	p.mu.Unlock()
+	if !available {
+		return platform.ProbeResult{Outcome: "engineUnavailable", Error: "routing engine is not running"}, nil
+	}
 	quick := strings.HasPrefix(operator, "quick:")
 	operator = strings.TrimPrefix(operator, "quick:")
 	operator = strings.ToLower(operator)
@@ -48,7 +54,10 @@ func (p *Platform) Probe(ctx context.Context, line, operator string) (platform.P
 	ctx, cancel := context.WithTimeout(ctx, duration)
 	defer cancel()
 	result := func(ok bool, err error) (platform.ProbeResult, error) {
-		r := platform.ProbeResult{OK: ok, Latency: time.Since(started)}
+		r := platform.ProbeResult{OK: ok, Outcome: "lineFailed", Latency: time.Since(started)}
+		if ok {
+			r.Outcome = "ok"
+		}
 		if err != nil {
 			r.Error = err.Error()
 		}

@@ -19,6 +19,7 @@ import (
 // specifies. We create the descriptor ourselves to reserve its exact index
 // in the ownership journal before TUNSETIFF.
 type Tun struct {
+	writeBuffer      [9010]byte
 	device           tun.Device
 	readMu, writeMu  sync.Mutex
 	bufs             [][]byte
@@ -120,7 +121,11 @@ func (t *Tun) WritePacket(ctx context.Context, packet []byte) error {
 		return err
 	}
 	// wireguard-go needs ten bytes before the IP header for virtio metadata.
-	b := make([]byte, 10+len(packet))
+	if len(packet) > 9000 {
+		return io.ErrShortBuffer
+	}
+	b := t.writeBuffer[:10+len(packet)]
+	clear(b[:10])
 	copy(b[10:], packet)
 	stop := context.AfterFunc(ctx, func() { t.device.Close() })
 	defer stop()
@@ -129,7 +134,7 @@ func (t *Tun) WritePacket(ctx context.Context, packet []byte) error {
 	// header), despite Device.Write's comment saying packets. Treat a real
 	// short write as failure, not every successful packet as failure.
 	if err == nil && n != len(b) {
-		return fmt.Errorf("TUN wrote %d of %d bytes: %w",n,len(b),io.ErrShortWrite)
+		return fmt.Errorf("TUN wrote %d of %d bytes: %w", n, len(b), io.ErrShortWrite)
 	}
 	return err
 }

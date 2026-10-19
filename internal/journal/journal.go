@@ -38,6 +38,10 @@ type Object interface {
 	Create(context.Context, Fingerprint) error
 	Remove(context.Context, Fingerprint) error
 }
+
+type Replacer interface {
+	Replace(context.Context, Fingerprint, Fingerprint) error
+}
 type Journal struct {
 	Store Store
 	Lock  Locker
@@ -158,7 +162,9 @@ func (s *Session) Cleanup(ctx context.Context) error {
 	// Some platforms must remove selectors before the routes they select,
 	// even when reconciliation appended newer routes after capture began.
 	priority := func(r Record) int {
-		if d, ok := s.j.Kinds[r.Kind].(interface{ CleanupPriority() int }); ok { return d.CleanupPriority() }
+		if d, ok := s.j.Kinds[r.Kind].(interface{ CleanupPriority() int }); ok {
+			return d.CleanupPriority()
+		}
 		return 0
 	}
 	sort.SliceStable(records, func(i, j int) bool { return priority(records[i]) > priority(records[j]) })
@@ -228,6 +234,67 @@ func (s *Session) Remove(ctx context.Context, kind string, fp Fingerprint) error
 		}
 		r.Phase = "removed"
 		return s.j.Store.Append(r)
+	}
+	return nil
+}
+
+// Replace preserves a live route while changing its gateway or attributes.
+// Both fingerprints remain recoverable if the process exits at any step.
+func (s *Session) Replace(ctx context.Context, kind string, before, after Fingerprint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.failed {
+		return errors.New("journal session closed or requires recovery")
+	}
+	d := s.j.Kinds[kind]
+	replacer, ok := d.(Replacer)
+	if !ok {
+		return errors.New("object has no atomic replacement operation")
+	}
+	if err := d.Validate(after); err != nil {
+		return err
+	}
+	records, err := s.j.live()
+	if err != nil {
+		return err
+	}
+	var previous *Record
+	for i := range records {
+		if records[i].Kind == kind && maps.Equal(records[i].Fingerprint, before) {
+			r := records[i]
+			previous = &r
+			break
+		}
+	}
+	if previous == nil {
+		return errors.New("replacement has no owned original")
+	}
+	live, found, err := d.Inspect(ctx, maps.Clone(before))
+	if err != nil {
+		return err
+	}
+	if !found || !maps.Equal(live, before) {
+		return errors.New("original changed before replacement")
+	}
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return err
+	}
+	next := Record{ID: hex.EncodeToString(id[:]), Boot: s.boot, Instance: s.instance, Kind: kind, Fingerprint: maps.Clone(after), Phase: "intent"}
+	fail := func(err error) error { s.failed = true; return err }
+	if err := s.j.Store.Append(next); err != nil {
+		return fail(err)
+	}
+	if err := replacer.Replace(ctx, maps.Clone(before), maps.Clone(after)); err != nil {
+		return fail(err)
+	}
+	next.Phase = "created"
+	if err := s.j.Store.Append(next); err != nil {
+		return fail(err)
+	}
+	previous.Phase = "removed"
+	if err := s.j.Store.Append(*previous); err != nil {
+		return fail(err)
 	}
 	return nil
 }

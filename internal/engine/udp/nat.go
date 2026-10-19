@@ -71,7 +71,7 @@ type NAT struct {
 	reconcileMu                                                      sync.Mutex
 	refresh                                                          chan struct{}
 	Invalid, Dropped, Rejected, IdentityErrors, Oversize, ReadErrors atomic.Uint64
-	PeakQueuePackets, PeakQueueBytes atomic.Uint64
+	PeakQueuePackets, PeakQueueBytes                                 atomic.Uint64
 }
 
 func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.Output, mtu int) *NAT {
@@ -116,10 +116,42 @@ func (n *NAT) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) bool {
 		if src.Is4() {
 			ip := header.IPv4(p.NetworkHeader().Slice())
 			df = ip.Flags()&header.IPv4FlagDontFragment != 0
+		} else {
+			// IPv6 has no DF bit. An unfragmented packet must learn a smaller
+			// path through PTB; once the host sends fragments, preserve that
+			// decision on our real socket after gVisor reassembles them.
+			df = !ipv6Fragmented(p.NetworkHeader().Slice())
 		}
 		return payload, original, df
 	})
 	return true
+}
+
+func ipv6Fragmented(ip []byte) bool {
+	if len(ip) < 40 {
+		return false
+	}
+	next, offset := ip[6], 40
+	for offset+2 <= len(ip) {
+		if next == 44 {
+			return true
+		}
+		var size int
+		switch next {
+		case 0, 43, 60:
+			size = (int(ip[offset+1]) + 1) * 8
+		case 51:
+			size = (int(ip[offset+1]) + 2) * 4
+		default:
+			return false
+		}
+		if size < 8 || offset+size > len(ip) {
+			return false
+		}
+		next = ip[offset]
+		offset += size
+	}
+	return false
 }
 
 func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket func() ([]byte, []byte, bool)) {
@@ -175,8 +207,10 @@ func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket f
 	payload, raw, df := copyPacket()
 	s.queue = append(s.queue, datagram{destination: destination, payload: payload, original: raw, df: df, bytes: bytes})
 	s.bytes += bytes
-	for old := n.PeakQueuePackets.Load(); uint64(len(s.queue))>old && !n.PeakQueuePackets.CompareAndSwap(old,uint64(len(s.queue))); old=n.PeakQueuePackets.Load() {}
-	for old := n.PeakQueueBytes.Load(); uint64(s.bytes)>old && !n.PeakQueueBytes.CompareAndSwap(old,uint64(s.bytes)); old=n.PeakQueueBytes.Load() {}
+	for old := n.PeakQueuePackets.Load(); uint64(len(s.queue)) > old && !n.PeakQueuePackets.CompareAndSwap(old, uint64(len(s.queue))); old = n.PeakQueuePackets.Load() {
+	}
+	for old := n.PeakQueueBytes.Load(); uint64(s.bytes) > old && !n.PeakQueueBytes.CompareAndSwap(old, uint64(s.bytes)); old = n.PeakQueueBytes.Load() {
+	}
 	s.mu.Unlock()
 	if created {
 		go s.run()

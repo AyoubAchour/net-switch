@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -47,6 +48,16 @@ func (p *Platform) OpenUDP(ctx context.Context, id string, v6 bool) (platform.UD
 	family, address := "udp4", "0.0.0.0:0"
 	if v6 {
 		family, address = "udp6", "[::]:0"
+	}
+	address = ""
+	for _, ip := range l.Addresses {
+		if ip.Is6() == v6 && ip.IsGlobalUnicast() {
+			address = net.JoinHostPort(ip.String(), "0")
+			break
+		}
+	}
+	if address == "" {
+		return nil, fmt.Errorf("line %s has no usable source address", id)
 	}
 	lc := net.ListenConfig{Control: func(_, _ string, raw syscall.RawConn) error {
 		if err := bindSocket(raw, l); err != nil {
@@ -100,7 +111,7 @@ func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) 
 	var err error
 	e := s.raw.Control(func(fd uintptr) {
 		mode := unix.IP_PMTUDISC_DONT
-		if df || s.v6 {
+		if df {
 			mode = unix.IP_PMTUDISC_DO
 		}
 		if s.v6 {
@@ -202,25 +213,50 @@ func (p *Platform) Echo(ctx context.Context, id string, dst netip.Addr, request 
 		proto, family = unix.IPPROTO_ICMPV6, unix.AF_INET6
 	}
 	fd, err := unix.Socket(family, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, proto)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	f := os.NewFile(uintptr(fd), "ping socket")
 	raw, err := f.SyscallConn()
-	if err != nil { f.Close(); return nil, err }
-	if err := bindSocket(raw,l); err != nil { f.Close(); return nil,err }
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if err := bindSocket(raw, l); err != nil {
+		f.Close()
+		return nil, err
+	}
 	conn, err := net.FilePacketConn(f)
 	f.Close()
-	if err != nil { return nil,err }
+	if err != nil {
+		return nil, err
+	}
 	defer conn.Close()
-	if deadline,ok := ctx.Deadline(); ok { conn.SetDeadline(deadline) }
-	stop := context.AfterFunc(ctx,func(){conn.Close()}); defer stop()
-	if _,err := conn.WriteTo(request, &net.UDPAddr{IP:net.IP(dst.AsSlice())});err!=nil{return nil,err}
-	b := make([]byte,9000)
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(deadline)
+	}
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
+	if _, err := conn.WriteTo(request, &net.UDPAddr{IP: net.IP(dst.AsSlice())}); err != nil {
+		return nil, err
+	}
+	b := make([]byte, 9000)
 	for {
-		n,remote,err := conn.ReadFrom(b)
-		if err != nil { return nil,err }
-		a,ok := remote.(*net.UDPAddr); if !ok || !a.IP.Equal(net.IP(dst.AsSlice())) || n<8 { continue }
-		want := byte(0);if dst.Is6(){want=129}
-		if b[0]!=want || b[1]!=0 || b[6]!=request[6] || b[7]!=request[7] { continue }
-		return b[:n],nil
+		n, remote, err := conn.ReadFrom(b)
+		if err != nil {
+			return nil, err
+		}
+		a, ok := remote.(*net.UDPAddr)
+		if !ok || !a.IP.Equal(net.IP(dst.AsSlice())) || n < 8 {
+			continue
+		}
+		want := byte(0)
+		if dst.Is6() {
+			want = 129
+		}
+		if b[0] != want || b[1] != 0 || b[6] != request[6] || b[7] != request[7] {
+			continue
+		}
+		return b[:n], nil
 	}
 }

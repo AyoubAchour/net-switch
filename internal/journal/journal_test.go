@@ -90,6 +90,54 @@ func fingerprint() Fingerprint {
 	return Fingerprint{"table": "21001", "priority": "10001", "destination": "0.0.0.0/0", "gateway": "192.0.2.1", "interface": "7", "guid": "unique-owner"}
 }
 
+func (o *object) Replace(ctx context.Context, before, after Fingerprint) error {
+	if err := o.steps.hit(); err != nil {
+		return err
+	}
+	if !maps.Equal(o.live, before) {
+		return errors.New("replacement fingerprint changed")
+	}
+	o.live = maps.Clone(after)
+	return o.steps.hit()
+}
+
+func TestReplacementCrashAtEveryStep(t *testing.T) {
+	for at := 1; at <= 8; at++ {
+		t.Run(string(rune('A'+at-1)), func(t *testing.T) {
+			steps := &steps{}
+			obj := &object{steps: steps}
+			store := &memoryStore{steps: steps}
+			j := &Journal{Store: store, Lock: &locker{}, Kinds: map[string]Object{"route": obj}}
+			s, err := j.Open(context.Background(), "boot", "instance")
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := fingerprint()
+			after := maps.Clone(before)
+			after["gateway"] = "192.0.2.99"
+			if err := s.Create(context.Background(), "route", before); err != nil {
+				t.Fatal(err)
+			}
+			steps.n = 0
+			steps.at = at
+			if err := s.Replace(context.Background(), "route", before, after); !errors.Is(err, crash) {
+				t.Fatalf("step %d did not crash: %v", at, err)
+			}
+			s.Close()
+			steps.at = 0
+			if err := j.Cleanup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if obj.live != nil {
+				t.Fatalf("replacement left owned route after step %d", at)
+			}
+			if err := j.Cleanup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestCrashAtEveryStep(t *testing.T) {
 	for at := 1; at <= 10; at++ {
 		t.Run(string(rune('A'+at-1)), func(t *testing.T) {

@@ -127,6 +127,7 @@ type UDPNotifications interface {
 
 type ProbeResult struct {
 	OK      bool          `json:"ok"`
+	Outcome string        `json:"outcome,omitempty"`
 	Latency time.Duration `json:"latency"`
 	Error   string        `json:"error,omitempty"`
 }

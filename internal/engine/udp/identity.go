@@ -79,10 +79,17 @@ func (n *NAT) Reconcile(ctx context.Context) {
 // or listener restart calls RefreshNow; the periodic dump remains the bound.
 func (n *NAT) Destroy(source netip.AddrPort, generation string) {
 	if source.Addr().IsUnspecified() {
-		for _, s := range n.sessions() {
-			if s.source.Port() == source.Port() && s.source.Addr().BitLen() == source.Addr().BitLen() {
-				n.Destroy(s.source, generation)
+		b := n.bucket(source)
+		b.Lock()
+		var keys []netip.AddrPort
+		for key := range b.m {
+			if key.Port() == source.Port() && key.Addr().BitLen() == source.Addr().BitLen() {
+				keys = append(keys, key)
 			}
+		}
+		b.Unlock()
+		for _, key := range keys {
+			n.Destroy(key, generation)
 		}
 		return
 	}
