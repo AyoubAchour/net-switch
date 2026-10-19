@@ -32,19 +32,22 @@ var appAddr = tcpip.AddrFrom4([4]byte{198, 18, 0, 2})
 var remoteAddr = tcpip.AddrFrom4([4]byte{203, 0, 113, 7})
 
 type accepted struct {
-	conn        *testfake.Conn
-	relayClosed <-chan struct{}
-	sentEOF     <-chan struct{}
+	conn         *testfake.Conn
+	relayClosed  <-chan struct{}
+	sentEOF      <-chan struct{}
+	closeEntered <-chan struct{}
 }
 
 type observedRemote struct {
 	*testfake.Conn
-	closed    chan struct{}
-	once      sync.Once
-	closeGate *atomic.Pointer[chan struct{}]
-	sentEOF   chan struct{}
-	eofOnce   sync.Once
-	readEOF   atomic.Bool
+	closed       chan struct{}
+	once         sync.Once
+	closeGate    *atomic.Pointer[chan struct{}]
+	sentEOF      chan struct{}
+	eofOnce      sync.Once
+	readEOF      atomic.Bool
+	closeEntered chan struct{}
+	enterOnce    sync.Once
 }
 
 func (c *observedRemote) Read(b []byte) (int, error) {
@@ -68,6 +71,7 @@ func (c *observedRemote) CloseRead() error {
 }
 
 func (c *observedRemote) Close() error {
+	c.enterOnce.Do(func() { close(c.closeEntered) })
 	if gate := c.closeGate.Load(); gate != nil {
 		<-*gate
 	}
@@ -174,8 +178,9 @@ func newPeerLink(t testing.TB, timestamps bool, limits flows.Limits, options ns.
 		a, b := testfake.Pair()
 		closed := make(chan struct{})
 		eof := make(chan struct{})
-		p.accepted <- accepted{conn: b, relayClosed: closed, sentEOF: eof}
-		return &observedRemote{Conn: a, closed: closed, closeGate: &p.relayCloseGate, sentEOF: eof}, nil
+		entered := make(chan struct{})
+		p.accepted <- accepted{conn: b, relayClosed: closed, sentEOF: eof, closeEntered: entered}
+		return &observedRemote{Conn: a, closed: closed, closeGate: &p.relayCloseGate, sentEOF: eof, closeEntered: entered}, nil
 	}}
 	p.owners = &testfake.Owners{Value: platform.Owner{AppID: "peer"}}
 	f := ntcp.New(context.Background(), s, limits.Handshakes, peerControl{Table: table, peer: p}, p.owners, d, l)

@@ -108,6 +108,9 @@ func TestCloseHandshakeCap(t *testing.T) {
 					t.Fatal("handshake cap not filled", g)
 				}
 				p.inject(p.packet(p.seq, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
+				if g := p.table.Stats(); g.Handshakes != cap-1 {
+					t.Fatal("reset retained its handshake admission", g)
+				}
 				if cap != 1 {
 					p.port++
 				}
@@ -121,5 +124,37 @@ func TestCloseHandshakeCap(t *testing.T) {
 			}
 			t.Logf("%d pending handshakes; 3 reset/replacements while open is blocked before completion; no rejection or upstream drop", cap)
 		})
+	}
+}
+
+func TestCloseHandshakeCompletionOwnsRelease(t *testing.T) {
+	limits := flows.Defaults()
+	limits.Flows, limits.Handshakes = 1, 1
+	p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+	release := p.holdRelayCleanup()
+	defer release()
+	// Force open to finish first: process the validated RST, but omit the
+	// forwarder's after-ingress accounting. Once pending is removed, open
+	// must own retirement; a later fence no longer has a ticket to find.
+	drain := tcp.SetLocalCloseFence(p.stack, true)
+	p.link.SetAfterInbound(func() { drain() })
+	p.seq = 1000
+	p.inject(p.packet(p.seq, 0, header.TCPFlagSyn, nil))
+	h := p.wait(header.TCPFlagSyn | header.TCPFlagAck)
+	p.seq++
+	p.ack = h.SequenceNumber() + 1
+	old := <-p.accepted
+	defer old.conn.Close()
+	p.inject(p.packet(p.seq, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
+	closeSignal(t, old.closeEntered, "failed handshake completed before deferred remote close")
+	if g := p.table.Stats(); g.Flows != 0 || g.Handshakes != 0 {
+		t.Fatal("completed handshake retained admission behind remote cleanup", g)
+	}
+	p.port++
+	p.open(2000)
+	release()
+	p.upload([]byte("replacement"))
+	if p.table.Stats().Rejected != 0 || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
+		t.Fatal(p.diagnostics())
 	}
 }

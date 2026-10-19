@@ -370,7 +370,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Repeat clock and reopen boundaries 1000 times
-        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(TimeWait(BlockedAndBudgetReuse|FinalACKReleasesAdmission|LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState|SYNBeforeRemoval|ZeroCapClosingBatch)|Close(Admission|IdleAdmission|FINWithoutPolicy|KeepsQueuedDataCounted|RSTDuringHandshake|BeforeFinalACK))$' ./internal/engine/stack
+        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(TimeWait(BlockedAndBudgetReuse|FinalACKReleasesAdmission|LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState|SYNBeforeRemoval|ZeroCapClosingBatch)|Close(Admission|IdleAdmission|FINWithoutPolicy|KeepsQueuedDataCounted|RSTDuringHandshake|BeforeFinalACK|HandshakeCompletionOwnsRelease))$' ./internal/engine/stack
       - name: Repeat endpoint setup deduplication and cancellation 1000 times
         run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths

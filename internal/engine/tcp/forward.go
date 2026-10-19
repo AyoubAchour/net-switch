@@ -167,6 +167,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	complete := func(reset bool) {
 		f.complete(id, pending, reset)
 	}
+	discardHandshake := func() {
+		if closeAdmissionEnabled {
+			ticket.Retire()
+		}
+		complete(false)
+	}
 	owner := platform.Owner{}
 	defer func() {
 		if owned && closeAdmissionEnabled {
@@ -220,7 +226,9 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	if errTCP != nil {
 		// TCP already handled the failed handshake. In particular an app RST
 		// must not receive another reset from admission during deferred cleanup.
-		complete(false)
+		// Retire before removing pending: the ingress fence may arrive after
+		// Complete, while remote.Close still holds up this goroutine's defers.
+		discardHandshake()
 		return
 	}
 	abort := func() {
@@ -235,7 +243,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	defer stopApp()
 	if ctx.Err() != nil {
 		// The handshake succeeded; Abort owns the reset, not admission.
-		complete(false)
+		discardHandshake()
 		abort()
 		return
 	}
@@ -252,7 +260,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	f.mu.Lock()
 	if f.ctx.Err() != nil || closedState(ep) {
 		f.mu.Unlock()
-		complete(false)
+		discardHandshake()
 		abort()
 		return
 	}
