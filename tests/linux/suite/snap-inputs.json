@@ -1,0 +1,22 @@
+{
+  "amd64": {
+    "core24": {
+      "revision": "2124",
+      "sha256": "e950f61a36652f18817294875bcafb08d273ccc3c44b3f5fbf01296100078efb"
+    },
+    "snapd": {
+      "revision": "28254",
+      "sha256": "9447bfe215ac0d2c426994779aab54e1ca66759b1da591bbabf18b995526b438"
+    }
+  },
+  "arm64": {
+    "core24": {
+      "revision": "2125",
+      "sha256": "93599967319227b63f3d7511db6304db6b210bfb2dfc7bb3992a1945fd99193f"
+    },
+    "snapd": {
+      "revision": "28255",
+      "sha256": "c4f15631490334981a44599911fc74c46fb779332a8c6ffe51fab2efa0a032ed"
+    }
+  }
+}

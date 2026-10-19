@@ -219,6 +219,12 @@ try {
   log('TUN end-to-end test passed');
 } catch (error) {
   log(`FAIL: ${error.stack}`);
+  // Keep the actual stop state and warnings beside the error. An unlink error
+  // does not prove the engine survived, and warn-level output can be empty.
+  log(`Engine at failure: ${JSON.stringify({ status: engine.status, error: engine.error,
+    childPid: engine.child?.pid ?? null, exitCode: engine.child?.exitCode ?? null })}`);
+  log(`PID file at failure: ${await readFile(engine.pidPath, 'utf8').catch((error) => error.code)}`);
+  log(`Engine log at failure:\n${await readFile(engine.logPath, 'utf8').then((text) => text.slice(-8000) || '(empty)').catch((error) => error.code)}`);
   process.exitCode = 1;
 } finally {
   if (restoreDns) {

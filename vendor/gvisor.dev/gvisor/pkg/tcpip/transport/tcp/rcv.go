@@ -251,9 +251,6 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
 	if s.flags.Contains(header.TCPFlagFin) {
 		r.RcvNxt++
 
-		// Send ACK immediately.
-		r.ep.snd.sendAck()
-
 		// Tell any readers that no more data will come.
 		r.closed = true
 		r.ep.readyToRead(nil)
@@ -274,6 +271,10 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
 		case StateFinWait2:
 			r.ep.setEndpointState(StateTimeWait)
 		}
+
+		// Publish the close transition and release admission before the app
+		// can observe this ACK and immediately open another connection.
+		r.ep.snd.sendAck()
 
 		// Flush out any pending segments, except the very first one if
 		// it happens to be the one we're handling now because the

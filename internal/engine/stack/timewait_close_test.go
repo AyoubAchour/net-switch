@@ -20,12 +20,19 @@ type cleanupClock struct {
 	*faketime.ManualClock
 	entered, release chan struct{}
 	once             sync.Once
+	mu               sync.Mutex
+	latest           *cleanupTimer
+	target           atomic.Pointer[cleanupTimer]
 }
 
 func (c *cleanupClock) AfterFunc(d time.Duration, f func()) tcpip.Timer {
 	timer := c.ManualClock.AfterFunc(d, f)
 	if d == 60*time.Second {
-		return &cleanupTimer{Timer: timer, clock: c}
+		wrapped := &cleanupTimer{Timer: timer, clock: c}
+		c.mu.Lock()
+		c.latest = wrapped
+		c.mu.Unlock()
+		return wrapped
 	}
 	return timer
 }
@@ -36,7 +43,9 @@ type cleanupTimer struct {
 }
 
 func (t *cleanupTimer) Stop() bool {
-	t.clock.once.Do(func() { close(t.clock.entered); <-t.clock.release })
+	if t.clock.target.Load() == t {
+		t.clock.once.Do(func() { close(t.clock.entered); <-t.clock.release })
+	}
 	return t.Timer.Stop()
 }
 
@@ -53,7 +62,17 @@ func TestTimeWaitSYNBeforeRemoval(t *testing.T) {
 	id := gv.TransportEndpointID{LocalAddress: remoteAddr, LocalPort: 443, RemoteAddress: appAddr, RemotePort: p.port}
 	ep := p.stack.FindTransportEndpoint(header.IPv4ProtocolNumber, tcp.ProtocolNumber, id, ns.NIC).(*tcp.Endpoint)
 	ep.LockUser()
-	ep.UnlockUser() // Wait for the TIME_WAIT timer to be installed.
+	// Under the endpoint lock, the last 60-second timer is now TIME_WAIT's.
+	// FIN_WAIT_2 may also have installed a 60-second timer; stopping that
+	// older timer during cleanup must not fire this barrier.
+	clock.mu.Lock()
+	clock.target.Store(clock.latest)
+	clock.mu.Unlock()
+	state := tcp.EndpointState(ep.State())
+	ep.UnlockUser()
+	if state != tcp.StateTimeWait || clock.target.Load() == nil {
+		t.Fatalf("cannot arm TIME_WAIT cleanup barrier: state=%s", state)
+	}
 	expired := make(chan struct{})
 	go func() { clock.Advance(60 * time.Second); close(expired) }()
 	select {

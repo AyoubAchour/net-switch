@@ -36,7 +36,7 @@ func main() {
 		log.Fatal("TestISP networking is restricted to disposable GitHub-hosted Windows runners")
 	}
 	if len(os.Args) < 2 {
-		log.Fatal("expected serve or probe")
+		log.Fatal("expected serve, probe or recover")
 	}
 	var err error
 	switch os.Args[1] {
@@ -44,6 +44,8 @@ func main() {
 		err = serve(os.Args[2:])
 	case "probe":
 		err = probe(os.Args[2:])
+	case "recover":
+		err = recoverDevice()
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -191,7 +193,7 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	ready := map[string]any{"pid": os.Getpid(), "index": adapter.Index, "alias": "TestISP", "address": "198.19.0.1", "control": "http://" + listener.Addr().String(), "uplinkIndex": *index, "uplinkIP": *ip, "tcpReuseHook": g.tcpReuseHook}
+	ready := map[string]any{"pid": os.Getpid(), "index": adapter.Index, "alias": "TestISP", "instanceID": device.adapter.InstanceID(), "session": "internal/wintun", "address": "198.19.0.1", "control": "http://" + listener.Addr().String(), "uplinkIndex": *index, "uplinkIP": *ip, "tcpReuseHook": g.tcpReuseHook}
 	if err := writeJSON(*state, ready); err != nil {
 		return err
 	}

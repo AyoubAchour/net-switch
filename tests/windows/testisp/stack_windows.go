@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/wintun"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -133,6 +135,12 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 				err := g.device.Write(data)
 				if err != nil {
 					g.event("wintun-write-error", 0, "", err.Error())
+					if errors.Is(err, wintun.ErrAdapterRemoved) {
+						view.Release()
+						packet.DecRef()
+						g.close()
+						return
+					}
 				} else {
 					g.trace(data, "delivered")
 				}

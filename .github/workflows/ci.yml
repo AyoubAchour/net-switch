@@ -257,6 +257,7 @@ jobs:
           name: tun-test-${{ matrix.arch }}
           path: |
             dist/tun-test/*.log*
+            dist/tun-test/udp/*.log*
             dist/tun-test/report.txt
             dist/tun-test/executables.json
             dist/tun-test/testisp/*.json
@@ -315,9 +316,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $untracked = git ls-files --others --exclude-standard -- third_party/gvisor vendor
           if ($untracked) { throw "Untracked generated dependencies: $untracked" }
+          node --test scripts/gvisor-diff.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: go vet ./internal/... ./cmd/... ./tests/...
       - run: go test -v ./internal/... ./cmd/... ./tests/...
       - run: go build ./internal/... ./cmd/... ./tests/...
+      # The acceptance suites' QUIC fixture is its own module (QUIC stays out
+      # of the product's dependencies), so "./tests/..." above skips it.
+      - name: Vet and test the QUIC test fixture
+        shell: bash
+        env:
+          GOFLAGS: -mod=readonly -p=2
+        run: |
+          go -C tests/quicfixture mod verify
+          go -C tests/quicfixture vet ./...
+          go -C tests/quicfixture test -count=1 -v ./...
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: runner.os == 'Linux'
         with:
@@ -352,7 +365,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Repeat clock and reopen boundaries 1000 times
-        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^TestTimeWait(LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState|SYNBeforeRemoval|ZeroCapClosingBatch)$' ./internal/engine/stack
+        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^TestTimeWait(BlockedAndBudgetReuse|FinalACKReleasesAdmission|LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState|SYNBeforeRemoval|ZeroCapClosingBatch)$' ./internal/engine/stack
       - name: Repeat endpoint setup deduplication and cancellation 1000 times
         run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths
@@ -361,6 +374,84 @@ jobs:
           go test -run '^$' -fuzz '^FuzzPackets$' -fuzztime 30s -parallel 2 ./internal/engine/packet
           go test -run '^$' -fuzz '^FuzzUDPHandler$' -fuzztime 30s -parallel 2 ./internal/engine/udp
           go test -run '^$' -fuzz '^FuzzProtocol$' -fuzztime 30s -parallel 2 ./internal/engine/protocol
+
+  wintun:
+    if: github.event_name != 'workflow_dispatch'
+    name: Wintun session / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the pinned Go version
+        id: pins
+        run: |
+          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+          "go_version=$($pins.go.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.pins.outputs.go_version }}
+          cache: false
+      - name: Compile the native test executable
+        run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
+      - name: Fetch the unchanged signed Wintun DLL beside the executable
+        run: ./scripts/prepare-wintun-tests.ps1
+      - name: Ring ABI, parser, cancellation, corruption recovery and parallel UDP
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.run=TestRing|TestPinnedDLL|TestWintun(ParallelUDP|RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|BatchCost)$'
+      - name: Single-packet ping-pong, 200000 round trips per implementation
+        if: ${{ !cancelled() }}
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPingPong$'
+      - name: Bulk UDP and TCP throughput and latency comparison
+        if: ${{ !cancelled() }}
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPerformance$'
+      - name: 1000 session cycles and forced crash cleanup, including phantom devices
+        if: ${{ !cancelled() }}
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintun(Lifetime|Crash)$'
+      - name: Profile single-stream TCP through both sessions
+        if: ${{ !cancelled() }}
+        run: |
+          foreach ($mode in @('dll', 'ours')) {
+            $env:NETSWITCH_WINTUN_PROFILE = $mode
+            ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintunProfile$' "-test.cpuprofile=bin/wintun-$mode-cpu.pprof"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            go tool pprof -top -nodecount=25 ./bin/wintun.test.exe "bin/wintun-$mode-cpu.pprof"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Keep the CPU profiles
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wintun-cpu-${{ matrix.arch }}
+          path: bin/wintun-*-cpu.pprof
+          retention-days: 14
+      - name: Fuzz the ring-entry parser
+        if: ${{ !cancelled() }}
+        env:
+          NETSWITCH_WINTUN_CI: '0'
+        run: go test -run '^$' -fuzz '^FuzzRingEntry$' -fuzztime 30s -parallel 2 ./internal/wintun
+      - name: Race detector with real recovery and teardown
+        if: ${{ !cancelled() && matrix.arch == 'x64' }}
+        run: |
+          go test -race -c -o ./bin/wintun-race.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./bin/wintun-race.test.exe '-test.v' '-test.timeout=5m' '-test.run=TestRing|TestWintun(RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|Lifetime)$'
 
   linux:
     if: github.event_name != 'workflow_dispatch'

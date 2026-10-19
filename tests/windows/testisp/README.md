@@ -30,7 +30,9 @@ The loopback control API exposes packet, byte, connection and destination counts
 for TestISP and its upstream relay. It supports `running`, `pause` (stop reading
 the adapter), and `drop` (drain and discard packets). The proof also withdraws and
 restores TestISP's default route. Shutdown closes the adapter, and the runner
-script verifies no adapter or routes remain.
+script verifies no adapter, routes or non-present PnP devices remain. After the
+gateway exits, a fresh process calls `internal/wintun.RecoverAfterCrash` with
+TestISP's own fixed GUID. It refuses present adapters and never loads the DLL.
 
 `proof.mjs` proves an HTTPS response on each explicitly bound interface, then
 proves the virtual path stops when paused, dropped or unrouted while the direct
@@ -51,16 +53,16 @@ attempt at or above 100 ms makes that job fail. Normal CI still stops its
 mandatory gate at the first slow attempt.
 
 Round artifacts include gVisor TCP counters, Windows IPv4 TCP retransmits,
-Wintun ring-full errors and NDIS discards, header traces, forwarder/hook/dial/
+Wintun session drops, recoveries and NDIS discards, header traces, forwarder/hook/dial/
 handshake/first-byte/close timestamps, observed endpoint states, GC pauses,
 and independent 1 ms gateway/client heartbeats. Gaps over 5 ms retain both ends
 of the interval. Endpoint states are sampled at packet and relay boundaries and
 each heartbeat; transitions between observations can be missed. Windows TCP
 counters cover the whole host, so a change alone cannot attribute a lost packet.
 
-The gateway uses Wintun's documented session API with the same 8 MiB rings.
-This exposes `ERROR_BUFFER_OVERFLOW`, which the former WireGuard wrapper
-silently reported as a successful write. No packet is retried by this wrapper.
+The gateway uses the shared `internal/wintun` session with the same 8 MiB rings.
+Its batch API reports the accepted packet count; a dropped packet cannot be
+reported as delivered. No packet is retried by the gateway wrapper.
 
 Set the dispatch input `packet_capture=true` for three additional runners per
 architecture with Windows Packet Monitor. This records the NIC and TCP/IP
@@ -88,10 +90,11 @@ ordering points in [commit ec0a6b9](https://git.zx2c4.com/wintun/commit/?id=ec0a
 and [latest release tag](https://git.zx2c4.com/wintun/refs/tags) are still 0.14.1
 as of the measurement date; that release lacks the fix.
 
-The fix belongs in the Wintun API/driver distribution used by the harness and
-engine. This branch keeps the verified signed binary and reports the failure;
-it does not add wake-up traffic, retry a failed round or relax the deadline.
-The mandatory gate remains capable of failing until the dependency is fixed.
+The gateway now uses our ring session from PR #35. It signals the driver's
+auto-reset wake event after every published batch, so the driver cannot miss a
+wake-up even with the unchanged signed 0.14.1 driver. The DLL manages adapters
+only. The old DLL session and polling wrapper are removed. The mandatory gate
+still has the same 100 ms deadline and no noise allowance or round retries.
 Per-job attempt counts and the packet/counter evidence are retained in
 [reuse-investigation.json](reuse-investigation.json), including incomplete rounds.
 PR #33 was merged and vendor regenerated before the second stress run
@@ -106,5 +109,5 @@ initial RTO of 1,000 ms. Neither is this established-connection FIN recovery.
 the processes. It uses native Winsock HTTP sockets, not the gateway's gVisor
 data path; it is not an independently implemented executable.
 
-Dependencies are vendored from upstream MIT (Wintun) and Apache-2.0
-(gVisor) sources. The gateway is test infrastructure, not the production engine.
+gVisor is vendored under Apache-2.0. The session is our own code; the signed DLL
+retains its prebuilt-binary license. The gateway remains test infrastructure.

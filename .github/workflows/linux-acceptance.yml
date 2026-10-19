@@ -1,0 +1,121 @@
+name: Acceptance
+
+# Net Switch 1.0, milestone 0: the Linux acceptance suite (tests/linux) against
+# the baseline engine, sing-box at the version packaging/versions.json pins.
+# Strict: any failing case fails the job. Known baseline defects are recorded,
+# must reproduce, and don't fail it. Nothing here ships; 0.3.x keeps building
+# from ci.yml.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      run:
+        description: 'Only cases whose id matches this regular expression (empty: all)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-acceptance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux acceptance / ${{ matrix.runner }}
+    # Pinned labels: ubuntu-latest moves between releases.
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm]
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # squashfs-tools: `snap pack` builds the test snap with it.
+      - name: Install test tools
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends jq nftables iproute2 flatpak fuse3 squashfs-tools
+      - name: Read the pinned snap revisions
+        id: snaps
+        run: |
+          arch=$(dpkg --print-architecture)
+          echo "arch=$arch" >> "$GITHUB_OUTPUT"
+          for name in core24 snapd; do
+            echo "$name=$(jq -er --arg arch "$arch" --arg name "$name" '.[$arch][$name].revision' tests/linux/suite/snap-inputs.json)" >> "$GITHUB_OUTPUT"
+          done
+      - name: Cache the pinned snaps and assertions
+        id: snap-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/snap-inputs
+          key: snap-inputs-v1-${{ steps.snaps.outputs.arch }}-core24-${{ steps.snaps.outputs.core24 }}-snapd-${{ steps.snaps.outputs.snapd }}
+      - name: Download missing snap inputs and verify their SHA-256
+        env:
+          CACHE_HIT: ${{ steps.snap-cache.outputs.cache-hit }}
+        run: |
+          echo "snap inputs cache hit: ${CACHE_HIT:-false}"
+          mode=verify
+          if [[ "$CACHE_HIT" != true ]]; then mode=fetch; fi
+          bash tests/linux/snap-inputs.sh "$mode" "$RUNNER_TEMP/snap-inputs"
+      - name: Read the pinned Go and Node versions
+        id: pins
+        run: |
+          echo "go_version=$(jq -r .go.version packaging/versions.json)" >> "$GITHUB_OUTPUT"
+          echo "node_version=$(jq -r .node.version packaging/versions.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.pins.outputs.go_version }}
+          cache: false
+      # The baseline is configured by the app's own generator (lib/engine.mjs).
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.pins.outputs.node_version }}
+          package-manager-cache: false
+      - name: Build the harness
+        env:
+          GOFLAGS: -mod=vendor
+        run: go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
+      # The QUIC fixture is its own module at a pinned quic-go, so QUIC never
+      # enters Net Switch's go.mod or vendor/.
+      - name: Check and build the QUIC fixture
+        working-directory: tests/quicfixture
+        env:
+          GOFLAGS: -mod=readonly
+        run: |
+          go mod verify
+          go vet ./...
+          go test -count=1 -v ./...
+          go build -trimpath -o "$RUNNER_TEMP/nsquic" .
+      - name: Fetch sing-box at the pinned version and check its SHA-256
+        run: sudo "$RUNNER_TEMP/nsaccept" fetch-sing-box --dest /opt/sing-box
+      # In a transient scope with Delegate=yes: systemd lets a program create
+      # cgroups only in a subtree delegated to it, and the lookup cases need some.
+      - name: Run the acceptance suite as root
+        env:
+          RUN_FILTER: ${{ inputs.run }}
+        run: >-
+          sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-${{ github.run_id }}-${{ strategy.job-index }}" --
+          env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
+          "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs"
+          "$RUNNER_TEMP/nsaccept" run --engine sing-box --engine-path /opt/sing-box/sing-box
+          --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance"
+          --quic "$RUNNER_TEMP/nsquic"
+          --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
+      - name: Upload the report and logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-acceptance-${{ matrix.runner }}
+          path: ${{ runner.temp }}/acceptance
+          retention-days: 14
+          if-no-files-found: error

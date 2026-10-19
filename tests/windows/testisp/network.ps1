@@ -1,8 +1,16 @@
-param([ValidateSet('inspect', 'state', 'configure', 'reuse-route', 'withdraw', 'restore', 'block-direct', 'unblock-direct', 'clean')] [string] $Action)
+param([ValidateSet('inspect', 'pnp', 'state', 'configure', 'reuse-route', 'withdraw', 'restore', 'block-direct', 'unblock-direct', 'clean')] [string] $Action)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted Windows runners only.' }
 $admin = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $admin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Administrator required.' }
+if ($Action -eq 'pnp') {
+  $devices = @(Get-PnpDevice -Class Net | Where-Object FriendlyName -like 'TestISP*' | ForEach-Object {
+    $present = (Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName 'DEVPKEY_Device_IsPresent').Data
+    [pscustomobject]@{ instanceID = $_.InstanceId; present = [bool]$present }
+  })
+  ConvertTo-Json -InputObject $devices -Compress
+  exit
+}
 if ($Action -eq 'inspect') {
   $route = Find-NetRoute -RemoteIPAddress '1.1.1.1' | Where-Object { $_.PSObject.Properties.Name -contains 'NextHop' } | Select-Object -First 1
   $adapter = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex
@@ -22,7 +30,8 @@ if ($Action -eq 'block-direct') {
   $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object Name -eq 'TestISP')
   $routes = @(Get-NetRoute | Where-Object InterfaceAlias -eq 'TestISP')
   $rules = @(Get-NetFirewallRule -Name 'TestISP-direct-probe' -ErrorAction SilentlyContinue)
-  if ($adapters.Count -or $routes.Count -or $rules.Count) { throw "TestISP leftovers: $($adapters.Count) adapters, $($routes.Count) routes, $($rules.Count) firewall rules" }
+  $devices = @(Get-PnpDevice -Class Net | Where-Object FriendlyName -like 'TestISP*')
+  if ($adapters.Count -or $routes.Count -or $rules.Count -or $devices.Count) { throw "TestISP leftovers: $($adapters.Count) adapters, $($routes.Count) routes, $($rules.Count) firewall rules, $($devices.Count) PnP devices: $($devices | ConvertTo-Json -Compress)" }
 } else {
   $index = [int]$env:TESTISP_INDEX
   $adapter = Get-NetAdapter -InterfaceIndex $index

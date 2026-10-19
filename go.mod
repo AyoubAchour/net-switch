@@ -9,7 +9,6 @@ replace gvisor.dev/gvisor => ./third_party/gvisor
 require (
 	github.com/quic-go/quic-go v0.64.0
 	golang.org/x/sys v0.49.0
-	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2
 )
 
 require (

@@ -62,7 +62,16 @@ try {
   }
   run('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'apply', '--unsafe-paths', '--whitespace=nowarn', path.join(root, 'third_party/gvisor-timewait.patch')], staging);
   if (diffOnly) {
-    process.stdout.write(run('git', ['-c', 'core.autocrlf=false', 'diff', '--no-ext-diff', '--no-color'], staging));
+    process.stdout.write(run('git', [
+      '-c', 'core.autocrlf=false', '-c', 'core.eol=lf',
+      '-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false',
+      '-c', 'diff.suppressBlankEmpty=false',
+      'diff', '--no-ext-diff', '--no-textconv', '--no-color',
+      '--src-prefix=a/', '--dst-prefix=b/', '--line-prefix=',
+      '--output-indicator-new=+', '--output-indicator-old=-', '--output-indicator-context= ',
+      '--no-renames', '--text', '--unified=3', '--inter-hunk-context=0',
+      '--diff-algorithm=myers', '--indent-heuristic', '--abbrev=7',
+    ], staging));
   } else {
     const target = path.resolve(root, 'third_party', 'gvisor');
     if (path.relative(root, target) !== path.join('third_party', 'gvisor')) throw new Error('Generated target escapes repository');

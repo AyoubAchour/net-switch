@@ -57,6 +57,11 @@ try {
     await network('unblock-direct');
     return { failed, virtual, recovered: await probe(uplink) };
   });
+  await check('normal adapter, route, firewall and PnP cleanup', () => harness.close());
+  harness = null;
+  harness = await startHarness(`${dir}/crash`);
+  await check('forced gateway death leaves an orphan that our recovery removes', () => harness.close({ crash: true }));
+  harness = null;
 } catch (error) { console.error(error); process.exitCode = 1; }
 finally {
   if (harness) {

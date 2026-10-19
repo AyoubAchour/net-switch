@@ -166,9 +166,10 @@ func SetTimeWaitHandler(s *stack.Stack, handler func(stack.TransportEndpointID, 
 }
 
 // SetTimeWaitPolicy installs a per-endpoint close-time budget. enter runs once
-// before the TIME_WAIT timer starts; false closes silently instead. After a
-// successful enter, leave runs once on removal. Both run under the endpoint
-// lock and must not block or call endpoint methods. Install before shutdown.
+// before publishing TIME_WAIT or its final ACK; false closes silently after
+// the current segment. After a successful enter, leave runs once on removal.
+// Both callbacks run under the endpoint lock and must not block or call
+// endpoint methods. Install before shutdown.
 // A per-endpoint decision avoids changing the stack-wide 60-second protection
 // for other connections when only this closing connection exceeds the cap.
 func (e *Endpoint) SetTimeWaitPolicy(enter func() bool, leave func()) {

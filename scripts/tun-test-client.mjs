@@ -1,9 +1,9 @@
 // Launched by e2e-tun.mjs using a separate copy of Node, so process pins are real.
-import assert from 'node:assert/strict';
-import { createSocket } from 'node:dgram';
 import { Agent, request } from 'node:https';
 import { connect, createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import assert from 'node:assert/strict';
+import { createSocket } from 'node:dgram';
 
 if (!process.send) throw new Error('Run this client through e2e-tun.mjs');
 const held = new Map();

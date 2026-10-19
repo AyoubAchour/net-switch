@@ -53,7 +53,7 @@ type diagnostics struct {
 
 func (g *gateway) tcpCounters() map[string]uint64 {
 	stats := g.stack.Stats()
-	result := map[string]uint64{"DroppedPackets": stats.DroppedPackets.Value(), "RingFull": g.device.ringFull.Load()}
+	result := map[string]uint64{"DroppedPackets": stats.DroppedPackets.Value(), "SessionWriteDrops": g.device.writeDrops.Load()}
 	fields := reflect.ValueOf(stats.TCP)
 	for i := 0; i < fields.NumField(); i++ {
 		if counter, ok := fields.Field(i).Interface().(*tcpip.StatCounter); ok && counter != nil {
@@ -68,7 +68,7 @@ func (g *gateway) event(kind string, id uint64, tuple, detail string) {
 	e := diagnosticEvent{At: time.Now().UnixMicro(), Kind: kind, Connection: id, Tuple: tuple, Detail: detail,
 		Counters: map[string]uint64{"retransmits": stats.TCP.Retransmits.Value(), "timeouts": stats.TCP.Timeouts.Value(),
 			"dropped": stats.DroppedPackets.Value(), "invalid": stats.TCP.InvalidSegmentsReceived.Value(),
-			"sendErrors": stats.TCP.SegmentSendErrors.Value(), "ringFull": g.device.ringFull.Load()}}
+			"sendErrors": stats.TCP.SegmentSendErrors.Value(), "sessionWriteDrops": g.device.writeDrops.Load()}}
 	g.diag.Lock()
 	g.diag.events[g.diag.next%uint64(len(g.diag.events))] = e
 	g.diag.next++
@@ -152,7 +152,7 @@ func (g *gateway) diagnosticSnapshot() map[string]any {
 	win["segmentsInError"], win["resetsOut"] = tcpStats[12], tcpStats[13]
 	row := windows.MibIfRow2{InterfaceLuid: g.device.adapter.LUID()}
 	err := windows.GetIfEntry2Ex(windows.MibIfEntryNormal, &row)
-	ring := map[string]any{"full": g.device.ringFull.Load(), "readErrors": g.device.readErrors.Load(), "writeErrors": g.device.writeErrors.Load(),
+	ring := map[string]any{"writeDrops": g.device.writeDrops.Load(), "readErrors": g.device.readErrors.Load(), "writeErrors": g.device.writeErrors.Load(),
 		"inDiscards": row.InDiscards, "outDiscards": row.OutDiscards, "inErrors": row.InErrors, "outErrors": row.OutErrors}
 	if err != nil {
 		ring["error"] = err.Error()
@@ -175,7 +175,7 @@ func (g *gateway) diagnosticSnapshot() map[string]any {
 	for n := start; n < g.diag.next; n++ {
 		events = append(events, g.diag.events[n%uint64(len(g.diag.events))])
 	}
-	return map[string]any{"at": time.Now().UnixMicro(), "tcp": g.tcpCounters(), "windowsTCP": win, "ring": ring,
+	return map[string]any{"at": time.Now().UnixMicro(), "tcp": g.tcpCounters(), "windowsTCP": win, "ring": ring, "session": g.device.session.Stats(),
 		"wire":   copyCounters(g.diag.wire),
 		"events": events, "heartbeat": map[string]any{"periodMs": 1, "ticks": g.diag.ticks, "maxGapMs": g.diag.maxGapMs, "gaps": append([]heartbeatGap{}, g.diag.gaps...)},
 		"gc": map[string]any{"count": memory.NumGC, "pauses": pauses}}

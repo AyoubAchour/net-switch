@@ -3,12 +3,17 @@ package engine
 import (
 	"context"
 	"errors"
+	"net/netip"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
+	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 func TestStartRollbackAndDisconnectLifetime(t *testing.T) {
@@ -44,6 +49,70 @@ func TestStartRollbackAndDisconnectLifetime(t *testing.T) {
 				t.Fatal("stop kept loaded revision")
 			}
 		})
+	}
+}
+
+type batchTun struct {
+	*testfake.Tun
+	batches chan []string
+	release chan struct{}
+}
+
+func (t *batchTun) WriteBatch(packets [][]byte) (int, error) {
+	var copyOf []string
+	for _, p := range packets {
+		copyOf = append(copyOf, string(p))
+	}
+	t.batches <- copyOf
+	select {
+	case <-t.release:
+	case <-t.Done:
+	}
+	return len(packets), nil
+}
+
+func (*batchTun) RXChecksumVerified(p []byte) bool { return p[19] == 2 }
+
+func TestEngineUsesAvailableBatchesAndChecksumMetadata(t *testing.T) {
+	tun := &batchTun{Tun: testfake.NewTun(), batches: make(chan []string, 2), release: make(chan struct{}, 2)}
+	e := New(context.Background(), Dependencies{OpenTun: func(context.Context) (platform.TunDevice, error) { return tun, nil }, Routes: &testfake.Routes{}, Dialer: testfake.Dialer{}, Owners: &testfake.Owners{}}, flows.Defaults(), nil)
+	defer e.Stop(context.Background())
+	c := policy.Config{Lines: []platform.Line{{ID: "A"}}}
+	if _, err := e.Start(context.Background(), policy.Revision{N: 1, Hash: policy.Hash(c), Config: c}); err != nil {
+		t.Fatal(err)
+	}
+	next := func(want []string) {
+		t.Helper()
+		select {
+		case got := <-tun.batches:
+			if !slices.Equal(got, want) {
+				t.Fatalf("batch %v, want %v", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("writer did not deliver available packets")
+		}
+	}
+	e.link.Send([]byte("one"))
+	next([]string{"one"})
+	e.link.Send([]byte("two"))
+	e.link.Send([]byte("three"))
+	tun.release <- struct{}{}
+	next([]string{"two", "three"})
+	tun.release <- struct{}{}
+	verified := make(chan bool, 2)
+	e.link.SetObserver(func(p *gv.PacketBuffer) { verified <- p.RXChecksumValidated })
+	for _, dst := range []string{"198.18.0.2", "198.18.0.3"} {
+		tun.In <- packet.IP(netip.MustParseAddr("198.18.0.1"), netip.MustParseAddr(dst), 253, []byte("metadata"))
+	}
+	for _, want := range []bool{true, false} {
+		select {
+		case got := <-verified:
+			if got != want {
+				t.Fatalf("checksum metadata %v, want %v", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("reader did not pass checksum metadata")
+		}
 	}
 }
 

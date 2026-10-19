@@ -53,7 +53,7 @@ index 62f42f4..89820c7 100644
  			extendTimeWait = true
  		}
 diff --git a/pkg/tcpip/transport/tcp/dispatcher.go b/pkg/tcpip/transport/tcp/dispatcher.go
-index d138e3b..bf33b3b 100644
+index d138e3b..4e07948 100644
 --- a/pkg/tcpip/transport/tcp/dispatcher.go
 +++ b/pkg/tcpip/transport/tcp/dispatcher.go
 @@ -12,6 +12,8 @@
@@ -65,25 +65,21 @@ index d138e3b..bf33b3b 100644
  package tcp
  
  import (
-@@ -235,6 +237,16 @@ func handleConnected(ep *Endpoint) {
+@@ -235,6 +237,12 @@ func handleConnected(ep *Endpoint) {
  //
  // +checklocks:ep.mu
  func startTimeWait(ep *Endpoint) {
-+	if enter := ep.timeWaitEnter; enter != nil {
-+		ep.timeWaitEnter = nil
-+		if !enter() {
-+			ep.transitionToStateCloseLocked()
-+			ep.drainClosingSegmentQueue()
-+			ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
-+			return
-+		}
-+		ep.timeWaitReserved = true
++	if ep.timeWaitSkipped {
++		ep.transitionToStateCloseLocked()
++		ep.drainClosingSegmentQueue()
++		ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
++		return
 +	}
  	// Disable close timer as we are now entering real TIME_WAIT.
  	if ep.finWait2Timer != nil {
  		ep.finWait2Timer.Stop()
 diff --git a/pkg/tcpip/transport/tcp/endpoint.go b/pkg/tcpip/transport/tcp/endpoint.go
-index 788a2f2..b9702c3 100644
+index 788a2f2..705eb1e 100644
 --- a/pkg/tcpip/transport/tcp/endpoint.go
 +++ b/pkg/tcpip/transport/tcp/endpoint.go
 @@ -12,6 +12,8 @@
@@ -95,7 +91,7 @@ index 788a2f2..b9702c3 100644
  package tcp
  
  import (
-@@ -480,7 +482,14 @@ type Endpoint struct {
+@@ -480,7 +482,16 @@ type Endpoint struct {
  	// segmentQueue is used to hand received segments to the protocol
  	// goroutine. Segments are queued as long as the queue is not full,
  	// and dropped when it is.
@@ -108,10 +104,27 @@ index 788a2f2..b9702c3 100644
 +	timeWaitLeave func() `state:"nosave"`
 +	// +checklocks:mu
 +	timeWaitReserved bool
++	// +checklocks:mu
++	timeWaitSkipped bool
  
  	// userMSS if non-zero is the MSS value explicitly set by the user
  	// for this endpoint using the TCP_MAXSEG setsockopt.
-@@ -1258,6 +1267,11 @@ func (e *Endpoint) cleanupLocked() {
+@@ -780,6 +791,14 @@ func (e *Endpoint) TryLock() bool {
+ //
+ // +checklocks:e.mu
+ func (e *Endpoint) setEndpointState(state EndpointState) {
++	// Release live admission before publishing TIME_WAIT or its final ACK.
++	// Defer a cap-driven close until the current segment is fully consumed.
++	if state == StateTimeWait && e.timeWaitEnter != nil {
++		enter := e.timeWaitEnter
++		e.timeWaitEnter = nil
++		e.timeWaitReserved = enter()
++		e.timeWaitSkipped = !e.timeWaitReserved
++	}
+ 	oldstate := EndpointState(e.state.Swap(uint32(state)))
+ 	switch state {
+ 	case StateEstablished:
+@@ -1258,6 +1277,11 @@ func (e *Endpoint) cleanupLocked() {
  		e.purgeReadQueue()
  	}
  	e.stack.CompleteTransportEndpointCleanup(e)
@@ -124,7 +137,7 @@ index 788a2f2..b9702c3 100644
  }
  
 diff --git a/pkg/tcpip/transport/tcp/protocol.go b/pkg/tcpip/transport/tcp/protocol.go
-index a3c8295..f59dc98 100644
+index a3c8295..fedc28b 100644
 --- a/pkg/tcpip/transport/tcp/protocol.go
 +++ b/pkg/tcpip/transport/tcp/protocol.go
 @@ -12,6 +12,8 @@
@@ -154,7 +167,7 @@ index a3c8295..f59dc98 100644
  
  	mu protocolRWMutex `state:"nosave"`
  
-@@ -139,6 +143,50 @@ type protocol struct {
+@@ -139,6 +143,51 @@ type protocol struct {
  	tsOffsetSecret [16]byte `state:"nosave"`
  }
  
@@ -181,9 +194,10 @@ index a3c8295..f59dc98 100644
 +}
 +
 +// SetTimeWaitPolicy installs a per-endpoint close-time budget. enter runs once
-+// before the TIME_WAIT timer starts; false closes silently instead. After a
-+// successful enter, leave runs once on removal. Both run under the endpoint
-+// lock and must not block or call endpoint methods. Install before shutdown.
++// before publishing TIME_WAIT or its final ACK; false closes silently after
++// the current segment. After a successful enter, leave runs once on removal.
++// Both callbacks run under the endpoint lock and must not block or call
++// endpoint methods. Install before shutdown.
 +// A per-endpoint decision avoids changing the stack-wide 60-second protection
 +// for other connections when only this closing connection exceeds the cap.
 +func (e *Endpoint) SetTimeWaitPolicy(enter func() bool, leave func()) {
@@ -206,7 +220,7 @@ index a3c8295..f59dc98 100644
  func (*protocol) Number() tcpip.TransportProtocolNumber {
  	return ProtocolNumber
 diff --git a/pkg/tcpip/transport/tcp/rcv.go b/pkg/tcpip/transport/tcp/rcv.go
-index 6bb5252..3c548cb 100644
+index 6bb5252..308bd09 100644
 --- a/pkg/tcpip/transport/tcp/rcv.go
 +++ b/pkg/tcpip/transport/tcp/rcv.go
 @@ -12,6 +12,8 @@
@@ -218,7 +232,28 @@ index 6bb5252..3c548cb 100644
  package tcp
  
  import (
-@@ -589,6 +591,10 @@ func (r *receiver) handleTimeWaitSegment(s *segment) (resetTimeWait bool, newSyn
+@@ -249,9 +251,6 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
+ 	if s.flags.Contains(header.TCPFlagFin) {
+ 		r.RcvNxt++
+ 
+-		// Send ACK immediately.
+-		r.ep.snd.sendAck()
+-
+ 		// Tell any readers that no more data will come.
+ 		r.closed = true
+ 		r.ep.readyToRead(nil)
+@@ -273,6 +272,10 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
+ 			r.ep.setEndpointState(StateTimeWait)
+ 		}
+ 
++		// Publish the close transition and release admission before the app
++		// can observe this ACK and immediately open another connection.
++		r.ep.snd.sendAck()
++
+ 		// Flush out any pending segments, except the very first one if
+ 		// it happens to be the one we're handling now because the
+ 		// caller is using it.
+@@ -589,6 +592,10 @@ func (r *receiver) handleTimeWaitSegment(s *segment) (resetTimeWait bool, newSyn
  
  	//    (2) returns to TIME-WAIT state if the SYN turns out
  	//      to be an old duplicate".

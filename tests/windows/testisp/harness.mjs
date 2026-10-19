@@ -84,10 +84,17 @@ export async function startHarness(directory) {
     }
     return result;
   };
-  const close = async () => {
+  const close = async ({ crash = false } = {}) => {
     const errors = [];
+    const evidence = { crash };
     try { await network('unblock-direct'); } catch (error) { errors.push(error); }
-    if (state && processHandle.exitCode === null) {
+    if (crash) {
+      try {
+        evidence.before = await network('pnp');
+        assert(evidence.before.some((d) => d.instanceID === state.instanceID && d.present), 'Crash probe requires our live adapter');
+        assert(processHandle.kill(), 'Could not terminate the gateway we started');
+      } catch (error) { errors.push(error); }
+    } else if (state && processHandle.exitCode === null) {
       try { await control('stop', {}); } catch (error) { errors.push(error); }
     }
     if (processHandle.exitCode === null) {
@@ -95,8 +102,24 @@ export async function startHarness(directory) {
       await exited; clearTimeout(timer);
     }
     log.end();
+    if (crash) {
+      try {
+        evidence.orphan = await until(async () => {
+          const devices = await network('pnp');
+          return devices.some((d) => d.instanceID === state.instanceID && !d.present) && devices;
+        }, 'our TestISP phantom before recovery');
+      } catch (error) { errors.push(error); }
+    }
+    // The owner has exited. Recover only TestISP's fixed GUID in a fresh process;
+    // this does not load the DLL or let its orphan sweeper hide cleanup defects.
+    try {
+      evidence.recovery = await run(exe, ['recover']);
+      evidence.after = await network('pnp');
+      assert.equal(evidence.after.length, 0, 'TestISP PnP devices remain after recovery');
+    } catch (error) { errors.push(error); }
     try { await until(() => network('clean').then(() => true), 'TestISP cleanup', 15_000); } catch (error) { errors.push(error); }
     if (errors.length) throw new AggregateError(errors, 'TestISP cleanup failed');
+    return evidence;
   };
   try {
     state = await until(async () => {
