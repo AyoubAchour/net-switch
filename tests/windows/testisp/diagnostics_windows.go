@@ -148,7 +148,8 @@ func (g *gateway) diagnosticSnapshot() map[string]any {
 	// MIB_TCPSTATS has fifteen consecutive DWORD fields on both architectures.
 	var tcpStats [15]uint32
 	code, _, _ := getTCPStatistics.Call(uintptr(unsafe.Pointer(&tcpStats[0])))
-	win := map[string]any{"error": code, "segmentsRetransmitted": tcpStats[11], "segmentsIn": tcpStats[9], "segmentsOut": tcpStats[10]}
+	win := map[string]any{"error": code, "rtoMinMs": tcpStats[1], "rtoMaxMs": tcpStats[2], "segmentsRetransmitted": tcpStats[11], "segmentsIn": tcpStats[9], "segmentsOut": tcpStats[10]}
+	win["segmentsInError"], win["resetsOut"] = tcpStats[12], tcpStats[13]
 	row := windows.MibIfRow2{InterfaceLuid: g.device.adapter.LUID()}
 	err := windows.GetIfEntry2Ex(windows.MibIfEntryNormal, &row)
 	ring := map[string]any{"full": g.device.ringFull.Load(), "readErrors": g.device.readErrors.Load(), "writeErrors": g.device.writeErrors.Load(),

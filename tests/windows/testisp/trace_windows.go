@@ -7,17 +7,25 @@ import (
 	"fmt"
 	"net"
 	"time"
+
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/checksum"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
 
 type tcpObservation struct {
-	At        int64  `json:"at"`
-	Direction string `json:"direction"`
-	Source    uint16 `json:"source"`
-	Target    uint16 `json:"target"`
-	Flags     byte   `json:"flags"`
-	Sequence  uint32 `json:"sequence"`
-	Ack       uint32 `json:"ack"`
-	Payload   int    `json:"payloadBytes"`
+	At            int64  `json:"at"`
+	Direction     string `json:"direction"`
+	Source        uint16 `json:"source"`
+	Target        uint16 `json:"target"`
+	Flags         byte   `json:"flags"`
+	Sequence      uint32 `json:"sequence"`
+	Ack           uint32 `json:"ack"`
+	Payload       int    `json:"payloadBytes"`
+	Window        uint16 `json:"window"`
+	IPChecksumOK  bool   `json:"ipChecksumOK"`
+	TCPChecksumOK bool   `json:"tcpChecksumOK"`
+	Header        string `json:"header"`
 }
 
 // A short header-only tail makes passive-close failures diagnosable without a
@@ -36,6 +44,13 @@ func (g *gateway) trace(packet []byte, direction string) {
 	tcp := packet[offset:]
 	item := tcpObservation{At: time.Now().UnixMicro(), Direction: direction, Source: binary.BigEndian.Uint16(tcp), Target: binary.BigEndian.Uint16(tcp[2:]), Flags: tcp[13], Sequence: binary.BigEndian.Uint32(tcp[4:]), Ack: binary.BigEndian.Uint32(tcp[8:])}
 	item.Payload = len(tcp) - int(tcp[12]>>4)*4
+	item.Window = binary.BigEndian.Uint16(tcp[14:])
+	item.IPChecksumOK = checksum.Checksum(packet[:offset], 0) == 0xffff
+	pseudo := header.PseudoHeaderChecksum(6, tcpip.AddrFromSlice(packet[12:16]), tcpip.AddrFromSlice(packet[16:20]), uint16(len(tcp)))
+	item.TCPChecksumOK = checksum.Checksum(tcp, pseudo) == 0xffff
+	if h := int(tcp[12]>>4) * 4; h >= 20 && h <= len(tcp) {
+		item.Header = fmt.Sprintf("%x", tcp[:h])
+	}
 	if direction != "delivered" {
 		g.diag.Lock()
 		if g.diag.wire == nil {
@@ -56,7 +71,7 @@ func (g *gateway) trace(packet []byte, direction string) {
 	}
 	g.states()
 	g.event("packet-"+direction, 0, fmt.Sprintf("%d -> %d", item.Source, item.Target),
-		fmt.Sprintf("flags=%02x seq=%d ack=%d bytes=%d", item.Flags, item.Sequence, item.Ack, item.Payload))
+		fmt.Sprintf("flags=%02x seq=%d ack=%d bytes=%d ipOK=%t tcpOK=%t window=%d", item.Flags, item.Sequence, item.Ack, item.Payload, item.IPChecksumOK, item.TCPChecksumOK, item.Window))
 	g.stats.Lock()
 	defer g.stats.Unlock()
 	if len(g.stats.TCPTrace) == 256 {

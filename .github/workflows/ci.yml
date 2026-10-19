@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      packet_capture:
+        description: Capture Windows packet/drop events on three runners per architecture
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -18,7 +23,7 @@ jobs:
       fail-fast: false
       max-parallel: 6
       matrix:
-        repeat: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        repeat: ${{ fromJSON(inputs.packet_capture && '[1,2,3]' || '[1,2,3,4,5,6,7,8,9,10]') }}
         arch: [x64, ARM64]
         include:
           - arch: x64
@@ -29,6 +34,7 @@ jobs:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
       GOFLAGS: -mod=vendor -p=2
+      TESTISP_PACKET_CAPTURE: ${{ inputs.packet_capture }}
     defaults:
       run:
         shell: powershell

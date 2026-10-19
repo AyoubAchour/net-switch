@@ -77,7 +77,12 @@ export async function startHarness(directory) {
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) });
     assert(response.ok, `${endpoint}: HTTP ${response.status}`);
-    return response.json();
+    const result = await response.json();
+    if (endpoint === 'diagnostics') {
+      assert.equal(result.windowsTCP.error, 0, 'GetTcpStatistics failed; retransmit evidence is unavailable');
+      assert(!result.ring.error, `GetIfEntry2Ex failed: ${result.ring.error}`);
+    }
+    return result;
   };
   const close = async () => {
     const errors = [];

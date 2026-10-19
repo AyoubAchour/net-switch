@@ -31,7 +31,12 @@ async function diagnosticCapture(control) {
   const get = async (endpoint) => {
     const response = await fetch(`${control.url}/${endpoint}`, { headers: { Authorization: `Bearer ${control.token}` }, signal: AbortSignal.timeout(10000) });
     assert(response.ok, `Gateway ${endpoint}: ${response.status}`);
-    return response.json();
+    const result = await response.json();
+    if (endpoint === 'diagnostics') {
+      assert.equal(result.windowsTCP.error, 0, 'GetTcpStatistics failed');
+      assert(!result.ring.error, `GetIfEntry2Ex failed: ${result.ring.error}`);
+    }
+    return result;
   };
   return { clientHeartbeat: heartbeat(), gateway: await get('diagnostics'), stats: await get('stats') };
 }
@@ -175,6 +180,7 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, max
       await delay(1);
     } while (true);
     result.bindRetries = bindRetries;
+    result.attempt = i + 1;
     result.ms = performance.now() - started;
     if (diagnostics && (result.ms >= maxMs || result.outcome !== 'closed')) {
       result.diagnostics = await diagnosticCapture(diagnostics);

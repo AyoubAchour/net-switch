@@ -67,5 +67,5 @@ silently reported as a successful write. No packet is retried by this wrapper.
 the processes. It uses native Winsock HTTP sockets, not the gateway's gVisor
 data path; it is not an independently implemented executable.
 
-Dependencies are vendored from upstream MIT (WireGuard/Wintun) and Apache-2.0
+Dependencies are vendored from upstream MIT (Wintun) and Apache-2.0
 (gVisor) sources. The gateway is test infrastructure, not the production engine.
