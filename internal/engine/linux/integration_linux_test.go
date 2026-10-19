@@ -28,6 +28,9 @@ func TestKernelPlatform(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Fatal("isolated kernel test requires root")
 	}
+	selfNS,_:=os.Readlink("/proc/self/ns/net")
+	initNS,_:=os.Readlink("/proc/1/ns/net")
+	if selfNS=="" || selfNS==initNS {t.Fatal("refusing kernel mutations in the initial network namespace")}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	lo, err := netlink.LinkByName("lo")
@@ -71,9 +74,12 @@ func TestKernelPlatform(t *testing.T) {
 			if _, err := c.WriteToUDPAddrPort([]byte{byte(i)}, remote); err != nil {
 				t.Fatal(err)
 			}
-			n, err := tun.ReadPacket(ctx, buf)
-			if err != nil {
-				t.Fatal(err)
+			var n int
+			for {
+				n, err = tun.ReadPacket(ctx, buf)
+				if err != nil {t.Fatal(err)}
+				if n>=29 && buf[0]>>4==4 && buf[9]==17 {break}
+				t.Logf("unrelated kernel control packet before UDP %d: %x",i,buf[:min(n,48)])
 			}
 			if n < 29 || buf[n-1] != byte(i) {
 				t.Fatalf("packet order: got %x at %d", buf[:n], i)
