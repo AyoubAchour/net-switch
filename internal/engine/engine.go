@@ -127,17 +127,32 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 				continue
 			}
 			p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), b[:n]...))})
+			if verified, ok := tun.(platform.ChecksumVerifier); ok {
+				p.RXChecksumValidated = verified.RXChecksumVerified(b[:n])
+			}
 			link.InjectInbound(proto, p)
 			p.DecRef()
 		}
 	})
 	e.pumps.Go(func() {
+		packets := make([][]byte, 64)
 		for {
-			b := link.Read(run)
-			if b == nil {
+			n := link.ReadBatch(run, packets)
+			if n == 0 {
 				return
 			}
-			if err := tun.WritePacket(run, b); err != nil {
+			var err error
+			if batch, ok := tun.(platform.BatchWriter); ok {
+				_, err = batch.WriteBatch(packets[:n])
+			} else {
+				for _, p := range packets[:n] {
+					if err = tun.WritePacket(run, p); err != nil {
+						break
+					}
+				}
+			}
+			clear(packets[:n])
+			if err != nil {
 				if run.Err() == nil {
 					e.fail(link, err)
 				}
