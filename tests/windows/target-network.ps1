@@ -1,7 +1,7 @@
 param([ValidateSet('allow', 'ipv6', 'capture', 'clean')] [string] $Action)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted Windows runners only.' }
-$names = @('NetSwitch-acceptance-client-udp', 'NetSwitch-acceptance-gateway-udp')
+$names = @('NetSwitch-acceptance-client-udp', 'NetSwitch-acceptance-gateway-udp', 'NetSwitch-acceptance-engine-udp')
 if ($Action -eq 'ipv6') {
   $primary = [int]$env:ACCEPTANCE_UPLINK
   $virtual = [int]$env:ACCEPTANCE_TESTISP
@@ -30,12 +30,12 @@ if ($Action -eq 'ipv6') {
     if (Get-NetRoute -InterfaceIndex $virtual -DestinationPrefix $prefix -ErrorAction SilentlyContinue) { throw "Direct target route remained: $prefix" }
   }
 } elseif ($Action -eq 'allow') {
-  $programs = @($env:ACCEPTANCE_CLIENT, $env:ACCEPTANCE_GATEWAY)
+  $programs = @($env:ACCEPTANCE_CLIENT, $env:ACCEPTANCE_GATEWAY, $env:ACCEPTANCE_ENGINE)
   for ($i = 0; $i -lt $programs.Count; $i++) {
     if (-not (Test-Path -LiteralPath $programs[$i])) { throw 'Missing test program.' }
     if (Get-NetFirewallRule -Name $names[$i] -ErrorAction SilentlyContinue) { throw 'Test firewall rule already exists.' }
     # A STUN response from a third port is deliberately unsolicited. Allow only
-    # the two test programs and these controlled source addresses, never all UDP.
+    # these programs and controlled source addresses, never all UDP.
     New-NetFirewallRule -Name $names[$i] -DisplayName $names[$i] -Direction Inbound -Action Allow -Program $programs[$i] -Protocol UDP -RemoteAddress @($env:ACCEPTANCE_TARGET, '198.19.128.2', '2001:db8:198::2') | Out-Null
   }
 } else {
@@ -43,6 +43,7 @@ if ($Action -eq 'ipv6') {
   foreach ($name in $names) { if (Get-NetFirewallRule -Name $name -ErrorAction SilentlyContinue) { throw "Rule remained: $name" } }
   if ($env:ACCEPTANCE_UPLINK) {
     Get-NetIPAddress -InterfaceIndex ([int]$env:ACCEPTANCE_UPLINK) -IPAddress '2001:db8:18::1' -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false
+    if (Get-NetIPAddress -InterfaceIndex ([int]$env:ACCEPTANCE_UPLINK) -IPAddress '2001:db8:18::1' -ErrorAction SilentlyContinue) { throw 'Controlled IPv6 address remained on the uplink.' }
   }
 }
 '{}'

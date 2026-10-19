@@ -163,6 +163,21 @@ jobs:
         run: |
           node scripts/check-engine-config.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build TestISP for the legacy TUN assertions
+        env:
+          GOTOOLCHAIN: local
+          GOMAXPROCS: '2'
+          GOFLAGS: -mod=vendor -p=2
+        run: |
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Test real TUN routing and report port reuse and DNS changes
         run: |
           node scripts/e2e-tun.mjs
@@ -175,6 +190,9 @@ jobs:
           path: |
             dist/tun-test/*.log*
             dist/tun-test/report.txt
+            dist/tun-test/executables.json
+            dist/tun-test/testisp/*.json
+            dist/tun-test/testisp/*.log*
           retention-days: 14
 
   # Net Switch 1.0, in progress: the Go code in the root module (cmd/, internal/).

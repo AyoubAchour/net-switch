@@ -80,7 +80,7 @@ async function publicBaseline() { return { direct: await harness.probe(harness.u
 
 async function targetFirewall(action) {
   return run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.resolve('tests/windows/target-network.ps1'), '-Action', action], {
-    env: { ACCEPTANCE_CLIENT: clientExe, ACCEPTANCE_GATEWAY: path.resolve('dist/windows-test/testisp.exe'), ACCEPTANCE_TARGET: harness?.uplink.address ?? '',
+    env: { ACCEPTANCE_CLIENT: clientExe, ACCEPTANCE_GATEWAY: path.resolve('dist/windows-test/testisp.exe'), ACCEPTANCE_ENGINE: options.engine, ACCEPTANCE_TARGET: harness?.uplink.address ?? '',
       ACCEPTANCE_UPLINK: String(harness?.uplink.index ?? ''), ACCEPTANCE_TESTISP: String(harness?.testisp.index ?? '') },
   });
 }
@@ -161,7 +161,7 @@ try {
   });
   const directReuse = await report.test('controlled port reuse baseline', 'parity', async () => {
     const samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 20 });
-    assert.equal(samples.length, 20); assert(samples.every((sample) => sample.outcome === 'closed'), JSON.stringify(samples));
+    assert(samples.length === 20 && samples.every((sample) => sample.outcome === 'closed'), `Direct reuse failed: ${JSON.stringify(samples)}`);
     return samples;
   });
   await report.test('controlled ICMP v4/v6 baselines', 'parity', async () => ({
@@ -261,7 +261,7 @@ try {
     const result = { v4: await ping(responder.virtual.host), v6: await ping(ipv6Target.host),
       mtu4: await ping(responder.virtual.host, undefined, 1400, true), mtu6: await ping(ipv6Target.host, undefined, 1400) };
     const after = await harness.control('stats');
-    assert(after.testisp.packetsIn >= before.testisp.packetsIn + 4, 'Echo replies did not reach the controlled path');
+    for (const host of [responder.virtual.host, ipv6Target.host]) assert((after.echoRequests?.[host] ?? 0) >= (before.echoRequests?.[host] ?? 0) + 2, `Echo replies for ${host} did not reach the controlled path`);
     await server.api('lines/order', { ids: [main.id, second.id] }); await server.on();
     return { result, before, after };
   });
@@ -318,11 +318,15 @@ try {
     const samples = await client('reject', { target: responder.virtual });
     assert(!samples.some((item) => item.outcome === 'connected'), 'A capped app escaped the block');
     assert(samples.some((item) => ['ECONNRESET', 'ECONNREFUSED'].includes(item.outcome)), 'No actual rejection before the burst');
+    const udp = await client('udpReject', { target: responder.virtual });
+    assert(!udp.some((item) => item.outcome === 'reply'), 'Capped UDP escaped the block');
+    assert.equal(blocked.find((line) => line.id === main.id).blocked, false, 'Main line exception was removed');
+    const mainException = await newPublicOn(main);
     await server.api('lines/update', { id: main.id, cap: null });
     await server.api('lines/update', { id: second.id, cap: null });
-    await delay(500); await client('open', { target: responder.virtual }); await client('close');
-    if (samples.some((item) => item.outcome === 'timeout')) throw new BaselineDefect('Repeated cap rejects become silent drops without no_drop', { blocked, samples });
-    return { blocked, samples };
+    await pin(second.id); await client('open', { target: responder.virtual }); await client('close');
+    if (samples.some((item) => item.outcome === 'timeout') || udp.some((item) => item.outcome === 'timeout')) throw new BaselineDefect('Repeated cap rejects become silent drops without no_drop', { blocked, samples, udp, mainException });
+    return { blocked, samples, udp, mainException };
   });
   await report.test('20 start/stop cycles clean up routes and adapters', 'parity', async () => {
     const cycles = [];

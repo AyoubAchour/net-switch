@@ -79,7 +79,7 @@ async function reuseProbe() {
   }
   return attempts;
 }
-async function udp(size) {
+async function udp(size, target = { host: '1.1.1.1', port: 53 }, localAddress) {
   const socket = createSocket('udp4');
   // A real DNS query with RFC 7830 EDNS padding, including a >1500-byte packet.
   const question = Buffer.from('076578616d706c6503636f6d0000010001', 'hex');
@@ -95,24 +95,24 @@ async function udp(size) {
       const finish = (fn, value) => { clearTimeout(timer); fn(value); };
       socket.on('error', (error) => finish(reject, error));
       socket.on('message', (reply, peer) => {
-        if (peer.address !== '1.1.1.1' || peer.port !== 53 || reply.length < 12 || reply.readUInt16BE(0) !== 0x1234) return;
+        if (peer.address !== target.host || peer.port !== target.port || reply.length < 12 || reply.readUInt16BE(0) !== 0x1234) return;
         try {
           assert(reply[2] & 0x80, 'DNS response flag missing');
           assert.equal(reply[3] & 15, 0, 'DNS error response');
           finish(resolve, { sent: packet.length, received: reply.length, port: socket.address().port });
         } catch (error) { finish(reject, error); }
       });
-      socket.send(packet, 53, '1.1.1.1');
+      socket.bind(0, localAddress ?? '0.0.0.0', () => socket.send(packet, target.port, target.host));
     });
   } finally { socket.close(); }
 }
-process.on('message', async ({ id, command, count, ids, size }) => {
+process.on('message', async ({ id, command, count, ids, size, target, localAddress }) => {
   try {
     let result;
     if (command === 'open') result = await open(count);
     else if (command === 'refresh') result = await Promise.all(ids.map((key) => requestOn(held.get(key))));
     else if (command === 'reuse') result = await reuseProbe();
-    else if (command === 'udp') result = await udp(size);
+    else if (command === 'udp') result = await udp(size, target, localAddress);
     else if (command === 'close') { for (const item of held.values()) item.agent.destroy(); held.clear(); result = true; }
     else throw new Error(`Unknown command ${command}`);
     process.send({ id, result });

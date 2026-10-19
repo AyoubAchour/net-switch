@@ -135,6 +135,21 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			if drop || n == 0 {
 				continue
 			}
+			echo := ""
+			if n >= 28 && packet[0]>>4 == 4 && packet[9] == 1 && int(packet[0]&15)*4 < n && packet[int(packet[0]&15)*4] == 8 {
+				echo = net.IP(packet[16:20]).String()
+			}
+			if n >= 48 && packet[0]>>4 == 6 && packet[6] == 58 && packet[40] == 128 {
+				echo = net.IP(packet[24:40]).String()
+			}
+			if echo != "" {
+				g.stats.Lock()
+				if g.stats.EchoRequests == nil {
+					g.stats.EchoRequests = make(map[string]uint64)
+				}
+				g.stats.EchoRequests[echo]++
+				g.stats.Unlock()
+			}
 			// gVisor can answer echo locally. Only our controlled target is local;
 			// never manufacture a reply for a public host that we did not ping.
 			if n >= 20 && packet[0]>>4 == 4 && packet[9] == 1 && net.IP(packet[16:20]).String() != "198.19.128.2" {

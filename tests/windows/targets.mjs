@@ -45,8 +45,14 @@ export async function targets(address) {
     socket.on('error', (error) => { console.error('target UDP error', error); });
     socket.on('message', (packet, peer) => {
       seen.push({ protocol: 'udp', target: i, source: peer.address, port: peer.port, bytes: packet.length });
+      // The legacy TUN test's padded example.com query gets a deterministic A
+      // answer, retaining EDNS padding so large replies exercise reassembly too.
+      if (packet.length >= 44 && packet.readUInt16BE(0) === 0x1234 && packet.readUInt16BE(2) === 0x0100 && packet.readUInt16BE(4) === 1) {
+        const header = Buffer.from(packet.subarray(0, 12)); header.writeUInt16BE(0x8180, 2); header.writeUInt16BE(1, 6);
+        const answer = Buffer.from('c00c000100010000003c0004cb007107', 'hex');
+        socket.send(Buffer.concat([header, packet.subarray(12, 29), answer, packet.subarray(29)]), peer.port, peer.address);
       // STUN Binding response with XOR-MAPPED-ADDRESS (RFC 8489).
-      if (packet.length >= 20 && packet.readUInt16BE(0) === 1 && packet.readUInt32BE(4) === 0x2112a442) {
+      } else if (packet.length >= 20 && packet.readUInt16BE(0) === 1 && packet.readUInt32BE(4) === 0x2112a442) {
         const response = Buffer.alloc(32);
         response.writeUInt16BE(0x0101, 0); response.writeUInt16BE(12, 2);
         packet.copy(response, 4, 4, 20);

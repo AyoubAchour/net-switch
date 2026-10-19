@@ -68,6 +68,7 @@ type observations struct {
 	Uplink       counters          `json:"uplink"`
 	Destinations map[string]uint64 `json:"destinations"`
 	UDPReplies   map[string]uint64 `json:"udpReplies"`
+	EchoRequests map[string]uint64 `json:"echoRequests"`
 }
 
 type gateway struct {
