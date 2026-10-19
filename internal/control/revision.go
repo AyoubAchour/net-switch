@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/AyoubAchour/net-switch/internal/engine"
+	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 )
 
@@ -92,6 +92,9 @@ func (c *Core) completeIntent(id string) error {
 func (c *Core) applyWithClosures(ctx context.Context, p engine.Policy, intents []closureIntent, gen uint64) error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
+	c.mu.Lock();stale:=gen!=c.generation;c.mu.Unlock();if stale{return nil}
 	before := c.op.Engine.Snapshot().Policy
 	r, err := c.persistRevision(p, intents)
 	if err != nil {

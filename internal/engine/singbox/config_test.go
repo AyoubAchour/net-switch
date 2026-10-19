@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/engine"
+	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/lines"
 )
 

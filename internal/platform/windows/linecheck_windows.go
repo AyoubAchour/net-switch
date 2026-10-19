@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"syscall"
 
-	"github.com/AyoubAchour/net-switch/internal/engine"
+	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/linecheck"
 	"golang.org/x/sys/windows"
 )

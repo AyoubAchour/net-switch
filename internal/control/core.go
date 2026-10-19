@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/engine"
+	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/linehealth"
 	"github.com/AyoubAchour/net-switch/internal/lines"
@@ -533,6 +533,8 @@ func (c *Core) ApplyPolicy(ctx context.Context) error {
 func (c *Core) applyPolicy(ctx context.Context, auto bool) error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
 	c.mu.Lock()
 	p := c.policyLocked()
 	gen := c.generation

@@ -1,95 +1,277 @@
-// Package engine is the control service's engine boundary. Milestone two can
-// implement it over IPC without giving the controller access to engine internals.
+// Package engine wires the platform-independent data path. OS resources enter
+// only through injected interfaces; this package never discovers or opens them.
 package engine
 
 import (
 	"context"
-	"time"
+	"errors"
+	"fmt"
+	"runtime/debug"
+	"sync"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/lines"
+	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
+	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
+	ntcp "github.com/AyoubAchour/net-switch/internal/engine/tcp"
+	"github.com/AyoubAchour/net-switch/internal/engine/udp"
+	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
+	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-type Policy struct {
-	Lines    []lines.Line      `json:"lines"`
-	AppLines apps.Pins         `json:"appLines"`
-	Combine  bool              `json:"combine"`
-	Shares   lines.Shares      `json:"shares"`
-	Blocked  []string          `json:"blocked"`
-	Lanes    map[string]string `json:"lanes"`
-	IPv6     bool              `json:"ipv6"`
+type Dependencies struct {
+	OpenTun    func(context.Context) (platform.TunDevice, error)
+	Routes     platform.RouteManager
+	Dialer     platform.LineDialer
+	Owners     platform.OwnerLookup
+	Identities platform.UDPIdentity
+}
+type Engine struct {
+	mu        sync.Mutex
+	root      context.Context
+	deps      Dependencies
+	Table     *flows.Table
+	limits    flows.Limits
+	cancel    context.CancelFunc
+	tun       platform.TunDevice
+	stack     *gv.Stack
+	link      *ns.Link
+	tcp       *ntcp.Forwarder
+	udp       *udp.NAT
+	pumps     sync.WaitGroup
+	lastError error
+	lines     []platform.Line
 }
 
-type Snapshot struct {
-	Status          string
-	Error           *string
-	ProxyPort       *int
-	StartedAt       time.Time
-	StartedWith     *Policy
-	Policy          Policy
-	PID             int
-	Instance        string
-	AppliedRevision uint64
-	AppliedHash     string
+func New(ctx context.Context, d Dependencies, l flows.Limits, state flows.StateStore) *Engine {
+	return &Engine{root: ctx, deps: d, limits: l, Table: flows.New(l, state)}
 }
 
-type Revision struct {
-	Number uint64 `json:"n"`
-	Hash   string `json:"sha256"`
-	Policy Policy `json:"policy"`
+func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stack != nil {
+		return e.applyLocked(ctx, r)
+	}
+	if e.deps.OpenTun == nil || e.deps.Routes == nil || e.deps.Owners == nil || e.deps.Dialer == nil {
+		return policy.Applied{}, platform.ErrNotYet
+	}
+	if _, err := policy.Compile(r); err != nil {
+		return policy.Applied{}, err
+	}
+	debug.SetMemoryLimit(512 << 20)
+	tun, err := e.deps.OpenTun(ctx)
+	if err != nil {
+		return policy.Applied{}, err
+	}
+	e.tun = tun
+	rollback := func(err error) (policy.Applied, error) {
+		cleanup := e.stopLocked(context.WithoutCancel(ctx))
+		return policy.Applied{}, errors.Join(err, cleanup)
+	}
+	if tun.MTU() != ns.MTU {
+		return rollback(fmt.Errorf("TUN MTU must be %d", ns.MTU))
+	}
+	if err := e.deps.Routes.Prepare(ctx, r.Config.Lines); err != nil {
+		return rollback(err)
+	}
+	a, err := e.Table.Apply(r)
+	if err != nil {
+		return rollback(err)
+	}
+	e.lines = cloneLines(r.Config.Lines)
+	link := ns.NewLink()
+	s, err := ns.New(link, ns.DefaultOptions())
+	if err != nil {
+		return rollback(err)
+	}
+	e.link = link
+	e.stack = s
+	// A disconnected controller does not own the forwarding lifetime. The
+	// service context and protocol lease do; reattach keeps these flows alive.
+	run, cancel := context.WithCancel(e.root)
+	e.cancel = cancel
+	e.tcp = ntcp.New(run, s, e.limits.Handshakes, e.Table, e.deps.Owners, e.deps.Dialer, link)
+	e.udp = udp.New(run, s, e.Table, e.deps.Owners, e.deps.Identities, e.deps.Dialer, link, tun.MTU())
+	nat := e.udp
+	link.SetObserver(func(p *gv.PacketBuffer) {
+		first, ok := p.Data().PullUp(20)
+		if !ok {
+			return
+		}
+		if (first[0]>>4 == 4 && first[9] != 1) || (first[0]>>4 == 6 && first[6] != 58) {
+			return
+		}
+		b := p.Data().AsRange().ToSlice()
+		nat.ObserveICMP(b)
+	})
+	e.pumps.Go(func() {
+		b := make([]byte, ns.MTU)
+		for {
+			n, err := tun.ReadPacket(run, b)
+			if err != nil {
+				if run.Err() == nil {
+					e.fail(link, err)
+				}
+				return
+			}
+			if n <= 0 || n > len(b) {
+				continue
+			}
+			proto := header.IPv4ProtocolNumber
+			if b[0]>>4 == 6 {
+				proto = header.IPv6ProtocolNumber
+			} else if b[0]>>4 != 4 {
+				continue
+			}
+			p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), b[:n]...))})
+			link.InjectInbound(proto, p)
+			p.DecRef()
+		}
+	})
+	e.pumps.Go(func() {
+		for {
+			b := link.Read(run)
+			if b == nil {
+				return
+			}
+			if err := tun.WritePacket(run, b); err != nil {
+				if run.Err() == nil {
+					e.fail(link, err)
+				}
+				return
+			}
+		}
+	})
+	if err := e.deps.Routes.Capture(ctx); err != nil {
+		return rollback(err)
+	}
+	return a, nil
 }
-type Acknowledgement struct {
-	Number    uint64    `json:"n"`
-	Hash      string    `json:"sha256"`
-	Instance  string    `json:"engineInstanceId"`
-	AppliedAt time.Time `json:"appliedAt"`
+func (e *Engine) fail(link *ns.Link, err error) {
+	go func() {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if e.link != link {
+			return
+		}
+		e.lastError = err
+		cleanup := e.stopLocked(context.Background())
+		e.lastError = errors.Join(err, cleanup)
+		e.Table.Emit(flowapi.Event{Type: "fatal", Message: e.lastError.Error()})
+	}()
 }
-type CloseRequest struct {
-	OperationID   string    `json:"opId"`
-	Line          string    `json:"line"`
-	Instance      string    `json:"engineInstanceId"`
-	StartedBefore time.Time `json:"startedBefore"`
-	// The temporary adapter also pins IDs because Clash has no revision-based
-	// flow identity. The real engine can enforce the apply-point cutoff itself.
-	ConnectionIDs []string `json:"connectionIds"`
+func (e *Engine) Apply(ctx context.Context, r policy.Revision) (policy.Applied, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stack == nil {
+		return policy.Applied{}, flows.ErrStopped
+	}
+	return e.applyLocked(ctx, r)
 }
-type CloseResult struct{ Closed, Failed, Gone int }
+func (e *Engine) applyLocked(ctx context.Context, r policy.Revision) (policy.Applied, error) {
+	if old := e.Table.Applied(); old != nil && r.N <= old.N {
+		return e.Table.Apply(r)
+	}
+	if _, err := policy.Compile(r); err != nil {
+		return policy.Applied{}, err
+	}
+	// The platform contract makes Prepare transactional and keeps old flow
+	// routes usable. Only explicit selectors close existing connections.
+	if err := e.deps.Routes.Prepare(ctx, r.Config.Lines); err != nil {
+		return policy.Applied{}, err
+	}
+	a, err := e.Table.Apply(r)
+	if err != nil {
+		rollback := e.deps.Routes.Prepare(context.WithoutCancel(ctx), e.lines)
+		if rollback != nil {
+			e.stopLocked(context.WithoutCancel(ctx))
+		}
+		return policy.Applied{}, errors.Join(err, rollback)
+	}
+	e.lines = cloneLines(r.Config.Lines)
+	if err == nil && !r.Config.IPv6 {
+		e.Table.CloseFlows(flows.Selector{IPv6: true}, a.Point)
+	}
+	return a, err
+}
+func (e *Engine) Stop(ctx context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.stopLocked(ctx)
+}
+func (e *Engine) stopLocked(ctx context.Context) error {
+	if e.cancel != nil {
+		e.cancel()
+	}
+	e.Table.Unload()
+	e.Table.CloseAll()
+	if e.tcp != nil {
+		e.tcp.Stop()
+	}
+	if e.stack != nil {
+		e.stack.Close()
+	}
+	if e.udp != nil {
+		e.udp.Close()
+	}
+	if e.tun != nil {
+		e.tun.Close()
+	}
+	e.pumps.Wait()
+	if e.stack != nil {
+		e.stack.Wait()
+	}
+	if e.tcp != nil {
+		e.tcp.Wait()
+	}
+	if e.link != nil {
+		e.link.Close()
+	}
+	e.stack = nil
+	e.tcp = nil
+	e.udp = nil
+	e.link = nil
+	e.tun = nil
+	e.cancel = nil
+	e.lines = nil
+	if e.deps.Routes != nil {
+		return e.deps.Routes.Cleanup(ctx)
+	}
+	return nil
+}
 
-type Outcome string
-
-const (
-	OK          Outcome = "ok"
-	LineFailed  Outcome = "lineFailed"
-	Unavailable Outcome = "engineUnavailable"
-)
-
-type ProbeRequest struct {
-	OperationID string
-	Line        string
-	Index       uint32
-	Target      string
-	Quick       bool
+func cloneLines(lines []platform.Line) []platform.Line {
+	out := append([]platform.Line(nil), lines...)
+	for i := range out {
+		out[i].Addresses = append(out[i].Addresses[:0:0], out[i].Addresses...)
+	}
+	return out
 }
-type ProbeResult struct {
-	Outcome Outcome  `json:"outcome"`
-	Delay   *float64 `json:"delay"`
-}
-type Connection struct {
-	apps.Connection
-	Host string
-}
-
-// Apply acknowledges only after the adapter has applied all parts of a policy.
-// The closure cutoff is captured before Apply, never from a subsequent poll.
-type Engine interface {
-	Snapshot() Snapshot
-	// Fail reports a control-side prerequisite failure without starting the engine.
-	Fail(error)
-	Start(context.Context, Policy) error
-	Stop(context.Context) error
-	Apply(context.Context, Revision) (Acknowledgement, error)
-	CloseFlows(context.Context, CloseRequest) (CloseResult, error)
-	Connections(context.Context) ([]Connection, error)
-	CloseConnection(context.Context, string) error
-	Probe(context.Context, ProbeRequest) ProbeResult
+func (e *Engine) Stats() any {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	s := map[string]any{"flows": e.Table.Stats()}
+	if e.lastError != nil {
+		s["fatal"] = e.lastError.Error()
+	}
+	if e.link != nil {
+		s["tunDropped"] = e.link.Dropped.Load()
+	}
+	if e.tcp != nil {
+		s["tcpRejected"] = e.tcp.Rejected.Load()
+		s["tcpInvalid"] = e.tcp.Invalid.Load()
+		s["tcpDialFailed"] = e.tcp.DialFailed.Load()
+	}
+	if e.udp != nil {
+		s["udpRejected"] = e.udp.Rejected.Load()
+		s["udpInvalid"] = e.udp.Invalid.Load()
+		s["udpDropped"] = e.udp.Dropped.Load()
+		s["udpIdentityErrors"] = e.udp.IdentityErrors.Load()
+		s["udpOversize"] = e.udp.Oversize.Load()
+		s["udpReadErrors"] = e.udp.ReadErrors.Load()
+	}
+	return s
 }

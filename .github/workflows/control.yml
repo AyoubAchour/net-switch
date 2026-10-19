@@ -27,7 +27,7 @@ jobs:
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
-      GOFLAGS: -mod=readonly -p=2
+      GOFLAGS: -mod=vendor -p=2
     defaults:
       run:
         shell: pwsh

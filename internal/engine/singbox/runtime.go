@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/engine"
+	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/lines"
 	"github.com/AyoubAchour/net-switch/internal/platform"
@@ -379,6 +379,8 @@ func (a *Adapter) Probe(ctx context.Context, r engine.ProbeRequest) engine.Probe
 func (a *Adapter) Apply(ctx context.Context, r engine.Revision) (engine.Acknowledgement, error) {
 	a.apply.Lock()
 	defer a.apply.Unlock()
+	encoded,err:=js.Marshal(r.Policy);if err!=nil{return engine.Acknowledgement{},err};digest:=sha256.Sum256(encoded)
+	if r.Hash!=hex.EncodeToString(digest[:]){return engine.Acknowledgement{},fmt.Errorf("policy revision payload does not match its hash")}
 	before := a.Snapshot()
 	ack := func() engine.Acknowledgement {
 		return engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: before.Instance, AppliedAt: a.o.Now()}

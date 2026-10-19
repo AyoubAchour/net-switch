@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine"
+	"github.com/AyoubAchour/net-switch/internal/control/engine"
 )
 
 type transport func(*http.Request) (*http.Response, error)
