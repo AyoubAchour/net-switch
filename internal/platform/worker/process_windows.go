@@ -250,18 +250,25 @@ func mediumIntegrity(token windows.Token) error {
 // a foreign-domain privileged group is just as powerful as the local domain's,
 // while an unrelated SID with the same final RID must remain untouched.
 func elevatedGroup(sid *windows.SID) bool {
-	if sid == nil || sid.IdentifierAuthority() != windows.SECURITY_NT_AUTHORITY {
+	if sid == nil {
 		return false
 	}
-	if sid.SubAuthorityCount() == 2 && sid.SubAuthority(0) == 32 {
-		switch sid.SubAuthority(1) {
-		case 544, 547, 548, 549, 550, 551, 554, 556:
+	// The x/sys pointer-returning SID helpers round-trip Go-backed SID
+	// addresses through uintptr, which fails checkptr. Canonical SID text
+	// copies the value instead and keeps the exact authority/count checks.
+	parts := strings.Split(sid.String(), "-")
+	if len(parts) < 5 || parts[0] != "S" || parts[1] != "1" || parts[2] != "5" {
+		return false
+	}
+	if len(parts) == 5 && parts[3] == "32" {
+		switch parts[4] {
+		case "544", "547", "548", "549", "550", "551", "554", "556":
 			return true
 		}
 	}
-	if sid.SubAuthorityCount() == 5 && sid.SubAuthority(0) == 21 {
-		switch sid.SubAuthority(4) {
-		case 512, 516, 517, 518, 519, 520, 553:
+	if len(parts) == 8 && parts[3] == "21" {
+		switch parts[7] {
+		case "512", "516", "517", "518", "519", "520", "553":
 			return true
 		}
 	}
