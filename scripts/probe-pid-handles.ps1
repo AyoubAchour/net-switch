@@ -31,7 +31,7 @@ public static class PidHandles {
         return "NT=0x" + status.ToString("x8") + " Win32=" + RtlNtStatusToDosError(status);
     }
     static string RemoveWithNode(string node) {
-        var info = new ProcessStartInfo(node, "-e \"require('fs').promises.rm(process.env.NETSWITCH_PID_PROBE,{force:true}).then(()=>console.log('ok'),e=>console.log(e.code))\"");
+        var info = new ProcessStartInfo(node, "-e \"require('fs').promises.rm(process.env.NETSWITCH_PID_PROBE,{force:true}).then(()=>console.log('ok'),e=>console.log(e.code+' '+e.syscall))\"");
         info.UseShellExecute = false;
         info.CreateNoWindow = true;
         info.RedirectStandardOutput = true;
@@ -52,6 +52,12 @@ public static class PidHandles {
             Console.WriteLine("PID-NATIVE second POSIX deletion " + Delete(second, true));
             Console.WriteLine("PID-NATIVE Node while POSIX handles remain " + RemoveWithNode(node));
         }
+        File.WriteAllText(path, "1234");
+        using (var held = Open(path)) {
+            Console.WriteLine("PID-NATIVE single delete handle " + Delete(held, true));
+            Console.WriteLine("PID-NATIVE Node before single delete handle closes " + RemoveWithNode(node));
+        }
+        Console.WriteLine("PID-NATIVE Node after single delete handle closes " + RemoveWithNode(node));
         File.WriteAllText(path, "1234");
         using (var held = Open(path)) {
             Console.WriteLine("PID-NATIVE legacy delete " + Delete(held, false));
