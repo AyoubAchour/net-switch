@@ -109,7 +109,7 @@ async function stoppedSnapshot() {
 }
 
 async function recordOrphanPnP(name, state, pnp) {
-  await observe(name, pnp.length ? 'baseline-defect' : 'parity', async () => {
+  await observe(name, 'baseline-defect', async () => {
     assert(pnp.every((device) => !device.present && appDeviceIDs.has(device.instanceId)), `Unrecognized PnP leftover: ${JSON.stringify(pnp)}`);
     if (pnp.length) throw new BaselineDefect('Engine exit left an owned, non-present Wintun device; Get-NetAdapter could not see it', { state, pnp });
     return { state, pnp };
@@ -294,7 +294,7 @@ try {
     // pass; a failure stops immediately and is never retried into a pass.
     for (let round = 1; round <= 4; round++) {
       const before = await harness.control('diagnostics');
-      samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000, maxMs: 100, diagnostics: harness.diagnosticClient });
+      samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000, warmup: true, maxMs: 100, diagnostics: harness.diagnosticClient });
       const after = await harness.control('diagnostics');
       const failed = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
       const stats = failed && await harness.control('stats');
@@ -470,9 +470,11 @@ try {
   if (!reuseReady) report.results.push({ name: 'freeze gate', label: 'baseline-defect', status: 'blocked', reason: 'Native or fixed-tuple TestISP reuse prerequisite failed; no engine conclusion is possible.' });
   for (const gap of reuseReady ? [0, 10, 100, 500] : []) {
     await observe(`freeze gate: ${gap} ms port reuse`, 'baseline-defect', async () => {
-      const samples = await client('reuse', { target: responder.virtual, count: gap ? 10 : 1000, gap });
+      const samples = await client('reuse', { target: responder.virtual, count: gap ? 10 : 1000, warmup: true, gap });
       const failure = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
-      if (failure?.outcome === 'timeout' && samples[0].outcome === 'closed') {
+      // The warm-up already proved a fresh connection on this tuple. Attempt
+      // one is now a reuse too, so its stall is the same baseline defect.
+      if (failure?.outcome === 'timeout') {
         let recovery;
         if (gap === 0) {
           const started = performance.now();
@@ -492,6 +494,8 @@ try {
     assert.equal(samples[0]?.outcome, 'closed', JSON.stringify(samples)); return samples;
   });
   if (reuseReady && large) await observe('freeze gate: reuse after 100 MB transfer', 'baseline-defect', async () => {
+    // The verified transfer is already the warm-up on this exact tuple. Keep
+    // the first timed attempt immediately after it to test large-transfer reuse.
     const samples = await client('reuse', { target: responder.virtual, count: 1000, reusePort: large[0].port });
     if (samples.some((sample) => sample.outcome === 'timeout')) throw new BaselineDefect('Port stalls after a verified 100 MB transfer', samples);
     assert(samples.length === 1000 && samples.every((sample) => sample.outcome === 'closed' && sample.ms < 100), JSON.stringify(samples));
@@ -676,7 +680,7 @@ try {
   let finalPnP = [], finalPnPError;
   try { if (server) finalPnP = await pnpDevices(); } catch (error) { finalPnPError = error; }
   const knownOrphans = finalPnP.length > 0 && finalPnP.every((device) => !device.present && appDeviceIDs.has(device.instanceId));
-  await observe('final NetSwitch adapter, route and firewall cleanup', knownOrphans ? 'baseline-defect' : server ? 'parity' : 'harness-baseline', async () => {
+  await observe('final NetSwitch adapter, route and firewall cleanup', server ? 'baseline-defect' : 'harness-baseline', async () => {
     if (finalPnPError) throw finalPnPError;
     if (!knownOrphans) return clean();
     const state = await network('state');

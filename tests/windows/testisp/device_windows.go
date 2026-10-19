@@ -30,7 +30,7 @@ type observedDevice struct {
 func recoverDevice() error {
 	err := wintun.RecoverAfterCrash(deviceConfig)
 	if err == nil {
-		log.Print("TestISP crash cleanup complete")
+		log.Print("TestISP recovery check complete")
 	}
 	return err
 }

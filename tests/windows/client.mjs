@@ -128,8 +128,15 @@ async function freePort() {
   });
 }
 
-async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, maxMs = Infinity, diagnostics, continueAfterSlow = false }) {
+async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, maxMs = Infinity, diagnostics, continueAfterSlow = false, warmup = false }) {
   const port = reusePort ?? await freePort();
+  if (warmup) {
+    assert(!target.httpPorts, 'Fixed-tuple warm-up requires one responder port');
+    const [sample] = await reuse({ target, count: 1, reusePort: port, diagnostics });
+    console.log(`REUSE WARMUP ${JSON.stringify(sample)}`);
+    assert.equal(sample.outcome, 'closed', `Warm-up connection failed: ${JSON.stringify(sample)}`);
+    if (gap) await delay(gap);
+  }
   const samples = [];
   if (target.httpPorts) assert.equal(target.httpPorts.length, count, 'Each native reuse needs a distinct responder port');
   for (let i = 0; i < count; i++) {

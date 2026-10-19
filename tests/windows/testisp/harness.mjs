@@ -87,6 +87,7 @@ export async function startHarness(directory) {
   const close = async ({ crash = false } = {}) => {
     const errors = [];
     const evidence = { crash };
+    let forced = false;
     try { await network('unblock-direct'); } catch (error) { errors.push(error); }
     if (crash) {
       try {
@@ -98,10 +99,21 @@ export async function startHarness(directory) {
       try { await control('stop', {}); } catch (error) { errors.push(error); }
     }
     if (processHandle.exitCode === null) {
-      const timer = setTimeout(() => processHandle.kill(), 7000);
+      const timer = setTimeout(() => { forced = true; processHandle.kill(); }, 7000);
       await exited; clearTimeout(timer);
     }
     log.end();
+    if (!crash) {
+      try {
+        // Get-PnpDevice includes non-present devices. Capture this before the
+        // recovery process can remove a phantom left by an ordinary stop.
+        evidence.normalExit = { code: processHandle.exitCode, signal: processHandle.signalCode, forced };
+        evidence.afterNormalExit = await network('pnp');
+        assert(!forced && processHandle.exitCode === 0, `TestISP did not exit normally: ${JSON.stringify(evidence.normalExit)}`);
+        assert.equal(evidence.afterNormalExit.length, 0, `TestISP PnP devices remain after normal exit: ${JSON.stringify(evidence.afterNormalExit)}`);
+        console.log('TestISP normal stop left no present or non-present PnP devices (before recovery)');
+      } catch (error) { errors.push(error); }
+    }
     if (crash) {
       try {
         evidence.orphan = await until(async () => {
@@ -116,8 +128,11 @@ export async function startHarness(directory) {
       evidence.recovery = await run(exe, ['recover']);
       evidence.after = await network('pnp');
       assert.equal(evidence.after.length, 0, 'TestISP PnP devices remain after recovery');
+      if (evidence.orphan) console.log('TestISP crash recovery removed the observed phantom device');
     } catch (error) { errors.push(error); }
     try { await until(() => network('clean').then(() => true), 'TestISP cleanup', 15_000); } catch (error) { errors.push(error); }
+    evidence.errors = errors.map((error) => error.stack);
+    await writeFile(path.join(dir, 'cleanup.json'), JSON.stringify(evidence, null, 2));
     if (errors.length) throw new AggregateError(errors, 'TestISP cleanup failed');
     return evidence;
   };
