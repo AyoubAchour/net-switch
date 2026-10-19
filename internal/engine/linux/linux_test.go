@@ -258,12 +258,14 @@ func TestUDPErrorCallbackUsesTheRealICMPQuote(t *testing.T) {
 func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 	const count = 2048
 	keys := make(map[netip.AddrPort]bool, count)
+	var sockets []*net.UDPConn
 	for range count {
 		c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer c.Close()
+		sockets = append(sockets, c)
 		keys[c.LocalAddr().(*net.UDPAddr).AddrPort()] = true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -303,6 +305,45 @@ func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 	}
 	workers.Wait()
 	t.Logf("attributed %d cold socket inodes with 8 concurrent lookups", count)
+	descriptor := func(c *net.UDPConn) int {
+		raw, err := c.SyscallConn()
+		if err != nil {
+			t.Fatal(err)
+		}
+		fd := -1
+		if err := raw.Control(func(value uintptr) { fd = int(value) }); err != nil {
+			t.Fatal(err)
+		}
+		return fd
+	}
+	old := sockets[count-256]
+	oldFD := descriptor(old)
+	oldKey := old.LocalAddr().(*net.UDPAddr).AddrPort()
+	var oldCookie string
+	for _, row := range rows {
+		if row.local == oldKey {
+			oldCookie = row.generation()
+		}
+	}
+	if oldCookie == "" {
+		t.Fatal("old live socket wasn't in the diagnostic dump")
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reused, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reused.Close()
+	if fd := descriptor(reused); fd != oldFD {
+		t.Fatalf("fixture must reuse the descriptor: old %d new %d", oldFD, fd)
+	}
+	source := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(reused.LocalAddr().(*net.UDPAddr).Port))
+	newOwner, err := o.UDPFor(ctx, platform.Tuple{Source: source, Destination: netip.MustParseAddrPort("192.0.2.1:443")})
+	if err != nil || newOwner.PID != uint32(os.Getpid()) || newOwner.Generation == oldCookie {
+		t.Fatalf("reused descriptor inherited stale identity or wasn't found: %+v %v", newOwner, err)
+	}
 }
 
 func (*byteCountingTun) Write(p [][]byte, offset int) (int, error) {

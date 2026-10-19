@@ -82,12 +82,17 @@ func (o *Owners) publish(found map[uint32]holder) {
 	}
 	for inode, h := range found {
 		old := o.inodes[inode]
+		changed := false
 		if old.first.pid == 0 {
 			old.first = h
+			changed = true
 		} else if old.first != h && !slices.Contains(old.more, h) && len(old.more) < 7 {
 			old.more = append(old.more, h)
+			changed = true
 		}
-		o.inodes[inode] = old
+		if changed {
+			o.inodes[inode] = old
+		}
 		// Wake only lookups for this inode, while the rest of the descriptor
 		// batch is still being indexed. A 512-entry batch must not hold every
 		// new connection's result until its last readlink completes.

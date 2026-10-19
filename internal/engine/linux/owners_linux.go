@@ -460,13 +460,42 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	if err := indexed.visit(accept); err != nil {
 		return platform.Owner{}, err
 	}
+	var notice *inodeWaiter
+	if result.AppID == "" {
+		notice = o.subscribe(r.inode)
+		defer func() { o.unsubscribe(r.inode, notice) }()
+	}
+	checkHints := func() error {
+		if result.AppID != "" || expired() {
+			return nil
+		}
+		hints := o.indexed(r.inode)
+		hinted += hints.count()
+		if err := hints.visit(accept); err != nil {
+			return err
+		}
+		if result.AppID == "" && notice != nil {
+			select {
+			case <-notice.ready:
+				o.unsubscribe(r.inode, notice)
+				notice = o.subscribe(r.inode)
+				return o.indexed(r.inode).visit(accept)
+			default:
+			}
+		}
+		return nil
+	}
 
 	// /proc's fd directory is seekable: its position is fd+2 (fs/proc/fd.c).
 	// Concurrent cold lookups share small rotating windows and index sockets
 	// seen along the way. The index is only a hint; accept rechecks the live fd
 	// and PID start time on every use. Regular files never enter the index.
 	var heavy []uint32
+	var busyWait <-chan struct{}
 	scan := func(pid uint32, complete bool) error {
+		if err := checkHints(); err != nil {
+			return err
+		}
 		if seen[pid] || expired() {
 			return nil
 		}
@@ -489,75 +518,39 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		// publishes instead of issuing the same hundreds of readlinks again.
 		gate := make(chan struct{})
 		remember := make(map[uint32]holder, 32)
-		for {
-			if expired() {
-				return nil
-			}
-			// A previous scan may have completed while this lookup read proc
-			// metadata. Recheck before becoming a scanner for an already known
-			// inode. Keep checking other candidate holders for ambiguity.
-			if result.AppID == "" {
-				hints := o.indexed(r.inode)
-				hinted += hints.count()
-				if err := hints.visit(accept); err != nil {
-					return err
+		if expired() {
+			return nil
+		}
+		if err := checkHints(); err != nil {
+			return err
+		}
+		if hasHolder(pid) {
+			return nil
+		}
+		o.mu.Lock()
+		if len(o.windows) > 4096 {
+			for old, state := range o.windows {
+				if old != pid && state.scanning == nil {
+					delete(o.windows, old)
 				}
-				if hasHolder(pid) {
-					return nil
+				if len(o.windows) <= 4096 {
+					break
 				}
-			}
-			o.mu.Lock()
-			if len(o.windows) > 4096 {
-				for old, state := range o.windows {
-					if old != pid && state.scanning == nil {
-						delete(o.windows, old)
-					}
-					if len(o.windows) <= 4096 {
-						break
-					}
-				}
-			}
-			window := o.windows[pid]
-			if window.scanning == nil {
-				window.scanning = gate
-				o.windows[pid] = window
-				o.mu.Unlock()
-				break
-			}
-			wait := window.scanning
-			o.mu.Unlock()
-			notice := o.subscribe(r.inode)
-			hints := o.indexed(r.inode)
-			hinted += hints.count()
-			if err := hints.visit(accept); err != nil {
-				o.unsubscribe(r.inode, notice)
-				return err
-			}
-			if hasHolder(pid) {
-				o.unsubscribe(r.inode, notice)
-				return nil
-			}
-			waiting := time.Now()
-			waitPID = pid
-			select {
-			case <-ctx.Done():
-				scanWait += time.Since(waiting)
-				o.unsubscribe(r.inode, notice)
-				return nil
-			case <-notice.ready:
-			case <-wait:
-			}
-			scanWait += time.Since(waiting)
-			o.unsubscribe(r.inode, notice)
-			hints = o.indexed(r.inode)
-			hinted += hints.count()
-			if err := hints.visit(accept); err != nil {
-				return err
-			}
-			if hasHolder(pid) {
-				return nil
 			}
 		}
+		current := o.windows[pid]
+		if current.scanning != nil {
+			// A busy candidate must not prevent searching another PID. Its
+			// scanner will notify this lookup if it finds the wanted inode.
+			busyWait = current.scanning
+			waitPID = pid
+			heavy = append(heavy, pid)
+			o.mu.Unlock()
+			return nil
+		}
+		current.scanning = gate
+		o.windows[pid] = current
+		o.mu.Unlock()
 		defer func() {
 			o.mu.Lock()
 			window := o.windows[pid]
@@ -604,6 +597,11 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					break
 				}
 				scannedFDs++
+				if scannedFDs%32 == 0 && result.AppID == "" {
+					if err := checkHints(); err != nil {
+						return err
+					}
+				}
 				if number, err := strconv.ParseInt(fd, 10, 64); err == nil && advancing {
 					maxFD = max(maxFD, number)
 				}
@@ -641,6 +639,27 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				o.windows[pid] = current
 			}
 		}()
+		recentRange := func() error {
+			// A burst of refused connections closes and reuses descriptors
+			// below the high-water mark. Inspect that recent range before a
+			// full fallback walk; a lone lastFD hint misses concurrent holes.
+			end := max(window.high, window.lastFD)
+			if _, err := f.Seek(max(0, end-1023)+2, 0); err == nil {
+				names, _ := f.Readdirnames(1024)
+				if err := visit(names); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if complete && canIndex && window.lastFD >= 128 {
+			if err := recentRange(); err != nil {
+				return err
+			}
+			if hasHolder(pid) {
+				return nil
+			}
+		}
 		if !complete {
 			// Small descriptor sets are commonly reused by concurrent short
 			// connections. The last descriptor alone misses its neighbours.
@@ -681,6 +700,14 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				}
 				advancing = false
 				if len(found) > 0 && found[len(found)-1].pid == pid {
+					return nil
+				}
+			}
+			if canIndex && window.lastFD >= 128 && len(recent) > 0 && recent[0] == pid {
+				if err := recentRange(); err != nil {
+					return err
+				}
+				if hasHolder(pid) {
 					return nil
 				}
 			}
@@ -781,6 +808,21 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return platform.Owner{}, err
 		}
 	}
+	if result.AppID == "" && busyWait != nil && !expired() {
+		waiting := time.Now()
+		timer := time.NewTimer(250 * time.Microsecond)
+		select {
+		case <-notice.ready:
+		case <-busyWait:
+		case <-timer.C:
+		case <-ctx.Done():
+		}
+		timer.Stop()
+		scanWait += time.Since(waiting)
+		if err := checkHints(); err != nil {
+			return platform.Owner{}, err
+		}
+	}
 	if result.AppID != "" {
 		return finish()
 	}
@@ -806,6 +848,18 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	entries, _ := os.ReadDir("/proc")
 	var sameUID, other []uint32
 	for i := len(entries) - 1; i >= 0 && !expired(); i-- {
+		if notice != nil && result.AppID == "" {
+			select {
+			case <-notice.ready:
+				if err := checkHints(); err != nil {
+					return platform.Owner{}, err
+				}
+				if result.AppID != "" {
+					return finish()
+				}
+			default:
+			}
+		}
 		e := entries[i]
 		pid, err := strconv.ParseUint(e.Name(), 10, 32)
 		if err != nil || seen[uint32(pid)] {
@@ -861,6 +915,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		return finish()
 	}
 	for len(heavy) > 0 && !expired() {
+		before := scannedFDs
 		pending := heavy
 		heavy = nil
 		visited := map[uint32]bool{}
@@ -871,6 +926,21 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			visited[pid] = true
 			delete(seen, pid)
 			if err := scan(pid, true); err != nil {
+				return platform.Owner{}, err
+			}
+			if result.AppID != "" {
+				return finish()
+			}
+		}
+		if scannedFDs == before && busyWait != nil && !expired() {
+			waiting := time.Now()
+			select {
+			case <-notice.ready:
+			case <-busyWait:
+			case <-ctx.Done():
+			}
+			scanWait += time.Since(waiting)
+			if err := checkHints(); err != nil {
 				return platform.Owner{}, err
 			}
 			if result.AppID != "" {
