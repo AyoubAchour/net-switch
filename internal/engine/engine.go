@@ -291,6 +291,9 @@ func (e *Engine) Stats() any {
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	s["heapBytes"] = memory.HeapAlloc
+	s["stackBytes"] = memory.StackInuse
+	s["heapGoalBytes"] = memory.NextGC
+	s["gcCycles"] = uint64(memory.NumGC)
 	if e.lastError != nil {
 		s["fatal"] = e.lastError.Error()
 	}

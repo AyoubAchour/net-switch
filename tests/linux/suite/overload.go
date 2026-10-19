@@ -404,6 +404,11 @@ func tcpFlowsTotalCase(e *Env) {
 	e.T.Check(len(accepted) == established && RecordLines(accepted)["c"] == len(accepted),
 		"the servers accepted exactly the %d connections the apps hold, all over line c (%d accepted, lines %s)", established, len(accepted), Describe(RecordLines(accepted)))
 	e.T.Check(established >= tcpFlowsTotal*95/100, "together the apps still got at least 95%% of the %d flows allowed in total (%d)", tcpFlowsTotal, established)
+	if v1, ok := e.Eng.(engine.V1); ok {
+		st, err := v1.Session().Stats(e.Ctx())
+		e.T.Require(err == nil, "stats while all TCP flows are held (%v)", err)
+		e.T.Logf("held TCP flows: %d; runtime memory and queues: %v", established, st.Counters)
+	}
 	release.Open(e)
 	refused, stillOpen := 0, 0
 	var parts []string
