@@ -104,7 +104,13 @@ func (p *peer) prepareFinalACK(simultaneous bool) []byte {
 	if simultaneous {
 		want = tcp.StateClosing
 	}
-	if state != want && !(state == tcp.StateClose && p.table.Stats().TimeWaitSkipped > skipped) {
+	if p.table.Stats().TimeWaitSkipped > skipped {
+		want = tcp.StateError
+		if h := readCloseReset(p.t, p); h.SequenceNumber() != p.ack {
+			p.t.Fatal("overflow reset has the wrong sequence")
+		}
+	}
+	if state != want {
 		p.t.Fatalf("close state=%s want=%s", state, want)
 	}
 	return p.packet(p.seq, p.ack, header.TCPFlagAck, nil)

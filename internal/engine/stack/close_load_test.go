@@ -28,6 +28,7 @@ func TestCloseAtCapUnderLoad(t *testing.T) {
 	counts := make(map[string]int)
 	start := time.Now()
 	n := 0
+	var expectedResets uint64
 	for time.Since(start) < 3*time.Second || n < 700 {
 		p.port = uint16(20000 + n%40000)
 		p.open(1000 + uint32(n))
@@ -41,11 +42,16 @@ func TestCloseAtCapUnderLoad(t *testing.T) {
 		case "app_fin", "simultaneous":
 			last := p.prepareFinalACK(path == "simultaneous")
 			p.inject(last)
+			if h := readCloseReset(t, p); h.SequenceNumber() != p.ack {
+				t.Fatal("late final ACK reset has the wrong sequence")
+			}
+			expectedResets += 2 // Retained overflow, then the harmless late ACK.
 		case "remote_fin":
 			p.closeActive()
 		case "app_rst":
 			p.inject(p.packet(p.seq, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
 		case "remote_rst", "policy":
+			expectedResets++
 			if path == "remote_rst" {
 				p.current.conn.Abort(errors.New("remote reset"))
 			} else {
@@ -83,9 +89,7 @@ func TestCloseAtCapUnderLoad(t *testing.T) {
 			t.Fatal("false budget reset", p.diagnostics())
 		}
 	}
-	// Exercise admission after the final close too. A timer-driven close is
-	// reclaimed by the next admission, so stopping on idle must not mistake
-	// a deferred reservation for a rejection, or leave that last reuse untested.
+	// Exercise admission after the final close too, including timer removal.
 	p.port++
 	p.open(1000 + uint32(n))
 	p.upload([]byte("load"))
@@ -102,8 +106,11 @@ func TestCloseAtCapUnderLoad(t *testing.T) {
 	p.stack.Close()
 	p.stack.Wait()
 	p.forward.Wait()
+	if got := p.stack.Stats().TCP.ResetsSent.Value(); got != expectedResets {
+		t.Fatalf("close resets=%d want=%d", got, expectedResets)
+	}
 	if got := p.table.Totals().Apps["peer"].Up; got != uint64(n*4) {
 		t.Fatalf("upload accounting=%d want=%d", got, n*4)
 	}
-	t.Logf("%d connections in %s at flow/per-app cap=1; each path=%v; false budget RST=0; payloads hash-checked", n, time.Since(start), counts)
+	t.Logf("%d connections in %s at flow/per-app cap=1; each path=%v; expected close RST=%d; false budget RST=0; payloads hash-checked", n, time.Since(start), counts, expectedResets)
 }

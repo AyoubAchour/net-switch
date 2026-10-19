@@ -92,6 +92,9 @@ func readCloseReset(t testing.TB, p *peer) header.TCP {
 			break
 		}
 		if h.Flags().Contains(header.TCPFlagRst) {
+			if h.DestinationPort() != p.port {
+				t.Fatal("reset belongs to another connection", segmentDescription(h))
+			}
 			return h
 		}
 	}
