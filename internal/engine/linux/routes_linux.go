@@ -116,6 +116,7 @@ func New(ctx context.Context, dir string) (*Platform, error) {
 }
 
 func (p *Platform) Close() error {
+	p.Owners.Close()
 	if p.testClose != nil {
 		p.testClose()
 		p.testClose = nil

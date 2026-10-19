@@ -44,6 +44,7 @@ type fdWindow struct {
 	scanning   chan struct{}
 }
 type Owners struct {
+	queries         diagPool
 	warmed          bool
 	lookupErrors    [4]atomic.Uint64
 	cgroupStats     [3]atomic.Uint64
@@ -111,7 +112,7 @@ func (o *Owners) Warm(ctx context.Context) error {
 				address = netip.IPv6Unspecified()
 			}
 			endpoint := netip.AddrPortFrom(address, 65535)
-			if _, err := diag(ctx, family, protocol, endpoint, endpoint, false); err != nil && !errors.Is(err, unix.ENOENT) {
+			if _, err := o.query(ctx, family, protocol, endpoint, endpoint); err != nil && !errors.Is(err, unix.ENOENT) {
 				return fmt.Errorf("initialize socket diagnostics: %w", err)
 			}
 		}
@@ -130,6 +131,11 @@ func NewOwners() *Owners {
 	return &Owners{cgroups: map[uint64]string{}, recent: map[uint32][]uint32{}, cache: map[uint64]cachedHolders{}, inodes: map[uint32][]holder{}, windows: map[uint32]fdWindow{}, ambiguousPorts: map[uint16]bool{}}
 }
 
+func (o *Owners) Close() { o.queries.close() }
+func (o *Owners) query(ctx context.Context, family, protocol int, local, remote netip.AddrPort) ([]socketRow, error) {
+	return diagQuery(ctx, family, protocol, local, remote, false, &o.queries)
+}
+
 // Work stops short of 10 ms to leave room for returning, timing and policy
 // admission. The caller's earlier cancellation always wins.
 func lookupContext(ctx context.Context) (context.Context, context.CancelFunc) {
@@ -144,9 +150,9 @@ func (o *Owners) TCP(ctx context.Context, t platform.Tuple) (owner platform.Owne
 	}
 	ctx, cancel := lookupContext(ctx)
 	defer cancel()
-	rows, err := diag(ctx, familyOf(t.Source.Addr()), unix.IPPROTO_TCP, t.Source, t.Destination, false)
+	rows, err := o.query(ctx, familyOf(t.Source.Addr()), unix.IPPROTO_TCP, t.Source, t.Destination)
 	if errors.Is(err, unix.ENOENT) && t.Source.Addr().Is4() {
-		rows, err = diag(ctx, unix.AF_INET6, unix.IPPROTO_TCP, t.Source, t.Destination, false)
+		rows, err = o.query(ctx, unix.AF_INET6, unix.IPPROTO_TCP, t.Source, t.Destination)
 	}
 	if errors.Is(err, unix.ENOENT) {
 		rows, err = diagDump(ctx, familyOf(t.Source.Addr()), unix.IPPROTO_TCP, t.Source)
@@ -188,7 +194,7 @@ func (o *Owners) udpOwner(ctx context.Context, tuple platform.Tuple) (owner plat
 	// Exact lookup is useful for the common wildcard socket. A port-filtered
 	// dump also detects SO_REUSEPORT ambiguity instead of accepting the arbitrary
 	// socket that the kernel's inbound hash selected.
-	exact, err := diag(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source, tuple.Destination, false)
+	exact, err := o.query(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source, tuple.Destination)
 	if err != nil && !errors.Is(err, unix.ENOENT) {
 		return platform.Owner{}, fmt.Errorf("UDP exact query: %w", err)
 	}
@@ -237,7 +243,7 @@ func (o *Owners) resolveUDP(ctx context.Context, r socketRow, unknown bool) (own
 }
 
 func processStart(pid uint32) (uint64, error) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	b, err := readKernelFile(fmt.Sprintf("/proc/%d/stat", pid), 4096)
 	if err != nil {
 		return 0, err
 	}
@@ -288,7 +294,7 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 		if len(parts) > 3 {
 			id = "snap:" + parts[2]
 		}
-	} else if b, err := os.ReadFile(root + "environ"); err == nil {
+	} else if b, err := readKernelFile(root+"environ", 8<<20); err == nil {
 		for _, v := range strings.Split(string(b), "\x00") {
 			if strings.HasPrefix(v, "APPIMAGE=") {
 				name := filepath.Base(strings.TrimPrefix(v, "APPIMAGE="))
@@ -324,7 +330,7 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 		return nil
 	}
 	o.cgroupStats[1].Add(1)
-	b, err := os.ReadFile(filepath.Join(dir, "cgroup.procs"))
+	b, err := readKernelFile(filepath.Join(dir, "cgroup.procs"), 1<<20)
 	if err != nil {
 		return nil
 	}
@@ -833,7 +839,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 // symlinks. This is a search hint only; socket inode and process identity are
 // still checked by holders. The tiny getdents buffer asks for one entry.
 func descriptorTail(f *os.File, pid uint32, expired func() bool) (int64, error) {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	b, err := readKernelFile(fmt.Sprintf("/proc/%d/status", pid), 64<<10)
 	if err != nil {
 		return 0, err
 	}

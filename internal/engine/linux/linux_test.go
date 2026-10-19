@@ -28,6 +28,70 @@ import (
 
 type byteCountingTun struct{ tun.Device }
 
+func newTestOwners(t *testing.T) *Owners {
+	t.Helper()
+	o := NewOwners()
+	t.Cleanup(o.Close)
+	return o
+}
+
+func TestKernelFileBoundIncludesExactLength(t *testing.T) {
+	const path = "/proc/sys/kernel/ostype"
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := readKernelFile(path, len(want))
+	if err != nil || string(got) != string(want) {
+		t.Fatalf("exact length: %q %v", got, err)
+	}
+	if _, err := readKernelFile(path, len(want)-1); err == nil {
+		t.Fatal("truncation wasn't reported")
+	}
+}
+
+func TestDiagnosticPoolCancellationAndClose(t *testing.T) {
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	source := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(c.LocalAddr().(*net.UDPAddr).Port))
+	destination := netip.MustParseAddrPort("192.0.2.1:443")
+	o := newTestOwners(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var cookie uint64
+	for i := 0; i < 100; i++ {
+		short, done := context.WithTimeout(ctx, time.Microsecond)
+		_, _ = o.query(short, unix.AF_INET, unix.IPPROTO_UDP, source, destination)
+		done()
+		rows, err := o.query(ctx, unix.AF_INET, unix.IPPROTO_UDP, source, destination)
+		if err != nil || len(rows) != 1 {
+			t.Fatalf("query after cancellation %d: %v %v", i, rows, err)
+		}
+		if cookie != 0 && cookie != rows[0].cookie {
+			t.Fatal("reply from another socket")
+		}
+		cookie = rows[0].cookie
+	}
+	if len(o.queries.idle) != 1 {
+		t.Fatalf("expected a live reusable socket before cleanup, got %d", len(o.queries.idle))
+	}
+	live := o.queries.idle[0].file
+	if _, err := live.Stat(); err != nil {
+		t.Fatalf("socket wasn't open before cleanup: %v", err)
+	}
+	o.Close()
+	if _, err := live.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("pool didn't close its descriptor: %v", err)
+	}
+	if _, err := o.query(ctx, unix.AF_INET, unix.IPPROTO_UDP, source, destination); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("closed pool accepted lookup: %v", err)
+	}
+	t.Log("100 canceled queries followed by 100 fresh, matching replies; idle descriptor closed")
+}
+
 func TestTCPReadinessPreservesDataEOFAndClose(t *testing.T) {
 	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -101,7 +165,7 @@ func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := NewOwners()
+	o := newTestOwners(t)
 	if err := o.Warm(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +250,7 @@ func TestSequentialColdSocketsReuseLowDescriptors(t *testing.T) {
 			c.Close()
 		}
 	}()
-	o := NewOwners()
+	o := newTestOwners(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for i := 0; i < 100; i++ {
@@ -239,7 +303,7 @@ func TestSocketBeyondFiveThousandRegularFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := NewOwners()
+	o := newTestOwners(t)
 	owner, err := o.holders(ctx, r)
 	if err != nil || owner.PID != uint32(os.Getpid()) {
 		t.Fatalf("socket after 5,000 files: %+v %v", owner, err)
@@ -288,7 +352,7 @@ func TestRealUDPDiagAndConflictingLiveHolders(t *testing.T) {
 	if r.cookie == 0 || r.inode == 0 {
 		t.Fatalf("socket lacks kernel identity: %+v", r)
 	}
-	o := NewOwners()
+	o := newTestOwners(t)
 	owner, err := o.holders(ctx, r)
 	if err != nil || owner.PID != uint32(os.Getpid()) || owner.StartTime == 0 || owner.Generation == "" {
 		t.Fatalf("live owner: %+v %v", owner, err)
@@ -362,7 +426,7 @@ func TestDualStackUDPOwnerAndReconciliation(t *testing.T) {
 	if _, _, err := c.ReadFromUDP(b); err != nil {
 		t.Fatal(err)
 	}
-	o := NewOwners()
+	o := newTestOwners(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := o.Warm(ctx); err != nil {
@@ -398,7 +462,7 @@ func TestUDPFirstDestinationUsesOneExactQuery(t *testing.T) {
 			defer client.Close()
 			source := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(client.LocalAddr().(*net.UDPAddr).Port))
 			tuple := platform.Tuple{Source: source, Destination: server.LocalAddr().(*net.UDPAddr).AddrPort()}
-			o := NewOwners()
+			o := newTestOwners(t)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			if err := o.Warm(ctx); err != nil {
@@ -466,7 +530,7 @@ func TestSameAppHoldersKeepAStableRepresentative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	o := NewOwners()
+	o := newTestOwners(t)
 	owner, err := o.holders(ctx, r)
 	if err != nil {
 		t.Fatal(err)
