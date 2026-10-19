@@ -60,8 +60,17 @@ func TestCancelDuringEndpointSetup(t *testing.T) {
 				return remote, nil
 			}}
 			var cancelOnce sync.Once
+			dialReturned := make(chan struct{})
+			finishDial := sync.OnceFunc(func() { close(dialReturned) })
+			defer finishDial()
 			f, dial := harnessPackets(t, c, d, func(f *Forwarder, raw []byte) {
 				h := header.TCP(raw[header.IPv4(raw).HeaderLength():])
+				if h.Flags().Contains(header.TCPFlagRst) {
+					// The server already completed the handshake, but the client's
+					// dial waiter may still be waking up. Deliver the abort after
+					// it returns so both schedules exercise the same setup path.
+					<-dialReturned
+				}
 				if where == "close_during_handshake" && h.Flags().Contains(header.TCPFlagSyn|header.TCPFlagAck) {
 					// Cancel before delivering SYN-ACK. CreateEndpoint still finishes
 					// the handshake, then observes this cancellation on return.
@@ -77,6 +86,7 @@ func TestCancelDuringEndpointSetup(t *testing.T) {
 				c.buffers = f.Stop
 			}
 			app, err := dial()
+			finishDial()
 			if app != nil {
 				defer app.Close()
 			}
