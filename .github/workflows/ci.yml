@@ -290,11 +290,11 @@ jobs:
       - name: Build the AnyCPU tray
         run: ./scripts/build-tray.ps1
       - name: Test app, native helper and tray on ARM64
-        # Print the loaded CLR architecture from the test's running tray,
-        # after its logged cold warm-up, so a later native build is visible.
-        env:
-          NETSWITCH_TEST_TRAY_RUNTIME: '1'
         run: npm test
+      # Run after the tests so this cannot warm the CLR before their warm-up,
+      # or charge PowerShell startup and module inspection to a timed case.
+      - name: Print the tray's loaded CLR architecture
+        run: ./scripts/show-tray-runtime.ps1
       - name: Route real connections through the ARM64 engine, per app and combined
         if: ${{ !cancelled() }}
         run: |

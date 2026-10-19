@@ -147,17 +147,6 @@ test('one icon per data folder: another copy, or tray.ps1, leaves at once while 
   assert.equal(first.child.exitCode, null, 'the first copy keeps running');
   assert.equal(log().match(/ started\r?\n/g).length, 1, 'only the first copy started an icon');
 
-  // CI inspects this already-running copy after the startup assertions. An
-  // architecture probe before the suite would silently warm up the runtime.
-  if (process.env.NETSWITCH_TEST_TRAY_RUNTIME === '1') {
-    const probe = start(POWERSHELL, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File',
-      path.join(ROOT, 'scripts', 'show-tray-runtime.ps1'), '-ProcessId', String(first.child.pid)],
-    { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    probe.child.stdout.on('data', (data) => t.diagnostic(data.toString().trim()));
-    probe.child.stderr.on('data', (data) => t.diagnostic(data.toString().trim()));
-    assert.equal(await exitWithin(probe, 15_000), 0, 'could not inspect the loaded tray runtime');
-  }
-
   // Net Switch removes server.json when it quits; that is how the icon learns it.
   unlinkSync(serverFile);
   assert.equal(await exitWithin(first, 20_000), 0);
