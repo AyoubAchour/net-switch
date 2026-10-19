@@ -1,7 +1,7 @@
 param([ValidateSet('allow', 'ipv6', 'capture', 'clean')] [string] $Action)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted Windows runners only.' }
-$names = @('NetSwitch-acceptance-client-udp', 'NetSwitch-acceptance-gateway-udp', 'NetSwitch-acceptance-engine-udp')
+$names = @('NetSwitch-acceptance-client-udp', 'NetSwitch-acceptance-gateway-udp', 'NetSwitch-acceptance-engine-udp', 'NetSwitch-acceptance-probe-udp')
 if ($Action -eq 'ipv6') {
   $primary = [int]$env:ACCEPTANCE_UPLINK
   $virtual = [int]$env:ACCEPTANCE_TESTISP
@@ -30,7 +30,7 @@ if ($Action -eq 'ipv6') {
     if (Get-NetRoute -InterfaceIndex $virtual -DestinationPrefix $prefix -ErrorAction SilentlyContinue) { throw "Direct target route remained: $prefix" }
   }
 } elseif ($Action -eq 'allow') {
-  $programs = @($env:ACCEPTANCE_CLIENT, $env:ACCEPTANCE_GATEWAY, $env:ACCEPTANCE_ENGINE)
+  $programs = @($env:ACCEPTANCE_CLIENT, $env:ACCEPTANCE_GATEWAY, $env:ACCEPTANCE_ENGINE, $env:ACCEPTANCE_UDP_PROBE)
   for ($i = 0; $i -lt $programs.Count; $i++) {
     if (-not (Test-Path -LiteralPath $programs[$i])) { throw 'Missing test program.' }
     if (Get-NetFirewallRule -Name $names[$i] -ErrorAction SilentlyContinue) { throw 'Test firewall rule already exists.' }

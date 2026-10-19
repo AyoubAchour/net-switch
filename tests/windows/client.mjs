@@ -170,19 +170,6 @@ async function rejectBurst({ target, count = 100, timeout = 5000 }) {
   })));
 }
 
-async function udpReject({ target, count = 100, timeout = 5000 }) {
-  return Promise.all(Array.from({ length: count }, () => new Promise((resolve) => {
-    const socket = createSocket('udp4');
-    const started = performance.now(); let done = false, sent = 0;
-    const finish = (outcome) => { if (done) return; done = true; clearTimeout(timer); clearInterval(sender); socket.close(); resolve({ outcome, sent, ms: performance.now() - started }); };
-    const timer = setTimeout(() => finish('timeout'), timeout);
-    const sender = setInterval(() => { if (!done && sent) { sent++; socket.send(Buffer.alloc(64), (error) => { if (error) finish(error.code); }); } }, 25);
-    socket.on('error', (error) => finish(error.code ?? error.message));
-    socket.on('message', () => finish('reply'));
-    socket.connect(target.udp[0], target.host, () => { sent++; socket.send(Buffer.alloc(64), (error) => { if (error) finish(error.code); }); });
-  })));
-}
-
 process.on('message', async ({ id, command, ...args }) => {
   try {
     let result;
@@ -191,7 +178,6 @@ process.on('message', async ({ id, command, ...args }) => {
     else if (command === 'udp') result = await udp(args);
     else if (command === 'reuse') result = await reuse(args);
     else if (command === 'reject') result = await rejectBurst(args);
-    else if (command === 'udpReject') result = await udpReject(args);
     else if (command === 'close') { for (const item of held.values()) item.agent.destroy(); held.clear(); result = true; }
     else throw new Error(`Unknown command ${command}`);
     process.send({ id, result });

@@ -69,6 +69,12 @@ is retried, for at most 100 ms. Connected attempts and TCP timeouts are never
 retried, and the recorded latency includes the bind wait. Both the physical and
 TestISP baselines perform 1,000 immediate reuses before the engine starts.
 
+Cap rejection has a mandatory closed-port baseline. Node's Windows libuv ignores
+UDP refusal errors, so this probe uses a native socket and explicitly enables
+`SIO_UDP_CONNRESET` after Go initializes it. The same executable must receive
+exact UDP echoes before applying caps and after clearing them; a timeout cannot
+be blamed on the app when the native refusal baseline failed.
+
 | Area | Checks |
 | --- | --- |
 | Routing | Pins on both interfaces; existing sockets survive a new pin; combining; route-loss failover and failback. |
