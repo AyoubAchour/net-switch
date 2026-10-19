@@ -313,15 +313,7 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 	if s.closed.Load() {
 		return 0, net.ErrClosed
 	}
-	cancelEvent := s.cancelEvent
-	done := make(chan struct{})
-	stop := context.AfterFunc(ctx, func() { windows.SetEvent(cancelEvent); close(done) })
-	defer func() {
-		if !stop() {
-			<-done
-			windows.ResetEvent(cancelEvent)
-		}
-	}()
+	var cancelEvent windows.Handle
 	for {
 		if ctx.Err() != nil {
 			return 0, ctx.Err()
@@ -354,7 +346,25 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 				return len(buffers), nil
 			}
 		}
-		_, err := windows.WaitForMultipleObjects([]windows.Handle{s.stop, s.event, cancelEvent}, false, windows.INFINITE)
+		// Give the reference wrapper the same lazy cancellation setup as our
+		// production reader, so ready-batch allocation does not bias the comparison.
+		if cancelEvent == 0 && ctx.Done() != nil {
+			event := s.cancelEvent
+			cancelEvent = event
+			done := make(chan struct{})
+			stop := context.AfterFunc(ctx, func() { windows.SetEvent(event); close(done) })
+			defer func() {
+				if !stop() {
+					<-done
+					windows.ResetEvent(event)
+				}
+			}()
+		}
+		handles := []windows.Handle{s.stop, s.event}
+		if cancelEvent != 0 {
+			handles = append(handles, cancelEvent)
+		}
+		_, err := windows.WaitForMultipleObjects(handles, false, windows.INFINITE)
 		if err != nil {
 			return 0, err
 		}
