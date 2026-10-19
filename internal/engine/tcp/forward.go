@@ -52,7 +52,7 @@ func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Cont
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 2*inFlight, f.open)
 	s.SetTransportProtocolHandler(gtcp.ProtocolNumber, f.Handle)
 	gtcp.SetTimeWaitHandler(s, f.Handle)
-	drain := gtcp.SetLocalCloseFence(s, true)
+	drain := gtcp.SetLocalCloseFence(s, localCloseFenceEnabled)
 	out.SetAfterInbound(func() {
 		if ep := drain(); ep != nil {
 			f.finishClose(ep)
@@ -80,11 +80,8 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		return true
 	}
 	if !h.Flags().Contains(header.TCPFlagSyn) || h.Flags()&(header.TCPFlagAck|header.TCPFlagRst|header.TCPFlagFin) != 0 {
-		// A retained endpoint can be silently removed at its cap. Its final
-		// pure ACK needs no response; resetting it would undo that close.
-		return h.Flags() == header.TCPFlagAck && p.Data().Size() == 0
+		return false
 	}
-	f.reclaimAtCapacity(nil)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c := f.connections[id]; c != nil {
@@ -199,7 +196,6 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		owner = platform.Owner{}
 	}
 	cancelLookup()
-	f.reclaimAtCapacity(&owner)
 	decision, err := ticket.Resolve(owner)
 	if err != nil {
 		f.Rejected.Add(1)
@@ -257,11 +253,15 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	ep.SocketOptions().SetReceiveBufferSize(int64(rx), true)
 	ep.SocketOptions().SetSendBufferSize(int64(tx), true)
 	ep.SocketOptions().SetKeepAlive(true)
-	retain := ticket.TimeWait
-	if !closeAdmissionEnabled {
-		retain = func() bool { return true }
-	}
-	ep.(*gtcp.Endpoint).SetTimeWaitPolicy(retain, ticket.EndTimeWait)
+	// Removal releases this endpoint's slot directly, including timer closes.
+	// The callback runs under the endpoint lock: bookkeeping only, no scans
+	// or calls back into any endpoint. TIME_WAIT release predates this fix.
+	ep.(*gtcp.Endpoint).SetTimeWaitPolicy(ticket.TimeWait, func() {
+		if closeAdmissionEnabled {
+			ticket.Retire()
+		}
+		ticket.EndTimeWait()
+	})
 	c := &connection{id: id, ep: ep, ticket: ticket, last: time.Now(), done: make(chan struct{})}
 	f.mu.Lock()
 	if f.ctx.Err() != nil || closedState(ep) {

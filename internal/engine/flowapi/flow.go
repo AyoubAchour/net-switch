@@ -31,7 +31,8 @@ type Ticket interface {
 	SetCancel(context.CancelFunc)
 	// TimeWait releases live-flow capacity and reserves a retained endpoint
 	// (TIME_WAIT or payload-free LAST_ACK/CLOSING). Repeated calls are safe.
-	// False skips TIME_WAIT; EndTimeWait releases a successful reservation.
+	// False skips TIME_WAIT or resets FIN-only overflow. EndTimeWait releases
+	// a successful reservation when the endpoint is removed.
 	TimeWait() bool
 	EndTimeWait()
 	// Retire releases live-flow capacity while preserving final accounting.

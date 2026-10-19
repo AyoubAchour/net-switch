@@ -90,10 +90,10 @@ const (
 
 // +stateify savable
 type protocol struct {
-	stack           *stack.Stack
-	timeWaitHandler atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
-	localClose      atomic.Pointer[Endpoint]                                                  `state:"nosave"`
-	localCloseEnabled atomic.Bool `state:"nosave"`
+	stack             *stack.Stack
+	timeWaitHandler   atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
+	localClose        atomic.Pointer[Endpoint]                                                  `state:"nosave"`
+	localCloseEnabled atomic.Bool                                                               `state:"nosave"`
 
 	mu protocolRWMutex `state:"nosave"`
 
@@ -169,7 +169,8 @@ func SetTimeWaitHandler(s *stack.Stack, handler func(stack.TransportEndpointID, 
 
 // SetTimeWaitPolicy installs a per-endpoint close-time budget. enter runs once
 // before publishing TIME_WAIT or its final ACK; false closes silently after
-// the current segment. After a successful enter, leave runs once on removal.
+// the current segment. leave runs once on removal, including non-TIME_WAIT
+// closes, so the caller can release admission without scanning endpoints.
 // Both callbacks run under the endpoint lock and must not block or call
 // endpoint methods. Install before shutdown.
 // A per-endpoint decision avoids changing the stack-wide 60-second protection
@@ -217,16 +218,18 @@ func (p *protocol) drainLocalClose() *Endpoint {
 	}
 }
 
-// CloseRetained silently removes a payload-free LAST_ACK/CLOSING endpoint when
-// the embedding application's retained-endpoint budget is exhausted.
+// CloseRetained resets a payload-free LAST_ACK/CLOSING endpoint when the
+// retained-endpoint budget is exhausted. Do not silently lose its FIN retry:
+// the peer may still be waiting for EOF if the first FIN was dropped.
 func (e *Endpoint) CloseRetained() {
 	e.LockUser()
 	defer e.UnlockUser()
 	state := e.EndpointState()
 	_, send := e.BufferUsage()
 	if (state == StateLastAck || state == StateClosing) && send <= 0 {
-		e.transitionToStateCloseLocked()
+		e.resetConnectionLocked(&tcpip.ErrAborted{})
 		e.drainClosingSegmentQueue()
+		e.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
 	}
 }
 

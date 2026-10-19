@@ -187,17 +187,6 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	return f, nil
 }
 
-// AtCapacity lets TCP reclaim completed endpoints before recording a rejection.
-// A nil owner checks Begin's limits; a known owner checks Resolve's limits.
-func (t *Table) AtCapacity(owner *platform.Owner) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if owner == nil {
-		return t.gauges.Flows >= t.limits.Flows || t.gauges.Handshakes >= t.limits.Handshakes
-	}
-	return t.apps[owner.AppID].flows >= t.limits.PerApp || (owner.AppID == "" && t.gauges.Unknown >= t.limits.Unknown)
-}
-
 type ticket struct {
 	accountMu                           sync.RWMutex
 	accountClosed                       bool
@@ -300,7 +289,7 @@ func (f *ticket) Shrink(receive, send int) {
 // TimeWait exchanges live admission for a retained-endpoint slot. This includes
 // payload-free LAST_ACK/CLOSING endpoints as well as TIME_WAIT. A transition
 // between these states keeps the same reservation.
-// False means close this endpoint without a reset; it cannot reject a new flow.
+// False skips TIME_WAIT or resets a FIN-only endpoint; it cannot reject a new flow.
 func (f *ticket) TimeWait() bool {
 	t := f.table
 	t.mu.Lock()

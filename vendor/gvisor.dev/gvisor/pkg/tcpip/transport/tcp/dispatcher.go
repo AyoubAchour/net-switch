@@ -528,7 +528,6 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
 	canDrain := state.connecting() || (state.connected() && state != StateTimeWait)
 	if ep.protocol.localCloseEnabled.Load() && canDrain && (s.flags&(header.TCPFlagRst|header.TCPFlagFin) != 0 || closingACK) {
 		ep.protocol.localClose.Store(ep)
-		return // The ingress owner processes this endpoint; no processor wakeup.
 	}
 
 	// Only wakeup the processor if endpoint lock is not held by a user

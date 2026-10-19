@@ -270,7 +270,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     name: Go 1.0 / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -355,6 +355,8 @@ jobs:
         run: go test -v -count=1 -run '^Test(TimeWait(ThousandPerSecondSuccess|SameTupleUnderLoad)|CloseAtCapUnderLoad)$' ./internal/engine/stack
       - name: Measure other-flow latency during a closing 100 MB download
         run: go test -run '^$' -bench '^BenchmarkCloseDownloadOtherFlow$' -benchtime=3x -count=1 ./internal/engine/stack
+      - name: Measure SYN admission at total and handshake caps with 65536 flows
+        run: go test -run '^$' -bench '^BenchmarkSYNAtCapacity$' -benchtime=1000x -count=1 ./internal/engine/tcp
       - name: Prove every close path fails without admission release
         if: matrix.name == 'Linux x64'
         run: node scripts/prove-close-release.mjs
@@ -370,7 +372,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Repeat clock and reopen boundaries 1000 times
-        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(TimeWait(BlockedAndBudgetReuse|FinalACKReleasesAdmission|LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState|SYNBeforeRemoval|ZeroCapClosingBatch)|Close(Admission|IdleAdmission|FINWithoutPolicy|KeepsQueuedDataCounted|RSTDuringHandshake|BeforeFinalACK|HandshakeCompletionOwnsRelease|HandshakeBeforeHangupNotification|FencePreservesListenerProcessing))$' ./internal/engine/stack
+        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -timeout=35m -run '^Test(TimeWait(BlockedAndBudgetReuse|FinalACKReleasesAdmission|LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState|SYNBeforeRemoval|ZeroCapClosingBatch)|Close(Admission|IdleAdmission|FINWithoutPolicy|KeepsQueuedDataCounted|RSTDuringHandshake|BeforeFinalACK|HandshakeCap|RetainedCap|RetainedCapLostFIN|UnknownACKGetsReset|HandshakeCompletionOwnsRelease|HandshakeBeforeHangupNotification|FencePreservesListenerProcessing|FenceWakesRemainingSegments))$' ./internal/engine/stack
       - name: Repeat endpoint setup deduplication and cancellation 1000 times
         run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths

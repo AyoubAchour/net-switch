@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: local SYN handoff and payload-aware close admission.
+// Modified by Net Switch, 2026-10-19: send reopened TIME_WAIT SYNs to admission.
 
 package tcp
 

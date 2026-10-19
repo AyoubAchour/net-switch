@@ -244,7 +244,10 @@ func TestCloseIdleAdmission(t *testing.T) {
 	if tcp.EndpointState(ep.State()) != tcp.StateError {
 		t.Fatal("idle did not time out", p.diagnostics())
 	}
-	// Timer-driven closes are reclaimed at admission, before any rejection.
+	if g := p.table.Stats(); g.Flows != 0 {
+		t.Fatal("timer removal retained admission until another SYN", g)
+	}
+	// Timer removal already released admission; a SYN does no reclaim work.
 	p.port++
 	p.open(500)
 	unblock()

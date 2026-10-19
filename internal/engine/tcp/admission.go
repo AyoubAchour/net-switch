@@ -5,7 +5,6 @@ import (
 	"sync/atomic"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	gtcp "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
@@ -56,16 +55,6 @@ func (f *Forwarder) finishClose(ep *gtcp.Endpoint) {
 func closedState(ep interface{ State() uint32 }) bool {
 	state := gtcp.EndpointState(ep.State())
 	return state == gtcp.StateClose || state == gtcp.StateError
-}
-
-// Timer closes have no ingress packet. Reclaim them before a capacity decision,
-// including per-owner resolution, without scanning all flows for every SYN.
-func (f *Forwarder) reclaimAtCapacity(owner *platform.Owner) {
-	if c, ok := f.control.(interface{ AtCapacity(*platform.Owner) bool }); ok && c.AtCapacity(owner) {
-		for _, c := range f.connectionSnapshot() {
-			c.releaseAdmission()
-		}
-	}
 }
 
 // After both directions end, queued or retransmittable payload still consumes
