@@ -46,8 +46,42 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 	if _, err := rand.Read(random[:]); err != nil {
 		t.Fatal(err)
 	}
-	name, _ := windows.UTF16PtrFromString(fmt.Sprintf("ns-%d-%x", os.Getpid(), random[:3]))
-	password, _ := windows.UTF16PtrFromString("Ns!" + hex.EncodeToString(random[:]))
+	accountName := fmt.Sprintf("ns-%d-%x", os.Getpid(), random[:3])
+	name, _ := windows.UTF16PtrFromString(accountName)
+	netapi := windows.NewLazySystemDLL("netapi32.dll")
+	var policy *uint32 // USER_MODALS_INFO_0 starts with minimum password length.
+	status, _, _ := netapi.NewProc("NetUserModalsGet").Call(0, 0, uintptr(unsafe.Pointer(&policy)))
+	if status != 0 || policy == nil {
+		t.Fatalf("read disposable-account password policy: %d", status)
+	}
+	minimum := *policy
+	netapi.NewProc("NetApiBufferFree").Call(uintptr(unsafe.Pointer(policy)))
+	if minimum > 200 {
+		t.Fatalf("unexpected minimum password length: %d", minimum)
+	}
+	// Keep independent entropy and all character classes. Reusing the name's
+	// random suffix in the password can violate Windows' name-token checks.
+	var passwordText string
+	for attempt := 0; attempt < 20; attempt++ {
+		secret := make([]byte, (max(64, int(minimum)+8)-8+1)/2)
+		if _, err := rand.Read(secret); err != nil {
+			t.Fatal(err)
+		}
+		candidate := "Q7!bR9@k" + hex.EncodeToString(secret)
+		containsName := false
+		for _, token := range strings.Split(accountName, "-") {
+			containsName = containsName || (len(token) >= 3 && strings.Contains(strings.ToLower(candidate), strings.ToLower(token)))
+		}
+		if !containsName {
+			passwordText = candidate
+			break
+		}
+	}
+	if passwordText == "" {
+		t.Fatal("could not generate an independent fixture password")
+	}
+	password, _ := windows.UTF16PtrFromString(passwordText)
+	t.Logf("disposable-account policy minimum=%d; generated length=%d; no account-name tokens reused", minimum, len(passwordText))
 	type userInfo struct {
 		Name, Password         *uint16
 		PasswordAge, Privilege uint32
@@ -56,11 +90,10 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 		Script                 *uint16
 	}
 	info := userInfo{Name: name, Password: password, Privilege: 1, Flags: 0x10201}
-	netapi := windows.NewLazySystemDLL("netapi32.dll")
 	var parameter uint32
-	status, _, _ := netapi.NewProc("NetUserAdd").Call(0, 1, uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&parameter)))
+	status, _, _ = netapi.NewProc("NetUserAdd").Call(0, 1, uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&parameter)))
 	if status != 0 {
-		t.Fatalf("create disposable account: %d parameter %d", status, parameter)
+		t.Fatalf("create disposable account: %d parameter %d (2245 means password-policy rejection; minimum=%d, generated length=%d)", status, parameter, minimum, len(passwordText))
 	}
 	t.Cleanup(func() {
 		status, _, _ := netapi.NewProc("NetUserDel").Call(0, uintptr(unsafe.Pointer(name)))
