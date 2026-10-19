@@ -141,9 +141,27 @@ jobs:
       - name: Record the complete TIME_WAIT acceptance gate under race detection
         if: matrix.name != 'Windows ARM64'
         run: go test -race -v -count=1 -run 'TimeWait|PacketOrderPerTuple' ./internal/engine/stack
-      - name: Repeat clock and reopen boundaries under race detection
-        if: matrix.name != 'Windows ARM64'
-        run: go test -race -v -count=1000 -run '^TestTimeWait(LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow)$' ./internal/engine/stack
+      # Sustained default-limit load and full heap sampling run once, separately
+      # from the race suite so timing and memory measurements stay meaningful.
+      - name: Sustain 1000 successful connections per second at default limits
+        env:
+          NETSWITCH_TIMEWAIT_GATE: '1'
+        run: go test -v -count=1 -run '^TestTimeWait(ThousandPerSecondSuccess|SameTupleUnderLoad)$' ./internal/engine/stack
+      - name: Measure retained TIME_WAIT memory after payload buffers drain
+        env:
+          NETSWITCH_TIMEWAIT_PROFILE: timewait.pprof
+        run: go test -v -count=1 -memprofilerate=1 -run '^TestTimeWaitEndpointMemory$' ./internal/engine/stack
+      - name: Keep the TIME_WAIT heap profile
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: timewait-heap-${{ matrix.name }}
+          path: internal/engine/stack/timewait.pprof
+          if-no-files-found: error
+          retention-days: 14
+      - name: Repeat clock and reopen boundaries 1000 times
+        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^TestTimeWait(LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState|SYNBeforeRemoval|ZeroCapClosingBatch)$' ./internal/engine/stack
+      - name: Repeat endpoint setup deduplication and cancellation 1000 times
+        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths
         if: matrix.name == 'Linux x64'
         run: |

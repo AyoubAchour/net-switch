@@ -13,6 +13,7 @@
 // limitations under the License.
 
 // Modified by Net Switch, 2026-10-19: local-app TIME_WAIT and buffer accounting.
+
 // Package tcp contains the implementation of the TCP transport protocol.
 package tcp
 
@@ -145,9 +146,16 @@ type protocol struct {
 // SetTimeWaitHandler opts into reopening TIME_WAIT for any bare SYN. This is
 // only safe for a local-app stack with ordered ingress: a host cannot reuse
 // a tuple it still owns, and no old segment may arrive after the new SYN.
-// The old endpoint closes and its queued segments are dropped, never reset.
-// The handler runs after removal and receives a borrowed packet. Install it
-// before capture starts; listeners retain their existing dispatch priority.
+// This applies to every TCP endpoint on s, not just forwarded connections.
+// All close paths hand off at most one bare SYN and silently drop the rest,
+// including late enqueues. The bool result is ignored: false also means drop.
+// The handler receives a borrowed packet after endpoint removal. It can run
+// on a TCP processor, timer, or closing goroutine, with the old endpoint locked:
+// it must not block or call methods that lock that endpoint. In particular,
+// waiting for relay completion here can deadlock the processor finishing it.
+// Deduplicate against SYNs reaching the default handler concurrently; gVisor's
+// Forwarder.HandlePacket already deduplicates its in-flight requests and is safe
+// to pass directly. Install before ingress; listeners keep dispatch priority.
 func SetTimeWaitHandler(s *stack.Stack, handler func(stack.TransportEndpointID, *stack.PacketBuffer) bool) {
 	p := protocolFromStack(s)
 	if handler == nil {
@@ -155,6 +163,18 @@ func SetTimeWaitHandler(s *stack.Stack, handler func(stack.TransportEndpointID, 
 	} else {
 		p.timeWaitHandler.Store(&handler)
 	}
+}
+
+// SetTimeWaitPolicy installs a per-endpoint close-time budget. enter runs once
+// before the TIME_WAIT timer starts; false closes silently instead. After a
+// successful enter, leave runs once on removal. Both run under the endpoint
+// lock and must not block or call endpoint methods. Install before shutdown.
+// A per-endpoint decision avoids changing the stack-wide 60-second protection
+// for other connections when only this closing connection exceeds the cap.
+func (e *Endpoint) SetTimeWaitPolicy(enter func() bool, leave func()) {
+	e.LockUser()
+	defer e.UnlockUser()
+	e.timeWaitEnter, e.timeWaitLeave = enter, leave
 }
 
 // BufferUsage reports receive-segment memory (including out-of-order and

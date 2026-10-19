@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: drop queued segments on local-app reuse.
+// Modified by Net Switch, 2026-10-19: skip TIME_WAIT silently when its close-time budget is full.
+
 package tcp
 
 import (
@@ -236,6 +237,16 @@ func handleConnected(ep *Endpoint) {
 //
 // +checklocks:ep.mu
 func startTimeWait(ep *Endpoint) {
+	if enter := ep.timeWaitEnter; enter != nil {
+		ep.timeWaitEnter = nil
+		if !enter() {
+			ep.transitionToStateCloseLocked()
+			ep.drainClosingSegmentQueue()
+			ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
+			return
+		}
+		ep.timeWaitReserved = true
+	}
 	// Disable close timer as we are now entering real TIME_WAIT.
 	if ep.finWait2Timer != nil {
 		ep.finWait2Timer.Stop()
@@ -265,22 +276,9 @@ func handleTimeWait(ep *Endpoint) {
 
 	extendTimeWait, reuseTW := ep.handleTimeWaitSegments()
 	if reuseTW != nil {
-		localReuse := ep.protocol.timeWaitHandler.Load() != nil
-		if localReuse {
-			ep.segmentQueue.freeze()
-		}
 		ep.transitionToStateCloseLocked()
-		if localReuse {
-			// Freeze before removal and drain under ep.mu: neither a late
-			// enqueue nor another processor may reset the app's new SYN.
-			for s := ep.segmentQueue.dequeue(); s != nil; s = ep.segmentQueue.dequeue() {
-				s.DecRef()
-			}
-		}
 		ep.mu.Unlock()
-		if !localReuse {
-			ep.drainClosingSegmentQueue()
-		}
+		ep.drainClosingSegmentQueue()
 		ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
 		reuseTW()
 		return

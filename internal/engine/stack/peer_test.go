@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net/netip"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,7 +30,20 @@ var appAddr = tcpip.AddrFrom4([4]byte{198, 18, 0, 2})
 var remoteAddr = tcpip.AddrFrom4([4]byte{203, 0, 113, 7})
 
 type accepted struct {
-	conn *testfake.Conn
+	conn        *testfake.Conn
+	relayClosed <-chan struct{}
+}
+
+type observedRemote struct {
+	*testfake.Conn
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *observedRemote) Close() error {
+	err := c.Conn.Close()
+	c.once.Do(func() { close(c.closed) })
+	return err
 }
 
 // The peer is a wire-level TCP driver, so it can retain and replay exact old
@@ -70,8 +84,9 @@ func newPeerOptions(t *testing.T, timestamps bool, limits flows.Limits, options 
 	d := testfake.Dialer{TCPFunc: func(context.Context, string, netip.AddrPort) (platform.TCPConn, error) {
 		p.dials.Add(1)
 		a, b := testfake.Pair()
-		p.accepted <- accepted{b}
-		return a, nil
+		closed := make(chan struct{})
+		p.accepted <- accepted{b, closed}
+		return &observedRemote{Conn: a, closed: closed}, nil
 	}}
 	f := ntcp.New(context.Background(), s, limits.Handshakes, table, &testfake.Owners{Value: platform.Owner{AppID: "peer"}}, d, l)
 	p.forward = f

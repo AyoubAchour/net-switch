@@ -38,7 +38,7 @@ func (t *Table) Page(cursor string) (Page, error) {
 		bytes := int64(64)
 		count := 0
 		for _, f := range t.flows {
-			if f.resolved {
+			if f.resolved && !f.retired {
 				count++
 				bytes += int64(unsafe.Sizeof(Record{})) + int64(len(f.record.Owner.Path)+len(f.record.Owner.AppID)+len(f.record.Owner.Generation)+len(f.record.Line)+len(f.record.Lane))
 			}
@@ -49,7 +49,7 @@ func (t *Table) Page(cursor string) (Page, error) {
 		t.gauges.SnapshotBytes += bytes
 		records := make([]Record, 0, count)
 		for _, f := range t.flows {
-			if f.resolved {
+			if f.resolved && !f.retired {
 				r := f.record
 				r.Up, r.Down = f.up.Load(), f.down.Load()
 				records = append(records, r)
