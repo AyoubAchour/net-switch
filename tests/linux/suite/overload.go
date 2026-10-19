@@ -34,7 +34,7 @@ const (
 func init() { register(55, addOverload) }
 
 func addOverload(r *registry) {
-	const noLimits = "sing-box has no per-app or total admission limits: it admits every session and connection it's asked for"
+	const noLimits = "sing-box has no per-app or total admission limits: it admits every session and connection it's asked for, and other flows can stall meanwhile"
 	r.defect("overload.udp-sessions-per-app", "Two apps open 5,000 UDP sessions each: each gets at most 4,096 and the rest are refused, far under the total limit, while other traffic carries on",
 		noLimits, "5.9", 3*time.Minute, udpSessionsPerAppCase)
 	r.defect("overload.udp-sessions-total", "Five apps open 4,000 UDP sessions each, all under their own limit: together they get at most 16,384 and the rest are refused",
@@ -88,6 +88,21 @@ func (e *Env) udpFlood(names []string, n int, release Release) (map[string]*Bg, 
 	return bgs, results
 }
 
+// keptOpen is the mandatory half of "other traffic carries on" under
+// overload: charlie's stream, open before it, was never closed and every
+// answer came over its line. How long it may go quiet belongs with the
+// limits in each case's defect assertion: without admission control an
+// overloaded engine stalls other flows (the baseline went 3.2 s without an
+// answer under 9,000 handshakes at once).
+func (e *Env) keptOpen(label string, s Stream, want engine.LineID) {
+	lines := StreamLines(s)
+	e.T.Check(s.Connected && s.ClosedAt == 0 && s.Pongs > 0 && lines[want] == s.Pongs,
+		"%s stayed open, every answer over line %s (pongs %d of %d pings, lines %s, closed %q)", label, want, s.Pongs, s.Pings, Describe(lines), s.CloseErr)
+}
+
+// responsive is the other half: no answer took more than 2 s.
+func responsive(s Stream) bool { return s.MaxGapMS < 2000 }
+
 // holding checks every app still holds what it opened, then lets them go.
 func (e *Env) holding(bgs map[string]*Bg, release Release) {
 	var gone []string
@@ -114,13 +129,14 @@ func describeFloods(names []string, results map[string]app.FloodResult) string {
 
 func udpSessionsPerAppCase(e *Env) {
 	e.StartEngine(e.DefaultConfig())
-	stream := e.StartStream("charlie", AsUser, 30*time.Second)
+	// The stream runs until the flood lets go.
+	release := e.NewRelease("udp-per-app")
+	stream := e.StartStream("charlie", AsUser, 3*time.Minute, release.Arg()...)
 	e.Sleep(time.Second)
 	// 904 sessions over each app's limit; the two apps together stay far
 	// under the total, so only the per-app limit can refuse.
 	const perApp = 5000
 	names := []string{"alpha", "bravo"}
-	release := e.NewRelease("udp-per-app")
 	bgs, results := e.udpFlood(names, perApp, release)
 	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
 	minAnswered, maxAnswered, minRefused, total := perApp, 0, perApp, 0
@@ -133,25 +149,25 @@ func udpSessionsPerAppCase(e *Env) {
 	e.T.Check(minAnswered >= udpSessionsPerApp*95/100, "each app still got at least 95%% of its allowed %d sessions served (least: %d; %s)", udpSessionsPerApp, minAnswered, describeFloods(names, results))
 	e.holding(bgs, release)
 	var s Stream
-	stream.WaitJSON(e, 40*time.Second, &s)
-	e.CheckStreamSurvived("charlie's stream through the flood", s, "c")
+	stream.WaitJSON(e, 30*time.Second, &s)
+	e.keptOpen("charlie's stream through the flood", s, "c")
 	e.T.Check(e.Eng.Running(), "the engine is still running")
 	// Losing sessions at random isn't a limit: the excess must be refused.
 	excess := perApp - udpSessionsPerApp
-	e.T.Expect(maxAnswered <= udpSessionsPerApp && minRefused >= excess*9/10,
-		"no app gets more than %d sessions and each app's %d extra are refused (most for one app %d, fewest refused %d; %s)",
-		udpSessionsPerApp, excess, maxAnswered, minRefused, describeFloods(names, results))
+	e.T.Expect(maxAnswered <= udpSessionsPerApp && minRefused >= excess*9/10 && responsive(s),
+		"no app gets more than %d sessions and each app's %d extra are refused, while charlie's stream never waits 2 s for an answer (most for one app %d, fewest refused %d, longest silence %d ms; %s)",
+		udpSessionsPerApp, excess, maxAnswered, minRefused, s.MaxGapMS, describeFloods(names, results))
 }
 
 func udpSessionsTotalCase(e *Env) {
 	e.StartEngine(e.DefaultConfig())
-	stream := e.StartStream("charlie", AsUser, 40*time.Second)
+	release := e.NewRelease("udp-total")
+	stream := e.StartStream("charlie", AsUser, 3*time.Minute, release.Arg()...)
 	e.Sleep(time.Second)
 	// Every app stays under its own 4,096; together they ask for 20,000, so
 	// only the total limit can refuse.
 	const perApp = 4000
 	names := []string{"alpha", "bravo", "delta", "golf", "hotel"}
-	release := e.NewRelease("udp-total")
 	bgs, results := e.udpFlood(names, perApp, release)
 	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
 	total, refused := 0, 0
@@ -162,25 +178,25 @@ func udpSessionsTotalCase(e *Env) {
 	e.T.Check(total >= udpSessionsTotal*95/100, "together the apps still got at least 95%% of the %d sessions allowed in total (%d; %s)", udpSessionsTotal, total, describeFloods(names, results))
 	e.holding(bgs, release)
 	var s Stream
-	stream.WaitJSON(e, 50*time.Second, &s)
-	e.CheckStreamSurvived("charlie's stream through the flood", s, "c")
+	stream.WaitJSON(e, 30*time.Second, &s)
+	e.keptOpen("charlie's stream through the flood", s, "c")
 	e.T.Check(e.Eng.Running(), "the engine is still running")
 	asked := perApp * len(names)
 	excess := asked - udpSessionsTotal
-	e.T.Expect(total <= udpSessionsTotal && refused >= excess*9/10,
-		"all together no more than %d of the %d sessions are admitted, and the %d extra are refused (%d answered, %d refused; %s)",
-		udpSessionsTotal, asked, excess, total, refused, describeFloods(names, results))
+	e.T.Expect(total <= udpSessionsTotal && refused >= excess*9/10 && responsive(s),
+		"all together no more than %d of the %d sessions are admitted and the %d extra are refused, while charlie's stream never waits 2 s for an answer (%d answered, %d refused, longest silence %d ms; %s)",
+		udpSessionsTotal, asked, excess, total, refused, s.MaxGapMS, describeFloods(names, results))
 }
 
 func tcpStorm(e *Env) {
 	e.StartEngine(e.DefaultConfig())
-	stream := e.StartStream("charlie", AsUser, 90*time.Second)
+	release := e.NewRelease("storm")
+	stream := e.StartStream("charlie", AsUser, 3*time.Minute, release.Arg()...)
 	e.Sleep(time.Second)
 	// 300 at a time keeps the handshakes in flight far under their own
 	// limit, and 9,000 flows are far under the total: only the per-app
 	// limit can refuse.
 	const storm = 9000
-	release := e.NewRelease("storm")
 	hold := e.Start(Run{App: "bravo", Args: append([]string{"tcphold", "--to", floodTargets(0, wire.PortHold), "--count", strconv.Itoa(storm),
 		"--concurrency", "300", "--timeout", "5000"}, release.Arg()...)})
 	hold.WaitLine(e, "holding ", 3*time.Minute)
@@ -193,17 +209,18 @@ func tcpStorm(e *Env) {
 	e.T.Check(r.Established >= tcpFlowsPerApp*95/100, "bravo still got at least 95%% of its allowed %d connections (%d established, errors %v)", tcpFlowsPerApp, r.Established, r.Errors)
 	e.T.Check(r.StillOpen == r.Established, "admitted connections stay open (%d of %d)", r.StillOpen, r.Established)
 	var s Stream
-	stream.WaitJSON(e, 2*time.Minute, &s)
-	e.CheckStreamSurvived("charlie's stream through the storm", s, "c")
+	stream.WaitJSON(e, 30*time.Second, &s)
+	e.keptOpen("charlie's stream through the storm", s, "c")
 	e.T.Check(e.Eng.Running(), "the engine is still running")
-	e.T.Expect(r.Established <= tcpFlowsPerApp && refused == storm-r.Established && r.FailedMS.Max < 3000,
-		"at most %d of %d are admitted and every other one is refused within 3 s (%d admitted, %d refused, slowest refusal %.0f ms, errors %v)",
-		tcpFlowsPerApp, storm, r.Established, refused, r.FailedMS.Max, r.Errors)
+	e.T.Expect(r.Established <= tcpFlowsPerApp && refused == storm-r.Established && r.FailedMS.Max < 3000 && responsive(s),
+		"at most %d of %d are admitted and every other one is refused within 3 s, while charlie's stream never waits 2 s for an answer (%d admitted, %d refused, slowest refusal %.0f ms, longest silence %d ms, errors %v)",
+		tcpFlowsPerApp, storm, r.Established, refused, r.FailedMS.Max, s.MaxGapMS, r.Errors)
 }
 
 func tcpHandshakesCase(e *Env) {
 	e.StartEngine(e.DefaultConfig())
-	stream := e.StartStream("charlie", AsUser, 40*time.Second)
+	streamEnd := e.NewRelease("stream")
+	stream := e.StartStream("charlie", AsUser, 3*time.Minute, streamEnd.Arg()...)
 	e.Sleep(time.Second)
 	// Every SYN to the black hole goes unanswered, so each admitted
 	// connection stays in its handshake. 9,000 at once from three apps is
@@ -228,15 +245,16 @@ func tcpHandshakesCase(e *Env) {
 	}
 	e.T.Check(completed == 0, "no handshake to the black hole completed: nothing answers there, so a completed one was faked (%d)", completed)
 	e.T.Check(pending >= tcpHandshakes*95/100, "at least 95%% of the %d handshakes allowed were in flight (%d; %s)", tcpHandshakes, pending, strings.Join(parts, "; "))
-	var s Stream
-	stream.WaitJSON(e, time.Minute, &s)
-	e.CheckStreamSurvived("charlie's stream, open before the handshakes", s, "c")
 	e.T.Check(e.Eng.Running(), "the engine is still running")
 	e.retryLine("foxtrot's new connections once the handshakes have given up", "foxtrot", "a", 10*time.Second)
+	streamEnd.Open(e)
+	var s Stream
+	stream.WaitJSON(e, 30*time.Second, &s)
+	e.keptOpen("charlie's stream, open before the handshakes,", s, "c")
 	asked := perApp * len(names)
-	e.T.Expect(pending <= tcpHandshakes && refused >= (asked-tcpHandshakes)*9/10,
-		"at most %d of %d handshakes are in flight at once and the %d extra are refused within %d ms (%d in flight, %d refused; %s)",
-		tcpHandshakes, asked, asked-tcpHandshakes, window, pending, refused, strings.Join(parts, "; "))
+	e.T.Expect(pending <= tcpHandshakes && refused >= (asked-tcpHandshakes)*9/10 && responsive(s),
+		"at most %d of %d handshakes are in flight at once and the %d extra are refused within %d ms, while charlie's stream never waits 2 s for an answer (%d in flight, %d refused, longest silence %d ms; %s)",
+		tcpHandshakes, asked, asked-tcpHandshakes, window, pending, refused, s.MaxGapMS, strings.Join(parts, "; "))
 }
 
 // raiseConntrack lifts the kernel's connection tracking limit for a case
@@ -275,10 +293,11 @@ func tcpFlowsTotalCase(e *Env) {
 	}
 	e.raiseConntrack(1 << 20)
 	e.StartEngine(cfg)
-	stream := e.StartStream("charlie", AsUser, 4*time.Minute)
+	// charlie's stream, itself a flow, runs until the apps let go.
+	release := e.NewRelease("flows")
+	stream := e.StartStream("charlie", AsUser, 6*time.Minute, release.Arg()...)
 	e.Sleep(time.Second)
 	from := time.Now().UnixMilli()
-	release := e.NewRelease("flows")
 	bgs := map[string]*Bg{}
 	for i, name := range names {
 		bgs[name] = e.Start(Run{App: name, Args: append([]string{"tcphold", "--to", floodTargets(i, wire.PortHold), "--count", strconv.Itoa(perApp),
@@ -314,15 +333,15 @@ func tcpFlowsTotalCase(e *Env) {
 	}
 	e.T.Check(stillOpen == established, "every admitted connection was still open when released (%d of %d)", stillOpen, established)
 	var s Stream
-	stream.WaitJSON(e, 2*time.Minute, &s)
-	e.CheckStreamSurvived("charlie's stream, one of the flows, throughout", s, "c")
+	stream.WaitJSON(e, 30*time.Second, &s)
+	e.keptOpen("charlie's stream, one of the flows,", s, "c")
 	e.T.Check(e.Eng.Running(), "the engine is still running")
 	asked := perApp * len(names)
 	// charlie's stream is a flow too.
 	room := tcpFlowsTotal - 1
-	e.T.Expect(established <= room && refused >= (asked-room)*9/10,
-		"at most %d of the %d connections are admitted besides charlie's stream, and the %d extra are refused (%d admitted, %d refused; %s)",
-		room, asked, asked-room, established, refused, strings.Join(parts, ", "))
+	e.T.Expect(established <= room && refused >= (asked-room)*9/10 && responsive(s),
+		"at most %d of the %d connections are admitted besides charlie's stream and the %d extra are refused, while the stream never waits 2 s for an answer (%d admitted, %d refused, longest silence %d ms; %s)",
+		room, asked, asked-room, established, refused, s.MaxGapMS, strings.Join(parts, ", "))
 }
 
 func tcpBufferBudgetCase(e *Env) {

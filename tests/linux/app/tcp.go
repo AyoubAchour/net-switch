@@ -406,12 +406,20 @@ func runStream(args []string) (any, error) {
 	interval := fs.Int("interval", 200, "ms between pings")
 	localAddr := fs.String("local-addr", "", "source address to bind")
 	bindDev := fs.String("bind-dev", "", "interface to bind to (an outside connection)")
+	release := fs.String("release-file", "", "end once this file exists (--duration is then the longest it runs)")
 	if err := parse(fs, args); err != nil {
 		return nil, err
 	}
 	list, err := targets(*to)
 	if err != nil {
 		return nil, err
+	}
+	released := func() bool {
+		if *release == "" {
+			return false
+		}
+		_, err := os.Stat(*release)
+		return err == nil
 	}
 	r := StreamResult{Seen: map[string]int{}}
 	d := net.Dialer{Timeout: 5 * time.Second, Control: socketOptions(*bindDev)}
@@ -459,7 +467,7 @@ func runStream(args []string) (any, error) {
 	ticker := time.NewTicker(time.Duration(*interval) * time.Millisecond)
 	defer ticker.Stop()
 loop:
-	for time.Now().Before(end) {
+	for time.Now().Before(end) && !released() {
 		select {
 		case <-closed:
 			break loop
