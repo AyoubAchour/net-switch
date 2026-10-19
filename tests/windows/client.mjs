@@ -120,20 +120,20 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
           connected = true;
           const path = length ? `/bytes?length=${length}` : `/close?nonce=${nonce}`;
           socket.write(`GET ${path} HTTP/1.1\r\nHost: target\r\nConnection: close\r\n\r\n`);
-      });
-      socket.on('data', (data) => {
-        if (!gotHeader) {
-          const combined = Buffer.concat([Buffer.from(header, 'latin1'), data]);
-          const separator = combined.indexOf('\r\n\r\n');
-          if (separator === -1) { header = combined.toString('latin1'); return; }
-          header = combined.subarray(0, separator).toString('latin1'); gotHeader = true;
-          data = combined.subarray(separator + 4);
-        }
-        bytes += data.length; digest.update(data); if (!length) body += data;
-      });
-      socket.on('end', () => { remoteClosedFirst = true; socket.end(); });
-      socket.on('close', () => finish(remoteClosedFirst ? 'closed' : 'closed-without-fin'));
-      socket.on('error', (error) => finish(error.code ?? error.message));
+        });
+        socket.on('data', (data) => {
+          if (!gotHeader) {
+            const combined = Buffer.concat([Buffer.from(header, 'latin1'), data]);
+            const separator = combined.indexOf('\r\n\r\n');
+            if (separator === -1) { header = combined.toString('latin1'); return; }
+            header = combined.subarray(0, separator).toString('latin1'); gotHeader = true;
+            data = combined.subarray(separator + 4);
+          }
+          bytes += data.length; digest.update(data); if (!length) body += data;
+        });
+        socket.on('end', () => { remoteClosedFirst = true; socket.end(); });
+        socket.on('close', () => finish(remoteClosedFirst ? 'closed' : 'closed-without-fin'));
+        socket.on('error', (error) => finish(error.code ?? error.message));
       });
       if (result.outcome !== 'EADDRINUSE' || performance.now() - started >= 100) break;
       // Node's close event can precede Winsock processing the final ACK. No
@@ -157,23 +157,23 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
   return samples;
 }
 
-async function rejectBurst({ target, count = 100 }) {
+async function rejectBurst({ target, count = 100, timeout = 5000 }) {
   return Promise.all(Array.from({ length: count }, () => new Promise((resolve) => {
     const started = performance.now(); let done = false;
     const socket = connect({ host: target.host, port: target.http });
-    const timer = setTimeout(() => finish('timeout'), 1500);
+    const timer = setTimeout(() => finish('timeout'), timeout);
     function finish(outcome) { if (done) return; done = true; clearTimeout(timer); socket.destroy(); resolve({ outcome, ms: performance.now() - started }); }
     socket.on('connect', () => finish('connected'));
     socket.on('error', (error) => finish(error.code ?? error.message));
   })));
 }
 
-async function udpReject({ target, count = 100 }) {
+async function udpReject({ target, count = 100, timeout = 5000 }) {
   return Promise.all(Array.from({ length: count }, () => new Promise((resolve) => {
     const socket = createSocket('udp4');
     const started = performance.now(); let done = false, sent = 0;
     const finish = (outcome) => { if (done) return; done = true; clearTimeout(timer); clearInterval(sender); socket.close(); resolve({ outcome, sent, ms: performance.now() - started }); };
-    const timer = setTimeout(() => finish('timeout'), 1500);
+    const timer = setTimeout(() => finish('timeout'), timeout);
     const sender = setInterval(() => { if (!done && sent) { sent++; socket.send(Buffer.alloc(64), (error) => { if (error) finish(error.code); }); } }, 25);
     socket.on('error', (error) => finish(error.code ?? error.message));
     socket.on('message', () => finish('reply'));

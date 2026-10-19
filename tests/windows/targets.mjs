@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { createSocket } from 'node:dgram';
 import { once } from 'node:events';
+import { createServer as createTCPServer } from 'node:net';
 import { hostedOnly } from './testisp/harness.mjs';
 
 // Both addresses reach this responder: the real NIC's address directly, and a
@@ -69,9 +70,18 @@ export async function targets(address) {
     });
     udp.push(socket);
   }
+  const closedTCP = createTCPServer();
+  closedTCP.listen(0, address); await once(closedTCP, 'listening');
+  const closedTCPPort = closedTCP.address().port;
+  await new Promise((resolve) => closedTCP.close(resolve));
+  const closedUDP = createSocket('udp4');
+  closedUDP.bind(0, address); await once(closedUDP, 'listening');
+  const closedUDPPort = closedUDP.address().port;
+  await new Promise((resolve) => closedUDP.close(resolve));
   return {
     direct: { host: address, http: server.address().port, udp: udp.map((socket) => socket.address().port) },
     virtual: { host: '198.19.128.2', http: server.address().port, udp: udp.map((socket) => socket.address().port) },
+    rejected: { host: address, http: closedTCPPort, udp: [closedUDPPort] },
     seen,
     async close() { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); for (const socket of udp) socket.close(); },
   };

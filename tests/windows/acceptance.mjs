@@ -22,6 +22,7 @@ await copyFile(process.execPath, clientExe);
 let harness, responder, server, worker, dnsAdapter, quicServer, quic, restoreDNS = false;
 const quicExe = path.resolve('dist/windows-test/quicprobe.exe');
 const mtuExe = path.resolve('dist/windows-test/mtuprobe.exe');
+const rejections = new Set(['ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT', 'EACCES']);
 let main, second;
 const pending = new Map();
 let serial = 0;
@@ -169,6 +170,12 @@ try {
       virtual: await client('udp', { target: responder.virtual, size, localAddress: harness.testisp.address }),
     }));
   }
+  const rejectBaseline = await observe('Windows reports controlled closed TCP and UDP ports', 'parity', async () => {
+    const tcp = await client('reject', { target: responder.rejected, count: 3 });
+    const udp = await client('udpReject', { target: responder.rejected, count: 3 });
+    assert([...tcp, ...udp].every((sample) => rejections.has(sample.outcome)), `Closed ports did not report rejection: ${JSON.stringify({ tcp, udp })}`);
+    return { tcp, udp };
+  });
   await report.test('gateway preserves STUN mapping before engine starts', 'parity', async () => {
     const result = await client('udp', { target: responder.virtual, stun: true, localAddress: harness.testisp.address });
     assert.equal(new Set(result.mappings.map((item) => item.port)).size, 1, JSON.stringify(result));
@@ -362,6 +369,7 @@ try {
     return { changed, held, beforePID, afterPID };
   });
   await observe('exhausted secondary rejects a burst instead of hanging', 'baseline-defect', async () => {
+    assert(rejectBaseline, 'Blocked: the Windows rejection baseline failed');
     await client('close');
     await client('open', { target: responder.virtual }); await client('close');
     try {
@@ -373,13 +381,14 @@ try {
       assert(!samples.some((item) => item.outcome === 'connected'), 'A capped app escaped the block');
       const udp = await client('udpReject', { target: responder.virtual });
       assert(!udp.some((item) => item.outcome === 'reply'), 'Capped UDP escaped the block');
+      assert([...samples, ...udp].every((item) => item.outcome === 'timeout' || rejections.has(item.outcome)), `Unexpected probe failure: ${JSON.stringify({ samples, udp })}`);
       assert.equal(blocked.find((line) => line.id === main.id).blocked, false, 'Main line exception was removed');
       const mainException = await newPublicOn(main);
       await server.api('lines/update', { id: main.id, cap: null });
       await server.api('lines/update', { id: second.id, cap: null });
       await pin(second.id); await client('open', { target: responder.virtual }); await client('close');
-      if (samples.some((item) => item.outcome === 'timeout') || udp.some((item) => item.outcome === 'timeout')) throw new BaselineDefect('Capped TCP/UDP did not fail fast; clearing the caps restored the same target', { blocked, samples, udp, mainException });
-      return { blocked, samples, udp, mainException };
+      if (samples.some((item) => item.outcome === 'timeout') || udp.some((item) => item.outcome === 'timeout')) throw new BaselineDefect('Capped TCP/UDP did not fail fast; clearing the caps restored the same target', { rejectBaseline, blocked, samples, udp, mainException });
+      return { rejectBaseline, blocked, samples, udp, mainException };
     } finally {
       await server.api('lines/update', { id: main.id, cap: null });
       await server.api('lines/update', { id: second.id, cap: null });
