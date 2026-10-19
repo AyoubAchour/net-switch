@@ -32,7 +32,21 @@ func (p *Platform) InstallAcceptanceHooks(e *engine.Engine, s *protocol.Server) 
 			f.Close()
 			panic(err)
 		}
-		p.testClose = func() { pprof.StopCPUProfile(); f.Close() }
+		runtime.SetBlockProfileRate(1_000_000)
+		p.testClose = func() {
+			pprof.StopCPUProfile()
+			f.Close()
+			runtime.SetBlockProfileRate(0)
+			block, err := os.OpenFile(filepath.Join(filepath.Dir(path), "block-"+p.Instance+".pprof"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+			if err != nil {
+				panic(err)
+			}
+			if err := pprof.Lookup("block").WriteTo(block, 0); err != nil {
+				block.Close()
+				panic(err)
+			}
+			block.Close()
+		}
 	}
 	var gates sync.Mutex
 	var lookupGate, writeGate chan struct{}
