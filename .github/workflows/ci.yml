@@ -316,7 +316,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $untracked = git ls-files --others --exclude-standard -- third_party/gvisor vendor
           if ($untracked) { throw "Untracked generated dependencies: $untracked" }
-          node --test scripts/gvisor-diff.test.mjs
+          node --test scripts/gvisor-diff.test.mjs scripts/repeat-close-tests.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: go vet ./internal/... ./cmd/... ./tests/...
       - run: go test -v ./internal/... ./cmd/... ./tests/...
@@ -372,7 +372,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Repeat clock and reopen boundaries 1000 times
-        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -timeout=35m -run '^Test(TimeWait(BlockedAndBudgetReuse|FinalACKReleasesAdmission|LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState|SYNBeforeRemoval|ZeroCapClosingBatch)|Close(Admission|IdleAdmission|FINWithoutPolicy|KeepsQueuedDataCounted|RSTDuringHandshake|BeforeFinalACK|HandshakeCap|RetainedCap|RetainedCapLostFIN|UnknownACKGetsReset|HandshakeCompletionOwnsRelease|HandshakeBeforeHangupNotification|FencePreservesListenerProcessing|FenceWakesRemainingSegments))$' ./internal/engine/stack
+        run: node scripts/repeat-close-tests.mjs ${{ matrix.name != 'Windows ARM64' && '--race' || '' }}
       - name: Repeat endpoint setup deduplication and cancellation 1000 times
         run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths
