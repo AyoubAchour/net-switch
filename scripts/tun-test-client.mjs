@@ -91,18 +91,29 @@ async function udp(size) {
   const packet = Buffer.concat([header, question, opt]);
   try {
     return await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`No UDP DNS reply to ${packet.length} bytes`)), 5000);
-      const finish = (fn, value) => { clearTimeout(timer); fn(value); };
+      const servers = ['1.1.1.1', '8.8.8.8'];
+      let attempts = 0, done = false;
+      const send = () => {
+        // Five attempts per resolver, one each second. Keep the same socket
+        // and large payload so this still exercises real UDP TUN routing.
+        if (attempts === servers.length * 5) {
+          finish(reject, new Error(`No UDP DNS reply to ${packet.length} bytes after ${attempts} attempts`));
+          return;
+        }
+        socket.send(packet, 53, servers[Math.floor(attempts++ / 5)]);
+      };
+      const timer = setInterval(send, 1000);
+      const finish = (fn, value) => { if (done) return; done = true; clearInterval(timer); fn(value); };
       socket.on('error', (error) => finish(reject, error));
       socket.on('message', (reply, peer) => {
-        if (peer.address !== '1.1.1.1' || peer.port !== 53 || reply.length < 12 || reply.readUInt16BE(0) !== 0x1234) return;
+        if (!servers.includes(peer.address) || peer.port !== 53 || reply.length < 12 || reply.readUInt16BE(0) !== 0x1234) return;
         try {
           assert(reply[2] & 0x80, 'DNS response flag missing');
           assert.equal(reply[3] & 15, 0, 'DNS error response');
           finish(resolve, { sent: packet.length, received: reply.length, port: socket.address().port });
         } catch (error) { finish(reject, error); }
       });
-      socket.send(packet, 53, '1.1.1.1');
+      send();
     });
   } finally { socket.close(); }
 }
