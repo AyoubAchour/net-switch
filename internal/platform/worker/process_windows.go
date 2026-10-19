@@ -32,7 +32,10 @@ func (p *process) Wait() error {
 			var code uint32
 			p.waitErr = windows.GetExitCodeProcess(p.handle, &code)
 			if code != 0 {
-				p.waitErr = fmt.Errorf("worker exited %d", code)
+				p.waitErr = fmt.Errorf("worker exited %d (0x%08X)", code, code)
+				if code == 0xc0000142 {
+					p.waitErr = fmt.Errorf("%w: STATUS_DLL_INIT_FAILED during Windows process initialization", p.waitErr)
+				}
 			}
 		}
 	})
@@ -54,8 +57,18 @@ func (p *process) Close() error {
 // Reads use a Medium-integrity token with Administrators deny-only. Writes and
 // outside (which enables TCP counters) retain admin access with privileges
 // stripped. Both enter a bounded worker-only job before they can execute.
+const workerUILimits = windows.JOB_OBJECT_UILIMIT_DESKTOP | windows.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
+	windows.JOB_OBJECT_UILIMIT_EXITWINDOWS | windows.JOB_OBJECT_UILIMIT_GLOBALATOMS |
+	windows.JOB_OBJECT_UILIMIT_HANDLES | windows.JOB_OBJECT_UILIMIT_READCLIPBOARD |
+	windows.JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS | windows.JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+
 func Start(executable string, args []string) (Process, error) {
-	return start(executable, args, nil, windows.CREATE_NO_WINDOW, 255)
+	// No worker needs a console. CREATE_NO_WINDOW still enters hidden-console
+	// initialization for console-subsystem binaries, which fails with a lowered
+	// token on hosted Windows (0xC0000142). DETACHED_PROCESS avoids that path;
+	// the only inherited I/O remains our three explicit pipes. GUI-subsystem
+	// builds and USER32/GDI icon extraction work with the same token/job limits.
+	return start(executable, args, nil, windows.DETACHED_PROCESS, workerUILimits)
 }
 
 // The explicit startup inputs let hosted tests distinguish loader, desktop and

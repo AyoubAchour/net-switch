@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -28,6 +30,7 @@ type isolationResult struct {
 	ProcessCode, RegistryCode, TCPCode       string
 	Memory                                   uintptr
 	UI                                       uint32
+	ConsoleAttached                          bool
 	Error                                    string
 }
 
@@ -40,10 +43,12 @@ func TestMain(m *testing.M) {
 		}
 		if len(os.Args) > 2 && os.Args[2] == "bootstrap-proof" {
 			dll, err := windows.LoadLibraryEx("user32.dll", 0, windows.LOAD_LIBRARY_SEARCH_SYSTEM32)
-			fmt.Printf("Go reached main; USER32=%v; error=%v\n", dll, err)
+			console, _, _ := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleCP").Call()
+			fmt.Printf("Go reached main; USER32=%v; console=%d; error=%v\n", dll, console, err)
 			if err != nil {
 				os.Exit(1)
 			}
+			windows.FreeLibrary(dll)
 			os.Exit(0)
 		}
 		var input isolationRequest
@@ -91,16 +96,29 @@ func TestWorkerBootstrapDiagnostics(t *testing.T) {
 		{"automatic/no-window/all-UI-limits", &empty, windows.CREATE_NO_WINDOW, 255},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			p, err := start(exe, []string{"worker", "bootstrap-proof"}, test.desktop, test.flags, test.ui)
+			var p Process
+			var err error
+			if test.flags == windows.DETACHED_PROCESS {
+				p, err = Start(exe, []string{"worker", "bootstrap-proof"})
+			} else {
+				p, err = start(exe, []string{"worker", "bootstrap-proof"}, test.desktop, test.flags, test.ui)
+			}
 			if err != nil {
-				t.Logf("create: %v", err)
-				return
+				t.Fatal(err)
 			}
 			defer p.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			stop := context.AfterFunc(ctx, func() { _ = p.Kill() })
+			defer stop()
 			p.Input().Close()
 			b, _ := io.ReadAll(io.LimitReader(p.Output(), 65536))
 			e, _ := io.ReadAll(io.LimitReader(p.Errors(), 65536))
-			t.Logf("exit=%v; stdout=%s; stderr=%s", p.Wait(), b, e)
+			err = p.Wait()
+			t.Logf("exit=%v; stdout=%s; stderr=%s", err, b, e)
+			if test.flags == windows.DETACHED_PROCESS && (err != nil || !strings.Contains(string(b), "Go reached main") || !strings.Contains(string(b), "console=0")) {
+				t.Fatal("production worker must initialize USER32 without a console")
+			}
 		})
 	}
 }
@@ -150,6 +168,8 @@ func isolationProbe(input isolationRequest) (isolationResult, error) {
 		return result, err
 	}
 	result.UI = ui.UIRestrictionsClass
+	console, _, _ := windows.NewLazySystemDLL("kernel32.dll").NewProc("GetConsoleCP").Call()
+	result.ConsoleAttached = console != 0
 	return result, nil
 }
 
@@ -225,7 +245,7 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 				t.Fatal(string(b), err)
 			}
 			t.Logf("%s: %+v", mode, got)
-			if got.Error != "" || got.Memory != 256*1024*1024 || got.UI != 255 {
+			if got.Error != "" || got.Memory != 256*1024*1024 || got.UI != 255 || got.ConsoleAttached {
 				t.Fatalf("worker limits: %+v", got)
 			}
 			if mode == "outside" {
