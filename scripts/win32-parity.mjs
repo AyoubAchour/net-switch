@@ -11,6 +11,7 @@ import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { windows } from '../lib/platform/windows.mjs';
 import { nativeArchitecture } from '../lib/architecture.mjs';
+import { enableAutostart, disableAutostart } from '../lib/autostart.mjs';
 import { AppInfo } from '../lib/appinfo.mjs';
 import { appKey } from '../lib/apps.mjs';
 import { InstalledApps } from '../lib/installed-apps.mjs';
@@ -156,15 +157,32 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { args: { OLD: old.i
   });
   await check('Task Scheduler registration, read and removal', async () => {
     const args = { on: true, executable, root: path.dirname(executable), userDir: folder, machineDir: folder };
+    // Task Scheduler omits default-valued XML elements when exporting a task.
+    // Compare effective principals and the service-normalized settings/triggers
+    // after registering each implementation, rather than requiring RunLevel's
+    // optional LeastPrivilege spelling to survive that normalization.
+    const readTasks = () => runPowerShellJson(`$service=New-Object -ComObject Schedule.Service; $service.Connect(); $folder=$service.GetFolder('\\Net Switch')
+$result=foreach($name in 'Server','Sign-in') {
+  $task=$folder.GetTask($name); $definition=$task.Definition; [xml]$xml=$task.Xml
+  [pscustomobject]@{ name=$name; logon=[int]$definition.Principal.LogonType; level=[int]$definition.Principal.RunLevel; user=[string]$definition.Principal.UserId; description=[string]$definition.RegistrationInfo.Description; settings=$xml.Task.Settings.OuterXml; triggers=$xml.Task.Triggers.OuterXml; directory=[string]$definition.Actions.Item(1).WorkingDirectory; command=[string]$definition.Actions.Item(1).Path; arguments=[string]$definition.Actions.Item(1).Arguments }
+}
+ConvertTo-Json -InputObject @($result) -Compress`);
     try {
+      await enableAutostart({ ...args, nodePath: process.execPath });
+      const baseline = await readTasks();
+      await disableAutostart();
+      assert.equal(await native('autostart'), false);
       await native('autostart-set', args);
       assert.equal(await native('autostart'), true);
       assert.equal(await windows.readAutostart(), true);
-      const settings = await runPowerShellJson(`$service=New-Object -ComObject Schedule.Service; $service.Connect(); $folder=$service.GetFolder('\\Net Switch')
-$result=foreach($name in 'Server','Sign-in') { $task=$folder.GetTask($name); [xml]$xml=$task.Xml; [pscustomobject]@{ name=$name; logon=[string]$xml.Task.Principals.Principal.LogonType; level=[string]$xml.Task.Principals.Principal.RunLevel; priority=[string]$xml.Task.Settings.Priority; limit=[string]$xml.Task.Settings.ExecutionTimeLimit; battery=[string]$xml.Task.Settings.DisallowStartIfOnBatteries; multiple=[string]$xml.Task.Settings.MultipleInstancesPolicy } }
-ConvertTo-Json -InputObject @($result) -Compress`);
-      assert.deepEqual(settings.map((s) => s.level), ['HighestAvailable', 'LeastPrivilege']);
-      assert(settings.every((s) => s.logon === 'InteractiveToken' && s.priority === '4' && s.limit === 'PT0S' && s.battery === 'false' && s.multiple === 'IgnoreNew'));
+      const current = await readTasks();
+      const semantics = ({ command, arguments: _arguments, ...settings }) => settings;
+      assert.deepEqual(current.map(semantics), baseline.map(semantics));
+      assert.deepEqual(current.map((s) => s.level), [1, 0]);
+      assert(current.every((s) => s.logon === 3 && s.command === executable));
+      assert(current[0].arguments.startsWith('--root '));
+      assert.equal(current[1].arguments, `--background ${current[0].arguments}`);
+      console.log(`Task effective privilege levels (Server, Sign-in): ${JSON.stringify(current.map((s) => s.level))}`);
     } finally { await native('autostart-set', { on: false }); }
     assert.equal(await native('autostart'), false);
     assert.equal(await windows.readAutostart(), false);
