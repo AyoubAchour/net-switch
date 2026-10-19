@@ -526,10 +526,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}()
 		if !complete {
-			// New sockets tend to be near this process's last verified socket,
-			// including high descriptors in a large pre-opened socket pool.
-			if _, err := f.Seek(max(0, window.lastFD-64)+2, 0); err == nil {
-				names, _ := f.Readdirnames(256)
+			// Scan newly allocated descriptors first. Everything below this
+			// high-water mark was already indexed by a prior window; rescanning
+			// 256 neighbours in every unrelated process made multi-app bursts
+			// spend their entire lookup budget reading the same symlinks.
+			if _, err := f.Seek(window.high+3, 0); err == nil {
+				names, _ := f.Readdirnames(128)
 				if err := visit(names); err != nil {
 					return err
 				}
