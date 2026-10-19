@@ -63,6 +63,8 @@ jobs:
           ./scripts/fetch-engine.ps1
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Run acceptance against today's Node server and sing-box
+        env:
+          NETSWITCH_NATIVE_REUSE_ROUNDS: '50'
         run: |
           node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry server.mjs --engine-exe engine/sing-box.exe --profile baseline
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

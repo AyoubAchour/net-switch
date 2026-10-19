@@ -189,12 +189,19 @@ try {
     return result;
   });
   const directReuse = await observe('physical controlled port reuse baseline', 'parity', async () => {
-    const samples = await client('reuse', { target: { ...responder.direct, source: harness.uplink.address }, count: 1000 });
-    const failed = samples.find((sample) => sample.outcome !== 'closed');
-    let sockets;
-    if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection | Where-Object { $_.LocalPort -eq ${failed.port} -or $_.RemotePort -eq ${failed.port} } | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess,CreationTime) | ConvertTo-Json -Compress`]);
-    assert(samples.length === 1000 && !failed, `Physical reuse failed: ${JSON.stringify({ samples, sockets, target: responder.direct })}`);
-    return samples;
+    const rounds = Number(process.env.NETSWITCH_NATIVE_REUSE_ROUNDS ?? 1);
+    assert(Number.isInteger(rounds) && rounds >= 1 && rounds <= 50, 'Native reuse rounds must be between 1 and 50');
+    const evidence = [];
+    for (let round = 1; round <= rounds; round++) {
+      const samples = await client('reuse', { target: { ...responder.direct, source: harness.uplink.address }, count: 1000 });
+      const failed = samples.find((sample) => sample.outcome !== 'closed');
+      let sockets;
+      if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection | Where-Object { $_.LocalPort -eq ${failed.port} -or $_.RemotePort -eq ${failed.port} } | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess,CreationTime) | ConvertTo-Json -Compress`]);
+      assert(samples.length === 1000 && !failed, `Physical reuse failed: ${JSON.stringify({ round, samples, sockets, target: responder.direct })}`);
+      evidence.push({ round, count: samples.length, maxMs: Math.max(...samples.map((sample) => sample.ms)), port: samples[0].port });
+      console.log(`Native reuse round ${round}/${rounds}: 1,000 completed`);
+    }
+    return evidence;
   });
   if (!harness.testisp.tcpReuseHook) {
     const reason = 'Section 5.1 / PR #29: TestISP keeps 60-second TIME_WAIT until the shared forwarder hook lands.';
