@@ -171,6 +171,8 @@ func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket f
 			if n.control.AllowReject("") {
 				_, raw, _ := copyPacket()
 				n.out.Send(packet.Unreachable(raw, 0))
+			} else {
+				n.Dropped.Add(1)
 			}
 			return
 		}
@@ -347,9 +349,14 @@ func (s *session) run() {
 	s.active = true
 	s.mu.Unlock()
 	s.ticket.Established(socket.LocalAddr().Addr())
+	if q, ok := socket.(platform.UDPErrorHandler); ok {
+		q.SetErrorHandler(s.errorReply)
+	}
 	s.workers.Go(func() { s.read(ctx) })
 	if q, ok := socket.(platform.UDPErrorQueue); ok {
-		s.workers.Go(func() { s.readErrors(ctx, q) })
+		if _, inline := socket.(platform.UDPErrorHandler); !inline {
+			s.workers.Go(func() { s.readErrors(ctx, q) })
+		}
 	}
 	for {
 		select {
@@ -427,14 +434,14 @@ func (s *session) waitRejected(ctx context.Context) {
 func (s *session) read(ctx context.Context) {
 	n := s.n
 	defer s.close()
-	// Begin reserved this fixed read buffer as part of the session budget.
-	buf := make([]byte, flowapi.UDPReadBuffer)
-	headerSize := 48
-	if s.source.Addr().Is4() {
-		headerSize = 28
+	// The worst-case read buffer is still reserved per session. Linux can
+	// wait for readiness before borrowing it, so idle mappings retain none.
+	var fixed []byte
+	if _, ok := s.socket.(interface{ WaitReadable(context.Context) error }); !ok {
+		fixed = make([]byte, flowapi.UDPReadBuffer)
 	}
 	for {
-		size, remote, err := s.socket.ReadFrom(buf)
+		size, p, err := s.readPacket(ctx, fixed)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
@@ -461,11 +468,6 @@ func (s *session) read(ctx context.Context) {
 			n.Dropped.Add(1)
 			continue
 		}
-		if size < 0 || size > len(buf) || size+headerSize > n.mtu {
-			n.Oversize.Add(1)
-			continue
-		}
-		p := packet.UDP(remote, s.source, buf[:size])
 		if len(p) > n.mtu || len(p) == 0 {
 			n.Oversize.Add(1)
 			continue
@@ -482,17 +484,48 @@ func (s *session) read(ctx context.Context) {
 	}
 }
 
+var readBuffers = sync.Pool{New: func() any { b := make([]byte, flowapi.UDPReadBuffer); return &b }}
+
+func (s *session) readPacket(ctx context.Context, buf []byte) (int, []byte, error) {
+	if ready, ok := s.socket.(interface{ WaitReadable(context.Context) error }); ok {
+		if err := ready.WaitReadable(ctx); err != nil {
+			return 0, nil, err
+		}
+		borrowed := readBuffers.Get().(*[]byte)
+		defer readBuffers.Put(borrowed)
+		buf = *borrowed
+	}
+	size, remote, err := s.socket.ReadFrom(buf)
+	if err != nil {
+		return size, nil, err
+	}
+	headerSize := 48
+	if s.source.Addr().Is4() {
+		headerSize = 28
+	}
+	if size < 0 || size > len(buf) || size+headerSize > s.n.mtu {
+		return size, nil, nil
+	}
+	// packet.UDP owns its copy before the pool buffer is returned.
+	return size, packet.UDP(remote, s.source, buf[:size]), nil
+}
+
 func (s *session) readErrors(ctx context.Context, q platform.UDPErrorQueue) {
 	for {
 		e, err := q.ReadError(ctx)
 		if err != nil {
 			return
 		}
-		s.mu.Lock()
-		fresh := !s.closed && s.n.now().Sub(s.validated) < IdentityMaxAge
-		s.mu.Unlock()
-		if fresh && s.n.control.AllowReject(s.owner.AppID) {
-			s.n.out.Send(packet.Unreachable(packet.UDP(s.source, e.Destination, e.Payload), e.MTU))
-		}
+		s.errorReply(e)
+	}
+}
+
+func (s *session) errorReply(e platform.DatagramError) {
+	s.mu.Lock()
+	fresh := !s.closed && s.n.now().Sub(s.validated) < IdentityMaxAge
+	app := s.owner.AppID
+	s.mu.Unlock()
+	if fresh && s.n.control.AllowReject(app) {
+		s.n.out.Send(packet.Unreachable(packet.UDP(s.source, e.Destination, e.Payload), e.MTU))
 	}
 }

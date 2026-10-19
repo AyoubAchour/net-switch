@@ -250,6 +250,19 @@ func TestKernelPlatform(t *testing.T) {
 		if big := u.tooBig(netip.MustParseAddrPort("198.51.100.1:30000")); big.MTU != 1280 {
 			t.Fatalf("drained error queue lost the path MTU: %+v", big)
 		}
+		var delivered []platform.DatagramError
+		u.SetErrorHandler(func(e platform.DatagramError) {
+			if !u.errorMu.TryLock() {
+				t.Error("error handler ran under the error-queue lock")
+			} else {
+				u.errorMu.Unlock()
+			}
+			delivered = append(delivered, e)
+		})
+		_, err = sock.WriteTo(make([]byte, 1400), netip.MustParseAddrPort("198.51.100.1:30001"), true)
+		if !errors.As(err, &big) || len(delivered) != 1 || delivered[0].MTU != 1280 || delivered[0].Destination.Port() != 30001 {
+			t.Fatalf("inline real error queue: %v %+v", err, delivered)
+		}
 		if err := netlink.RouteDel(&def); err != nil {
 			t.Fatal(err)
 		}

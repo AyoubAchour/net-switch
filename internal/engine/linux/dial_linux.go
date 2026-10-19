@@ -152,10 +152,32 @@ type udpSocket struct {
 	done             chan struct{}
 	mtus             [8]mtuEntry
 	mtuCursor        int
+	handler          func(platform.DatagramError)
 }
 
 func (s *udpSocket) LocalAddr() netip.AddrPort { return s.conn.LocalAddr().(*net.UDPAddr).AddrPort() }
 func (s *udpSocket) Close() error              { s.once.Do(func() { close(s.done) }); return s.conn.Close() }
+func (s *udpSocket) SetErrorHandler(handler func(platform.DatagramError)) {
+	s.errorMu.Lock()
+	s.handler = handler
+	s.errorMu.Unlock()
+}
+func (s *udpSocket) WaitReadable(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var readErr error
+	var peek [1]byte
+	err := s.raw.Read(func(fd uintptr) bool {
+		_, _, readErr = unix.Recvfrom(int(fd), peek[:], unix.MSG_PEEK|unix.MSG_DONTWAIT)
+		return readErr != unix.EAGAIN && readErr != unix.EWOULDBLOCK
+	})
+	err = errors.Join(err, readErr)
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		s.drainErrors()
+	}
+	return err
+}
 func (s *udpSocket) ReadFrom(b []byte) (int, netip.AddrPort, error) {
 	n, a, err := s.conn.ReadFromUDPAddrPort(b)
 	if err != nil && !errors.Is(err, net.ErrClosed) {
@@ -214,7 +236,14 @@ func (s *udpSocket) tooBig(dst netip.AddrPort) *platform.TooBig {
 // starve replies. ReadError consumes bounded messages from this channel.
 func (s *udpSocket) drainErrors() {
 	s.errorMu.Lock()
-	defer s.errorMu.Unlock()
+	handler := s.handler
+	var pending *platform.DatagramError
+	defer func() {
+		s.errorMu.Unlock()
+		if handler != nil && pending != nil {
+			handler(*pending)
+		}
+	}()
 	for i := 0; i < 16; i++ {
 		var data [2048]byte
 		var control [256]byte
@@ -264,10 +293,14 @@ func (s *udpSocket) drainErrors() {
 			} else {
 				message.Unreachable = true
 			}
-			if len(s.errors) == cap(s.errors) {
+			if (handler != nil && pending != nil) || (handler == nil && len(s.errors) == cap(s.errors)) {
 				continue
 			}
 			message.Payload = append([]byte(nil), data[:n]...)
+			if handler != nil {
+				pending = &message
+				continue
+			}
 			select {
 			case s.errors <- message:
 			default:

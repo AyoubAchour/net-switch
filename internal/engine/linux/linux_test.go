@@ -62,10 +62,16 @@ func TestDiagnosticPoolCancellationAndClose(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var cookie uint64
+	canceled := 0
 	for i := 0; i < 100; i++ {
 		short, done := context.WithTimeout(ctx, time.Microsecond)
-		_, _ = o.query(short, unix.AF_INET, unix.IPPROTO_UDP, source, destination)
+		_, shortErr := o.query(short, unix.AF_INET, unix.IPPROTO_UDP, source, destination)
 		done()
+		if errors.Is(shortErr, context.DeadlineExceeded) || errors.Is(shortErr, os.ErrDeadlineExceeded) {
+			canceled++
+		} else if shortErr != nil {
+			t.Fatalf("short query: %v", shortErr)
+		}
 		rows, err := o.query(ctx, unix.AF_INET, unix.IPPROTO_UDP, source, destination)
 		if err != nil || len(rows) != 1 {
 			t.Fatalf("query after cancellation %d: %v %v", i, rows, err)
@@ -74,6 +80,9 @@ func TestDiagnosticPoolCancellationAndClose(t *testing.T) {
 			t.Fatal("reply from another socket")
 		}
 		cookie = rows[0].cookie
+	}
+	if canceled == 0 {
+		t.Fatal("no query was canceled; cancellation path wasn't exercised")
 	}
 	if len(o.queries.idle) != 1 {
 		t.Fatalf("expected a live reusable socket before cleanup, got %d", len(o.queries.idle))
@@ -89,7 +98,7 @@ func TestDiagnosticPoolCancellationAndClose(t *testing.T) {
 	if _, err := o.query(ctx, unix.AF_INET, unix.IPPROTO_UDP, source, destination); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("closed pool accepted lookup: %v", err)
 	}
-	t.Log("100 canceled queries followed by 100 fresh, matching replies; idle descriptor closed")
+	t.Logf("%d canceled queries, 100 fresh matching replies; idle descriptor closed", canceled)
 }
 
 func TestTCPReadinessPreservesDataEOFAndClose(t *testing.T) {

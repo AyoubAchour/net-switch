@@ -509,12 +509,17 @@ func (t *Table) AllowReject(app string) bool {
 		t.rejectTotal = 0
 		clear(t.rejectApps)
 	}
-	if t.rejectTotal >= 5000 || t.rejectApps[app] >= 1000 {
+	// Before attribution there is no app bucket: empty is not one shared
+	// application. Otherwise five apps at 800/s are incorrectly throttled
+	// together to 1,000/s when the total flow/session cap is reached.
+	if t.rejectTotal >= 5000 || (app != "" && t.rejectApps[app] >= 1000) {
 		t.gauges.DroppedNotices++
 		return false
 	}
 	t.rejectTotal++
-	t.rejectApps[app]++
+	if app != "" {
+		t.rejectApps[app]++
+	}
 	t.Emit(flowapi.Event{Type: "log", Message: "flow rejected", App: app})
 	return true
 }
