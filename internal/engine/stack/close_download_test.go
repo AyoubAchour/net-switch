@@ -3,7 +3,6 @@ package stack_test
 import (
 	"bytes"
 	"crypto/sha256"
-	"fmt"
 	"runtime"
 	"slices"
 	"testing"
@@ -68,29 +67,34 @@ func TestCloseDownloadACKStaysAsync(t *testing.T) {
 	}
 }
 
-// Both cases transfer and hash 100 MB through the real relay. A 5 MiB tail is
-// queued at a zero window, then drained while another flow sends requests.
-// In closing, the remote sends EOF before that tail drains (FIN_WAIT_1).
+// Transfer and hash 100 MB through the relay. Queue and drain two 5 MiB tails,
+// first while ESTABLISHED, then after CloseWrite (FIN_WAIT_1). Keep the same
+// connections and stack: gVisor randomizes TCP worker assignment per stack,
+// which would otherwise confound the latency comparison.
 func BenchmarkCloseDownloadOtherFlow(b *testing.B) {
-	for _, closing := range []bool{false, true} {
-		b.Run(fmt.Sprintf("closing_%t", closing), func(b *testing.B) {
-			var latency []time.Duration
-			for range b.N {
-				latency = append(latency, downloadWithOtherFlow(b, closing)...)
+	b.Run("paired", func(b *testing.B) {
+		var latency [2][]time.Duration
+		for range b.N {
+			pair := downloadWithOtherFlow(b)
+			for i := range pair {
+				latency[i] = append(latency[i], pair[i]...)
 			}
-			slices.Sort(latency)
-			if latency[len(latency)/2] <= 0 {
+		}
+		b.SetBytes(100_000_000)
+		for i, name := range []string{"open", "closing"} {
+			samples := latency[i]
+			slices.Sort(samples)
+			if samples[len(samples)/2] <= 0 {
 				b.Fatal("clock cannot resolve the other flow's latency")
 			}
-			b.SetBytes(100_000_000)
-			b.ReportMetric(float64(latency[len(latency)/2].Nanoseconds()), "other-p50-ns")
-			b.ReportMetric(float64(latency[(len(latency)-1)*99/100].Nanoseconds()), "other-p99-ns")
-			b.ReportMetric(float64(latency[len(latency)-1].Nanoseconds()), "other-max-ns")
-		})
-	}
+			b.ReportMetric(float64(samples[len(samples)/2].Nanoseconds()), name+"-p50-ns")
+			b.ReportMetric(float64(samples[(len(samples)-1)*99/100].Nanoseconds()), name+"-p99-ns")
+			b.ReportMetric(float64(samples[len(samples)-1].Nanoseconds()), name+"-max-ns")
+		}
+	})
 }
 
-func downloadWithOtherFlow(t testing.TB, closing bool) []time.Duration {
+func downloadWithOtherFlow(t testing.TB) [2][]time.Duration {
 	p := newPeer(t, false)
 	p.fixedSendBuffer = 6 << 20
 	p.open(1000)
@@ -101,20 +105,16 @@ func downloadWithOtherFlow(t testing.TB, closing bool) []time.Duration {
 	ep := p.endpoint()
 	ep.SocketOptions().SetSendBufferSize(6<<20, true)
 	const total, tail = 100_000_000, 5 << 20
+	const prefix = total - 2*tail
 	clock := newLatencyClock(t)
 	block := bytes.Repeat([]byte{0x5a}, 32<<10)
 	resume := make(chan struct{})
-	unblock := false
-	defer func() {
-		if !unblock {
-			close(resume)
-		}
-	}()
+	defer close(resume)
 	writer := make(chan error, 1)
 	remote := p.current.conn
 	go func() {
-		for _, size := range []int{total - tail, tail} {
-			if size == tail {
+		for phase, size := range []int{prefix, tail, tail} {
+			if phase != 0 {
 				<-resume
 			}
 			for left := size; left > 0; {
@@ -126,14 +126,13 @@ func downloadWithOtherFlow(t testing.TB, closing bool) []time.Duration {
 				left -= n
 			}
 		}
-		if closing {
-			remote.CloseWrite()
-		}
+		remote.CloseWrite()
 		writer <- nil
 	}()
 	hash := sha256.New()
 	received, packets := 0, 0
-	var latency []time.Duration
+	phase := -1
+	var latency [2][]time.Duration
 	for received < total {
 		h := p.read(5 * time.Second)
 		if h == nil || h.Flags().Contains(header.TCPFlagRst) {
@@ -149,21 +148,22 @@ func downloadWithOtherFlow(t testing.TB, closing bool) []time.Duration {
 		hash.Write(data)
 		received += len(data)
 		p.ack += uint32(len(data))
-		if received == total-tail {
+		boundary := received == prefix || received == prefix+tail
+		if boundary {
 			p.inject(p.windowACK(0))
 			p.inject(p.packet(p.seq+1, p.ack, header.TCPFlagRst|header.TCPFlagAck, nil))
-			close(resume)
-			unblock = true
-			if err := <-writer; err != nil {
-				t.Fatal(err)
-			}
-			if closing {
+			resume <- struct{}{}
+			phase++
+			if phase == 1 {
+				if err := <-writer; err != nil {
+					t.Fatal(err)
+				}
 				closeSignal(t, p.current.sentEOF, "closing download tail")
 			} else {
 				awaitSendBuffer(t, ep, tail)
 			}
 			want := tcp.StateEstablished
-			if closing {
+			if phase == 1 {
 				want = tcp.StateFinWait1
 			}
 			if state := tcp.EndpointState(ep.State()); state != want {
@@ -171,11 +171,11 @@ func downloadWithOtherFlow(t testing.TB, closing bool) []time.Duration {
 			}
 		}
 		ack := p.windowACK(65535)
-		if received >= total-tail && (received == total-tail || packets%16 == 0) {
+		if phase >= 0 && (boundary || packets%16 == 0) {
 			start := clock()
 			p.inject(ack)
 			other.upload([]byte("ping"))
-			latency = append(latency, clock()-start)
+			latency[phase] = append(latency[phase], clock()-start)
 		} else {
 			p.inject(ack)
 		}
@@ -189,9 +189,6 @@ func downloadWithOtherFlow(t testing.TB, closing bool) []time.Duration {
 	}
 	if !bytes.Equal(hash.Sum(nil), expected.Sum(nil)) {
 		t.Fatal("100 MB download hash mismatch")
-	}
-	if !closing {
-		remote.CloseWrite()
 	}
 	h := p.wait(header.TCPFlagFin)
 	p.ack = h.SequenceNumber() + 1
