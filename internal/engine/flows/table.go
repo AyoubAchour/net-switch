@@ -147,6 +147,7 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	} else {
 		f.handshake = true
 		f.tcpBytes = MinTCP
+		f.receive, f.send = 64<<10, 64<<10
 		t.gauges.Handshakes++
 		t.gauges.TCPBytes += MinTCP
 	}
@@ -159,6 +160,7 @@ type ticket struct {
 	record                      Record
 	resolved, closed, handshake bool
 	tcpBytes                    int64
+	receive, send               int
 	cancel                      context.CancelFunc
 }
 
@@ -201,6 +203,7 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	if !udp && t.gauges.TCPBytes+DefaultTCP-MinTCP <= t.limits.TCPBytes {
 		t.gauges.TCPBytes += DefaultTCP - MinTCP
 		f.tcpBytes = DefaultTCP
+		f.receive, f.send = 1<<20, 1<<20
 	}
 	t.point++
 	f.record.Point = t.point
@@ -215,11 +218,24 @@ func (f *ticket) Buffers() (int, int) {
 	t := f.table
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	n := 64 << 10
-	if f.tcpBytes == DefaultTCP {
-		n = 1 << 20
+	return f.receive, f.send
+}
+
+func (f *ticket) Grow(receive, send int) bool {
+	t := f.table
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if f.closed || !f.resolved || f.record.Protocol != "tcp" || receive < f.receive || send < f.send || receive > 8<<20 || send > 6<<20 {
+		return false
 	}
-	return n, n
+	delta := int64(receive-f.receive) + int64(send-f.send)
+	if delta > t.limits.TCPBytes-t.gauges.TCPBytes {
+		return false
+	}
+	t.gauges.TCPBytes += delta
+	f.tcpBytes += delta
+	f.receive, f.send = receive, send
+	return true
 }
 func (f *ticket) Established(source netip.Addr) {
 	t := f.table
@@ -405,6 +421,10 @@ func (t *Table) CloseFlows(s Selector, before uint64) (CloseResult, error) {
 		return CloseResult{}, err
 	}
 	t.mu.Lock()
+	if s.App != "" && t.policy != nil && t.policy.Predict(s.App).Distribution != nil {
+		t.mu.Unlock()
+		return CloseResult{}, errors.New("shared apps reconnect only outside connections through Control")
+	}
 	ids := map[uint64]bool{}
 	for _, id := range s.IDs {
 		ids[id] = true

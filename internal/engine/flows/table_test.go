@@ -279,3 +279,15 @@ func TestCancellationBeforeRegistration(t *testing.T) {
 	}
 	x.Close()
 }
+
+func TestSharedReconnectKeepsRoutedFlows(t *testing.T) {
+	f := table(t, Defaults())
+	x := admit(t, f, "tcp", "shared")
+	defer x.Close()
+	if _, err := f.CloseFlows(Selector{App: "shared", NotLine: "A"}, 0); err == nil {
+		t.Fatal("shared routed flows were reconnectable")
+	}
+	if f.Stats().Flows != 1 {
+		t.Fatal("shared flow closed")
+	}
+}
