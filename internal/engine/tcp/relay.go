@@ -60,10 +60,15 @@ func Splice(ctx context.Context, app halfConn, remote platform.TCPConn, count fu
 			err = dst.CloseWrite()
 		}
 		src.CloseRead()
+		if err != nil {
+			closeBoth()
+		}
 		done <- err
 	}
 	go copyOne(remote, app, func(n uint64) { count(n, 0) })
-	go copyOne(app, remote, func(n uint64) { count(0, n) })
+	// Reuse the caller for one direction. A third idle goroutine per flow
+	// only waits on done and adds another stack to every GC root scan.
+	copyOne(app, remote, func(n uint64) { count(0, n) })
 	err := <-done
 	if err != nil {
 		closeBoth()

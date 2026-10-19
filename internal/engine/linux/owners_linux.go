@@ -585,6 +585,19 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}()
 		if !complete {
+			// Small descriptor sets are commonly reused by concurrent short
+			// connections. The last descriptor alone misses its neighbours.
+			if window.lastFD > 0 && window.lastFD < 128 {
+				if _, err := f.Seek(0, 0); err == nil {
+					names, _ := f.Readdirnames(128)
+					if err := visit(names); err != nil {
+						return err
+					}
+					if len(found) > 0 && found[len(found)-1].pid == pid {
+						return nil
+					}
+				}
+			}
 			// Reopening normally reuses the previous descriptor. Check that
 			// one live link even when another lookup just scanned this process.
 			if window.lastFD > 0 {

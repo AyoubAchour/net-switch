@@ -3,6 +3,7 @@
 package suite
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -86,6 +87,11 @@ func lookupGate(e *Env, scoped, measured bool) {
 		e.RunJSON(Run{App: "bravo", Cgroup: appScope, Args: append([]string{"tcp", "--to", whoami, "--timeout", "5000"}, args...), Timeout: 3 * time.Minute}, &p.r)
 		if session != nil {
 			after := stats()
+			if scoped {
+				var hints struct{ CgroupPopulated uint64 }
+				err := json.Unmarshal(after.OwnerLookup, &hints)
+				e.T.Check(err == nil && hints.CgroupPopulated > 0, "the scoped phase actually resolved cgroup hints inside the engine (%d populated hints; %v)", hints.CgroupPopulated, err)
+			}
 			p.lookups, p.misses, p.lookupTime = after.LookupCount-before.LookupCount, after.LookupMisses-before.LookupMisses, after.LookupTime-before.LookupTime
 			for i := range p.histogram {
 				p.histogram[i] = after.LookupHistogram[i] - before.LookupHistogram[i]

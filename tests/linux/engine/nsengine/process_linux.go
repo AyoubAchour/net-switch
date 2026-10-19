@@ -48,9 +48,14 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 		os.RemoveAll(temp)
 		return err
 	}
-	p.cmd = exec.Command("ip", "netns", "exec", env.Netns, d.exe.Path, "run", "--socket", p.socket, "--state-dir", p.state)
+	// ip netns exec replaces /sys and hides its cgroup2 submount. Enter only
+	// the network namespace so the real engine can resolve kernel cgroup IDs,
+	// exactly as it does when running as a host service.
+	p.cmd = exec.Command("nsenter", "--net="+filepath.Join("/run/netns", env.Netns), "--", d.exe.Path, "run", "--socket", p.socket, "--state-dir", p.state)
 	p.cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+filepath.Join(filepath.Dir(env.WorkDir), "inet", "probe-ca.pem"))
-	if os.Getenv("NSACCEPT_PROFILE")=="true"{p.cmd.Env=append(p.cmd.Env,"NETSWITCH_ACCEPTANCE_PROFILE="+filepath.Join(env.WorkDir,"cpu.pprof"))}
+	if os.Getenv("NSACCEPT_PROFILE") == "true" {
+		p.cmd.Env = append(p.cmd.Env, "NETSWITCH_ACCEPTANCE_PROFILE="+filepath.Join(env.WorkDir, "cpu.pprof"))
+	}
 	p.cmd.Stdout = f
 	p.cmd.Stderr = f
 	if err := p.cmd.Start(); err != nil {
@@ -178,7 +183,7 @@ func (d *Driver) cleanup(ctx context.Context) error {
 		return nil
 	}
 	p := d.process
-	cmd := exec.CommandContext(ctx, "ip", "netns", "exec", p.netns, d.exe.Path, "cleanup", "--state-dir", p.state)
+	cmd := exec.CommandContext(ctx, "nsenter", "--net="+filepath.Join("/run/netns", p.netns), "--", d.exe.Path, "cleanup", "--state-dir", p.state)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("engine cleanup: %w: %s", err, out)
 	}
