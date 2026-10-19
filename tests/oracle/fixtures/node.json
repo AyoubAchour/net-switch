@@ -1,0 +1,5768 @@
+{
+  "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+  "states": {
+    "oneLine": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": false,
+          "active": false,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "on",
+          "wanted": true,
+          "error": null,
+          "measuring": true,
+          "proxyPort": null,
+          "ipv6": false,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "k3f9",
+            "alias": "Ethernet",
+            "label": "Cable",
+            "kind": "wired",
+            "main": true,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "k3f9",
+            "rate": {
+              "down": 38912,
+              "up": 1234
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          }
+        ],
+        "candidates": [],
+        "apps": [
+          {
+            "key": "c:\\apps\\steam.exe",
+            "path": "C:\\Apps\\Steam.exe",
+            "name": "Steam",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 2662400,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 2662400
+            },
+            "sortScore": 2662400,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\firefox.exe",
+            "path": "C:\\Apps\\Firefox.exe",
+            "name": "Firefox",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 655360,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 655360
+            },
+            "sortScore": 655360,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\discord.exe",
+            "path": "C:\\Apps\\Discord.exe",
+            "name": "Discord",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 14336,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 14336
+            },
+            "sortScore": 14336,
+            "connections": {},
+            "outside": null
+          }
+        ],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": false,
+          "wifiBlocked": false,
+          "keepBothConnected": false,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    },
+    "twoLines": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": false,
+          "active": false,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "on",
+          "wanted": true,
+          "error": null,
+          "measuring": true,
+          "proxyPort": null,
+          "ipv6": false,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "k3f9",
+            "alias": "Ethernet",
+            "label": "Cable",
+            "kind": "wired",
+            "main": true,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "k3f9",
+            "rate": {
+              "down": 38912,
+              "up": 1234
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "p2x1",
+            "alias": "Wi-Fi 2",
+            "label": "Wi-Fi stick",
+            "kind": "wifi",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 31,
+            "connections": 6,
+            "carrying": true,
+            "target": "p2x1",
+            "rate": {
+              "down": 936960,
+              "up": 50
+            },
+            "ssid": "Home",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          }
+        ],
+        "candidates": [],
+        "apps": [
+          {
+            "key": "c:\\apps\\steam.exe",
+            "path": "C:\\Apps\\Steam.exe",
+            "name": "Steam",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 2662400,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 2662400
+            },
+            "sortScore": 2662400,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\firefox.exe",
+            "path": "C:\\Apps\\Firefox.exe",
+            "name": "Firefox",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "p2x1",
+            "rate": {
+              "down": 655360,
+              "up": 0
+            },
+            "lineDown": {
+              "p2x1": 655360
+            },
+            "sortScore": 655360,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\discord.exe",
+            "path": "C:\\Apps\\Discord.exe",
+            "name": "Discord",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 14336,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 14336
+            },
+            "sortScore": 14336,
+            "connections": {},
+            "outside": null
+          }
+        ],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": true,
+          "wifiBlocked": false,
+          "keepBothConnected": true,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    },
+    "fourLines": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": false,
+          "active": false,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "on",
+          "wanted": true,
+          "error": null,
+          "measuring": true,
+          "proxyPort": null,
+          "ipv6": false,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "k3f9",
+            "alias": "Ethernet",
+            "label": "Cable",
+            "kind": "wired",
+            "main": true,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "k3f9",
+            "rate": {
+              "down": 38912,
+              "up": 1234
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "p2x1",
+            "alias": "Wi-Fi 2",
+            "label": "Wi-Fi stick",
+            "kind": "wifi",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 31,
+            "connections": 6,
+            "carrying": true,
+            "target": "p2x1",
+            "rate": {
+              "down": 936960,
+              "up": 50
+            },
+            "ssid": "Home",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "ph01",
+            "alias": "Ethernet 3",
+            "label": "Phone",
+            "kind": "phone",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 54,
+            "connections": 6,
+            "carrying": true,
+            "target": "ph01",
+            "rate": {
+              "down": 122880,
+              "up": 8192
+            },
+            "ssid": null,
+            "metered": true,
+            "strict": false,
+            "cap": {
+              "bytes": 10737418240,
+              "period": "month"
+            },
+            "usage": {
+              "bytes": 6657199308.8,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "w2x9",
+            "alias": "Wi-Fi 3",
+            "label": "Wi-Fi stick 2",
+            "kind": "wifi",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 27,
+            "connections": 6,
+            "carrying": true,
+            "target": "w2x9",
+            "rate": {
+              "down": 307200,
+              "up": 20480
+            },
+            "ssid": "Upstairs",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          }
+        ],
+        "candidates": [],
+        "apps": [
+          {
+            "key": "c:\\apps\\steam.exe",
+            "path": "C:\\Apps\\Steam.exe",
+            "name": "Steam",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 2662400,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 2662400
+            },
+            "sortScore": 2662400,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\firefox.exe",
+            "path": "C:\\Apps\\Firefox.exe",
+            "name": "Firefox",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "p2x1",
+            "rate": {
+              "down": 655360,
+              "up": 0
+            },
+            "lineDown": {
+              "p2x1": 655360
+            },
+            "sortScore": 655360,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\discord.exe",
+            "path": "C:\\Apps\\Discord.exe",
+            "name": "Discord",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 14336,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 14336
+            },
+            "sortScore": 14336,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\spotify.exe",
+            "path": "C:\\Apps\\Spotify.exe",
+            "name": "Spotify",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "ph01",
+            "rate": {
+              "down": 163840,
+              "up": 0
+            },
+            "lineDown": {
+              "ph01": 163840
+            },
+            "sortScore": 163840,
+            "connections": {},
+            "outside": null
+          }
+        ],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": true,
+          "wifiBlocked": false,
+          "keepBothConnected": true,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    },
+    "threeLines": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": false,
+          "active": false,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "on",
+          "wanted": true,
+          "error": null,
+          "measuring": true,
+          "proxyPort": null,
+          "ipv6": false,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "k3f9",
+            "alias": "Ethernet",
+            "label": "Cable",
+            "kind": "wired",
+            "main": true,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "k3f9",
+            "rate": {
+              "down": 1153433.6,
+              "up": 45056
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "p2x1",
+            "alias": "Wi-Fi 2",
+            "label": "Wi-Fi stick",
+            "kind": "wifi",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 31,
+            "connections": 6,
+            "carrying": true,
+            "target": "p2x1",
+            "rate": {
+              "down": 2411724.8,
+              "up": 95232
+            },
+            "ssid": "Home",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "ph01",
+            "alias": "Ethernet 3",
+            "label": "Phone",
+            "kind": "phone",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 54,
+            "connections": 6,
+            "carrying": true,
+            "target": "ph01",
+            "rate": {
+              "down": 122880,
+              "up": 8192
+            },
+            "ssid": null,
+            "metered": true,
+            "strict": false,
+            "cap": {
+              "bytes": 10737418240,
+              "period": "month"
+            },
+            "usage": {
+              "bytes": 6657199308.8,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          }
+        ],
+        "candidates": [],
+        "apps": [
+          {
+            "key": "c:\\apps\\steam.exe",
+            "path": "C:\\Apps\\Steam.exe",
+            "name": "Steam",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "p2x1",
+            "rate": {
+              "down": 2662400,
+              "up": 0
+            },
+            "lineDown": {
+              "p2x1": 2662400
+            },
+            "sortScore": 2662400,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\firefox.exe",
+            "path": "C:\\Apps\\Firefox.exe",
+            "name": "Firefox",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 655360,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 655360
+            },
+            "sortScore": 655360,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\spotify.exe",
+            "path": "C:\\Apps\\Spotify.exe",
+            "name": "Spotify",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "ph01",
+            "rate": {
+              "down": 163840,
+              "up": 0
+            },
+            "lineDown": {
+              "ph01": 163840
+            },
+            "sortScore": 163840,
+            "connections": {},
+            "outside": null
+          }
+        ],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": true,
+          "wifiBlocked": false,
+          "keepBothConnected": true,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    },
+    "lineDown": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": false,
+          "active": false,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "on",
+          "wanted": true,
+          "error": null,
+          "measuring": true,
+          "proxyPort": null,
+          "ipv6": false,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "k3f9",
+            "alias": "Ethernet",
+            "label": "Cable",
+            "kind": "wired",
+            "main": true,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "k3f9",
+            "rate": {
+              "down": 38912,
+              "up": 1234
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "p2x1",
+            "alias": "Wi-Fi 2",
+            "label": "Wi-Fi stick",
+            "kind": "wifi",
+            "main": false,
+            "connected": false,
+            "problem": "no internet",
+            "ping": null,
+            "connections": 0,
+            "carrying": false,
+            "target": "k3f9",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "ssid": "Home",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          }
+        ],
+        "candidates": [],
+        "apps": [
+          {
+            "key": "c:\\apps\\steam.exe",
+            "path": "C:\\Apps\\Steam.exe",
+            "name": "Steam",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 2662400,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 2662400
+            },
+            "sortScore": 2662400,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\firefox.exe",
+            "path": "C:\\Apps\\Firefox.exe",
+            "name": "Firefox",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "p2x1",
+            "rate": {
+              "down": 655360,
+              "up": 0
+            },
+            "lineDown": {
+              "p2x1": 655360
+            },
+            "sortScore": 655360,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\discord.exe",
+            "path": "C:\\Apps\\Discord.exe",
+            "name": "Discord",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 14336,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 14336
+            },
+            "sortScore": 14336,
+            "connections": {},
+            "outside": null
+          }
+        ],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": false,
+          "wifiBlocked": false,
+          "keepBothConnected": true,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    },
+    "mainDown": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": false,
+          "active": false,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "on",
+          "wanted": true,
+          "error": null,
+          "measuring": true,
+          "proxyPort": null,
+          "ipv6": false,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "k3f9",
+            "alias": "Ethernet",
+            "label": "Cable",
+            "kind": "wired",
+            "main": true,
+            "connected": false,
+            "problem": "no address",
+            "ping": null,
+            "connections": 0,
+            "carrying": false,
+            "target": "p2x1",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "p2x1",
+            "alias": "Wi-Fi 2",
+            "label": "Wi-Fi stick",
+            "kind": "wifi",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 31,
+            "connections": 6,
+            "carrying": true,
+            "target": "p2x1",
+            "rate": {
+              "down": 936960,
+              "up": 50
+            },
+            "ssid": "Home",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          }
+        ],
+        "candidates": [],
+        "apps": [
+          {
+            "key": "c:\\apps\\steam.exe",
+            "path": "C:\\Apps\\Steam.exe",
+            "name": "Steam",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 2662400,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 2662400
+            },
+            "sortScore": 2662400,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\firefox.exe",
+            "path": "C:\\Apps\\Firefox.exe",
+            "name": "Firefox",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "p2x1",
+            "rate": {
+              "down": 655360,
+              "up": 0
+            },
+            "lineDown": {
+              "p2x1": 655360
+            },
+            "sortScore": 655360,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\discord.exe",
+            "path": "C:\\Apps\\Discord.exe",
+            "name": "Discord",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 14336,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 14336
+            },
+            "sortScore": 14336,
+            "connections": {},
+            "outside": null
+          }
+        ],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": false,
+          "wifiBlocked": false,
+          "keepBothConnected": true,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    },
+    "capped": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": false,
+          "active": false,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "on",
+          "wanted": true,
+          "error": null,
+          "measuring": true,
+          "proxyPort": null,
+          "ipv6": false,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "k3f9",
+            "alias": "Ethernet",
+            "label": "Cable",
+            "kind": "wired",
+            "main": true,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "k3f9",
+            "rate": {
+              "down": 38912,
+              "up": 1234
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "p2x1",
+            "alias": "Wi-Fi 2",
+            "label": "Wi-Fi stick",
+            "kind": "wifi",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 31,
+            "connections": 6,
+            "carrying": true,
+            "target": "p2x1",
+            "rate": {
+              "down": 936960,
+              "up": 50
+            },
+            "ssid": "Home",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "ph01",
+            "alias": "Ethernet 3",
+            "label": "Phone",
+            "kind": "phone",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 54,
+            "connections": 6,
+            "carrying": false,
+            "target": "k3f9",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "ssid": null,
+            "metered": true,
+            "strict": false,
+            "cap": {
+              "bytes": 10737418240,
+              "period": "month"
+            },
+            "usage": {
+              "bytes": 11059540787.2,
+              "periodStart": 1790812800000
+            },
+            "exhausted": true,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          }
+        ],
+        "candidates": [],
+        "apps": [
+          {
+            "key": "c:\\apps\\steam.exe",
+            "path": "C:\\Apps\\Steam.exe",
+            "name": "Steam",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 2662400,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 2662400
+            },
+            "sortScore": 2662400,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\firefox.exe",
+            "path": "C:\\Apps\\Firefox.exe",
+            "name": "Firefox",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "p2x1",
+            "rate": {
+              "down": 655360,
+              "up": 0
+            },
+            "lineDown": {
+              "p2x1": 655360
+            },
+            "sortScore": 655360,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\discord.exe",
+            "path": "C:\\Apps\\Discord.exe",
+            "name": "Discord",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 14336,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 14336
+            },
+            "sortScore": 14336,
+            "connections": {},
+            "outside": null
+          }
+        ],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": true,
+          "wifiBlocked": false,
+          "keepBothConnected": true,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    },
+    "combining": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": true,
+          "active": true,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "on",
+          "wanted": true,
+          "error": null,
+          "measuring": true,
+          "proxyPort": null,
+          "ipv6": false,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "k3f9",
+            "alias": "Ethernet",
+            "label": "Cable",
+            "kind": "wired",
+            "main": true,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "k3f9",
+            "rate": {
+              "down": 38912,
+              "up": 1234
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": 0.4
+          },
+          {
+            "id": "p2x1",
+            "alias": "Wi-Fi 2",
+            "label": "Wi-Fi stick",
+            "kind": "wifi",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 31,
+            "connections": 6,
+            "carrying": true,
+            "target": "p2x1",
+            "rate": {
+              "down": 936960,
+              "up": 50
+            },
+            "ssid": "Home",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": 0.6
+          }
+        ],
+        "candidates": [],
+        "apps": [
+          {
+            "key": "c:\\apps\\steam.exe",
+            "path": "C:\\Apps\\Steam.exe",
+            "name": "Steam",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 2662400,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 2662400
+            },
+            "sortScore": 2662400,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\firefox.exe",
+            "path": "C:\\Apps\\Firefox.exe",
+            "name": "Firefox",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "p2x1",
+            "rate": {
+              "down": 655360,
+              "up": 0
+            },
+            "lineDown": {
+              "p2x1": 655360
+            },
+            "sortScore": 655360,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\discord.exe",
+            "path": "C:\\Apps\\Discord.exe",
+            "name": "Discord",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "k3f9",
+            "rate": {
+              "down": 14336,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 14336
+            },
+            "sortScore": 14336,
+            "connections": {},
+            "outside": null
+          }
+        ],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": true,
+          "wifiBlocked": false,
+          "keepBothConnected": true,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    },
+    "checking": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": false,
+          "active": false,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "on",
+          "wanted": true,
+          "error": null,
+          "measuring": true,
+          "proxyPort": null,
+          "ipv6": false,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "k3f9",
+            "alias": "Ethernet",
+            "label": "Cable",
+            "kind": "wired",
+            "main": true,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "k3f9",
+            "rate": {
+              "down": 38912,
+              "up": 1234
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "p2x1",
+            "alias": "Wi-Fi 2",
+            "label": "Wi-Fi stick",
+            "kind": "wifi",
+            "main": false,
+            "connected": false,
+            "problem": "checking",
+            "ping": null,
+            "connections": 0,
+            "carrying": false,
+            "target": "k3f9",
+            "rate": {
+              "down": 0,
+              "up": 0
+            },
+            "ssid": "Home",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          }
+        ],
+        "candidates": [],
+        "apps": [
+          {
+            "key": "c:\\apps\\steam.exe",
+            "path": "C:\\Apps\\Steam.exe",
+            "name": "Steam",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 2662400,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 2662400
+            },
+            "sortScore": 2662400,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\firefox.exe",
+            "path": "C:\\Apps\\Firefox.exe",
+            "name": "Firefox",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "p2x1",
+            "rate": {
+              "down": 655360,
+              "up": 0
+            },
+            "lineDown": {
+              "p2x1": 655360
+            },
+            "sortScore": 655360,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\discord.exe",
+            "path": "C:\\Apps\\Discord.exe",
+            "name": "Discord",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 14336,
+              "up": 0
+            },
+            "lineDown": {
+              "k3f9": 14336
+            },
+            "sortScore": 14336,
+            "connections": {},
+            "outside": null
+          }
+        ],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": false,
+          "wifiBlocked": false,
+          "keepBothConnected": true,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    },
+    "longNames": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": false,
+          "active": false,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "on",
+          "wanted": true,
+          "error": null,
+          "measuring": true,
+          "proxyPort": null,
+          "ipv6": false,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "l1",
+            "alias": "Realtek USB GbE Family Controller #2",
+            "label": "Fibre from the basement router",
+            "kind": "wired",
+            "main": true,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "l1",
+            "rate": {
+              "down": 123456789,
+              "up": 123456789
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "l2",
+            "alias": "Wi-Fi 2",
+            "label": "Wi-Fi stick on the upstairs network",
+            "kind": "wifi",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "l2",
+            "rate": {
+              "down": 38912,
+              "up": 1234
+            },
+            "ssid": "A very long network name indeed",
+            "metered": true,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "l3",
+            "alias": "Ethernet 3",
+            "label": "Ayoub’s phone on the unlimited weekend plan",
+            "kind": "phone",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": true,
+            "target": "l3",
+            "rate": {
+              "down": 38912,
+              "up": 1234
+            },
+            "ssid": null,
+            "metered": true,
+            "strict": false,
+            "cap": {
+              "bytes": 10737418240,
+              "period": "day"
+            },
+            "usage": {
+              "bytes": 2684354560,
+              "periodStart": 1792195200000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          }
+        ],
+        "candidates": [],
+        "apps": [
+          {
+            "key": "c:\\apps\\microsoft edge webview2 helper for the company sign-in page.exe",
+            "path": "C:\\Apps\\Microsoft Edge WebView2 helper for the company sign-in page.exe",
+            "name": "Microsoft Edge WebView2 helper for the company sign-in page",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "l2",
+            "rate": {
+              "down": 921600,
+              "up": 0
+            },
+            "lineDown": {
+              "l2": 921600
+            },
+            "sortScore": 921600,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\steam.exe",
+            "path": "C:\\Apps\\Steam.exe",
+            "name": "Steam",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": null,
+            "rate": {
+              "down": 307200,
+              "up": 0
+            },
+            "lineDown": {
+              "l1": 307200
+            },
+            "sortScore": 307200,
+            "connections": {},
+            "outside": null
+          },
+          {
+            "key": "c:\\apps\\discord.exe",
+            "path": "C:\\Apps\\Discord.exe",
+            "name": "Discord",
+            "hasIcon": false,
+            "switchable": true,
+            "reconnectable": true,
+            "line": "l3",
+            "rate": {
+              "down": 14336,
+              "up": 0
+            },
+            "lineDown": {
+              "l3": 14336
+            },
+            "sortScore": 14336,
+            "connections": {},
+            "outside": null
+          }
+        ],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": true,
+          "wifiBlocked": false,
+          "keepBothConnected": true,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    },
+    "routingOff": {
+      "status": 200,
+      "headers": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store"
+      },
+      "body": {
+        "mode": "tun",
+        "elevated": true,
+        "version": "0.3.1",
+        "update": null,
+        "updateChecks": true,
+        "features": {
+          "reconnect": true,
+          "combine": true,
+          "lines": true,
+          "installedApps": true
+        },
+        "combine": {
+          "on": false,
+          "active": false,
+          "mode": "auto"
+        },
+        "routing": {
+          "status": "off",
+          "wanted": false,
+          "error": null,
+          "measuring": false,
+          "proxyPort": null,
+          "ipv6": null,
+          "retryAt": null
+        },
+        "lines": [
+          {
+            "id": "k3f9",
+            "alias": "Ethernet",
+            "label": "Cable",
+            "kind": "wired",
+            "main": true,
+            "connected": true,
+            "problem": null,
+            "ping": 18,
+            "connections": 6,
+            "carrying": false,
+            "target": null,
+            "rate": {
+              "down": 38912,
+              "up": 1234
+            },
+            "ssid": null,
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          },
+          {
+            "id": "p2x1",
+            "alias": "Wi-Fi 2",
+            "label": "Wi-Fi stick",
+            "kind": "wifi",
+            "main": false,
+            "connected": true,
+            "problem": null,
+            "ping": 31,
+            "connections": 6,
+            "carrying": false,
+            "target": null,
+            "rate": {
+              "down": 936960,
+              "up": 50
+            },
+            "ssid": "Home",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "usage": {
+              "bytes": 429496729.6,
+              "periodStart": 1790812800000
+            },
+            "exhausted": false,
+            "blocked": false,
+            "weight": 1,
+            "share": null
+          }
+        ],
+        "candidates": [],
+        "apps": [],
+        "events": [],
+        "settings": {
+          "autostart": null,
+          "checkForUpdates": true,
+          "probeTargets": [
+            "1.1.1.1:443",
+            "8.8.8.8:443"
+          ]
+        },
+        "setup": {
+          "cableNotDefault": true,
+          "wifiBlocked": false,
+          "keepBothConnected": true,
+          "changed": {
+            "cableDefault": false,
+            "keepBoth": false
+          }
+        }
+      }
+    }
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "route": "/api/ping",
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "ok": true
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/state",
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": true,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": false,
+            "active": false,
+            "mode": "auto"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Wi-Fi",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": true,
+            "probeTargets": [
+              "1.1.1.1:443",
+              "8.8.8.8:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/installed-apps",
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": [
+          {
+            "path": "C:\\Apps\\Firefox.exe",
+            "name": "Firefox"
+          }
+        ]
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/icon?key=missing",
+      "response": {
+        "status": 404,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "Not found"
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/ping",
+      "headers": {
+        "x-token": ""
+      },
+      "response": {
+        "status": 401,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "Open Net Switch from its shortcut."
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/ping",
+      "headers": {
+        "host": "attacker.invalid"
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "Forbidden"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/routing",
+      "input": {
+        "on": false
+      },
+      "headers": {
+        "origin": "https://attacker.invalid"
+      },
+      "response": {
+        "status": 403,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "Forbidden"
+        }
+      }
+    },
+    {
+      "method": "GET",
+      "route": "/api/missing",
+      "response": {
+        "status": 404,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "Not found"
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/settings",
+      "input": "{",
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "The request could not be read."
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/settings",
+      "input": {
+        "bytes": 65537,
+        "sha256": "fc44b3294ed0af81ea8aa59c654b0344f8f882ff9b80f0db589701b1d8bf1850"
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "Request too large."
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/settings",
+      "input": {
+        "checkForUpdates": false,
+        "probeTargets": [
+          "9.9.9.9:443"
+        ]
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": false,
+            "active": false,
+            "mode": "auto"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Wi-Fi",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/settings",
+      "input": {
+        "autostart": true
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "Starting with Windows needs Net Switch installed from its installer."
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/update/check",
+      "input": {},
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": false,
+            "active": false,
+            "mode": "auto"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Wi-Fi",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          },
+          "check": {
+            "result": "current",
+            "version": null
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/update/dismiss",
+      "input": {
+        "version": "0.3.2"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": false,
+            "active": false,
+            "mode": "auto"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Wi-Fi",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/app-line",
+      "input": {
+        "path": "C:\\Apps\\Firefox.exe",
+        "line": "b2"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": false,
+            "active": false,
+            "mode": "auto"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Wi-Fi",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 0,
+                "up": 0
+              },
+              "lineDown": {},
+              "sortScore": 0,
+              "connections": {},
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/app-line",
+      "input": {
+        "path": "",
+        "line": "b2"
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "Choose an app and a line, then try again."
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/lines/update",
+      "input": {
+        "id": "b2",
+        "label": "Phone data",
+        "metered": true,
+        "cap": {
+          "bytes": 1024,
+          "period": "day"
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": false,
+            "active": false,
+            "mode": "auto"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Phone data",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": {
+                "bytes": 1024,
+                "period": "day"
+              },
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 0,
+                "up": 0
+              },
+              "lineDown": {},
+              "sortScore": 0,
+              "connections": {},
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/lines/update",
+      "input": {
+        "id": "a1",
+        "strict": true
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "The main line carries every app without a line of its own, so it can’t be kept to chosen apps."
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/combine",
+      "input": {
+        "on": true,
+        "mode": "manual",
+        "weights": {
+          "a1": 2,
+          "b2": 3
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": true,
+            "active": true,
+            "mode": "manual"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 2,
+              "share": 0.4
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Phone data",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": {
+                "bytes": 1024,
+                "period": "day"
+              },
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 3,
+              "share": 0.6
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 0,
+                "up": 0
+              },
+              "lineDown": {},
+              "sortScore": 0,
+              "connections": {},
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/combine",
+      "input": {
+        "mode": "invalid"
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "Choose Auto or Manual, then try again."
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/reconnect",
+      "input": {
+        "key": "unknown"
+      },
+      "response": {
+        "status": 400,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "error": "This one can’t be reconnected, because other programs share its connections."
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/reconnect",
+      "input": {
+        "key": "c:\\apps\\firefox.exe"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "closed": 1,
+          "failed": 0,
+          "gone": 0,
+          "state": {
+            "mode": "tun",
+            "elevated": true,
+            "version": "0.3.1",
+            "update": null,
+            "updateChecks": false,
+            "features": {
+              "reconnect": true,
+              "combine": true,
+              "lines": true,
+              "installedApps": true
+            },
+            "combine": {
+              "on": true,
+              "active": true,
+              "mode": "manual"
+            },
+            "routing": {
+              "status": "on",
+              "wanted": true,
+              "error": null,
+              "measuring": true,
+              "proxyPort": null,
+              "ipv6": false,
+              "retryAt": null
+            },
+            "lines": [
+              {
+                "id": "a1",
+                "alias": "Ethernet",
+                "label": "Ethernet",
+                "kind": "wired",
+                "main": true,
+                "connected": true,
+                "problem": null,
+                "ping": 18,
+                "connections": 1,
+                "carrying": true,
+                "target": "a1",
+                "rate": null,
+                "ssid": null,
+                "metered": false,
+                "strict": false,
+                "cap": null,
+                "usage": {
+                  "bytes": 0,
+                  "periodStart": 1790812800000
+                },
+                "exhausted": false,
+                "blocked": false,
+                "weight": 2,
+                "share": 0.4
+              },
+              {
+                "id": "b2",
+                "alias": "Wi-Fi",
+                "label": "Phone data",
+                "kind": "wifi",
+                "main": false,
+                "connected": true,
+                "problem": null,
+                "ping": 18,
+                "connections": 0,
+                "carrying": true,
+                "target": "b2",
+                "rate": null,
+                "ssid": null,
+                "metered": true,
+                "strict": false,
+                "cap": {
+                  "bytes": 1024,
+                  "period": "day"
+                },
+                "usage": {
+                  "bytes": 0,
+                  "periodStart": 1792368000000
+                },
+                "exhausted": false,
+                "blocked": false,
+                "weight": 3,
+                "share": 0.6
+              }
+            ],
+            "candidates": [
+              {
+                "alias": "Phone",
+                "label": "Phone",
+                "kind": "phone",
+                "ssid": null
+              }
+            ],
+            "apps": [
+              {
+                "key": "c:\\apps\\firefox.exe",
+                "path": "C:\\Apps\\Firefox.exe",
+                "name": "Firefox",
+                "hasIcon": false,
+                "switchable": true,
+                "reconnectable": true,
+                "line": "b2",
+                "rate": {
+                  "down": 30,
+                  "up": 9
+                },
+                "lineDown": {
+                  "a1": 30
+                },
+                "sortScore": 16.25,
+                "connections": {
+                  "a1": 1
+                },
+                "outside": null
+              }
+            ],
+            "events": [
+              {
+                "id": "090909090909",
+                "at": 1792411202000,
+                "kind": "up",
+                "lineId": "a1",
+                "text": "Ethernet is back."
+              },
+              {
+                "id": "0a0a0a0a0a0a",
+                "at": 1792411202000,
+                "kind": "up",
+                "lineId": "b2",
+                "text": "Wi-Fi is back."
+              }
+            ],
+            "settings": {
+              "autostart": null,
+              "checkForUpdates": false,
+              "probeTargets": [
+                "9.9.9.9:443"
+              ]
+            },
+            "setup": {
+              "cableNotDefault": true,
+              "wifiBlocked": false,
+              "keepBothConnected": true,
+              "changed": {
+                "cableDefault": false,
+                "keepBoth": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/setup/cable-default",
+      "input": {},
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": true,
+            "active": true,
+            "mode": "manual"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 1,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 2,
+              "share": 0.4
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Phone data",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": {
+                "bytes": 1024,
+                "period": "day"
+              },
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1792368000000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 3,
+              "share": 0.6
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 30,
+                "up": 9
+              },
+              "lineDown": {
+                "a1": 30
+              },
+              "sortScore": 16.25,
+              "connections": {
+                "a1": 1
+              },
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": true,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/setup/keep-both",
+      "input": {},
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": true,
+            "active": true,
+            "mode": "manual"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 1,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 2,
+              "share": 0.4
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Phone data",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": {
+                "bytes": 1024,
+                "period": "day"
+              },
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1792368000000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 3,
+              "share": 0.6
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 30,
+                "up": 9
+              },
+              "lineDown": {
+                "a1": 30
+              },
+              "sortScore": 16.25,
+              "connections": {
+                "a1": 1
+              },
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": false,
+            "changed": {
+              "cableDefault": true,
+              "keepBoth": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/setup/undo",
+      "input": {},
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": true,
+            "active": true,
+            "mode": "manual"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 1,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 2,
+              "share": 0.4
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Phone data",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": {
+                "bytes": 1024,
+                "period": "day"
+              },
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1792368000000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 3,
+              "share": 0.6
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 30,
+                "up": 9
+              },
+              "lineDown": {
+                "a1": 30
+              },
+              "sortScore": 16.25,
+              "connections": {
+                "a1": 1
+              },
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/lines/add",
+      "input": {
+        "alias": "Phone"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": true,
+            "active": true,
+            "mode": "manual"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 2,
+              "share": 0.35
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Phone data",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": {
+                "bytes": 1024,
+                "period": "day"
+              },
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1792368000000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 3,
+              "share": 0.5
+            },
+            {
+              "id": "292929",
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "292929",
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": null,
+              "usage": null,
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": 0.15
+            }
+          ],
+          "candidates": [],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 0,
+                "up": 0
+              },
+              "lineDown": {},
+              "sortScore": 0,
+              "connections": {},
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/lines/remove",
+      "input": {
+        "id": "292929"
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": true,
+            "active": true,
+            "mode": "manual"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 2,
+              "share": 0.4
+            },
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Phone data",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": {
+                "bytes": 1024,
+                "period": "day"
+              },
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1792368000000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 3,
+              "share": 0.6
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 0,
+                "up": 0
+              },
+              "lineDown": {},
+              "sortScore": 0,
+              "connections": {},
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/lines/order",
+      "input": {
+        "ids": [
+          "b2",
+          "a1"
+        ]
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": true,
+            "active": true,
+            "mode": "manual"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Phone data",
+              "kind": "wifi",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": {
+                "bytes": 1024,
+                "period": "day"
+              },
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1792368000000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 3,
+              "share": 0.6
+            },
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 2,
+              "share": 0.4
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 0,
+                "up": 0
+              },
+              "lineDown": {},
+              "sortScore": 0,
+              "connections": {},
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": false,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/routing",
+      "input": {
+        "on": false
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": true,
+            "active": false,
+            "mode": "manual"
+          },
+          "routing": {
+            "status": "off",
+            "wanted": false,
+            "error": null,
+            "measuring": false,
+            "proxyPort": null,
+            "ipv6": null,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Phone data",
+              "kind": "wifi",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": null,
+              "connections": 0,
+              "carrying": false,
+              "target": null,
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": {
+                "bytes": 1024,
+                "period": "day"
+              },
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1792368000000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 3,
+              "share": 0.6
+            },
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": null,
+              "connections": 0,
+              "carrying": false,
+              "target": null,
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 2,
+              "share": 0.4
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 0,
+                "up": 0
+              },
+              "lineDown": {},
+              "sortScore": 0,
+              "connections": {},
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": false,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/routing",
+      "input": {
+        "on": true
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": false,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": true,
+            "active": true,
+            "mode": "manual"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "b2",
+              "alias": "Wi-Fi",
+              "label": "Phone data",
+              "kind": "wifi",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "b2",
+              "rate": null,
+              "ssid": null,
+              "metered": true,
+              "strict": false,
+              "cap": {
+                "bytes": 1024,
+                "period": "day"
+              },
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1792368000000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 3,
+              "share": 0.6
+            },
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 2,
+              "share": 0.4
+            }
+          ],
+          "candidates": [
+            {
+              "alias": "Phone",
+              "label": "Phone",
+              "kind": "phone",
+              "ssid": null
+            }
+          ],
+          "apps": [
+            {
+              "key": "c:\\apps\\firefox.exe",
+              "path": "C:\\Apps\\Firefox.exe",
+              "name": "Firefox",
+              "hasIcon": false,
+              "switchable": true,
+              "reconnectable": true,
+              "line": "b2",
+              "rate": {
+                "down": 0,
+                "up": 0
+              },
+              "lineDown": {},
+              "sortScore": 0,
+              "connections": {},
+              "outside": null
+            }
+          ],
+          "events": [
+            {
+              "id": "090909090909",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "a1",
+              "text": "Ethernet is back."
+            },
+            {
+              "id": "0a0a0a0a0a0a",
+              "at": 1792411202000,
+              "kind": "up",
+              "lineId": "b2",
+              "text": "Wi-Fi is back."
+            }
+          ],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": false,
+            "probeTargets": [
+              "9.9.9.9:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": false,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "method": "POST",
+      "route": "/api/quit",
+      "input": {},
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "ok": true
+        }
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "log",
+      "text": "line readings come from PowerShell: the native helper is not built (npm run build:helper)"
+    },
+    {
+      "kind": "log",
+      "text": "network readings come from PowerShell and route.exe: the native helper is not built"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/server.json",
+      "bytes": 135,
+      "sha256": "52089863a5f54837074069cc1721ef8803356bc7e5a67352e41b0d98809a2556",
+      "text": "{\"port\":47821,\"token\":\"010101010101010101010101010101010101010101010101\",\"pid\":123,\"mode\":\"tun\",\"startedAt\":\"2026-10-19T12:00:00.000Z\"}"
+    },
+    {
+      "kind": "log",
+      "text": "started on port 47821 (mode tun, elevated true)"
+    },
+    {
+      "kind": "console",
+      "text": "Net Switch is running at http://127.0.0.1:47821/#token=010101010101010101010101010101010101010101010101"
+    },
+    {
+      "kind": "log",
+      "text": "routing starting"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/usage.json",
+      "bytes": 112,
+      "sha256": "a63c8aaee00711e913b366a81fcc9f5208e6138067a1ea0b172a53b4c7d04a49",
+      "text": "{\"lines\":{\"a1\":{\"bytes\":0,\"periodStart\":1790812800000},\"b2\":{\"bytes\":0,\"periodStart\":1790812800000}},\"peaks\":{}}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-b2.json",
+      "bytes": 79,
+      "sha256": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-b2.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/engine-config.json",
+      "bytes": 2753,
+      "sha256": "e738c4ac5f352f0ed12443e624cabccf1e5a6a83d8c0eff1e9e135de117fb289",
+      "text": "{\n  \"log\": {\n    \"level\": \"warn\",\n    \"timestamp\": true\n  },\n  \"dns\": {\n    \"servers\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"local\"\n      }\n    ]\n  },\n  \"inbounds\": [\n    {\n      \"type\": \"tun\",\n      \"tag\": \"tun-in\",\n      \"interface_name\": \"NetSwitch\",\n      \"address\": [\n        \"198.18.0.1/30\",\n        \"fdfe:dcba:9876::1/126\"\n      ],\n      \"mtu\": 9000,\n      \"auto_route\": true,\n      \"strict_route\": false,\n      \"route_exclude_address\": [\n        \"10.0.0.0/8\",\n        \"172.16.0.0/12\",\n        \"192.168.0.0/16\",\n        \"169.254.0.0/16\",\n        \"224.0.0.0/4\",\n        \"255.255.255.255/32\",\n        \"fc00::/7\",\n        \"fe80::/10\",\n        \"ff00::/8\"\n      ],\n      \"dns_mode\": \"disabled\",\n      \"stack\": \"gvisor\"\n    }\n  ],\n  \"outbounds\": [\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-a1\",\n      \"bind_interface\": \"Ethernet\"\n    },\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-b2\",\n      \"bind_interface\": \"Wi-Fi\"\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-a1\",\n      \"outbounds\": [\n        \"line-a1\",\n        \"line-b2\"\n      ],\n      \"default\": \"line-a1\",\n      \"interrupt_exist_connections\": false\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-b2\",\n      \"outbounds\": [\n        \"line-b2\",\n        \"line-a1\"\n      ],\n      \"default\": \"line-b2\",\n      \"interrupt_exist_connections\": false\n    }\n  ],\n  \"route\": {\n    \"rules\": [\n      {\n        \"ip_version\": 6,\n        \"action\": \"reject\",\n        \"no_drop\": true\n      },\n      {\n        \"rule_set\": \"cut-b2\",\n        \"action\": \"reject\"\n      },\n      {\n        \"rule_set\": \"apps-a1\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-a1\"\n      },\n      {\n        \"rule_set\": \"apps-b2\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-b2\"\n      },\n      {\n        \"rule_set\": \"share-b2\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-b2\"\n      }\n    ],\n    \"rule_set\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-a1.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"share-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/share-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"cut-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/cut-b2.json\"\n      }\n    ],\n    \"final\": \"lane-a1\",\n    \"auto_detect_interface\": true,\n    \"find_process\": true,\n    \"default_domain_resolver\": \"local\"\n  },\n  \"experimental\": {\n    \"clash_api\": {\n      \"external_controller\": \"127.0.0.1:49000\",\n      \"secret\": \"040404040404040404040404040404040404040404040404\"\n    }\n  }\n}"
+    },
+    {
+      "kind": "spawn",
+      "exe": "/oracle/engine/sing-box.exe",
+      "args": [
+        "run",
+        "-c",
+        "/oracle/data/engine-config.json",
+        "--disable-color"
+      ]
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/engine.pid",
+      "bytes": 3,
+      "sha256": "b3a8e0e1f9ab1bfe3a36f231f676f78bb30a519d2b21e6c530c0eee8ebb4a5d0",
+      "text": "456"
+    },
+    {
+      "kind": "engine",
+      "route": "/version",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "routing on"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-a1",
+      "method": "PUT",
+      "body": {
+        "name": "line-a1"
+      }
+    },
+    {
+      "kind": "log",
+      "text": "Ethernet's apps now use Ethernet"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-b2",
+      "method": "PUT",
+      "body": {
+        "name": "line-b2"
+      }
+    },
+    {
+      "kind": "log",
+      "text": "Wi-Fi's apps now use Wi-Fi"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-a1/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-a1/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-b2/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-b2/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "engine",
+      "route": "/connections",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "Ethernet is up again"
+    },
+    {
+      "kind": "log",
+      "text": "Wi-Fi is up again"
+    },
+    {
+      "kind": "engine",
+      "route": "/connections",
+      "method": "GET"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json",
+      "bytes": 613,
+      "sha256": "1e810e49bf8bae58a94692276faa36c9d60180945a39ebc45212e2b055f7afd9",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Wi-Fi\",\n      \"kind\": \"wifi\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {},\n  \"combine\": false,\n  \"combineMode\": \"auto\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": null\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json.bak",
+      "bytes": 613,
+      "sha256": "1e810e49bf8bae58a94692276faa36c9d60180945a39ebc45212e2b055f7afd9",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Wi-Fi\",\n      \"kind\": \"wifi\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {},\n  \"combine\": false,\n  \"combineMode\": \"auto\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": null\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json",
+      "bytes": 616,
+      "sha256": "b8fb20910e93acdef67eb0770c09caf11d37dd3fbb72a3fc62d030ad4da80613",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Wi-Fi\",\n      \"kind\": \"wifi\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {},\n  \"combine\": false,\n  \"combineMode\": \"auto\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json.bak",
+      "bytes": 616,
+      "sha256": "b8fb20910e93acdef67eb0770c09caf11d37dd3fbb72a3fc62d030ad4da80613",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Wi-Fi\",\n      \"kind\": \"wifi\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {},\n  \"combine\": false,\n  \"combineMode\": \"auto\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 130,
+      "sha256": "12e435a1b0602fdf87bddcfd626341c7b279b2ea0b9d75ebd3b0b6bc0242d773",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path_regex\": [\n        \"(?i)^C:\\\\\\\\Apps\\\\\\\\Firefox\\\\.exe$\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-b2.json",
+      "bytes": 79,
+      "sha256": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-b2.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json",
+      "bytes": 653,
+      "sha256": "86f3322a136738c663139b9a5b21e6a29a37343b7b111eea5c9ee8c6d40f16aa",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Wi-Fi\",\n      \"kind\": \"wifi\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": false,\n  \"combineMode\": \"auto\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json.bak",
+      "bytes": 653,
+      "sha256": "86f3322a136738c663139b9a5b21e6a29a37343b7b111eea5c9ee8c6d40f16aa",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Wi-Fi\",\n      \"kind\": \"wifi\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": false,\n  \"combineMode\": \"auto\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 130,
+      "sha256": "12e435a1b0602fdf87bddcfd626341c7b279b2ea0b9d75ebd3b0b6bc0242d773",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path_regex\": [\n        \"(?i)^C:\\\\\\\\Apps\\\\\\\\Firefox\\\\.exe$\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-b2.json",
+      "bytes": 79,
+      "sha256": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-b2.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json",
+      "bytes": 709,
+      "sha256": "d20c95074c4008b5ea56e17212f8a38a320b087867c657bcfdfeaf9029913433",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Phone data\",\n      \"kind\": \"wifi\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": {\n        \"bytes\": 1024,\n        \"period\": \"day\"\n      },\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": false,\n  \"combineMode\": \"auto\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json.bak",
+      "bytes": 709,
+      "sha256": "d20c95074c4008b5ea56e17212f8a38a320b087867c657bcfdfeaf9029913433",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Phone data\",\n      \"kind\": \"wifi\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": {\n        \"bytes\": 1024,\n        \"period\": \"day\"\n      },\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": false,\n  \"combineMode\": \"auto\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 130,
+      "sha256": "12e435a1b0602fdf87bddcfd626341c7b279b2ea0b9d75ebd3b0b6bc0242d773",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path_regex\": [\n        \"(?i)^C:\\\\\\\\Apps\\\\\\\\Firefox\\\\.exe$\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-b2.json",
+      "bytes": 226904,
+      "sha256": "ecbfe9bd114143c7c6c7f887f0a483f7383e02167fa35efc0ff040675242ceb9"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-b2.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json",
+      "bytes": 710,
+      "sha256": "baf1398c7a9c54ad8622c55e125e687a66fc42de9fd0dc7ef11a2170db17f01c",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 2\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Phone data\",\n      \"kind\": \"wifi\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": {\n        \"bytes\": 1024,\n        \"period\": \"day\"\n      },\n      \"weight\": 3\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": true,\n  \"combineMode\": \"manual\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json.bak",
+      "bytes": 710,
+      "sha256": "baf1398c7a9c54ad8622c55e125e687a66fc42de9fd0dc7ef11a2170db17f01c",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 2\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Phone data\",\n      \"kind\": \"wifi\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": {\n        \"bytes\": 1024,\n        \"period\": \"day\"\n      },\n      \"weight\": 3\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": true,\n  \"combineMode\": \"manual\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "engine",
+      "route": "/connections",
+      "method": "GET"
+    },
+    {
+      "kind": "engine",
+      "route": "/connections/old-flow",
+      "method": "DELETE"
+    },
+    {
+      "kind": "outside-close",
+      "items": []
+    },
+    {
+      "kind": "log",
+      "text": "reconnect c:\\apps\\firefox.exe: closed 1, failed 0 (codes ), already gone 0"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/windows-undo.json",
+      "bytes": 149,
+      "sha256": "8b252dd776488d6532cd3c99e856c4c50976f18df4c7bbbeabcb56ffc885a1bc",
+      "text": "{\n  \"metrics\": {\n    \"Wi-Fi\": [\n      {\n        \"family\": \"IPv4\",\n        \"automatic\": true,\n        \"metric\": 25\n      }\n    ]\n  },\n  \"policy\": {}\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/windows-undo.json.bak",
+      "bytes": 149,
+      "sha256": "8b252dd776488d6532cd3c99e856c4c50976f18df4c7bbbeabcb56ffc885a1bc",
+      "text": "{\n  \"metrics\": {\n    \"Wi-Fi\": [\n      {\n        \"family\": \"IPv4\",\n        \"automatic\": true,\n        \"metric\": 25\n      }\n    ]\n  },\n  \"policy\": {}\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/windows-undo.json",
+      "bytes": 167,
+      "sha256": "041232d767fecce67b306a175a998b398b2a85a9a3a63947092d863037f7b030",
+      "text": "{\n  \"metrics\": {\n    \"Wi-Fi\": [\n      {\n        \"family\": \"IPv4\",\n        \"automatic\": true,\n        \"metric\": 25\n      }\n    ]\n  },\n  \"policy\": {\n    \"value\": 1\n  }\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/windows-undo.json.bak",
+      "bytes": 167,
+      "sha256": "041232d767fecce67b306a175a998b398b2a85a9a3a63947092d863037f7b030",
+      "text": "{\n  \"metrics\": {\n    \"Wi-Fi\": [\n      {\n        \"family\": \"IPv4\",\n        \"automatic\": true,\n        \"metric\": 25\n      }\n    ]\n  },\n  \"policy\": {\n    \"value\": 1\n  }\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/windows-undo.json",
+      "bytes": 149,
+      "sha256": "8b252dd776488d6532cd3c99e856c4c50976f18df4c7bbbeabcb56ffc885a1bc",
+      "text": "{\n  \"metrics\": {\n    \"Wi-Fi\": [\n      {\n        \"family\": \"IPv4\",\n        \"automatic\": true,\n        \"metric\": 25\n      }\n    ]\n  },\n  \"policy\": {}\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/windows-undo.json.bak",
+      "bytes": 149,
+      "sha256": "8b252dd776488d6532cd3c99e856c4c50976f18df4c7bbbeabcb56ffc885a1bc",
+      "text": "{\n  \"metrics\": {\n    \"Wi-Fi\": [\n      {\n        \"family\": \"IPv4\",\n        \"automatic\": true,\n        \"metric\": 25\n      }\n    ]\n  },\n  \"policy\": {}\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/windows-undo.json",
+      "bytes": 35,
+      "sha256": "01ba309186922246c0d4fdadb997a10b06d91728a4f6aec0a0d9da2b1debcccc",
+      "text": "{\n  \"metrics\": {},\n  \"policy\": {}\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/windows-undo.json.bak",
+      "bytes": 35,
+      "sha256": "01ba309186922246c0d4fdadb997a10b06d91728a4f6aec0a0d9da2b1debcccc",
+      "text": "{\n  \"metrics\": {},\n  \"policy\": {}\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 130,
+      "sha256": "12e435a1b0602fdf87bddcfd626341c7b279b2ea0b9d75ebd3b0b6bc0242d773",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path_regex\": [\n        \"(?i)^C:\\\\\\\\Apps\\\\\\\\Firefox\\\\.exe$\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-b2.json",
+      "bytes": 189089,
+      "sha256": "d80dc9a87fbad0ec8e7990aa1c084285ff2690aef77c7b6e644f8a520afbdd44"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-b2.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json",
+      "bytes": 919,
+      "sha256": "2c0c55c2437d003ae793b7ca734c292d2aca752cd2b0ce00feacf9a6f0b7050f",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 2\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Phone data\",\n      \"kind\": \"wifi\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": {\n        \"bytes\": 1024,\n        \"period\": \"day\"\n      },\n      \"weight\": 3\n    },\n    {\n      \"id\": \"292929\",\n      \"alias\": \"Phone\",\n      \"guid\": null,\n      \"label\": \"Phone\",\n      \"kind\": \"phone\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": true,\n  \"combineMode\": \"manual\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json.bak",
+      "bytes": 919,
+      "sha256": "2c0c55c2437d003ae793b7ca734c292d2aca752cd2b0ce00feacf9a6f0b7050f",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 2\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Phone data\",\n      \"kind\": \"wifi\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": {\n        \"bytes\": 1024,\n        \"period\": \"day\"\n      },\n      \"weight\": 3\n    },\n    {\n      \"id\": \"292929\",\n      \"alias\": \"Phone\",\n      \"guid\": null,\n      \"label\": \"Phone\",\n      \"kind\": \"phone\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": true,\n  \"combineMode\": \"manual\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "log",
+      "text": "added Phone (Phone)"
+    },
+    {
+      "kind": "log",
+      "text": "routing stopping"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/engine.pid"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/engine.pid"
+    },
+    {
+      "kind": "log",
+      "text": "routing off"
+    },
+    {
+      "kind": "log",
+      "text": "routing starting"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 130,
+      "sha256": "12e435a1b0602fdf87bddcfd626341c7b279b2ea0b9d75ebd3b0b6bc0242d773",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path_regex\": [\n        \"(?i)^C:\\\\\\\\Apps\\\\\\\\Firefox\\\\.exe$\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-b2.json",
+      "bytes": 189089,
+      "sha256": "d80dc9a87fbad0ec8e7990aa1c084285ff2690aef77c7b6e644f8a520afbdd44"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-b2.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-292929.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-292929.json",
+      "bytes": 56750,
+      "sha256": "40aba9fc2de4d8666f8b6a02407c039c42025e6036fb0fd9380f66e2d6936f99"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-292929.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/engine-config.json",
+      "bytes": 3877,
+      "sha256": "b3bacbfd4a6cb451a36b92dcb7f9f0077f8780e9794477ef11148d16128f7d5d",
+      "text": "{\n  \"log\": {\n    \"level\": \"warn\",\n    \"timestamp\": true\n  },\n  \"dns\": {\n    \"servers\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"local\"\n      }\n    ]\n  },\n  \"inbounds\": [\n    {\n      \"type\": \"tun\",\n      \"tag\": \"tun-in\",\n      \"interface_name\": \"NetSwitch\",\n      \"address\": [\n        \"198.18.0.1/30\",\n        \"fdfe:dcba:9876::1/126\"\n      ],\n      \"mtu\": 9000,\n      \"auto_route\": true,\n      \"strict_route\": false,\n      \"route_exclude_address\": [\n        \"10.0.0.0/8\",\n        \"172.16.0.0/12\",\n        \"192.168.0.0/16\",\n        \"169.254.0.0/16\",\n        \"224.0.0.0/4\",\n        \"255.255.255.255/32\",\n        \"fc00::/7\",\n        \"fe80::/10\",\n        \"ff00::/8\"\n      ],\n      \"dns_mode\": \"disabled\",\n      \"stack\": \"gvisor\"\n    }\n  ],\n  \"outbounds\": [\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-a1\",\n      \"bind_interface\": \"Ethernet\"\n    },\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-b2\",\n      \"bind_interface\": \"Wi-Fi\"\n    },\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-292929\",\n      \"bind_interface\": \"Phone\"\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-a1\",\n      \"outbounds\": [\n        \"line-a1\",\n        \"line-b2\",\n        \"line-292929\"\n      ],\n      \"default\": \"line-a1\",\n      \"interrupt_exist_connections\": false\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-b2\",\n      \"outbounds\": [\n        \"line-b2\",\n        \"line-a1\",\n        \"line-292929\"\n      ],\n      \"default\": \"line-b2\",\n      \"interrupt_exist_connections\": false\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-292929\",\n      \"outbounds\": [\n        \"line-292929\",\n        \"line-a1\",\n        \"line-b2\"\n      ],\n      \"default\": \"line-292929\",\n      \"interrupt_exist_connections\": false\n    }\n  ],\n  \"route\": {\n    \"rules\": [\n      {\n        \"ip_version\": 6,\n        \"action\": \"reject\",\n        \"no_drop\": true\n      },\n      {\n        \"rule_set\": \"cut-b2\",\n        \"action\": \"reject\"\n      },\n      {\n        \"rule_set\": \"cut-292929\",\n        \"action\": \"reject\"\n      },\n      {\n        \"rule_set\": \"apps-a1\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-a1\"\n      },\n      {\n        \"rule_set\": \"apps-b2\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-b2\"\n      },\n      {\n        \"rule_set\": \"apps-292929\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-292929\"\n      },\n      {\n        \"rule_set\": \"share-b2\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-b2\"\n      },\n      {\n        \"rule_set\": \"share-292929\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-292929\"\n      }\n    ],\n    \"rule_set\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-a1.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"share-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/share-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"cut-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/cut-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-292929\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-292929.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"share-292929\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/share-292929.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"cut-292929\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/cut-292929.json\"\n      }\n    ],\n    \"final\": \"lane-a1\",\n    \"auto_detect_interface\": true,\n    \"find_process\": true,\n    \"default_domain_resolver\": \"local\"\n  },\n  \"experimental\": {\n    \"clash_api\": {\n      \"external_controller\": \"127.0.0.1:49000\",\n      \"secret\": \"303030303030303030303030303030303030303030303030\"\n    }\n  }\n}"
+    },
+    {
+      "kind": "spawn",
+      "exe": "/oracle/engine/sing-box.exe",
+      "args": [
+        "run",
+        "-c",
+        "/oracle/data/engine-config.json",
+        "--disable-color"
+      ]
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/engine.pid",
+      "bytes": 3,
+      "sha256": "b3a8e0e1f9ab1bfe3a36f231f676f78bb30a519d2b21e6c530c0eee8ebb4a5d0",
+      "text": "456"
+    },
+    {
+      "kind": "engine",
+      "route": "/version",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "routing on"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-a1",
+      "method": "PUT",
+      "body": {
+        "name": "line-a1"
+      }
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-a1/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "Ethernet's apps now use Ethernet"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-b2",
+      "method": "PUT",
+      "body": {
+        "name": "line-b2"
+      }
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-b2/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "Phone data's apps now use Phone data"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-292929",
+      "method": "PUT",
+      "body": {
+        "name": "line-292929"
+      }
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-292929/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 130,
+      "sha256": "12e435a1b0602fdf87bddcfd626341c7b279b2ea0b9d75ebd3b0b6bc0242d773",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path_regex\": [\n        \"(?i)^C:\\\\\\\\Apps\\\\\\\\Firefox\\\\.exe$\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-b2.json",
+      "bytes": 226904,
+      "sha256": "ecbfe9bd114143c7c6c7f887f0a483f7383e02167fa35efc0ff040675242ceb9"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-b2.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-292929.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-292929.json",
+      "bytes": 79,
+      "sha256": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-292929.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json",
+      "bytes": 710,
+      "sha256": "baf1398c7a9c54ad8622c55e125e687a66fc42de9fd0dc7ef11a2170db17f01c",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 2\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Phone data\",\n      \"kind\": \"wifi\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": {\n        \"bytes\": 1024,\n        \"period\": \"day\"\n      },\n      \"weight\": 3\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": true,\n  \"combineMode\": \"manual\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json.bak",
+      "bytes": 710,
+      "sha256": "baf1398c7a9c54ad8622c55e125e687a66fc42de9fd0dc7ef11a2170db17f01c",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 2\n    },\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Phone data\",\n      \"kind\": \"wifi\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": {\n        \"bytes\": 1024,\n        \"period\": \"day\"\n      },\n      \"weight\": 3\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": true,\n  \"combineMode\": \"manual\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "log",
+      "text": "removed Phone (Phone)"
+    },
+    {
+      "kind": "log",
+      "text": "routing stopping"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/engine.pid"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/engine.pid"
+    },
+    {
+      "kind": "log",
+      "text": "routing off"
+    },
+    {
+      "kind": "log",
+      "text": "routing starting"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 130,
+      "sha256": "12e435a1b0602fdf87bddcfd626341c7b279b2ea0b9d75ebd3b0b6bc0242d773",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path_regex\": [\n        \"(?i)^C:\\\\\\\\Apps\\\\\\\\Firefox\\\\.exe$\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-b2.json",
+      "bytes": 226904,
+      "sha256": "ecbfe9bd114143c7c6c7f887f0a483f7383e02167fa35efc0ff040675242ceb9"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-b2.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/engine-config.json",
+      "bytes": 2753,
+      "sha256": "a465d810c58affb9b22a586a2d8556f2b92186a8c2ea85c3dc3a6f9a90d496aa",
+      "text": "{\n  \"log\": {\n    \"level\": \"warn\",\n    \"timestamp\": true\n  },\n  \"dns\": {\n    \"servers\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"local\"\n      }\n    ]\n  },\n  \"inbounds\": [\n    {\n      \"type\": \"tun\",\n      \"tag\": \"tun-in\",\n      \"interface_name\": \"NetSwitch\",\n      \"address\": [\n        \"198.18.0.1/30\",\n        \"fdfe:dcba:9876::1/126\"\n      ],\n      \"mtu\": 9000,\n      \"auto_route\": true,\n      \"strict_route\": false,\n      \"route_exclude_address\": [\n        \"10.0.0.0/8\",\n        \"172.16.0.0/12\",\n        \"192.168.0.0/16\",\n        \"169.254.0.0/16\",\n        \"224.0.0.0/4\",\n        \"255.255.255.255/32\",\n        \"fc00::/7\",\n        \"fe80::/10\",\n        \"ff00::/8\"\n      ],\n      \"dns_mode\": \"disabled\",\n      \"stack\": \"gvisor\"\n    }\n  ],\n  \"outbounds\": [\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-a1\",\n      \"bind_interface\": \"Ethernet\"\n    },\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-b2\",\n      \"bind_interface\": \"Wi-Fi\"\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-a1\",\n      \"outbounds\": [\n        \"line-a1\",\n        \"line-b2\"\n      ],\n      \"default\": \"line-a1\",\n      \"interrupt_exist_connections\": false\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-b2\",\n      \"outbounds\": [\n        \"line-b2\",\n        \"line-a1\"\n      ],\n      \"default\": \"line-b2\",\n      \"interrupt_exist_connections\": false\n    }\n  ],\n  \"route\": {\n    \"rules\": [\n      {\n        \"ip_version\": 6,\n        \"action\": \"reject\",\n        \"no_drop\": true\n      },\n      {\n        \"rule_set\": \"cut-b2\",\n        \"action\": \"reject\"\n      },\n      {\n        \"rule_set\": \"apps-a1\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-a1\"\n      },\n      {\n        \"rule_set\": \"apps-b2\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-b2\"\n      },\n      {\n        \"rule_set\": \"share-b2\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-b2\"\n      }\n    ],\n    \"rule_set\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-a1.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"share-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/share-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"cut-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/cut-b2.json\"\n      }\n    ],\n    \"final\": \"lane-a1\",\n    \"auto_detect_interface\": true,\n    \"find_process\": true,\n    \"default_domain_resolver\": \"local\"\n  },\n  \"experimental\": {\n    \"clash_api\": {\n      \"external_controller\": \"127.0.0.1:49000\",\n      \"secret\": \"414141414141414141414141414141414141414141414141\"\n    }\n  }\n}"
+    },
+    {
+      "kind": "spawn",
+      "exe": "/oracle/engine/sing-box.exe",
+      "args": [
+        "run",
+        "-c",
+        "/oracle/data/engine-config.json",
+        "--disable-color"
+      ]
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/engine.pid",
+      "bytes": 3,
+      "sha256": "b3a8e0e1f9ab1bfe3a36f231f676f78bb30a519d2b21e6c530c0eee8ebb4a5d0",
+      "text": "456"
+    },
+    {
+      "kind": "engine",
+      "route": "/version",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "routing on"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-a1",
+      "method": "PUT",
+      "body": {
+        "name": "line-a1"
+      }
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-a1/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "Ethernet's apps now use Ethernet"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-b2",
+      "method": "PUT",
+      "body": {
+        "name": "line-b2"
+      }
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-b2/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "Phone data's apps now use Phone data"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 130,
+      "sha256": "12e435a1b0602fdf87bddcfd626341c7b279b2ea0b9d75ebd3b0b6bc0242d773",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path_regex\": [\n        \"(?i)^C:\\\\\\\\Apps\\\\\\\\Firefox\\\\.exe$\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-b2.json",
+      "bytes": 226892,
+      "sha256": "a45b027635b9c4e3b5a0b8fc80ef18917c6a5cdf88a1dd545e17e41a98675185"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-b2.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json",
+      "bytes": 710,
+      "sha256": "d7c2cb65e2760496831b88d95ce36d9d40c2f5b43d8902441ee89a7d686b4d80",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Phone data\",\n      \"kind\": \"wifi\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": {\n        \"bytes\": 1024,\n        \"period\": \"day\"\n      },\n      \"weight\": 3\n    },\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 2\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": true,\n  \"combineMode\": \"manual\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/settings.json.bak",
+      "bytes": 710,
+      "sha256": "d7c2cb65e2760496831b88d95ce36d9d40c2f5b43d8902441ee89a7d686b4d80",
+      "text": "{\n  \"lines\": [\n    {\n      \"id\": \"b2\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Phone data\",\n      \"kind\": \"wifi\",\n      \"metered\": true,\n      \"strict\": false,\n      \"cap\": {\n        \"bytes\": 1024,\n        \"period\": \"day\"\n      },\n      \"weight\": 3\n    },\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 2\n    }\n  ],\n  \"appLines\": {\n    \"C:\\\\Apps\\\\Firefox.exe\": \"b2\"\n  },\n  \"combine\": true,\n  \"combineMode\": \"manual\",\n  \"probeTargets\": [\n    \"9.9.9.9:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": false,\n  \"skippedUpdate\": \"0.3.2\"\n}"
+    },
+    {
+      "kind": "log",
+      "text": "line order: Phone data, Ethernet"
+    },
+    {
+      "kind": "log",
+      "text": "routing stopping"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/engine.pid"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/engine.pid"
+    },
+    {
+      "kind": "log",
+      "text": "routing off"
+    },
+    {
+      "kind": "log",
+      "text": "routing starting"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 130,
+      "sha256": "12e435a1b0602fdf87bddcfd626341c7b279b2ea0b9d75ebd3b0b6bc0242d773",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path_regex\": [\n        \"(?i)^C:\\\\\\\\Apps\\\\\\\\Firefox\\\\.exe$\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-a1.json",
+      "bytes": 151286,
+      "sha256": "2373b35a835a45b012207417d9ab46dc3966bc2d499d048cea0b716a9e02cdce"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/engine-config.json",
+      "bytes": 2753,
+      "sha256": "d7583e4bc63f306f0d95a4ea9e76c12d40c171286cb4b017feeee68d3c4eb591",
+      "text": "{\n  \"log\": {\n    \"level\": \"warn\",\n    \"timestamp\": true\n  },\n  \"dns\": {\n    \"servers\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"local\"\n      }\n    ]\n  },\n  \"inbounds\": [\n    {\n      \"type\": \"tun\",\n      \"tag\": \"tun-in\",\n      \"interface_name\": \"NetSwitch\",\n      \"address\": [\n        \"198.18.0.1/30\",\n        \"fdfe:dcba:9876::1/126\"\n      ],\n      \"mtu\": 9000,\n      \"auto_route\": true,\n      \"strict_route\": false,\n      \"route_exclude_address\": [\n        \"10.0.0.0/8\",\n        \"172.16.0.0/12\",\n        \"192.168.0.0/16\",\n        \"169.254.0.0/16\",\n        \"224.0.0.0/4\",\n        \"255.255.255.255/32\",\n        \"fc00::/7\",\n        \"fe80::/10\",\n        \"ff00::/8\"\n      ],\n      \"dns_mode\": \"disabled\",\n      \"stack\": \"gvisor\"\n    }\n  ],\n  \"outbounds\": [\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-b2\",\n      \"bind_interface\": \"Wi-Fi\"\n    },\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-a1\",\n      \"bind_interface\": \"Ethernet\"\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-b2\",\n      \"outbounds\": [\n        \"line-b2\",\n        \"line-a1\"\n      ],\n      \"default\": \"line-b2\",\n      \"interrupt_exist_connections\": false\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-a1\",\n      \"outbounds\": [\n        \"line-a1\",\n        \"line-b2\"\n      ],\n      \"default\": \"line-a1\",\n      \"interrupt_exist_connections\": false\n    }\n  ],\n  \"route\": {\n    \"rules\": [\n      {\n        \"ip_version\": 6,\n        \"action\": \"reject\",\n        \"no_drop\": true\n      },\n      {\n        \"rule_set\": \"cut-a1\",\n        \"action\": \"reject\"\n      },\n      {\n        \"rule_set\": \"apps-b2\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-b2\"\n      },\n      {\n        \"rule_set\": \"apps-a1\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-a1\"\n      },\n      {\n        \"rule_set\": \"share-a1\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-a1\"\n      }\n    ],\n    \"rule_set\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-a1.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"share-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/share-a1.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"cut-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/cut-a1.json\"\n      }\n    ],\n    \"final\": \"lane-b2\",\n    \"auto_detect_interface\": true,\n    \"find_process\": true,\n    \"default_domain_resolver\": \"local\"\n  },\n  \"experimental\": {\n    \"clash_api\": {\n      \"external_controller\": \"127.0.0.1:49000\",\n      \"secret\": \"4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c\"\n    }\n  }\n}"
+    },
+    {
+      "kind": "spawn",
+      "exe": "/oracle/engine/sing-box.exe",
+      "args": [
+        "run",
+        "-c",
+        "/oracle/data/engine-config.json",
+        "--disable-color"
+      ]
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/engine.pid",
+      "bytes": 3,
+      "sha256": "b3a8e0e1f9ab1bfe3a36f231f676f78bb30a519d2b21e6c530c0eee8ebb4a5d0",
+      "text": "456"
+    },
+    {
+      "kind": "engine",
+      "route": "/version",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "routing on"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-b2",
+      "method": "PUT",
+      "body": {
+        "name": "line-b2"
+      }
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-b2/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "Phone data's apps now use Phone data"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-a1",
+      "method": "PUT",
+      "body": {
+        "name": "line-a1"
+      }
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-a1/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "Ethernet's apps now use Ethernet"
+    },
+    {
+      "kind": "log",
+      "text": "routing stopping"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/engine.pid"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/engine.pid"
+    },
+    {
+      "kind": "log",
+      "text": "routing off"
+    },
+    {
+      "kind": "log",
+      "text": "routing starting"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-b2.json",
+      "bytes": 130,
+      "sha256": "12e435a1b0602fdf87bddcfd626341c7b279b2ea0b9d75ebd3b0b6bc0242d773",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path_regex\": [\n        \"(?i)^C:\\\\\\\\Apps\\\\\\\\Firefox\\\\.exe$\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/apps-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/share-a1.json",
+      "bytes": 151286,
+      "sha256": "2373b35a835a45b012207417d9ab46dc3966bc2d499d048cea0b716a9e02cdce"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/cut-a1.json",
+      "bytes": 125,
+      "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+      "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/engine-config.json",
+      "bytes": 2753,
+      "sha256": "250a7e779100dcd3490790c827e7d8c8e91740f92d943585a34a9a9428ecf752",
+      "text": "{\n  \"log\": {\n    \"level\": \"warn\",\n    \"timestamp\": true\n  },\n  \"dns\": {\n    \"servers\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"local\"\n      }\n    ]\n  },\n  \"inbounds\": [\n    {\n      \"type\": \"tun\",\n      \"tag\": \"tun-in\",\n      \"interface_name\": \"NetSwitch\",\n      \"address\": [\n        \"198.18.0.1/30\",\n        \"fdfe:dcba:9876::1/126\"\n      ],\n      \"mtu\": 9000,\n      \"auto_route\": true,\n      \"strict_route\": false,\n      \"route_exclude_address\": [\n        \"10.0.0.0/8\",\n        \"172.16.0.0/12\",\n        \"192.168.0.0/16\",\n        \"169.254.0.0/16\",\n        \"224.0.0.0/4\",\n        \"255.255.255.255/32\",\n        \"fc00::/7\",\n        \"fe80::/10\",\n        \"ff00::/8\"\n      ],\n      \"dns_mode\": \"disabled\",\n      \"stack\": \"gvisor\"\n    }\n  ],\n  \"outbounds\": [\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-b2\",\n      \"bind_interface\": \"Wi-Fi\"\n    },\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-a1\",\n      \"bind_interface\": \"Ethernet\"\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-b2\",\n      \"outbounds\": [\n        \"line-b2\",\n        \"line-a1\"\n      ],\n      \"default\": \"line-b2\",\n      \"interrupt_exist_connections\": false\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-a1\",\n      \"outbounds\": [\n        \"line-a1\",\n        \"line-b2\"\n      ],\n      \"default\": \"line-a1\",\n      \"interrupt_exist_connections\": false\n    }\n  ],\n  \"route\": {\n    \"rules\": [\n      {\n        \"ip_version\": 6,\n        \"action\": \"reject\",\n        \"no_drop\": true\n      },\n      {\n        \"rule_set\": \"cut-a1\",\n        \"action\": \"reject\"\n      },\n      {\n        \"rule_set\": \"apps-b2\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-b2\"\n      },\n      {\n        \"rule_set\": \"apps-a1\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-a1\"\n      },\n      {\n        \"rule_set\": \"share-a1\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-a1\"\n      }\n    ],\n    \"rule_set\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-b2\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-b2.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-a1.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"share-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/share-a1.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"cut-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/cut-a1.json\"\n      }\n    ],\n    \"final\": \"lane-b2\",\n    \"auto_detect_interface\": true,\n    \"find_process\": true,\n    \"default_domain_resolver\": \"local\"\n  },\n  \"experimental\": {\n    \"clash_api\": {\n      \"external_controller\": \"127.0.0.1:49000\",\n      \"secret\": \"515151515151515151515151515151515151515151515151\"\n    }\n  }\n}"
+    },
+    {
+      "kind": "spawn",
+      "exe": "/oracle/engine/sing-box.exe",
+      "args": [
+        "run",
+        "-c",
+        "/oracle/data/engine-config.json",
+        "--disable-color"
+      ]
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/engine.pid",
+      "bytes": 3,
+      "sha256": "b3a8e0e1f9ab1bfe3a36f231f676f78bb30a519d2b21e6c530c0eee8ebb4a5d0",
+      "text": "456"
+    },
+    {
+      "kind": "engine",
+      "route": "/version",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "routing on"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-b2",
+      "method": "PUT",
+      "body": {
+        "name": "line-b2"
+      }
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-b2/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "Phone data's apps now use Phone data"
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/lane-a1",
+      "method": "PUT",
+      "body": {
+        "name": "line-a1"
+      }
+    },
+    {
+      "kind": "engine",
+      "route": "/proxies/line-a1/delay",
+      "method": "GET"
+    },
+    {
+      "kind": "log",
+      "text": "Ethernet's apps now use Ethernet"
+    },
+    {
+      "kind": "log",
+      "text": "routing stopping"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/engine.pid"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/engine.pid"
+    },
+    {
+      "kind": "log",
+      "text": "routing off"
+    },
+    {
+      "kind": "write",
+      "file": "/oracle/data/usage.json",
+      "bytes": 112,
+      "sha256": "f7245e9c4fddc763393153febe6e0b50af51abbcfb9a8c8149fbe691a96b78fa",
+      "text": "{\"lines\":{\"a1\":{\"bytes\":0,\"periodStart\":1790812800000},\"b2\":{\"bytes\":0,\"periodStart\":1792368000000}},\"peaks\":{}}"
+    },
+    {
+      "kind": "remove",
+      "file": "/oracle/data/server.json"
+    },
+    {
+      "kind": "log",
+      "text": "quit"
+    }
+  ]
+}
