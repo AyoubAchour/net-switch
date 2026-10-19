@@ -160,7 +160,15 @@ func tcpTransfer(t *testing.T, streams int) (float64, error) {
 	return float64(size*streams) / elapsed(start).Seconds() / 1e6, nil
 }
 
+// The sender/receiver runs in a separate process. Otherwise a Go packet session
+// competes with the load generator for Go's Ps while the DLL's native work runs
+// outside that limit, so saturation measures scheduler placement, not the link.
 func udpTransfer(t *testing.T, streams int) (float64, error) {
+	t.Helper()
+	return runUDPClient(t, streams)
+}
+
+func udpTraffic(t *testing.T, streams int) (float64, error) {
 	t.Helper()
 	const size = 1200
 	// UDP is lossy under saturation, particularly while a corrupted session
@@ -226,6 +234,22 @@ func udpTransfer(t *testing.T, streams int) (float64, error) {
 	seconds := elapsed(start).Seconds()
 	report(t, map[string]any{"test": "udp_goodput", "arch": runtime.GOARCH, "streams": streams, "sent": sent.Load(), "received": received.Load(), "seconds": seconds})
 	return float64(received.Load()*size) / seconds / 1e6, failure
+}
+
+func TestWintunUDPClient(t *testing.T) {
+	requireRunner(t)
+	streams := 0
+	switch os.Getenv("NETSWITCH_WINTUN_UDP_STREAMS") {
+	case "1":
+		streams = 1
+	case "8":
+		streams = 8
+	default:
+		t.Skip("client process only")
+	}
+	rate, err := udpTraffic(t, streams)
+	must(t, err)
+	fmt.Printf("UDP_CLIENT_RESULT %.9f\n", rate)
 }
 
 func shortLatency(t *testing.T, mode string) float64 {

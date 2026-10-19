@@ -85,6 +85,45 @@ func command(t *testing.T, program string, args ...string) string {
 	return strings.TrimSpace(string(b))
 }
 
+func runUDPClient(t *testing.T, streams int) (float64, error) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		return 0, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, exe, "-test.run=^TestWintunUDPClient$", "-test.v")
+	child.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	child.Env = append(os.Environ(), fmt.Sprintf("NETSWITCH_WINTUN_UDP_STREAMS=%d", streams))
+	output, err := child.CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("UDP client: %w\n%s", err, output)
+	}
+	var rate float64
+	found := false
+	for _, line := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(line, "UDP_CLIENT_RESULT ") {
+			if _, err := fmt.Sscanf(line, "UDP_CLIENT_RESULT %f", &rate); err != nil {
+				return 0, err
+			}
+			found = true
+		}
+		if i := strings.Index(line, "WINTUN_RESULT "); i >= 0 {
+			var value map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(line[i+14:])), &value); err != nil {
+				return 0, err
+			}
+			value["client_process"] = true
+			report(t, value)
+		}
+	}
+	if !found {
+		return 0, fmt.Errorf("UDP client exited without running its traffic test: %s", output)
+	}
+	return rate, nil
+}
+
 type batchIO interface {
 	ReadBatch(context.Context, [][]byte, []int) (int, error)
 	WriteBatch([][]byte) (int, error)

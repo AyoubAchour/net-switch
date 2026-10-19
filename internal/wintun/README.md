@@ -68,7 +68,9 @@ recorded, then one retry releases the DLL's queued packet; the slow attempt stay
 in the distribution. Our path must have zero round trips over 50 ms.
 
 Throughput uses delivered UDP bytes over a fixed interval and complete, hashed
-TCP transfers, with one and eight streams. Three trials alternate implementation
+TCP transfers, with one and eight streams. The UDP load generator is a separate
+process, so it does not compete with only the Go session for Go scheduler slots
+while the DLL executes outside that limit. Three trials alternate implementation
 order. Each TCP stack first runs two fixed, logged warm-up transfers: CPU profiles
 show both implementations' initial connections warming from roughly 320–450 to
 540–600 MB/s on the same x64 runner. The three measured trials compare the steady
