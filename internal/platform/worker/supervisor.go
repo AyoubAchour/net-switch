@@ -86,10 +86,14 @@ func (s Supervisor) Stream(ctx context.Context, mode string, args []string, emit
 	silent := s.Silent
 	if silent == 0 {
 		silent = 10 * time.Second
+		if mode == "network" {
+			silent = 30 * time.Second
+		}
 	}
 	for ctx.Err() == nil {
 		p, err := s.launch(append([]string{"worker", mode}, args...))
 		if err == nil {
+			runCtx, stopReader := context.WithCancel(ctx)
 			lines := make(chan []byte, 1)
 			done := make(chan error, 1)
 			go func() {
@@ -99,7 +103,7 @@ func (s Supervisor) Stream(ctx context.Context, mode string, args []string, emit
 					b := append([]byte{}, scanner.Bytes()...)
 					select {
 					case lines <- b:
-					case <-ctx.Done():
+					case <-runCtx.Done():
 						return
 					}
 				}
@@ -137,6 +141,7 @@ func (s Supervisor) Stream(ctx context.Context, mode string, args []string, emit
 				}
 			}
 			timer.Stop()
+			stopReader()
 			_ = p.Kill()
 			_ = p.Wait()
 			_ = p.Close()

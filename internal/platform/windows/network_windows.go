@@ -222,9 +222,13 @@ func readNetwork() (networkLine, error) {
 		return line, err
 	}
 	addresses := map[uint32][]string{}
+	globalIPv6 := map[uint32]bool{}
 	for adapter := first; adapter != nil; adapter = adapter.Next {
 		for unicast := adapter.FirstUnicastAddress; unicast != nil; unicast = unicast.Next {
 			ip := unicast.Address.IP()
+			if len(ip) == 16 && ip[0]&0xe0 == 0x20 {
+				globalIPv6[adapter.IfIndex] = true
+			}
 			if ip.To4() != nil && !ip.IsLinkLocalUnicast() {
 				addresses[adapter.IfIndex] = append(addresses[adapter.IfIndex], ip.String())
 			}
@@ -252,7 +256,11 @@ func readNetwork() (networkLine, error) {
 		return line, fmt.Errorf("read interfaces: %w", err)
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(table))
-	return assembleNetwork(line, unsafe.Slice(&table.Table[0], table.NumEntries), addresses, defaults, ssids, hidden, windows.GetIpInterfaceEntry)
+	result, err := assembleNetwork(line, unsafe.Slice(&table.Table[0], table.NumEntries), addresses, defaults, ssids, hidden, windows.GetIpInterfaceEntry)
+	for i := range result.Adapters {
+		result.Adapters[i].IPv6 = globalIPv6[result.Adapters[i].Index]
+	}
+	return result, err
 }
 
 func missingIPInterface(err error) bool {

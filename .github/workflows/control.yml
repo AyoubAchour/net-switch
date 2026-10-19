@@ -45,7 +45,9 @@ jobs:
       - name: Build Go control with commit identity
         run: go build -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o bin/netswitch.exe ./cmd/netswitch
       - name: Native Win32 parity
+        id: parity
         if: matrix.control == 'go'
+        continue-on-error: true
         run: node scripts/win32-parity.mjs ./bin/netswitch.exe
       - name: Fetch verified sing-box
         run: ./scripts/fetch-engine.ps1
@@ -59,6 +61,9 @@ jobs:
           $server = if ('${{ matrix.control }}' -eq 'go') { (Resolve-Path bin/netswitch.exe).Path } else { (Get-Command node).Source }
           node scripts/e2e-tun.mjs --server-executable $server
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Require native parity to pass
+        if: always() && steps.parity.outcome == 'failure'
+        run: throw 'Native parity failed; its complete case results are above.'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:

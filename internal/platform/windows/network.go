@@ -24,6 +24,7 @@ type networkAdapter struct {
 	Metric          *uint32  `json:"metric"`
 	AutomaticMetric *bool    `json:"automaticMetric"`
 	SSID            *string  `json:"ssid"`
+	IPv6            bool     `json:"ipv6"`
 }
 
 type defaultRoute struct {

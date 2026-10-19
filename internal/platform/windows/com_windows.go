@@ -6,6 +6,7 @@ package winplatform
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -52,9 +53,22 @@ func comThread(run func() (any, error)) (any, error) {
 	return run()
 }
 func comCreate(class string, iid *windows.GUID) (*comObject, error) {
-	id, err := windows.GUIDFromString(class)
-	if err != nil {
-		return nil, err
+	var id windows.GUID
+	if strings.HasPrefix(class, "{") {
+		var err error
+		id, err = windows.GUIDFromString(class)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		name, err := windows.UTF16PtrFromString(class)
+		if err != nil {
+			return nil, err
+		}
+		r, _, _ := ole32.NewProc("CLSIDFromProgID").Call(uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(&id)))
+		if err := hresult(r); err != nil {
+			return nil, err
+		}
 	}
 	var o *comObject
 	r, _, _ := ole32.NewProc("CoCreateInstance").Call(uintptr(unsafe.Pointer(&id)), 0, 1|4, uintptr(unsafe.Pointer(iid)), uintptr(unsafe.Pointer(&o)))
@@ -225,7 +239,17 @@ func persistMetric(index uint32, family uint16, automatic bool, metric uint32) e
 			return nil, err
 		}
 		defer service.release()
-		set, err := service.object("ExecQuery", 1, fmt.Sprintf("SELECT * FROM MSFT_NetIPInterface WHERE InterfaceIndex=%d AND AddressFamily=%d AND Store=0", index, family), "WQL", 0)
+		options, err := comCreate("WbemScripting.SWbemNamedValueSet", &iidDispatch)
+		if err != nil {
+			return nil, err
+		}
+		defer options.release()
+		// PolicyStore is a provider query option, not a WQL property filter;
+		// see Microsoft's MSFT_NetIPInterface.cdxml QueryOptions declaration.
+		if err := options.discard("Add", 1, "PolicyStore", "PersistentStore"); err != nil {
+			return nil, err
+		}
+		set, err := service.object("ExecQuery", 1, fmt.Sprintf("SELECT * FROM MSFT_NetIPInterface WHERE InterfaceIndex=%d AND AddressFamily=%d", index, family), "WQL", 0, options)
 		if err != nil {
 			return nil, err
 		}
@@ -254,7 +278,7 @@ func persistMetric(index uint32, family uint16, automatic bool, metric uint32) e
 				return nil, err
 			}
 		}
-		return nil, item.discard("Put_", 1, 1)
+		return nil, item.discard("Put_", 1, 1, options)
 	})
 	return err
 }

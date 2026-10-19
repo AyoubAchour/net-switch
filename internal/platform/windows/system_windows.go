@@ -23,31 +23,7 @@ func Execute(operation string, a map[string]any) (any, error) {
 	case "line-check":
 		return checkLine(uint32(js.Number(a["index"])), js.Text(a["target"]), a["quick"] == true), nil
 	case "network":
-		v, err := readNetwork()
-		if err != nil {
-			return nil, err
-		}
-		ipv6 := map[string]bool{}
-		first, err := adapterAddresses(true)
-		if err != nil {
-			return nil, err
-		}
-		for p := first; p != nil; p = p.Next {
-			for u := p.FirstUnicastAddress; u != nil; u = u.Next {
-				ip := u.Address.IP()
-				if len(ip) == 16 && (ip[0]&0xe0) == 0x20 {
-					ipv6[windows.UTF16PtrToString(p.FriendlyName)] = true
-				}
-			}
-		}
-		b, _ := json.Marshal(v)
-		var result map[string]any
-		_ = json.Unmarshal(b, &result)
-		for _, v := range result["adapters"].([]any) {
-			m := v.(map[string]any)
-			m["ipv6"] = ipv6[m["alias"].(string)]
-		}
-		return result, nil
+		return readNetwork()
 	case "elevated":
 		return windows.GetCurrentProcessToken().IsElevated(), nil
 	case "architecture":

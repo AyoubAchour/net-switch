@@ -31,7 +31,12 @@ const native = async (name, args = {}) => {
   return value.value;
 };
 let count = 0;
-async function check(name, fn) { await fn(); count++; console.log(`ok ${count} - ${name}`); }
+let failures = 0;
+async function check(name, fn) {
+  count++;
+  try { await fn(); console.log(`ok ${count} - ${name}`); }
+  catch (error) { failures++; console.error(`not ok ${count} - ${name}\n${error.stack}`); }
+}
 const folder = await mkdtemp(path.join(tmpdir(), 'netswitch-win32-parity-'));
 try {
   await check('elevation and native architecture', async () => {
@@ -123,5 +128,6 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { args: { OLD: old.i
       assert.equal((await windows.closeTcpConnections([tuple])).gone, 1);
     } finally { client?.destroy(); accepted?.destroy(); await new Promise((resolve) => listener.close(resolve)); }
   });
-  console.log(`Win32 parity: ${count} cases passed`);
+  console.log(`Win32 parity: ${count} cases executed, ${count - failures} passed, ${failures} failed`);
+  if (failures) process.exitCode = 1;
 } finally { await rm(folder, { recursive: true, force: true }); }
