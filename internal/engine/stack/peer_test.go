@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -185,7 +186,21 @@ func newPeerLink(t testing.TB, timestamps bool, limits flows.Limits, options ns.
 	p.owners = &testfake.Owners{Value: platform.Owner{AppID: "peer"}}
 	f := ntcp.New(context.Background(), s, limits.Handshakes, peerControl{Table: table, peer: p}, p.owners, d, l)
 	p.forward = f
-	t.Cleanup(func() { f.Stop(); s.Close(); s.Wait(); f.Wait(); l.Close() })
+	t.Cleanup(func() {
+		// A stuck teardown otherwise hides behind the whole suite's timeout,
+		// or a runner shutdown. Capture the blocked goroutines while alive.
+		deadline := time.AfterFunc(30*time.Second, func() {
+			buf := make([]byte, 4<<20)
+			n := runtime.Stack(buf, true)
+			panic("peer cleanup did not finish within 30 seconds:\n" + string(buf[:n]))
+		})
+		defer deadline.Stop()
+		f.Stop()
+		s.Close()
+		s.Wait()
+		f.Wait()
+		l.Close()
+	})
 	return p
 }
 
