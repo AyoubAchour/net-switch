@@ -179,6 +179,8 @@ func (l *Link) SetObserver(observe func(*gv.PacketBuffer)) {
 	l.mu.Unlock()
 }
 
+func (l *Link) Queued() int { l.mu.Lock(); defer l.mu.Unlock(); return l.count }
+
 func (l *Link) Close() {
 	l.mu.Lock()
 	if l.closed {

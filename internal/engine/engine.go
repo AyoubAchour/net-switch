@@ -29,6 +29,7 @@ type Dependencies struct {
 	Identities platform.UDPIdentity
 }
 type Engine struct {
+	OnFatal func(error)
 	mu        sync.Mutex
 	root      context.Context
 	deps      Dependencies
@@ -95,7 +96,11 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	e.cancel = cancel
 	e.tcp = ntcp.New(run, s, e.limits.Handshakes, e.Table, e.deps.Owners, e.deps.Dialer, link)
 	e.udp = udp.New(run, s, e.Table, e.deps.Owners, e.deps.Identities, e.deps.Dialer, link, tun.MTU())
+	echo := newEcho(run, e.deps.Dialer, e.Table, link)
 	nat := e.udp
+	if events, ok := e.deps.Identities.(platform.UDPNotifications); ok {
+		e.pumps.Go(func() { events.WatchUDP(run, nat.Destroy, nat.RefreshNow) })
+	}
 	link.SetObserver(func(p *gv.PacketBuffer) {
 		first, ok := p.Data().PullUp(20)
 		if !ok {
@@ -108,6 +113,7 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 		nat.ObserveICMP(b)
 	})
 	e.pumps.Go(func() {
+		defer echo.wait()
 		b := make([]byte, ns.MTU)
 		for {
 			n, err := tun.ReadPacket(run, b)
@@ -120,6 +126,7 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			if n <= 0 || n > len(b) {
 				continue
 			}
+			if echo.handle(b[:n]) { continue }
 			proto := header.IPv4ProtocolNumber
 			if b[0]>>4 == 6 {
 				proto = header.IPv6ProtocolNumber
@@ -176,6 +183,7 @@ func (e *Engine) fail(link *ns.Link, err error) {
 		cleanup := e.stopLocked(context.Background())
 		e.lastError = errors.Join(err, cleanup)
 		e.Table.Emit(flowapi.Event{Type: "fatal", Message: e.lastError.Error()})
+		if e.OnFatal != nil { e.OnFatal(e.lastError) }
 	}()
 }
 func (e *Engine) Apply(ctx context.Context, r policy.Revision) (policy.Applied, error) {
@@ -274,6 +282,7 @@ func (e *Engine) Stats() any {
 	}
 	if e.link != nil {
 		s["tunDropped"] = e.link.Dropped.Load()
+		s["tunQueued"] = e.link.Queued()
 	}
 	if e.tcp != nil {
 		s["tcpRejected"] = e.tcp.Rejected.Load()

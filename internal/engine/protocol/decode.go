@@ -27,11 +27,13 @@ type Request struct {
 	Line          string           `json:"line,omitempty"`
 	Operator      string           `json:"operator,omitempty"`
 	App           string           `json:"app,omitempty"`
+	Fault         json.RawMessage  `json:"fault,omitempty"`
 }
 type Reply struct {
-	ID     string `json:"id"`
-	Result any    `json:"result,omitempty"`
-	Error  string `json:"error,omitempty"`
+	ID       string `json:"id"`
+	Result   any    `json:"result,omitempty"`
+	Error    string `json:"error,omitempty"`
+	terminal bool
 }
 type Event = flowapi.Event
 

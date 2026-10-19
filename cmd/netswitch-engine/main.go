@@ -12,7 +12,8 @@ func main() {
 		fmt.Println("netswitch-engine", buildinfo.String())
 		return
 	}
-	// Platform capture is deliberately not wired into this binary yet.
-	fmt.Fprintln(os.Stderr, "usage: netswitch-engine version")
-	os.Exit(2)
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "netswitch-engine:", err)
+		os.Exit(1)
+	}
 }

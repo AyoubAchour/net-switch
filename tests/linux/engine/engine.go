@@ -325,6 +325,7 @@ type Stats struct {
 	// the time they took in total.
 	LookupCount, LookupMisses, LookupAmbiguous uint64
 	LookupTime                                 time.Duration
+	LookupHistogram                            [201]uint64
 	// Counters reports every other counter the engine sent, by name.
 	Counters map[string]uint64
 }

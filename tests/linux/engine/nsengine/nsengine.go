@@ -64,6 +64,7 @@ type Driver struct {
 	cfg     engine.Config
 	n       uint64 // the last revision number sent
 	session *Session
+	process *engineProcess
 }
 
 // New makes the driver for the engine binary at path.
@@ -99,14 +100,11 @@ func (d *Driver) Prepare(ctx context.Context) error {
 		return fmt.Errorf("netswitch-engine version: %w", err)
 	}
 	d.exe.Version = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(out)), "netswitch-engine"))
-	return notYet("run (a test namespace needs `netswitch-engine run --socket --state-dir`)")
+	return nil
 }
 
 // launch starts the engine in env's namespace and connects d.call to its
 // control socket.
-func (d *Driver) launch(context.Context, engine.Env) error {
-	return notYet("run")
-}
 
 // Start implements engine.Driver: launch, attach, then revision 1.
 func (d *Driver) Start(ctx context.Context, env engine.Env, cfg engine.Config) error {
@@ -224,16 +222,16 @@ func (d *Driver) Stop(ctx context.Context) error {
 }
 
 // Crash implements engine.Driver.
-func (d *Driver) Crash() error { return notYet("crash") }
+func (d *Driver) Crash() error { return d.crash() }
 
 // Cleanup implements engine.Driver.
-func (d *Driver) Cleanup(context.Context) error { return notYet("cleanup") }
+func (d *Driver) Cleanup(ctx context.Context) error { return d.cleanup(ctx) }
 
 // Running implements engine.Driver.
-func (d *Driver) Running() bool { return false }
+func (d *Driver) Running() bool { return d.running() }
 
 // LogPath implements engine.Driver.
-func (d *Driver) LogPath() string { return "" }
+func (d *Driver) LogPath() string { return d.logPath() }
 
 // Hello implements engine.V1.
 func (d *Driver) Hello(ctx context.Context) (engine.Hello, error) {
@@ -305,7 +303,7 @@ func (d *Driver) Session() engine.Controller {
 }
 
 // WaitExit implements engine.V1.
-func (d *Driver) WaitExit(context.Context) error { return notYet("wait for exit") }
+func (d *Driver) WaitExit(ctx context.Context) error { return d.waitExit(ctx) }
 
 func (d *Driver) id(method string) string {
 	return fmt.Sprintf("%s-%d", method, d.ops.Add(1))

@@ -115,7 +115,14 @@ type RouteManager interface {
 
 type Line struct {
 	ID        string       `json:"id"`
+	Interface string       `json:"interface,omitempty"`
 	Addresses []netip.Addr `json:"addresses"`
+}
+
+// UDPNotifications is optional. Cancellation must stop the listener before
+// the NAT is destroyed. A lost notification requests an immediate full dump.
+type UDPNotifications interface {
+	WatchUDP(context.Context, func(netip.AddrPort, string), func())
 }
 
 type ProbeResult struct {
@@ -126,4 +133,8 @@ type ProbeResult struct {
 
 type Prober interface {
 	Probe(context.Context, string, string) (ProbeResult, error)
+}
+
+type Echoer interface {
+	Echo(context.Context, string, netip.Addr, []byte) ([]byte, error)
 }

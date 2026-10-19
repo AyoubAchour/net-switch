@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sort"
 	"sync"
 )
 
@@ -154,6 +155,13 @@ func (s *Session) Cleanup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Some platforms must remove selectors before the routes they select,
+	// even when reconciliation appended newer routes after capture began.
+	priority := func(r Record) int {
+		if d, ok := s.j.Kinds[r.Kind].(interface{ CleanupPriority() int }); ok { return d.CleanupPriority() }
+		return 0
+	}
+	sort.SliceStable(records, func(i, j int) bool { return priority(records[i]) > priority(records[j]) })
 	for i := len(records) - 1; i >= 0; i-- {
 		r := records[i]
 		driver := s.j.Kinds[r.Kind]
@@ -189,6 +197,39 @@ func (s *Session) Close() error {
 	}
 	s.closed = true
 	return s.release()
+}
+
+// Remove retires one owned object during reconciliation, with the same
+// fingerprint check as shutdown. It never claims a replacement object.
+func (s *Session) Remove(ctx context.Context, kind string, fp Fingerprint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("journal session closed")
+	}
+	records, err := s.j.live()
+	if err != nil {
+		return err
+	}
+	for i := len(records) - 1; i >= 0; i-- {
+		r := records[i]
+		if r.Kind != kind || !maps.Equal(r.Fingerprint, fp) {
+			continue
+		}
+		d := s.j.Kinds[kind]
+		live, found, err := d.Inspect(ctx, maps.Clone(fp))
+		if err != nil {
+			return err
+		}
+		if found && maps.Equal(live, fp) {
+			if err := d.Remove(ctx, maps.Clone(fp)); err != nil {
+				return err
+			}
+		}
+		r.Phase = "removed"
+		return s.j.Store.Append(r)
+	}
+	return nil
 }
 func (j *Journal) Cleanup(ctx context.Context) error {
 	s, err := j.Open(ctx, "cleanup", "cleanup")

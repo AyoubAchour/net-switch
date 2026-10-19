@@ -78,6 +78,14 @@ func (n *NAT) Reconcile(ctx context.Context) {
 // Destroy matches the generation, never just the reused port. A dropped event
 // or listener restart calls RefreshNow; the periodic dump remains the bound.
 func (n *NAT) Destroy(source netip.AddrPort, generation string) {
+	if source.Addr().IsUnspecified() {
+		for _, s := range n.sessions() {
+			if s.source.Port() == source.Port() && s.source.Addr().BitLen() == source.Addr().BitLen() {
+				n.Destroy(s.source, generation)
+			}
+		}
+		return
+	}
 	b := n.bucket(source)
 	b.Lock()
 	s := b.m[source]

@@ -1,10 +1,7 @@
 name: Acceptance
 
-# Net Switch 1.0, milestone 0: the Linux acceptance suite (tests/linux) against
-# the baseline engine, sing-box at the version packaging/versions.json pins.
-# Strict: any failing case fails the job. Known baseline defects are recorded,
-# must reproduce, and don't fail it. Nothing here ships; 0.3.x keeps building
-# from ci.yml.
+# The 1.0 profile runs the real Linux engine in isolated namespaces. Every
+# former baseline defect is a required pass; missing gates fail the job.
 on:
   push:
     branches: [main]
@@ -84,7 +81,9 @@ jobs:
       - name: Build the harness
         env:
           GOFLAGS: -mod=vendor
-        run: go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
+          go build -trimpath -tags acceptance -o "$RUNNER_TEMP/netswitch-engine" ./cmd/netswitch-engine
       # The QUIC fixture is its own module at a pinned quic-go, so QUIC never
       # enters Net Switch's go.mod or vendor/.
       - name: Check and build the QUIC fixture
@@ -96,8 +95,6 @@ jobs:
           go vet ./...
           go test -count=1 -v ./...
           go build -trimpath -o "$RUNNER_TEMP/nsquic" .
-      - name: Fetch sing-box at the pinned version and check its SHA-256
-        run: sudo "$RUNNER_TEMP/nsaccept" fetch-sing-box --dest /opt/sing-box
       # In a transient scope with Delegate=yes: systemd lets a program create
       # cgroups only in a subtree delegated to it, and the lookup cases need some.
       - name: Run the acceptance suite as root
@@ -107,7 +104,7 @@ jobs:
           sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-${{ github.run_id }}-${{ strategy.job-index }}" --
           env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
           "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs"
-          "$RUNNER_TEMP/nsaccept" run --engine sing-box --engine-path /opt/sing-box/sing-box
+          "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine"
           --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance"
           --quic "$RUNNER_TEMP/nsquic"
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"

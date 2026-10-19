@@ -47,6 +47,10 @@ type Server struct {
 	order                       []string
 	clients                     map[*connection]struct{}
 	EventsDropped               atomic.Uint64
+	done                        chan struct{}
+	doneOnce                    sync.Once
+	// TestFault is nil in production. Acceptance binaries install it explicitly.
+	TestFault func(context.Context, json.RawMessage) (any, error)
 }
 
 func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
@@ -54,8 +58,10 @@ func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
 	if _, err := rand.Read(id[:]); err != nil {
 		panic(err)
 	}
-	return &Server{Instance: hex.EncodeToString(id[:]), now: time.Now, runtime: runtime, table: table, prober: prober, operations: map[string]*operation{}, clients: map[*connection]struct{}{}}
+	return &Server{Instance: hex.EncodeToString(id[:]), now: time.Now, runtime: runtime, table: table, prober: prober, operations: map[string]*operation{}, clients: map[*connection]struct{}{}, done: make(chan struct{})}
 }
+func (s *Server) Done() <-chan struct{} { return s.done }
+func (s *Server) finished()             { s.doneOnce.Do(func() { close(s.done) }) }
 func (s *Server) fence(r Request) error {
 	if r.Instance != s.Instance || !s.attached || r.Epoch != s.epoch {
 		return errors.New("controller fenced")
@@ -68,7 +74,7 @@ func (s *Server) fence(r Request) error {
 
 func (s *Server) Handle(ctx context.Context, r Request) Reply {
 	result, err := s.execute(ctx, r)
-	reply := Reply{ID: r.ID, Result: result}
+	reply := Reply{ID: r.ID, Result: result, terminal: r.Method == "stop" && err == nil}
 	if err != nil {
 		reply.Result = nil
 		reply.Error = err.Error()
@@ -124,6 +130,11 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 	}
 	defer s.mu.Unlock()
 	switch r.Method {
+	case "testFault":
+		if s.TestFault == nil {
+			return nil, errors.New("test faults unavailable in production")
+		}
+		return s.TestFault(ctx, r.Fault)
 	case "renew":
 		s.expires = s.now().Add(Lease)
 		return true, nil
@@ -259,6 +270,7 @@ func (s *Server) CheckLease(ctx context.Context) error {
 	err := s.runtime.Stop(ctx)
 	if err == nil {
 		s.stopped = true
+		s.finished()
 	}
 	return err
 }
