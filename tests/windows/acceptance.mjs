@@ -369,9 +369,10 @@ try {
     assert.equal(samples[0]?.outcome, 'closed', JSON.stringify(samples)); return samples;
   });
   if (directReuse && large) await observe('freeze gate: reuse after 100 MB transfer', 'baseline-defect', async () => {
-    const samples = await client('reuse', { target: responder.virtual, count: 1, reusePort: large[0].port });
-    if (samples[0].outcome === 'timeout') throw new BaselineDefect('Port stalls after a verified 100 MB transfer', samples);
-    assert.equal(samples[0].outcome, 'closed'); return samples;
+    const samples = await client('reuse', { target: responder.virtual, count: 1000, reusePort: large[0].port });
+    if (samples.some((sample) => sample.outcome === 'timeout')) throw new BaselineDefect('Port stalls after a verified 100 MB transfer', samples);
+    assert(samples.length === 1000 && samples.every((sample) => sample.outcome === 'closed' && sample.ms < 100), JSON.stringify(samples));
+    return samples;
   });
   await report.test('DNS change leaves held sockets alive', 'baseline-defect', async () => {
     await client('close');
