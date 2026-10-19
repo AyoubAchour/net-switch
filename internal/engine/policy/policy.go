@@ -111,7 +111,7 @@ func Compile(r Revision) (*Policy, error) {
 		}
 	}
 	for id, w := range c.Shares {
-		if !ids[id] || p.blocked[id] {
+		if !ids[id] || (w != 0 && p.blocked[id]) {
 			return nil, errors.New("invalid sharing line")
 		}
 		total, carry := bits.Add64(p.total, w, 0)
