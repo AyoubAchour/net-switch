@@ -95,6 +95,41 @@ func (l *Link) Read(ctx context.Context) []byte {
 	}
 }
 
+// ReadBatch waits for the first packet, then drains the packets already queued
+// in FIFO order. It never waits to fill a batch. The TUN writer can publish one
+// batch with one driver wake-up without delaying a lone packet.
+func (l *Link) ReadBatch(ctx context.Context, packets [][]byte) int {
+	if len(packets) == 0 {
+		return 0
+	}
+	for {
+		l.mu.Lock()
+		if l.count != 0 {
+			n := min(len(packets), l.count)
+			for i := 0; i < n; i++ {
+				packets[i] = l.queue[l.head]
+				l.queue[l.head] = nil
+				l.head = (l.head + 1) % QueuePackets
+			}
+			l.count -= n
+			l.mu.Unlock()
+			return n
+		}
+		closed := l.closed
+		l.mu.Unlock()
+		if closed {
+			return 0
+		}
+		select {
+		case <-l.ready:
+		case <-l.done:
+			return 0
+		case <-ctx.Done():
+			return 0
+		}
+	}
+}
+
 func (l *Link) InjectInbound(protocol tcpip.NetworkProtocolNumber, p *gv.PacketBuffer) {
 	l.ingress.Lock()
 	defer l.ingress.Unlock()

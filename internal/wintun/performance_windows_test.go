@@ -65,14 +65,16 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 	}()
 	go func() {
 		defer pumps.Done()
+		packets := make([][]byte, 64)
 		for {
-			p := link.Read(ctx)
-			if p == nil {
+			n := link.ReadBatch(ctx, packets)
+			if n == 0 {
 				return
 			}
-			if _, err := session.WriteBatch([][]byte{p}); err != nil && ctx.Err() == nil {
+			if _, err := session.WriteBatch(packets[:n]); err != nil && ctx.Err() == nil {
 				t.Logf("TCP ring write: %v", err)
 			}
+			clear(packets[:n])
 		}
 	}()
 	go func() {
@@ -291,6 +293,10 @@ func TestWintunPerformance(t *testing.T) {
 				for _, streams := range []int{1, 8} {
 					var value float64
 					var err error
+					var before Stats
+					if s, ok := f.io.(*Session); ok {
+						before = s.Stats()
+					}
 					func() { stop := tcpEcho(t, f); defer stop(); value, err = tcpTransfer(t, streams) }()
 					if err != nil {
 						if mode != "dll" || !errors.Is(f.fault(), windows.ERROR_INVALID_DATA) {
@@ -304,6 +310,10 @@ func TestWintunPerformance(t *testing.T) {
 						f.faultMu.Unlock()
 					}
 					measure(fmt.Sprintf("tcp_%d_MBps", streams), value)
+					if s, ok := f.io.(*Session); ok {
+						after := s.Stats()
+						report(t, map[string]any{"test": "tcp_batching", "arch": runtime.GOARCH, "trial": trial, "streams": streams, "written_packets": after.WrittenPackets - before.WrittenPackets, "wakeups": after.Wakeups - before.Wakeups})
+					}
 				}
 			})
 		}
