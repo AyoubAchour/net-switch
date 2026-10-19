@@ -2,7 +2,7 @@
 // batches. Every named case must actually run and pass in every batch.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { pathToFileURL } from 'node:url';
 
@@ -34,13 +34,26 @@ export class Results {
 
 // Include the actual test executable, not just its small `go test` parent.
 // Read only this command's process tree; nothing is stopped or reconfigured.
-function rssKiB(pid) {
-  if (process.platform !== 'linux') return null;
+export function rssKiB(pid, files = { readFileSync, readdirSync }, seen = new Set()) {
+  if (seen.has(pid)) return 0;
+  seen.add(pid);
+  const read = path => {
+    try {
+      return files.readFileSync(path, 'utf8');
+    } catch (err) {
+      if (err.code === 'ENOENT' || err.code === 'ESRCH') return '';
+      throw err;
+    }
+  };
   try {
-    const status = readFileSync(`/proc/${pid}/status`, 'utf8');
+    const status = read(`/proc/${pid}/status`);
     let rss = Number(status.match(/^VmRSS:\s+(\d+)/m)?.[1] || 0);
-    const children = readFileSync(`/proc/${pid}/task/${pid}/children`, 'utf8').trim();
-    for (const child of children ? children.split(/\s+/) : []) rss += rssKiB(Number(child)) || 0;
+    // Go may start the test executable from any OS thread. Linux's children
+    // file belongs to a thread, so checking only the group leader misses it.
+    for (const tid of files.readdirSync(`/proc/${pid}/task`)) {
+      const children = read(`/proc/${pid}/task/${tid}/children`).trim();
+      for (const child of children ? children.split(/\s+/) : []) rss += rssKiB(Number(child), files, seen);
+    }
     return rss;
   } catch (err) {
     if (err.code === 'ENOENT' || err.code === 'ESRCH') return 0;
@@ -60,7 +73,7 @@ async function batch(index, batches, count, race) {
   });
   let peakRSS = 0;
   const monitor = setInterval(() => {
-    const rss = rssKiB(child.pid);
+    const rss = process.platform === 'linux' ? rssKiB(child.pid) : null;
     if (rss !== null) {
       peakRSS = Math.max(peakRSS, rss);
       const available = readFileSync('/proc/meminfo', 'utf8').match(/^MemAvailable:\s+(\d+)/m)?.[1];

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { Results } from './repeat-close-tests.mjs';
+import { Results, rssKiB } from './repeat-close-tests.mjs';
 
 test('repeat evidence requires the exact run and pass counts', () => {
   const results = new Results(['TestCap', 'TestCap/full']);
@@ -34,4 +34,28 @@ test('a failed package or subtest fails the evidence check', () => {
     results.record({ Test, Action: 'fail' });
     assert.throws(() => results.verify(1), /failed or skipped/);
   }
+});
+
+test('memory samples include children started by a nonleader Go thread once', () => {
+  const content = new Map([
+    ['/proc/10/status', 'VmRSS: 64 kB'],
+    ['/proc/10/task/10/children', ''],
+    ['/proc/10/task/11/children', '20'],
+    ['/proc/20/status', 'VmRSS: 4096 kB'],
+    ['/proc/20/task/20/children', '30'],
+    ['/proc/20/task/21/children', '30'],
+    ['/proc/30/status', 'VmRSS: 512 kB'],
+    ['/proc/30/task/30/children', ''],
+  ]);
+  const tasks = new Map([['/proc/10/task', ['10', '11']], ['/proc/20/task', ['20', '21']], ['/proc/30/task', ['30']]]);
+  assert.equal(rssKiB(10, {
+    readFileSync: path => {
+      assert.ok(content.has(path), path);
+      return content.get(path);
+    },
+    readdirSync: path => {
+      assert.ok(tasks.has(path), path);
+      return tasks.get(path);
+    },
+  }), 64 + 4096 + 512);
 });
