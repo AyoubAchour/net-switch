@@ -3,6 +3,7 @@ package winplatform
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,11 +57,10 @@ func runMetadataProof() int {
 	if err != nil {
 		return 2
 	}
-	acl, _, err := sd.DACL()
-	if err != nil {
-		return 2
-	}
-	if err := windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+	// This is deliberately adversarial, not the product's file-security helper.
+	// SetSecurityInfo can query additional metadata/inheritance; the direct
+	// kernel operation needs only the WRITE_DAC right retained on this handle.
+	if err := windows.SetKernelObjectSecurity(h, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, sd); err != nil {
 		_ = encoder.Encode(metadataAnswer{Error: "retained WRITE_DAC: " + err.Error()})
 		return 1
 	}
@@ -133,6 +133,7 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			// fixture must grant it alongside WRITE_DAC to exercise retention.
 			setProofSecurity(t, target, user.User.Sid.String(), "0x00140000")
 			before := fileSecurity(t, target)
+			rootBefore := fileSecurity(t, root)
 			p, err := worker.Start(exe, []string{"worker", "acl-proof"})
 			if err != nil {
 				t.Fatal(err)
@@ -150,17 +151,29 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			if err := decoder.Decode(&ready); err != nil || !ready.Ready {
 				t.Fatalf("Medium worker could not acquire the original grant: %+v %v", ready, err)
 			}
+			blocked := false
 			if test.quarantine {
 				if err := ProtectDirectory(root); err != nil {
-					t.Fatal(err)
-				}
-				old, err := filepath.Glob(root + ".untrusted-*")
-				if err != nil || len(old) != 1 {
-					t.Fatalf("untrusted objects were not quarantined: %v %v", old, err)
-				}
-				relative, _ := filepath.Rel(root, target)
-				if after := fileSecurity(t, filepath.Join(old[0], relative)); before != after {
-					t.Fatalf("original ACL was changed before quarantine: %s -> %s", before, after)
+					// Windows refuses a directory rename while a descendant is
+					// open, even with FILE_SHARE_DELETE. Startup must fail closed
+					// without rewriting any original ACL or using that old tree.
+					if kind == "root" || !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+						t.Fatal(err)
+					}
+					blocked = true
+					if fileSecurity(t, target) != before || fileSecurity(t, root) != rootBefore {
+						t.Fatal("failed quarantine changed an original ACL")
+					}
+					t.Logf("startup refused while descendant handle is open: %v", err)
+				} else {
+					old, err := filepath.Glob(root + ".untrusted-*")
+					if err != nil || len(old) != 1 {
+						t.Fatalf("untrusted objects were not quarantined: %v %v", old, err)
+					}
+					relative, _ := filepath.Rel(root, target)
+					if after := fileSecurity(t, filepath.Join(old[0], relative)); before != after {
+						t.Fatalf("original ACL was changed before quarantine: %s -> %s", before, after)
+					}
 				}
 			} else {
 				// Vulnerable control: remove the dangerous grant in place. The
@@ -178,9 +191,25 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			if err := p.Wait(); err != nil {
 				t.Fatalf("metadata proof did not execute: %v %+v", err, answer)
 			}
-			t.Logf("%s retained WRITE_DAC: quarantine=%t, escaped=%t, write result=%s", kind, test.quarantine, answer.Escaped, answer.Error)
-			if answer.Escaped == test.quarantine {
-				t.Fatalf("retained metadata handle: quarantine=%t, escaped=%t", test.quarantine, answer.Escaped)
+			t.Logf("%s retained WRITE_DAC: quarantine=%t, startup refused=%t, escaped=%t, write result=%s", kind, test.quarantine, blocked, answer.Escaped, answer.Error)
+			if wantEscape := !test.quarantine || blocked; answer.Escaped != wantEscape {
+				t.Fatalf("retained metadata handle: escaped=%t, want %t", answer.Escaped, wantEscape)
+			}
+			if blocked {
+				// The worker has exited and closed its handle. Retrying must now
+				// quarantine all the old objects, including its last write.
+				if err := ProtectDirectory(root); err != nil {
+					t.Fatal("quarantine after descendant closes:", err)
+				}
+				old, err := filepath.Glob(root + ".untrusted-*")
+				if err != nil || len(old) != 1 {
+					t.Fatalf("retry did not quarantine the untrusted tree: %v %v", old, err)
+				}
+				items, err := os.ReadDir(root)
+				if err != nil || len(items) != 0 {
+					t.Fatalf("retry kept untrusted data: %v %v", items, err)
+				}
+				t.Log("quarantine succeeded after the descendant handle closed")
 			}
 		})
 	}

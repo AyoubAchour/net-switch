@@ -153,7 +153,7 @@ func ProtectDirectory(path string) error {
 			return err
 		}
 		if err := renameDirectoryHandle(windows.Handle(root.file.Fd()), path+".untrusted-"+hex.EncodeToString(nonce[:])); err != nil {
-			return fmt.Errorf("move untrusted machine folder aside: %w", err)
+			return fmt.Errorf("move untrusted machine folder aside (open descendants can prevent this; refusing to use it): %w", err)
 		}
 	}
 	return fmt.Errorf("machine folder was repeatedly replaced while securing it")
