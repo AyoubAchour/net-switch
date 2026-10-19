@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 )
@@ -32,10 +33,7 @@ type Reply struct {
 	Result any    `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
 }
-type Event struct {
-	Type    string `json:"event"`
-	Message string `json:"message"`
-}
+type Event = flowapi.Event
 
 func Decode(b []byte) (Request, error) {
 	var r Request

@@ -33,3 +33,10 @@ type Ticket interface {
 }
 
 type Output interface{ Send([]byte) bool }
+
+type Event struct {
+	Type    string `json:"event"`
+	Message string `json:"message"`
+	App     string `json:"app,omitempty"`
+	Line    string `json:"line,omitempty"`
+}
