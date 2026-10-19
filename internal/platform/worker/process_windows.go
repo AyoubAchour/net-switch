@@ -209,7 +209,11 @@ func workerToken(token windows.Token, administrative bool) (windows.Token, error
 			return 0, err
 		}
 		for _, group := range groups.AllGroups() {
-			if elevatedGroup(group.Sid) {
+			text := group.Sid.String()
+			if text == "" {
+				return 0, fmt.Errorf("could not read a worker token group SID")
+			}
+			if elevatedGroupText(text) {
 				disabled = append(disabled, windows.SIDAndAttributes{Sid: group.Sid})
 			}
 		}
@@ -253,10 +257,14 @@ func elevatedGroup(sid *windows.SID) bool {
 	if sid == nil {
 		return false
 	}
+	return elevatedGroupText(sid.String())
+}
+
+func elevatedGroupText(text string) bool {
 	// The x/sys pointer-returning SID helpers round-trip Go-backed SID
 	// addresses through uintptr, which fails checkptr. Canonical SID text
 	// copies the value instead and keeps the exact authority/count checks.
-	parts := strings.Split(sid.String(), "-")
+	parts := strings.Split(text, "-")
 	if len(parts) < 5 || parts[0] != "S" || parts[1] != "1" || parts[2] != "5" {
 		return false
 	}
