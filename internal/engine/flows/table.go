@@ -46,7 +46,8 @@ type Totals struct {
 	Lines map[string]Bytes `json:"lines"`
 }
 type Gauges struct {
-	PendingPeakBytes int64
+	PeakFlows, PeakHandshakes, PeakUDP, PeakPerApp, PeakUDPPerApp int
+	PendingPeakBytes                                              int64
 	// Non-cumulative buckets: 100 us wide through 20 ms, then overflow.
 	// Histograms can be subtracted across a cold-socket test phase.
 	LookupHistogram                                                                                   [201]uint64
@@ -191,13 +192,16 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	t.nextID++
 	f := &ticket{table: t, record: Record{ID: t.nextID, Epoch: t.epoch, Start: t.now(), Protocol: protocol, Source: tuple.Source, Destination: tuple.Destination}}
 	t.gauges.Flows++
+	t.gauges.PeakFlows = max(t.gauges.PeakFlows, t.gauges.Flows)
 	if protocol == "udp" {
 		t.gauges.UDP++
+		t.gauges.PeakUDP = max(t.gauges.PeakUDP, t.gauges.UDP)
 		t.gauges.UDPReadBytes += flowapi.UDPReadBuffer + flowapi.UDPAdapterBuffer
 	} else {
 		f.handshake = true
 		f.receive, f.send = 64<<10, 64<<10
 		t.gauges.Handshakes++
+		t.gauges.PeakHandshakes = max(t.gauges.PeakHandshakes, t.gauges.Handshakes)
 	}
 	t.flows[f.record.ID] = f
 	return f, nil
@@ -244,8 +248,10 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 		return flowapi.Decision{}, ErrBudget
 	}
 	c.flows++
+	t.gauges.PeakPerApp = max(t.gauges.PeakPerApp, c.flows)
 	if udp {
 		c.udp++
+		t.gauges.PeakUDPPerApp = max(t.gauges.PeakUDPPerApp, c.udp)
 	}
 	t.apps[owner.AppID] = c
 	if unknown {

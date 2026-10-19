@@ -164,6 +164,13 @@ type stalledTun struct {
 	gate func() <-chan struct{}
 }
 
+func (t *stalledTun) Stats() any {
+	if s, ok := t.TunDevice.(interface{ Stats() any }); ok {
+		return s.Stats()
+	}
+	return nil
+}
+
 func (t *stalledTun) WritePacket(ctx context.Context, b []byte) error {
 	if gate := t.gate(); gate != nil {
 		select {

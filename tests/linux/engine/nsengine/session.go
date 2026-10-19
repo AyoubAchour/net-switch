@@ -326,6 +326,9 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		return engine.Stats{}, fmt.Errorf("stats gauges: %w", err)
 	}
 	return engine.Stats{
+		OwnerLookup: nested["ownerLookup"],
+		TunKernel:   nested["tunKernel"],
+		PeakFlows:   g.PeakFlows, PeakHandshakes: g.PeakHandshakes, PeakUDP: g.PeakUDP, PeakPerApp: g.PeakPerApp, PeakUDPPerApp: g.PeakUDPPerApp,
 		Flows: int64(g.Flows), Handshakes: int64(g.Handshakes), UDP: int64(g.UDP),
 		Unknown: int64(g.Unknown), UnknownUDP: int64(g.UnknownUDP), TimeWait: int64(g.TimeWait),
 		TCPBytes: g.TCPBytes, PendingBytes: g.PendingBytes, SnapshotBytes: g.SnapshotBytes,

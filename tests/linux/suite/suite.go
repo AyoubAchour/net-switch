@@ -70,7 +70,7 @@ type Env struct {
 	cfg    Config
 	engCfg engine.Config
 	// Before is the PC's routing state before the engine first started.
-	Before topo.Snapshot
+	Before    topo.Snapshot
 	sharedDir string // SharedDir, once made
 	nextPort  int    // the next source port ports hands out
 }
@@ -130,6 +130,12 @@ func (r *registry) setup(t *harness.T) *Env {
 	t.Cleanup(func() {
 		ctx := t.Context()
 		if e.Eng.Running() {
+			if v, ok := e.Eng.(engine.V1); ok && v.Session() != nil {
+				if s, err := v.Session().Stats(ctx); err == nil {
+					t.Logf("engine stats: flows=%d handshakes=%d UDP=%d unknown=%d lookups=%d misses=%d mean=%v owners=%s counters=%v", s.Flows, s.Handshakes, s.UDP, s.Unknown, s.LookupCount, s.LookupMisses, s.LookupMean(), s.OwnerLookup, s.Counters)
+					t.Logf("engine peaks: flows=%d handshakes=%d UDP=%d per-app=%d UDP-per-app=%d kernel=%s", s.PeakFlows, s.PeakHandshakes, s.PeakUDP, s.PeakPerApp, s.PeakUDPPerApp, s.TunKernel)
+				}
+			}
 			err := e.Eng.Stop(ctx)
 			t.Check(err == nil, "the engine stops cleanly after the case (%v)", err)
 		}

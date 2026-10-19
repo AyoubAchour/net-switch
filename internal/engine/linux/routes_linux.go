@@ -121,6 +121,9 @@ func (p *Platform) Close() error {
 func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if err := p.Owners.Warm(ctx); err != nil {
+		return nil, err
+	}
 	rollback := func(cause error) (platform.TunDevice, error) {
 		if p.objects.tun != nil {
 			p.objects.tun.Close()

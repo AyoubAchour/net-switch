@@ -282,6 +282,12 @@ func (e *Engine) Stats() any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := map[string]any{"flows": e.Table.Stats()}
+	if tun, ok := e.tun.(interface{ Stats() any }); ok {
+		s["tunKernel"] = tun.Stats()
+	}
+	if owners, ok := e.deps.Owners.(interface{ Stats() any }); ok {
+		s["ownerLookup"] = owners.Stats()
+	}
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	s["heapBytes"] = memory.HeapAlloc

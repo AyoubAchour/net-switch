@@ -511,6 +511,8 @@ func crashCleanup(e *Env) {
 	e.ExpectTCP("alpha after the crash, before cleanup", "alpha", AsUser, "a", topo.Server4, 3)
 	e.ExpectTCP("bravo after the crash, before cleanup (main route)", "bravo", AsUser, "a", topo.Server4, 3)
 	e.ExpectUDP("bravo UDP after the crash, before cleanup", "bravo", AsUser, "a", topo.Server4, 5)
+	left := e.Snapshot().Diff(e.Before)
+	e.T.Require(len(left) > 0, "owned routing objects still exist before explicit cleanup (%d differences)", len(left))
 	err := e.Eng.Cleanup(e.Ctx())
 	e.T.Check(err == nil, "cleanup succeeds (%v)", err)
 	e.ExpectSameState("after cleanup", e.Before)
