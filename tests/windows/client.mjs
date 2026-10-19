@@ -178,7 +178,7 @@ async function reset({ target }) {
     const socket = connect({ host: target.host, port: target.http, localAddress: target.source });
     const timer = setTimeout(() => { socket.destroy(); reject(new Error('Reset target timed out')); }, 5000);
     socket.on('connect', () => socket.write('GET /reset HTTP/1.1\r\nHost: target\r\n\r\n'));
-    socket.on('end', () => { clearTimeout(timer); reject(new Error('RST was converted into FIN')); });
+    socket.on('end', () => { clearTimeout(timer); resolve({ outcome: 'fin' }); });
     socket.on('error', (error) => {
       clearTimeout(timer);
       if (error.code === 'ECONNRESET') resolve({ outcome: error.code });

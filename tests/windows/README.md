@@ -8,7 +8,7 @@ All tests run in CI.
 The existing app and release packaging are unchanged. `Windows acceptance / x64`
 and `Windows acceptance / ARM64` have a 25-minute job limit and upload reports,
 executable identities, target observations and logs even after a failed test.
-The independent [TestISP proof](testisp/README.md) runs before the harness is
+The separate [TestISP proof](testisp/README.md) runs before the harness is
 accepted as evidence.
 
 ## What counts as evidence
@@ -78,6 +78,11 @@ despite the app requesting no fragmentation, on both IPv4 and IPv6. This extra
 `baseline-defect` requires the direct DF baseline to reject the same size and the
 TUN probe to return the full payload. A timeout is not exempted.
 
+The strengthened reset probe also measured a sing-box 1.14.2 defect: it reports
+FIN for a controlled upstream RST, while both native and TestISP paths report
+`ECONNRESET`. Only that specific substitution is a `baseline-defect`; the
+gateway's own reset preservation remains a mandatory baseline on both arches.
+
 Immediate TCP reuse records Winsock bind retries separately. A `close` event can
 arrive before Windows consumes the final ACK; the captured exchange showed a
 complete passive close and `EADDRINUSE` before any new SYN. Only that failed bind
@@ -109,6 +114,11 @@ be blamed on the app when the native refusal baseline failed.
 Every accepted rejection must be faster than the slowest native sample plus
 500 ms. `ETIMEDOUT` is not a rejection. During the blocked burst, neither the
 TCP target's flow counter nor the UDP target's datagram counter may increase.
+The 0.3.x blocked flag acknowledges a written file, not sing-box's reload. The
+baseline adapter therefore records canary outcomes until an actual prompt
+refusal proves the rule is active, then snapshots counters and starts the burst.
+The `v1` profile gets no canary grace: its applied-state contract acknowledges
+the revision before the API reports it. This replaces the old fixed 500 ms wait.
 An independent cap case holds flows on both lines: old secondary flows must
 close while the exhausted main line, with no stand-in, keeps its original sockets.
 

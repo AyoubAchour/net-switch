@@ -219,10 +219,13 @@ try {
     assert([...tcp, ...udp].every((sample) => rejections.has(sample.outcome)), `Closed ports did not report rejection: ${JSON.stringify({ tcp, udp })}`);
     return { tcp, udp };
   });
-  const resetBaseline = await observe('RST survives both native and TestISP relays', 'harness-baseline', async () => ({
-    direct: await client('reset', { target: responder.direct }),
-    virtual: await client('reset', { target: { ...responder.virtual, source: harness.testisp.address } }),
-  }));
+  const resetBaseline = await observe('RST survives both native and TestISP relays', 'harness-baseline', async () => {
+    const direct = await client('reset', { target: responder.direct });
+    const virtual = await client('reset', { target: { ...responder.virtual, source: harness.testisp.address } });
+    assert.equal(direct.outcome, 'ECONNRESET', JSON.stringify(direct));
+    assert.equal(virtual.outcome, 'ECONNRESET', JSON.stringify(virtual));
+    return { direct, virtual };
+  });
   await report.test('gateway preserves STUN mapping before engine starts', 'harness-baseline', async () => {
     const result = await client('udp', { target: responder.virtual, stun: true, localAddress: harness.testisp.address });
     assert.equal(new Set(result.mappings.map((item) => item.port)).size, 1, JSON.stringify(result));
@@ -355,9 +358,12 @@ try {
     const after = await harness.control('stats'); assert(after.testisp.connections > before.testisp.connections);
     await client('close'); return { response, byLine, before, after };
   });
-  await observe('TCP reset crosses the app TUN unchanged', 'parity', async () => {
+  await observe('TCP reset crosses the app TUN unchanged', 'baseline-defect', async () => {
     assert(resetBaseline, 'Blocked: the reset baseline failed');
-    return client('reset', { target: responder.virtual });
+    const result = await client('reset', { target: responder.virtual });
+    if (result.outcome === 'fin') throw new BaselineDefect('The engine converts an upstream RST into FIN', { resetBaseline, result });
+    assert.equal(result.outcome, 'ECONNRESET', JSON.stringify(result));
+    return result;
   });
   for (const size of [64, 1200, 1800, 8192, 12000]) {
     await observe(`UDP payload and fragmentation through TUN: ${size} bytes`, 'parity', () => client('udp', { target: responder.virtual, size }));
@@ -510,12 +516,26 @@ try {
       await server.api('lines/update', { id: main.id, cap: { bytes: 1, period: 'day' } });
       await server.api('lines/update', { id: second.id, cap: { bytes: 1, period: 'day' } });
       const blocked = await until(async () => { const state = await server.api('state'); return state.lines.find((line) => line.id === second.id)?.blocked && state.lines; }, 'both caps exhausted and secondary blocked', 30_000);
-      const beforeBurst = await harness.control('stats');
       const limitMs = Math.max(...rejectBaseline.tcp.map((sample) => sample.ms), ...rejectBaseline.udp.map((sample) => sample.ms)) + 500;
+      const readiness = [];
+      if (options.profile === 'baseline') {
+        // 0.3.x reports a written rule file, not sing-box's asynchronous reload.
+        // Observe an actual refusal before starting the measured burst. The
+        // v1 state contract acknowledges an applied revision, so it gets no grace.
+        await until(async () => {
+          const [sample] = await client('reject', { target: responder.virtual, count: 1, timeout: limitMs });
+          readiness.push(sample);
+          assert(rejections.has(sample.outcome) && sample.ms <= limitMs,
+            `Cap not applied yet: ${JSON.stringify({ limitMs, blocked, recent: readiness.slice(-5) })}`);
+          return true;
+        }, 'sing-box has applied the cap rejection rule', 30_000);
+      }
+      const beforeBurst = await harness.control('stats');
       const samples = await client('reject', { target: responder.virtual, timeout: limitMs });
-      assert(!samples.some((item) => item.outcome === 'connected'), 'A capped app escaped the block');
       const udp = await udpReject(responder.virtual, 100, limitMs);
       const afterBurst = await harness.control('stats');
+      const burstEvidence = { blocked, limitMs, readiness, samples, udp, beforeBurst, afterBurst };
+      assert(!samples.some((item) => item.outcome === 'connected'), `A capped app escaped the applied block: ${JSON.stringify(burstEvidence)}`);
       exactTraffic(beforeBurst, afterBurst, 0, `${responder.virtual.host}:${responder.virtual.http}`);
       exactTraffic(beforeBurst, afterBurst, 0, `${responder.virtual.host}:${responder.virtual.udp[0]}`);
       assert(!udp.some((item) => item.outcome === 'reply'), 'Capped UDP escaped the block');
@@ -529,7 +549,7 @@ try {
       const beforeRecovery = await harness.control('stats');
       const udpAfter = await udpReject(responder.virtual, 3);
       assert(udpAfter.every((sample) => sample.outcome === 'reply'), JSON.stringify({ udpBefore, udp, udpAfter, state: await server.api('state'), beforeRecovery, afterRecovery: await harness.control('stats') }));
-      const evidence = { rejectBaseline, limitMs, blocked, samples, udp, udpBefore, udpAfter, mainException, beforeBurst, afterBurst };
+      const evidence = { rejectBaseline, ...burstEvidence, udpBefore, udpAfter, mainException };
       if ([...samples, ...udp].some((item) => !rejections.has(item.outcome) || item.ms > limitMs)) {
         throw new BaselineDefect('Capped TCP/UDP did not fail fast; clearing the caps restored the same target', evidence);
       }
@@ -583,13 +603,13 @@ try {
   report.deferred('freeze: sequence wrap, stale SYN/data/RST, final ACK loss, timestamps off, reordered TUN queues', 3, 'These require the engine’s in-memory link endpoint; Winsock does not expose the app-side TCP sequence or queue injection. Socket reuse tests above run against today’s app.');
 } catch (error) {
   console.error(error); process.exitCode = 1;
-  if (!report.results.some((result) => result.status === 'fail')) report.results.push({ name: 'acceptance setup or teardown', label: 'parity', status: 'fail', error: error.stack });
+  if (!report.results.some((result) => result.status === 'fail')) report.results.push({ name: 'acceptance setup or teardown', label: server ? 'parity' : 'harness-baseline', status: 'fail', error: error.stack });
 } finally {
   if (restoreDNS) try { await network('dns-restore', dnsAdapter); } catch (error) { console.error(error); process.exitCode = 1; }
   if (worker?.exitCode === null && worker.connected) worker.disconnect();
   if (quicServer?.exitCode === null) quicServer.kill();
   if (server?.child.exitCode === null) try { await server.quit(); } catch (error) { console.error(error); process.exitCode = 1; }
-  await observe('final NetSwitch adapter, route and firewall cleanup', 'parity', clean);
+  await observe('final NetSwitch adapter, route and firewall cleanup', server ? 'parity' : 'harness-baseline', clean);
   if (harness) try { await harness.close(); } catch (error) { console.error(error); process.exitCode = 1; }
   try { await targetFirewall('clean'); } catch (error) { console.error(error); process.exitCode = 1; }
   if (responder) { await writeFile(path.join(dir, 'target-observations.json'), JSON.stringify(responder.seen, null, 2)); await responder.close(); }
