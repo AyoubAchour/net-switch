@@ -1,6 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { BaselineDefect, Report } from '../tests/windows/report.mjs';
+
+test('default launch paths are stable when the routing script is called outside the repo', () => {
+  const moduleURL = new URL('../tests/windows/launch.mjs', import.meta.url).href;
+  const source = `import { launchOptions } from ${JSON.stringify(moduleURL)}; console.log(JSON.stringify(launchOptions()));`;
+  const options = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source], { cwd: tmpdir(), encoding: 'utf8', windowsHide: true }));
+  assert.equal(options.entry, fileURLToPath(new URL('../server.mjs', import.meta.url)));
+  assert.equal(options.engine, fileURLToPath(new URL('../engine/sing-box.exe', import.meta.url)));
+});
 
 test('a disappearing baseline defect fails instead of silently changing the oracle', async () => {
   const report = new Report('baseline');
