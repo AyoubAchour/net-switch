@@ -105,10 +105,13 @@ try {
   adapter = await network('inspect');
   log(`Physical adapter: ${JSON.stringify(adapter)}`);
   log(`PORT-REUSE direct baseline: ${JSON.stringify(await client('reuse'))}`);
-  const udpAvailable = new Set();
+  // Capture the runner's resolver before the later DNS-change experiment.
+  // Both sizes are mandatory: an unavailable baseline fails instead of
+  // silently removing UDP coverage from this run.
+  const dnsServer = adapter.dns.find((address) => /^\d+\.\d+\.\d+\.\d+$/.test(address));
+  assert(dnsServer, `No IPv4 runner DNS resolver: ${JSON.stringify(adapter.dns)}`);
   for (const size of [64, 1800]) {
-    try { log(`UDP direct baseline: ${JSON.stringify(await client('udp', { size }))}`); udpAvailable.add(size); }
-    catch (error) { log(`UDP ${size} unavailable before TUN (target/network limitation): ${error.message}`); }
+    log(`UDP direct baseline: ${JSON.stringify(await client('udp', { size, server: dnsServer }))}`);
   }
   // Hosted runners have one physical internet adapter. Two independently tagged
   // outbounds on that adapter let the Clash API prove which line was selected.
@@ -159,8 +162,8 @@ try {
   log(`ok - selector PUT ${elapsed.toFixed(1)} ms with 100 open connections; all old sockets reused, new connections use bb`);
   await client('close');
 
-  for (const size of udpAvailable) {
-    const result = await client('udp', { size });
+  for (const size of [64, 1800]) {
+    const result = await client('udp', { size, server: dnsServer });
     await routed([result], 'bb');
     log(`ok - UDP through TUN: ${JSON.stringify(result)}`);
   }
