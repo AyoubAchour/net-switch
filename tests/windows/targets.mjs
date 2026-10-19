@@ -10,7 +10,7 @@ import { hostedOnly } from './testisp/harness.mjs';
 export async function targets(address) {
   hostedOnly();
   const seen = [];
-  const server = createServer(async (req, res) => {
+  const respond = async (req, res) => {
     const url = new URL(req.url, 'http://target');
     const observation = { source: req.socket.remoteAddress, port: req.socket.remotePort,
       nonce: url.searchParams.get('nonce'), path: url.pathname };
@@ -35,7 +35,8 @@ export async function targets(address) {
     }
     res.setHeader('Content-Type', 'application/json');
     res.end(JSON.stringify(observation));
-  });
+  };
+  const server = createServer(respond);
   server.keepAliveTimeout = 180_000;
   server.headersTimeout = 185_000;
   server.listen(0, address);
@@ -85,6 +86,24 @@ export async function targets(address) {
     virtual: { host: '198.19.128.2', http: server.address().port, udp: udp.map((socket) => socket.address().port) },
     rejected: { host: address, http: closedTCPPort, udp: [closedUDPPort] },
     seen,
+    async reuseTargets(count) {
+      const listeners = [];
+      const close = async () => {
+        await Promise.all(listeners.map((listener) => new Promise((resolve) => {
+          listener.closeAllConnections(); listener.close(resolve);
+        })));
+      };
+      try {
+        // A distinct peer port avoids the Windows responder's TIME_WAIT while
+        // the client reuses one source port. Engine tests keep a fixed peer.
+        for (let n = 0; n < count; n++) {
+          const listener = createServer(respond);
+          listeners.push(listener);
+          listener.listen(0, address); await once(listener, 'listening');
+        }
+        return { target: { host: address, httpPorts: listeners.map((listener) => listener.address().port) }, close };
+      } catch (error) { await close(); throw error; }
+    },
     async close() { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); for (const socket of udp) socket.close(); },
   };
 }

@@ -100,7 +100,9 @@ async function freePort() {
 async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
   const port = reusePort ?? await freePort();
   const samples = [];
+  if (target.httpPorts) assert.equal(target.httpPorts.length, count, 'Each native reuse needs a distinct responder port');
   for (let i = 0; i < count; i++) {
+    const peerPort = target.httpPorts?.[i] ?? target.http;
     const nonce = randomBytes(12).toString('hex');
     const started = performance.now();
     let result, bindRetries = 0;
@@ -109,12 +111,12 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
         const start = performance.now();
         let connected = false, remoteClosedFirst = false, header = '', body = '', bytes = 0, gotHeader = false;
         const digest = createHash('sha256');
-        const socket = connect({ host: target.host, port: target.http, localAddress: target.source, localPort: port, allowHalfOpen: true });
+        const socket = connect({ host: target.host, port: peerPort, localAddress: target.source, localPort: port, allowHalfOpen: true });
         const timer = setTimeout(() => finish('timeout'), length ? 30_000 : 2000);
         let done = false;
         function finish(outcome) {
           if (done) return; done = true; clearTimeout(timer); socket.destroy();
-          resolve({ port, outcome, connected, remoteClosedFirst, ms: performance.now() - start, bytes, sha256: digest.digest('hex'), header, body });
+          resolve({ port, peerPort, outcome, connected, remoteClosedFirst, ms: performance.now() - start, bytes, sha256: digest.digest('hex'), header, body });
         }
         socket.on('connect', () => {
           connected = true;

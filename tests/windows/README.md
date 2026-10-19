@@ -69,6 +69,15 @@ is retried, for at most 100 ms. Connected attempts and TCP timeouts are never
 retried, and the recorded latency includes the bind wait. The physical-path
 baseline performs 1,000 immediate reuses before the engine starts.
 
+The native baseline keeps one client source port and rotates the responder's
+listening port for each attempt. The old fixed-peer version intermittently timed
+out before the engine started; a hosted state capture showed that exact tuple's
+responder still in TIME_WAIT. Rotating only the native peer isolates client-side
+source-port reuse from Windows' server-side TIME_WAIT policy. Both ports are
+recorded and checked. TestISP and engine probes keep the entire tuple fixed, and
+each successful reuse must complete in under 100 ms, excluding the requested
+idle gap. Native failures still capture both ends' TCP states and fail CI.
+
 TestISP retains gVisor's default 60-second TIME_WAIT. Its 1,000-reuse prerequisite
 is `pending-shared-hook`, not a pass or a baseline CI failure, until the shared
 section 5.1 patch in [#29](https://github.com/AyoubAchour/net-switch/pull/29) lands.
@@ -82,6 +91,14 @@ UDP refusal errors, so this probe uses a native socket and explicitly enables
 `SIO_UDP_CONNRESET` after Go initializes it. The same executable must receive
 exact UDP echoes before applying caps and after clearing them; a timeout cannot
 be blamed on the app when the native refusal baseline failed.
+
+Socket behavior is checked against Microsoft's [Winsock port reuse guidance](https://learn.microsoft.com/windows/win32/winsock/using-so-reuseaddr-and-so-exclusiveaddruse)
+and [UDP IOCTL definitions](https://learn.microsoft.com/windows/win32/winsock/winsock-ioctls),
+[RFC 1122 section 4.2.2.13](https://www.rfc-editor.org/rfc/rfc1122#section-4.2.2.13)
+and [RFC 6191](https://www.rfc-editor.org/rfc/rfc6191) for TCP reuse, and
+[RFC 8085 section 5](https://www.rfc-editor.org/rfc/rfc8085#section-5) for UDP's
+lack of TIME_WAIT and the need to distinguish delayed packets. UDP probes use
+fresh random payloads and record source tuples, so stale replies cannot pass.
 
 | Area | Checks |
 | --- | --- |

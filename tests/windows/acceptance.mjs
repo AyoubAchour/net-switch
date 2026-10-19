@@ -189,19 +189,22 @@ try {
     return result;
   });
   const directReuse = await observe('physical controlled port reuse baseline', 'parity', async () => {
-    const rounds = Number(process.env.NETSWITCH_NATIVE_REUSE_ROUNDS ?? 1);
-    assert(Number.isInteger(rounds) && rounds >= 1 && rounds <= 50, 'Native reuse rounds must be between 1 and 50');
-    const evidence = [];
-    for (let round = 1; round <= rounds; round++) {
-      const samples = await client('reuse', { target: { ...responder.direct, source: harness.uplink.address }, count: 1000 });
+    const peers = await responder.reuseTargets(1000);
+    try {
+      const samples = await client('reuse', { target: { ...peers.target, source: harness.uplink.address }, count: 1000 });
       const failed = samples.find((sample) => sample.outcome !== 'closed');
       let sockets;
       if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection | Where-Object { $_.LocalPort -eq ${failed.port} -or $_.RemotePort -eq ${failed.port} } | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess,CreationTime) | ConvertTo-Json -Compress`]);
-      assert(samples.length === 1000 && !failed, `Physical reuse failed: ${JSON.stringify({ round, samples, sockets, target: responder.direct })}`);
-      evidence.push({ round, count: samples.length, maxMs: Math.max(...samples.map((sample) => sample.ms)), port: samples[0].port });
-      console.log(`Native reuse round ${round}/${rounds}: 1,000 completed`);
-    }
-    return evidence;
+      assert(samples.length === 1000 && !failed, `Physical reuse failed: ${JSON.stringify({ samples, sockets, target: peers.target })}`);
+      assert.equal(new Set(samples.map((sample) => sample.port)).size, 1, 'Native source port changed');
+      assert.equal(new Set(samples.map((sample) => sample.peerPort)).size, 1000, 'Native responder port was reused');
+      for (const sample of samples) {
+        const seen = JSON.parse(sample.body);
+        assert.equal(seen.source, harness.uplink.address);
+        assert.equal(seen.port, samples[0].port, 'Responder saw a different native source port');
+      }
+      return samples;
+    } finally { await peers.close(); }
   });
   if (!harness.testisp.tcpReuseHook) {
     const reason = 'Section 5.1 / PR #29: TestISP keeps 60-second TIME_WAIT until the shared forwarder hook lands.';
@@ -209,7 +212,7 @@ try {
     console.log(`PENDING-SHARED-HOOK [parity] TestISP 1,000 rapid reuses: ${reason}`);
   } else await observe('gateway controlled port reuse baseline', 'parity', async () => {
     const samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000 });
-    const failed = samples.find((sample) => sample.outcome !== 'closed');
+    const failed = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
     let sockets;
     if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection -LocalPort ${failed.port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess) | ConvertTo-Json -Compress`]);
     assert(samples.length === 1000 && !failed, `Gateway reuse failed: ${JSON.stringify({ samples, sockets, trace: failed && (await harness.control('stats')).tcpTrace })}`);
@@ -345,7 +348,7 @@ try {
   for (const gap of directReuse ? [0, 10, 100, 500] : []) {
     await observe(`freeze gate: ${gap} ms port reuse`, 'baseline-defect', async () => {
       const samples = await client('reuse', { target: responder.virtual, count: gap ? 10 : 1000, gap });
-      const failure = samples.find((sample) => sample.outcome !== 'closed' || sample.ms > 100 + gap);
+      const failure = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
       if (failure?.outcome === 'timeout' && samples[0].outcome === 'closed') {
         let recovery;
         if (gap === 0) {
