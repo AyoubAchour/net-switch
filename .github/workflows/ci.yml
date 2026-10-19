@@ -343,15 +343,6 @@ jobs:
           - arch: arm64
             runner: windows-11-arm
             sample: 1
-          - arch: arm64
-            runner: windows-11-arm
-            sample: 2
-          - arch: arm64
-            runner: windows-11-arm
-            sample: 3
-          - arch: arm64
-            runner: windows-11-arm
-            sample: 4
           - arch: x64
             runner: windows-latest
             sample: 1

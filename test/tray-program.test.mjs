@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
@@ -38,28 +38,36 @@ function setup(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'netswitch-tray-'));
   const runs = [];
   t.after(async () => {
-    if (process.env.NETSWITCH_TRAY_DIAGNOSTIC) {
-      t.diagnostic(`before cleanup: ${JSON.stringify(runs.map(r => ({ pid: r.child.pid, exitCode: r.child.exitCode, signalCode: r.child.signalCode, elapsed: Math.round(performance.now() - r.started) })))} log=${JSON.stringify(log())}`);
-      for (const run of runs.filter(r => r.child.exitCode === null && r.child.signalCode === null)) {
-        const snapshot = spawnSync(POWERSHELL, ['-NoProfile', '-Command', `$p = Get-Process -Id ${run.child.pid} -ErrorAction SilentlyContinue; $p | Select-Object Id,CPU,StartTime,Responding | Format-List; $p.Modules | Where-Object { $_.ModuleName -match 'clr|jit|mscor|Windows.Forms' } | Select-Object FileName | Format-Table -AutoSize; $p.Threads | Select-Object Id,ThreadState,WaitReason | Format-Table`], { encoding: 'utf8', timeout: 15_000 });
-        t.diagnostic(`process snapshot: ${snapshot.stdout} ${snapshot.stderr}`);
+    // Save evidence before killing a timed-out process or deleting its log.
+    // A timeout before "started" needs a different investigation from one
+    // after the tray has logged that Net Switch is no longer running.
+    for (const run of runs) {
+      t.diagnostic(JSON.stringify({ ...run.timing, pid: run.child.pid,
+        exitCode: run.child.exitCode, signalCode: run.child.signalCode,
+        elapsedMs: Math.round(performance.now() - run.started) }));
+    }
+    t.diagnostic(`tray.log before cleanup: ${log() || '(not written)'}`);
+    for (const run of runs) {
+      if (run.child.exitCode === null && run.child.signalCode === null) {
+        t.diagnostic(`stopping test process ${run.child.pid}`);
+        run.child.kill();
       }
     }
-    for (const run of runs) {
-      if (run.child.exitCode === null && run.child.signalCode === null) run.child.kill();
+    const exits = await Promise.all(runs.map((run) => exitWithin(run, 5000)));
+    for (let i = 0; i < runs.length; i++) {
+      assert.notEqual(exits[i], 'still running', `test process ${runs[i].child.pid} survived cleanup`);
     }
-    await Promise.all(runs.map((run) => exitWithin(run, 5000)));
-    for (const run of runs) t.diagnostic(`cleanup pid=${run.child.pid} exit=${run.child.exitCode} signal=${run.child.signalCode}`);
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   });
   const start = (file, args, options = {}) => {
     const started = performance.now();
+    const timing = { file: path.basename(file), startedAt: new Date().toISOString() };
     const child = spawn(file, args, { stdio: 'ignore', ...options });
     const elapsed = () => Math.round(performance.now() - started);
-    t.diagnostic(`spawn returned pid=${child.pid} file=${path.basename(file)} ms=${elapsed()} at=${new Date().toISOString()}`);
-    child.once('spawn', () => t.diagnostic(`spawn event pid=${child.pid} ms=${elapsed()}`));
-    const run = { child, started, exited: once(child, 'exit').then(([code]) => {
-      t.diagnostic(`exit pid=${child.pid} code=${code} ms=${elapsed()}`);
+    timing.spawnReturnedMs = elapsed();
+    child.once('spawn', () => { timing.spawnEventMs = elapsed(); });
+    const run = { child, started, timing, exited: once(child, 'exit').then(([code]) => {
+      timing.exitMs = elapsed();
       return code;
     }) };
     runs.push(run);
