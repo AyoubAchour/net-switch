@@ -172,6 +172,83 @@ jobs:
           go test -run '^$' -fuzz '^FuzzUDPHandler$' -fuzztime 30s -parallel 2 ./internal/engine/udp
           go test -run '^$' -fuzz '^FuzzProtocol$' -fuzztime 30s -parallel 2 ./internal/engine/protocol
 
+  wintun:
+    name: Wintun session / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the pinned Go version
+        id: pins
+        run: |
+          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+          "go_version=$($pins.go.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.pins.outputs.go_version }}
+          cache: false
+      - name: Compile the native test executable
+        run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
+      - name: Fetch the unchanged signed Wintun DLL beside the executable
+        run: ./scripts/prepare-wintun-tests.ps1
+      - name: Ring ABI, parser, cancellation, corruption recovery and parallel UDP
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.run=TestRing|TestPinnedDLL|TestWintun(ParallelUDP|RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|BatchCost)$'
+      - name: Single-packet ping-pong, 200000 round trips per implementation
+        if: ${{ !cancelled() }}
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPingPong$'
+      - name: Bulk UDP and TCP throughput and latency comparison
+        if: ${{ !cancelled() }}
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPerformance$'
+      - name: 1000 session cycles and forced crash cleanup, including phantom devices
+        if: ${{ !cancelled() }}
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintun(Lifetime|Crash)$'
+      - name: Profile single-stream TCP through both sessions
+        if: ${{ !cancelled() }}
+        run: |
+          foreach ($mode in @('dll', 'ours')) {
+            $env:NETSWITCH_WINTUN_PROFILE = $mode
+            ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintunProfile$' "-test.cpuprofile=bin/wintun-$mode-cpu.pprof"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            go tool pprof -top -nodecount=25 ./bin/wintun.test.exe "bin/wintun-$mode-cpu.pprof"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Keep the CPU profiles
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wintun-cpu-${{ matrix.arch }}
+          path: bin/wintun-*-cpu.pprof
+          retention-days: 14
+      - name: Fuzz the ring-entry parser
+        if: ${{ !cancelled() }}
+        env:
+          NETSWITCH_WINTUN_CI: '0'
+        run: go test -run '^$' -fuzz '^FuzzRingEntry$' -fuzztime 30s -parallel 2 ./internal/wintun
+      - name: Race detector with real recovery and teardown
+        if: ${{ !cancelled() && matrix.arch == 'x64' }}
+        run: |
+          go test -race -c -o ./bin/wintun-race.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./bin/wintun-race.test.exe '-test.v' '-test.timeout=5m' '-test.run=TestRing|TestWintun(RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|Lifetime)$'
+
   linux:
     name: Linux / Node ${{ matrix.node }} (shared code)
     runs-on: ubuntu-24.04

@@ -23,6 +23,18 @@ type TunDevice interface {
 	Close() error
 }
 
+// BatchWriter accepts packets already available in the link queue, without
+// waiting to fill a batch. The return count excludes packets dropped under load.
+type BatchWriter interface {
+	WriteBatch([][]byte) (int, error)
+}
+
+// ChecksumVerifier describes only packets returned by this device's reader.
+// Fragments and protocols it did not verify must return false.
+type ChecksumVerifier interface {
+	RXChecksumVerified([]byte) bool
+}
+
 type Tuple struct {
 	Source      netip.AddrPort `json:"source"`
 	Destination netip.AddrPort `json:"destination"`
