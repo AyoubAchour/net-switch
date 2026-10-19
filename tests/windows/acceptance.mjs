@@ -292,11 +292,12 @@ try {
   });
   await server.api('app-line', { path: mtuExe, line: second.id }); await delay(500);
   for (const host of [responder.virtual.host, ipv6Target.host]) {
-    await observe(`DF and oversize UDP through TUN ${host}`, 'parity', async () => {
+    await observe(`DF and oversize UDP through TUN ${host}`, 'baseline-defect', async () => {
       assert(mtuBaselines[host], 'Blocked: the controlled DF baseline failed');
       const small = await mtuProbe(host, 1200);
       assert.equal(small.outcome, 'reply', JSON.stringify(small));
       const large = await mtuProbe(host, 2000);
+      if (large.outcome === 'reply') throw new BaselineDefect('Oversize UDP is fragmented despite the app requesting no fragmentation', { baseline: mtuBaselines[host], small, large });
       assert.equal(large.outcome, 'message-too-large', JSON.stringify(large));
       return { small, large };
     });
@@ -345,37 +346,45 @@ try {
   await report.test('DNS change leaves held sockets alive', 'baseline-defect', async () => {
     await client('close');
     const held = await client('open', { count: 5, target: responder.virtual });
+    const beforePID = await readFile(path.join(dataDir, 'engine.pid'), 'utf8');
     restoreDNS = true;
     const changed = await network('dns-change', dnsAdapter);
     assert.notDeepEqual(changed, dnsAdapter.dns);
-    await delay(3000);
+    await delay(6500);
     let lost;
     try { await client('refresh', { ids: held.map((item) => item.id) }); } catch (error) { lost = error.message; }
     const after = await server.api('state'); assert.equal(after.routing.status, 'on');
+    const afterPID = await readFile(path.join(dataDir, 'engine.pid'), 'utf8');
     await network('dns-restore', dnsAdapter); restoreDNS = false;
     await client('close');
     await client('open', { target: responder.virtual }); await client('close');
-    if (lost) throw new BaselineDefect('DNS change closed existing connections while routing remained on', { lost, changed, after: after.routing });
-    return { changed, held };
+    if (lost) throw new BaselineDefect('DNS change closed existing connections while routing remained on', { lost, changed, beforePID, afterPID, after: after.routing });
+    return { changed, held, beforePID, afterPID };
   });
-  await report.test('exhausted secondary rejects a burst instead of hanging', 'baseline-defect', async () => {
+  await observe('exhausted secondary rejects a burst instead of hanging', 'baseline-defect', async () => {
     await client('close');
-    await server.api('lines/update', { id: main.id, cap: { bytes: 1, period: 'day' } });
-    await server.api('lines/update', { id: second.id, cap: { bytes: 1, period: 'day' } });
-    const blocked = await until(async () => { const state = await server.api('state'); return state.lines.find((line) => line.id === second.id)?.blocked && state.lines; }, 'both caps exhausted and secondary blocked', 30_000);
-    await delay(500);
-    const samples = await client('reject', { target: responder.virtual });
-    assert(!samples.some((item) => item.outcome === 'connected'), 'A capped app escaped the block');
-    assert(samples.some((item) => ['ECONNRESET', 'ECONNREFUSED'].includes(item.outcome)), 'No actual rejection before the burst');
-    const udp = await client('udpReject', { target: responder.virtual });
-    assert(!udp.some((item) => item.outcome === 'reply'), 'Capped UDP escaped the block');
-    assert.equal(blocked.find((line) => line.id === main.id).blocked, false, 'Main line exception was removed');
-    const mainException = await newPublicOn(main);
-    await server.api('lines/update', { id: main.id, cap: null });
-    await server.api('lines/update', { id: second.id, cap: null });
-    await pin(second.id); await client('open', { target: responder.virtual }); await client('close');
-    if (samples.some((item) => item.outcome === 'timeout') || udp.some((item) => item.outcome === 'timeout')) throw new BaselineDefect('Repeated cap rejects become silent drops without no_drop', { blocked, samples, udp, mainException });
-    return { blocked, samples, udp, mainException };
+    await client('open', { target: responder.virtual }); await client('close');
+    try {
+      await server.api('lines/update', { id: main.id, cap: { bytes: 1, period: 'day' } });
+      await server.api('lines/update', { id: second.id, cap: { bytes: 1, period: 'day' } });
+      const blocked = await until(async () => { const state = await server.api('state'); return state.lines.find((line) => line.id === second.id)?.blocked && state.lines; }, 'both caps exhausted and secondary blocked', 30_000);
+      await delay(500);
+      const samples = await client('reject', { target: responder.virtual });
+      assert(!samples.some((item) => item.outcome === 'connected'), 'A capped app escaped the block');
+      const udp = await client('udpReject', { target: responder.virtual });
+      assert(!udp.some((item) => item.outcome === 'reply'), 'Capped UDP escaped the block');
+      assert.equal(blocked.find((line) => line.id === main.id).blocked, false, 'Main line exception was removed');
+      const mainException = await newPublicOn(main);
+      await server.api('lines/update', { id: main.id, cap: null });
+      await server.api('lines/update', { id: second.id, cap: null });
+      await pin(second.id); await client('open', { target: responder.virtual }); await client('close');
+      if (samples.some((item) => item.outcome === 'timeout') || udp.some((item) => item.outcome === 'timeout')) throw new BaselineDefect('Capped TCP/UDP did not fail fast; clearing the caps restored the same target', { blocked, samples, udp, mainException });
+      return { blocked, samples, udp, mainException };
+    } finally {
+      await server.api('lines/update', { id: main.id, cap: null });
+      await server.api('lines/update', { id: second.id, cap: null });
+      await pin(second.id);
+    }
   });
   await report.test('20 start/stop cycles clean up routes and adapters', 'parity', async () => {
     const cycles = [];

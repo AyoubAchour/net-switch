@@ -102,21 +102,24 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
   const samples = [];
   for (let i = 0; i < count; i++) {
     const nonce = randomBytes(12).toString('hex');
-    const result = await new Promise((resolve) => {
-      const start = performance.now();
-      let connected = false, remoteClosedFirst = false, header = '', body = '', bytes = 0, gotHeader = false;
-      const digest = createHash('sha256');
-      const socket = connect({ host: target.host, port: target.http, localAddress: target.source, localPort: port, allowHalfOpen: true });
-      const timer = setTimeout(() => finish('timeout'), length ? 30_000 : 2000);
-      let done = false;
-      function finish(outcome) {
-        if (done) return; done = true; clearTimeout(timer); socket.destroy();
-        resolve({ port, outcome, connected, remoteClosedFirst, ms: performance.now() - start, bytes, sha256: digest.digest('hex'), header, body });
-      }
-      socket.on('connect', () => {
-        connected = true;
-        const path = length ? `/bytes?length=${length}` : `/close?nonce=${nonce}`;
-        socket.write(`GET ${path} HTTP/1.1\r\nHost: target\r\nConnection: close\r\n\r\n`);
+    const started = performance.now();
+    let result, bindRetries = 0;
+    do {
+      result = await new Promise((resolve) => {
+        const start = performance.now();
+        let connected = false, remoteClosedFirst = false, header = '', body = '', bytes = 0, gotHeader = false;
+        const digest = createHash('sha256');
+        const socket = connect({ host: target.host, port: target.http, localAddress: target.source, localPort: port, allowHalfOpen: true });
+        const timer = setTimeout(() => finish('timeout'), length ? 30_000 : 2000);
+        let done = false;
+        function finish(outcome) {
+          if (done) return; done = true; clearTimeout(timer); socket.destroy();
+          resolve({ port, outcome, connected, remoteClosedFirst, ms: performance.now() - start, bytes, sha256: digest.digest('hex'), header, body });
+        }
+        socket.on('connect', () => {
+          connected = true;
+          const path = length ? `/bytes?length=${length}` : `/close?nonce=${nonce}`;
+          socket.write(`GET ${path} HTTP/1.1\r\nHost: target\r\nConnection: close\r\n\r\n`);
       });
       socket.on('data', (data) => {
         if (!gotHeader) {
@@ -131,7 +134,15 @@ async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort }) {
       socket.on('end', () => { remoteClosedFirst = true; socket.end(); });
       socket.on('close', () => finish(remoteClosedFirst ? 'closed' : 'closed-without-fin'));
       socket.on('error', (error) => finish(error.code ?? error.message));
-    });
+      });
+      if (result.outcome !== 'EADDRINUSE' || performance.now() - started >= 100) break;
+      // Node's close event can precede Winsock processing the final ACK. No
+      // SYN was sent on this failed bind. Never retry a connected TCP attempt.
+      bindRetries++;
+      await delay(1);
+    } while (true);
+    result.bindRetries = bindRetries;
+    result.ms = performance.now() - started;
     samples.push(result);
     if (result.outcome !== 'closed') break;
     assert.match(result.header, /^HTTP\/1\.1 200/);
@@ -163,7 +174,7 @@ async function udpReject({ target, count = 100 }) {
     const started = performance.now(); let done = false, sent = 0;
     const finish = (outcome) => { if (done) return; done = true; clearTimeout(timer); clearInterval(sender); socket.close(); resolve({ outcome, sent, ms: performance.now() - started }); };
     const timer = setTimeout(() => finish('timeout'), 1500);
-    const sender = setInterval(() => { if (!done && sent) socket.send(Buffer.alloc(64), (error) => { if (error) finish(error.code); }); }, 25);
+    const sender = setInterval(() => { if (!done && sent) { sent++; socket.send(Buffer.alloc(64), (error) => { if (error) finish(error.code); }); } }, 25);
     socket.on('error', (error) => finish(error.code ?? error.message));
     socket.on('message', () => finish('reply'));
     socket.connect(target.udp[0], target.host, () => { sent++; socket.send(Buffer.alloc(64), (error) => { if (error) finish(error.code); }); });
