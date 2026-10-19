@@ -35,6 +35,17 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 	s.SetPromiscuousMode(1, true)
 	s.SetSpoofing(1, true)
 	s.SetRouteTable([]tcpip.Route{{Destination: header.IPv4EmptySubnet, NIC: 1}, {Destination: header.IPv6EmptySubnet, NIC: 1}})
+	// Promiscuous addresses are temporary; gVisor deliberately does not answer
+	// IPv4 echo for them. The controlled responder has permanent stack addresses.
+	for _, address := range []tcpip.ProtocolAddress{
+		{Protocol: ipv4.ProtocolNumber, AddressWithPrefix: tcpip.AddrFrom4([4]byte{198, 19, 128, 2}).WithPrefix()},
+		{Protocol: ipv6.ProtocolNumber, AddressWithPrefix: tcpip.AddrFromSlice(net.ParseIP("2001:db8:198::2").To16()).WithPrefix()},
+	} {
+		if err := s.AddProtocolAddress(1, address, stack.AddressProperties{}); err != nil {
+			s.Close()
+			return nil, netstackError{err}
+		}
+	}
 	// The harness must not add its own TIME_WAIT freeze to the engine under test.
 	wait := tcpip.TCPTimeWaitTimeoutOption(0)
 	s.SetTransportProtocolOption(tcp.ProtocolNumber, &wait)
@@ -86,6 +97,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			view := packet.ToView()
 			data := view.AsSlice()
 			if g.mode.Load() == 0 {
+				g.trace(data, "reply")
 				_, err := g.device.Write([][]byte{data}, 0)
 				g.stats.Lock()
 				if err != nil {
@@ -135,6 +147,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			if drop || n == 0 {
 				continue
 			}
+			g.trace(packet[:n], "request")
 			echo := ""
 			if n >= 28 && packet[0]>>4 == 4 && packet[9] == 1 && int(packet[0]&15)*4 < n && packet[int(packet[0]&15)*4] == 8 {
 				echo = net.IP(packet[16:20]).String()
@@ -155,7 +168,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			if n >= 20 && packet[0]>>4 == 4 && packet[9] == 1 && net.IP(packet[16:20]).String() != "198.19.128.2" {
 				continue
 			}
-			if n >= 40 && packet[0]>>4 == 6 && packet[6] == 58 && net.IP(packet[24:40]).String() != "2001:db8:198::2" {
+			if n >= 40 && packet[0]>>4 == 6 && net.IP(packet[24:40]).String() != "2001:db8:198::2" {
 				continue
 			}
 			protocol := ipv4.ProtocolNumber

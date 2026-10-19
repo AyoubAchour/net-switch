@@ -49,6 +49,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/quicprobe.exe ./tests/windows/quicprobe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/mtuprobe.exe ./tests/windows/mtuprobe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build today's native helper
         # The helper has its own module and its own dependency policy.
         env:

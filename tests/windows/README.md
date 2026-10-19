@@ -63,7 +63,7 @@ them failures. A defect which no longer reproduces is reported as a pass.
 | Caps | Repeated TCP rejects, continuously sending UDP, no traffic escaping the block, and the exhausted main line remaining usable. |
 | UDP | Exact payloads at 64, 1,200, 1,800 and 8,192 bytes; fragmentation; STUN mapping and unsolicited replies. |
 | QUIC | Real QUIC v1 handshake and 1 MiB payload hash through the TUN. |
-| IPv6 and ICMP | Controlled IPv6 TCP/UDP; IPv4/IPv6 echo; 1,400-byte MTU probes with wire counters. |
+| IPv6 and ICMP | Controlled IPv6 TCP/UDP; IPv4/IPv6 echo; 1,400-byte echo probes with wire counters; UDP with DF and oversize rejection on both families. |
 | Lifecycle | Engine crash with automatic restart; abrupt control and engine death without restart, direct connectivity, then startup; 20 start/stop cycles with traffic and cleanup. |
 
 ## Design deviations and limits

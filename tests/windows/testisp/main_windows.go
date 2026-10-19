@@ -69,6 +69,7 @@ type observations struct {
 	Destinations map[string]uint64 `json:"destinations"`
 	UDPReplies   map[string]uint64 `json:"udpReplies"`
 	EchoRequests map[string]uint64 `json:"echoRequests"`
+	TCPTrace     []tcpObservation  `json:"tcpTrace"`
 }
 
 type gateway struct {

@@ -21,6 +21,7 @@ const clientExe = path.join(dir, 'acceptance-app.exe');
 await copyFile(process.execPath, clientExe);
 let harness, responder, server, worker, dnsAdapter, quicServer, quic, restoreDNS = false;
 const quicExe = path.resolve('dist/windows-test/quicprobe.exe');
+const mtuExe = path.resolve('dist/windows-test/mtuprobe.exe');
 let main, second;
 const pending = new Map();
 let serial = 0;
@@ -118,6 +119,13 @@ async function start() {
   return state;
 }
 
+async function mtuProbe(host, size, source, index) {
+  const args = ['--address', `${host.includes(':') ? `[${host}]` : host}:${responder.virtual.udp[0]}`, '--size', String(size)];
+  if (source) args.push('--source', source);
+  if (index) args.push('--interface', String(index));
+  return JSON.parse((await run(mtuExe, args, { timeout: 10_000 })).stdout);
+}
+
 try {
   await recordLaunch(options, path.join(dir, 'executables.json'));
   await report.test('clean before start', 'parity', clean);
@@ -127,6 +135,7 @@ try {
   await targetFirewall('allow');
   await targetFirewall('ipv6');
   await writeFile(path.join(dir, 'quic-executable.json'), JSON.stringify(await identity(quicExe), null, 2));
+  await writeFile(path.join(dir, 'mtu-executable.json'), JSON.stringify(await identity(mtuExe), null, 2));
   const quicState = path.join(dir, `quic-ready-${Date.now()}.json`);
   quicServer = spawn(quicExe, ['--serve', '--address', `${harness.uplink.address}:0`, '--interface', String(harness.uplink.index), '--state', quicState], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
@@ -176,19 +185,29 @@ try {
     const failed = samples.find((sample) => sample.outcome !== 'closed');
     let sockets;
     if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection -LocalPort ${failed.port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess) | ConvertTo-Json -Compress`]);
-    assert(samples.length === 20 && !failed, `Gateway reuse failed: ${JSON.stringify({ samples, sockets })}`);
+    assert(samples.length === 20 && !failed, `Gateway reuse failed: ${JSON.stringify({ samples, sockets, trace: failed && (await harness.control('stats')).tcpTrace })}`);
     return samples;
   });
-  await report.test('controlled ICMP v4/v6 baselines', 'parity', async () => ({
+  const icmpBaseline = await observe('controlled ICMP v4/v6 baselines', 'parity', async () => ({
     v4: await ping(responder.virtual.host, harness.testisp.address),
     v6: await ping('2001:db8:198::2', '2001:db8:19::1'),
   }));
   const ipv6Target = { ...responder.virtual, host: '2001:db8:198::2' };
-  await report.test('controlled IPv6 TCP and UDP baselines', 'parity', async () => {
+  const ipv6Baseline = await observe('controlled IPv6 TCP and UDP baselines', 'parity', async () => {
     const tcp = await client('open', { target: { ...ipv6Target, source: '2001:db8:19::1' } }); await client('close');
     const udp = await client('udp', { target: ipv6Target, localAddress: '2001:db8:19::1' });
     return { tcp, udp };
   });
+  const mtuBaselines = {};
+  for (const [host, source] of [[responder.virtual.host, harness.testisp.address], [ipv6Target.host, '2001:db8:19::1']]) {
+    mtuBaselines[host] = await observe(`DF and oversize UDP baseline ${host}`, 'parity', async () => {
+      const small = await mtuProbe(host, 1200, source, harness.testisp.index);
+      assert.equal(small.outcome, 'reply', JSON.stringify(small));
+      const large = await mtuProbe(host, 2000, source, harness.testisp.index);
+      assert.equal(large.outcome, 'message-too-large', JSON.stringify(large));
+      return { small, large };
+    });
+  }
   await writeFile(path.join(dataDir, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
   await targetFirewall('capture');
   const initial = await start();
@@ -265,12 +284,25 @@ try {
     return { response, before, after };
   });
   await observe('controlled IPv6 TCP and UDP through TUN', 'parity', async () => {
+    assert(ipv6Baseline, 'Blocked: the controlled IPv6 baseline failed');
     assert.equal((await server.api('state')).routing.ipv6, true, 'IPv6 capture was not enabled');
     const tcp = await client('open', { target: ipv6Target });
     const byLine = await counts(1); assert(byLine[second.id] >= 1); await client('close');
     const udp = await client('udp', { target: ipv6Target }); return { tcp, udp, byLine };
   });
+  await server.api('app-line', { path: mtuExe, line: second.id }); await delay(500);
+  for (const host of [responder.virtual.host, ipv6Target.host]) {
+    await observe(`DF and oversize UDP through TUN ${host}`, 'parity', async () => {
+      assert(mtuBaselines[host], 'Blocked: the controlled DF baseline failed');
+      const small = await mtuProbe(host, 1200);
+      assert.equal(small.outcome, 'reply', JSON.stringify(small));
+      const large = await mtuProbe(host, 2000);
+      assert.equal(large.outcome, 'message-too-large', JSON.stringify(large));
+      return { small, large };
+    });
+  }
   await observe('ICMP v4/v6 and 1400-byte MTU probes through TUN', 'parity', async () => {
+    assert(icmpBaseline, 'Blocked: the controlled ICMP baseline failed');
     await server.api('lines/order', { ids: [second.id, main.id] }); await server.on();
     try {
       const before = await harness.control('stats');
@@ -283,7 +315,7 @@ try {
   });
   if (!directReuse) report.results.push({ name: 'freeze gate', label: 'baseline-defect', status: 'blocked', reason: 'Direct port reuse baseline failed; no engine conclusion is possible.' });
   for (const gap of directReuse ? [0, 10, 100, 500] : []) {
-    await report.test(`freeze gate: ${gap} ms port reuse`, 'baseline-defect', async () => {
+    await observe(`freeze gate: ${gap} ms port reuse`, 'baseline-defect', async () => {
       const samples = await client('reuse', { target: responder.virtual, count: gap ? 10 : 1000, gap });
       const failure = samples.find((sample) => sample.outcome !== 'closed' || sample.ms > 100 + gap);
       if (failure?.outcome === 'timeout' && samples[0].outcome === 'closed') {
@@ -301,11 +333,11 @@ try {
       return { count: samples.length, maxMs: Math.max(...samples.map((sample) => sample.ms)) };
     });
   }
-  const large = await report.test('100 MB TCP transfer with a payload hash', 'parity', async () => {
+  const large = await observe('100 MB TCP transfer with a payload hash', 'parity', async () => {
     const samples = await client('reuse', { target: responder.virtual, count: 1, length: 100_000_000 });
     assert.equal(samples[0]?.outcome, 'closed', JSON.stringify(samples)); return samples;
   });
-  if (directReuse) await report.test('freeze gate: reuse after 100 MB transfer', 'baseline-defect', async () => {
+  if (directReuse && large) await observe('freeze gate: reuse after 100 MB transfer', 'baseline-defect', async () => {
     const samples = await client('reuse', { target: responder.virtual, count: 1, reusePort: large[0].port });
     if (samples[0].outcome === 'timeout') throw new BaselineDefect('Port stalls after a verified 100 MB transfer', samples);
     assert.equal(samples[0].outcome, 'closed'); return samples;
