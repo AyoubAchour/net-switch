@@ -336,5 +336,146 @@
       ],
       "logs": []
     }
+  },
+  {
+    "name": "legacy-ordered",
+    "legacyUndo": {
+      "policy": 3,
+      "metrics": {
+        "Zebra": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ],
+        "Alpha": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ]
+      }
+    },
+    "undo": {
+      "policy": {},
+      "metrics": {
+        "Zebra": [
+          {
+            "family": "IPv4",
+            "automatic": false,
+            "metric": 77
+          }
+        ],
+        "Current": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ]
+      }
+    },
+    "faults": {
+      "restoreFailures": {
+        "Zebra": "adapter missing",
+        "Alpha": "adapter missing",
+        "Current": "adapter missing"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "error": "Connect Zebra and Alpha and Current again to finish undoing, then press Undo again.",
+      "remaining": {
+        "metrics": {
+          "Zebra": [
+            {
+              "family": "IPv4",
+              "automatic": false,
+              "metric": 77
+            }
+          ],
+          "Alpha": [
+            {
+              "family": "IPv4",
+              "automatic": true,
+              "metric": 25
+            }
+          ],
+          "Current": [
+            {
+              "family": "IPv4",
+              "automatic": true,
+              "metric": 25
+            }
+          ]
+        },
+        "policy": {}
+      },
+      "policy": 3,
+      "operations": [
+        {
+          "operation": "network.restoreMinimizeConnectionsPolicy",
+          "args": [
+            3
+          ],
+          "ok": true
+        },
+        {
+          "operation": "network.restoreMetrics",
+          "args": [
+            "Zebra",
+            [
+              {
+                "family": "IPv4",
+                "automatic": false,
+                "metric": 77
+              }
+            ]
+          ],
+          "ok": false
+        },
+        {
+          "operation": "network.restoreMetrics",
+          "args": [
+            "Alpha",
+            [
+              {
+                "family": "IPv4",
+                "automatic": true,
+                "metric": 25
+              }
+            ]
+          ],
+          "ok": false
+        },
+        {
+          "operation": "network.restoreMetrics",
+          "args": [
+            "Current",
+            [
+              {
+                "family": "IPv4",
+                "automatic": true,
+                "metric": 25
+              }
+            ]
+          ],
+          "ok": false
+        },
+        {
+          "operation": "platform.readMinimizeConnectionsPolicy",
+          "args": [],
+          "ok": true
+        },
+        {
+          "operation": "platform.detectAdapters",
+          "args": [],
+          "ok": true
+        }
+      ],
+      "logs": []
+    }
   }
 ]

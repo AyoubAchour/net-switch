@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +28,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/settings"
 	"github.com/AyoubAchour/net-switch/internal/updates"
 	"github.com/AyoubAchour/net-switch/internal/usage"
+	"github.com/AyoubAchour/net-switch/internal/windowsundo"
 )
 
 type Clock interface {
@@ -269,6 +272,19 @@ func (c *Core) migrate() error {
 	if old, ok := v["setupUndo"]; ok && c.op.Undo != nil {
 		if m := js.Object(old); m != nil {
 			u := c.op.Undo.Values()
+			var rawOld map[string]json.RawMessage
+			if err := json.Unmarshal(c.op.Settings.RawValues()["setupUndo"], &rawOld); err != nil {
+				return err
+			}
+			// Node spreads the legacy entries first, then the current record.
+			// Overwrites keep the original key position; new keys append. Keep
+			// that raw order so a later partial Undo names adapters identically.
+			aliases := windowsundo.Aliases(rawOld["metrics"])
+			for _, alias := range windowsundo.Aliases(c.op.Undo.RawValues()["metrics"]) {
+				if !slices.Contains(aliases, alias) {
+					aliases = append(aliases, alias)
+				}
+			}
 			metrics := js.Object(m["metrics"])
 			if metrics == nil {
 				metrics = map[string]any{}
@@ -285,7 +301,7 @@ func (c *Core) migrate() error {
 					policy["value"] = val
 				}
 			}
-			if _, err := c.op.Undo.Update(map[string]any{"metrics": metrics, "policy": policy}); err != nil {
+			if _, err := c.op.Undo.Update(map[string]any{"metrics": windowsundo.MetricsJSON(metrics, aliases), "policy": policy}); err != nil {
 				return err
 			}
 		}

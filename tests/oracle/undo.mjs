@@ -12,13 +12,16 @@ export const undoScenarios = [
   { name: 'save-failure', undo: { policy: { value: 3 }, metrics: { Zebra: metric } }, faults: { undoWriteFailure: 'disk full' } },
   { name: 'partial-ordered', undo: { policy: { value: 3 }, metrics: { Zebra: metric, Alpha: metric, Done: metric } }, faults: { restoreFailures: { Zebra: 'adapter missing', Alpha: 'access denied' } } },
   { name: 'empty-record', undo: { policy: {}, metrics: { Empty: [] } } },
+  { name: 'legacy-ordered', legacyUndo: { policy: 3, metrics: { Zebra: metric, Alpha: metric } },
+    undo: { policy: {}, metrics: { Zebra: [{ family: 'IPv4', automatic: false, metric: 77 }], Current: metric } },
+    faults: { restoreFailures: { Zebra: 'adapter missing', Alpha: 'adapter missing', Current: 'adapter missing' } } },
 ];
 
 export async function recordUndo() {
   const cases = [];
   for (const scenario of undoScenarios) {
     const entries = [];
-    const run = await oracle({ initial: { lines }, environment: { undo: scenario.undo }, trace: (direction, kind, value) => entries.push({ direction, kind, value }) });
+    const run = await oracle({ initial: { lines, ...(scenario.legacyUndo ? { setupUndo: scenario.legacyUndo } : {}) }, environment: { undo: scenario.undo }, trace: (direction, kind, value) => entries.push({ direction, kind, value }) });
     entries.length = 0;
     Object.assign(run.environment, scenario.faults);
     const response = await run.request('POST', '/api/setup/undo', {});
@@ -37,6 +40,10 @@ export async function recordUndo() {
       assert.equal(expected.operations.at(-1).operation, 'platform.detectAdapters');
     }
     if (scenario.name === 'empty-record') assert(!expected.operations.some(({ operation }) => operation === 'network.restoreMetrics'));
+    if (scenario.name === 'legacy-ordered') {
+      assert.match(expected.error, /Connect Zebra and Alpha and Current again/);
+      assert.equal(expected.remaining.metrics.Zebra[0].metric, 77);
+    }
     cases.push({ ...scenario, expected });
   }
   return cases;

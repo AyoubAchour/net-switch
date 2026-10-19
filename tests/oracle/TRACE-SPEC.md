@@ -125,11 +125,12 @@ comparison rules, not changes to the frozen Node files.
   its configured path. The file marker and that record must agree. Certification
   is durable before quarantine, so a completed stage remains recoverable.
 
-`undo.json` adds six focused cases from the unchanged Node production source at
+`undo.json` adds seven focused cases from the unchanged Node production source at
 `4e8b74a0513e6c0ecbaac0282df9e7fa11ea4128`, with only initial-file and failure
 injection added to the harness in round four. Both Node and Go check damaged
 policy/metrics, policy restore and save failures, an ordered partial restore,
-and a legacy empty metric record. The comparison includes HTTP status/error,
+an empty metric record, and legacy migration retaining adapter order and current
+record precedence. The comparison includes HTTP status/error,
 saved Undo, policy, diagnostics and ordered OS calls (including the refresh).
 These cases supplement the 25 full traces; they do not replace them.
 

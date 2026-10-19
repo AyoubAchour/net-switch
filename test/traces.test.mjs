@@ -57,8 +57,8 @@ test('Undo failures and partial restoration still match the Node oracle', async 
   const actual = JSON.parse(result.stdout);
   const expected = JSON.parse(await readFile(new URL('../tests/oracle/fixtures/undo.json', import.meta.url), 'utf8'));
   assert.deepEqual(actual, expected);
-  assert.equal(actual.length, 6);
-  t.diagnostic('Six Undo oracle cases: damaged policy/metrics, policy/save failures, ordered partial restore, empty record.');
+  assert.equal(actual.length, 7);
+  t.diagnostic('Seven Undo oracle cases: damaged policy/metrics, policy/save failures, ordered partial restore, empty record and legacy migration order.');
 });
 
 test('policy comparison rejects reordered pins and shares', () => {

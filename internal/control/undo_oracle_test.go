@@ -17,19 +17,28 @@ func TestUndoFailureOracle(t *testing.T) {
 		t.Fatal(err)
 	}
 	var cases []struct {
-		Name     string
-		Undo     map[string]json.RawMessage
-		Faults   map[string]any
-		Expected json.RawMessage
+		Name       string
+		Undo       map[string]json.RawMessage
+		LegacyUndo json.RawMessage
+		Faults     map[string]any
+		Expected   json.RawMessage
 	}
-	if err := json.Unmarshal(b, &cases); err != nil || len(cases) != 6 {
-		t.Fatal("expected all six Undo oracle cases", err)
+	if err := json.Unmarshal(b, &cases); err != nil || len(cases) != 7 {
+		t.Fatal("expected all seven Undo oracle cases", err)
 	}
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
 			c, _, _, files := testCore(t, map[string]any{"lines": testLines()})
 			if _, err := c.op.Undo.Update(map[string]any{"metrics": tc.Undo["metrics"], "policy": tc.Undo["policy"]}); err != nil {
 				t.Fatal(err)
+			}
+			if len(tc.LegacyUndo) != 0 {
+				if err := c.save(map[string]any{"setupUndo": tc.LegacyUndo}); err != nil {
+					t.Fatal(err)
+				}
+				if err := c.migrate(); err != nil {
+					t.Fatal(err)
+				}
 			}
 			operations := []any{}
 			policy := any(float64(1))
