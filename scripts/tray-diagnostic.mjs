@@ -4,7 +4,7 @@ import os from 'node:os';
 if (!process.env.GITHUB_ACTIONS || process.platform !== 'win32') throw new Error('CI only');
 console.log(JSON.stringify({ arch: process.arch, cpus: os.availableParallelism(), node: process.version }));
 const results = [];
-for (let round = 1; round <= 3; round++) {
+for (let round = 1; round <= 1; round++) {
   for (const mode of ['suite', 'native']) {
     console.log(`ROUND ${round} MODE ${mode} ${new Date().toISOString()}`);
     const build = spawnSync('powershell.exe', ['-NoProfile', '-File', mode === 'native' ? 'scripts/build-tray-native-diagnostic.ps1' : 'scripts/build-tray.ps1'], { stdio: 'inherit' });

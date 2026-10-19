@@ -333,7 +333,7 @@ jobs:
 
   tray-diagnostic:
     if: github.event_name == 'workflow_dispatch'
-    name: Tray diagnostic / ${{ matrix.arch }}
+    name: Tray diagnostic / ${{ matrix.arch }} / ${{ matrix.sample }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -342,8 +342,19 @@ jobs:
         include:
           - arch: arm64
             runner: windows-11-arm
+            sample: 1
+          - arch: arm64
+            runner: windows-11-arm
+            sample: 2
+          - arch: arm64
+            runner: windows-11-arm
+            sample: 3
+          - arch: arm64
+            runner: windows-11-arm
+            sample: 4
           - arch: x64
             runner: windows-latest
+            sample: 1
     defaults:
       run:
         shell: powershell
