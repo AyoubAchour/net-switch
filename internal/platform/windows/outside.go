@@ -20,13 +20,14 @@ import (
 // the connections found are read every second.
 
 type outsideEntry struct {
-	ID      string  `json:"id"`
-	PID     uint32  `json:"pid"`
-	Path    string  `json:"path"`
-	Local   string  `json:"local"`
-	Created string  `json:"created"`
-	Down    *uint64 `json:"down"`
-	Up      *uint64 `json:"up"`
+	ID             string  `json:"id"`
+	PID            uint32  `json:"pid"`
+	Path           string  `json:"path"`
+	Local          string  `json:"local"`
+	Created        string  `json:"created"`
+	ProcessStarted string  `json:"processStarted,omitempty"`
+	Down           *uint64 `json:"down"`
+	Up             *uint64 `json:"up"`
 }
 
 type outsideLine struct {
@@ -91,9 +92,10 @@ func connectionID(local string, localPort uint16, remote string, remotePort uint
 
 // What the watcher asks Windows. Tests replace it.
 type tcpSystem struct {
-	estats      bool
-	connections func() ([]tcpConnection, error)
-	processPath func(pid uint32) string
+	estats       bool
+	connections  func() ([]tcpConnection, error)
+	processPath  func(pid uint32) string
+	processStart func(pid uint32) string
 	// Returns Windows' result code: 0 means collection is on.
 	enable func(row *mibTcpRow) uint32
 	read   func(row *mibTcpRow) (down, up uint64, ok bool)
@@ -179,6 +181,9 @@ func (w *outsideWatcher) rescan() {
 			entry:    outsideEntry{ID: id, PID: c.pid, Path: path, Local: local, Created: created},
 			row:      row,
 			measured: measured,
+		}
+		if w.system.processStart != nil {
+			w.tracked[id].entry.ProcessStarted = w.system.processStart(c.pid)
 		}
 	}
 	for id := range w.tracked {

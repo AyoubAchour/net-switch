@@ -32,6 +32,8 @@ func hresult(hr uintptr) error {
 	}
 	return nil
 }
+
+//go:uintptrescapes
 func (o *comObject) invokeSlot(slot int, args ...uintptr) (uintptr, error) {
 	all := append([]uintptr{uintptr(unsafe.Pointer(o))}, args...)
 	r, _, _ := syscall.SyscallN(o.vt[slot], all...)

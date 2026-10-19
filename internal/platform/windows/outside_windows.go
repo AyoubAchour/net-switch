@@ -16,12 +16,33 @@ var (
 
 func windowsTCP() tcpSystem {
 	return tcpSystem{
-		estats:      procSetPerTcpConnectionEStats.Find() == nil && procGetPerTcpConnectionEStats.Find() == nil,
-		connections: tcpConnections,
-		processPath: processPath,
-		enable:      enableEstats,
-		read:        readEstats,
+		estats:       procSetPerTcpConnectionEStats.Find() == nil && procGetPerTcpConnectionEStats.Find() == nil,
+		connections:  tcpConnections,
+		processPath:  processPath,
+		processStart: processStarted,
+		enable:       enableEstats,
+		read:         readEstats,
 	}
+}
+
+func processStarted(pid uint32) string {
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return ""
+	}
+	defer windows.CloseHandle(h)
+	created, err := processCreationTime(h)
+	if err != nil {
+		return ""
+	}
+	return formatCreated(created)
+}
+func processCreationTime(h windows.Handle) (int64, error) {
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(h, &created, &exited, &kernel, &user); err != nil {
+		return 0, err
+	}
+	return int64(uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime)), nil
 }
 
 // Kept between reads; it grows when the table doesn't fit.

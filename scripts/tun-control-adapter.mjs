@@ -5,6 +5,7 @@ import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { launchServer, recordServerAndEngine } from './server-under-test.mjs';
+import { killTree } from '../lib/ps.mjs';
 
 export class ControlUnderTest {
   constructor(dataDir) {
@@ -71,10 +72,16 @@ export class ControlUnderTest {
   async stop() { if (!this.session) return; await this.api('routing', { on: false }); this.status = 'off'; }
   async quit() {
     if (!this.server) return;
-    if (this.server.exitCode === null && this.session) await this.api('quit', {});
-    const deadline = Date.now() + 30_000;
-    while (this.server.exitCode === null && Date.now() < deadline) await delay(100);
-    if (this.server.exitCode === null) throw new Error(`Control failed to quit: ${this.output}`);
-    if (this.server.exitCode !== 0) throw new Error(`Control exited ${this.server.exitCode}: ${this.output}`);
+    try {
+      if (this.server.exitCode === null && this.session) await this.api('quit', {});
+      const deadline = Date.now() + 30_000;
+      while (this.server.exitCode === null && Date.now() < deadline) await delay(100);
+      if (this.server.exitCode === null) throw new Error(`Control failed to quit: ${this.output}`);
+      if (this.server.exitCode !== 0) throw new Error(`Control exited ${this.server.exitCode}: ${this.output}`);
+    } finally {
+      // A failed stop/quit must not leave inherited output pipes holding the
+      // test runner open until Actions' job timeout. This is only our child.
+      if (this.server.exitCode === null) await killTree(this.server.pid);
+    }
   }
 }

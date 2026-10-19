@@ -7,13 +7,12 @@ import (
 	"fmt"
 	"io/fs"
 	"net/netip"
-	"os"
 	"path/filepath"
 	"strings"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	"github.com/AyoubAchour/net-switch/internal/platform"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -71,11 +70,23 @@ func Execute(operation string, a map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		var tuples []apps.Tuple
+		var tuples []platform.TCPSelector
 		if err := json.Unmarshal(b, &tuples); err != nil {
 			return nil, err
 		}
 		return closeTCP(tuples)
+	case "tcp-identity":
+		rows, err := tcpConnections()
+		if err != nil {
+			return nil, err
+		}
+		out := []map[string]any{}
+		for _, r := range rows {
+			if r.localPort == uint16(js.Number(a["port"])) {
+				out = append(out, map[string]any{"local": netip.AddrFrom4(r.local).String(), "lport": r.localPort, "remote": netip.AddrFrom4(r.remote).String(), "rport": r.remotePort, "pid": r.pid, "created": formatCreated(r.created), "state": r.state})
+			}
+		}
+		return out, nil
 	case "app-info":
 		paths := []string{}
 		for _, v := range arrayValue(a["paths"]) {
@@ -267,7 +278,7 @@ func ProtectDirectory(path string) error {
 			return err
 		}
 	}
-	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)")
+	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
 	if err != nil {
 		return err
 	}
@@ -350,7 +361,7 @@ func portHolder(port uint16) (any, error) {
 	}
 	return nil, nil
 }
-func closeTCP(tuples []apps.Tuple) (map[string]any, error) {
+func closeTCP(tuples []platform.TCPSelector) (map[string]any, error) {
 	closed, failed, gone := 0, 0, 0
 	codes := []uint32{}
 	for _, t := range tuples {
@@ -369,9 +380,21 @@ func closeTCP(tuples []apps.Tuple) (map[string]any, error) {
 			gone++
 			continue
 		}
+		owner, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, found.pid)
+		if err != nil {
+			gone++
+			continue
+		}
+		started, err := processCreationTime(owner)
+		if err != nil || started > found.created || (t.ProcessStarted != "" && formatCreated(started) != t.ProcessStarted) {
+			windows.CloseHandle(owner)
+			gone++
+			continue
+		}
 		row := found.row()
 		row.State = 12
 		code, _, _ := iphlpapi.NewProc("SetTcpEntry").Call(uintptr(unsafe.Pointer(&row)))
+		windows.CloseHandle(owner)
 		if code == 0 {
 			closed++
 		} else {
@@ -382,5 +405,3 @@ func closeTCP(tuples []apps.Tuple) (map[string]any, error) {
 	return map[string]any{"closed": closed, "failed": failed, "gone": gone, "codes": codes}, nil
 }
 
-// Keep the process image buffer local to each bounded worker invocation.
-var _ = os.ErrNotExist

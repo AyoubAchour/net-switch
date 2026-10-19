@@ -12,6 +12,7 @@ import { once } from 'node:events';
 import { windows } from '../lib/platform/windows.mjs';
 import { nativeArchitecture } from '../lib/architecture.mjs';
 import { AppInfo } from '../lib/appinfo.mjs';
+import { appKey } from '../lib/apps.mjs';
 import { InstalledApps } from '../lib/installed-apps.mjs';
 import { restoreMetrics } from '../lib/platform/windows-network.mjs';
 import { runPowerShellJson } from '../lib/ps.mjs';
@@ -94,7 +95,7 @@ ConvertTo-Json -InputObject @($items | ForEach-Object { [pscustomobject]@{ famil
     const info = new AppInfo(); paths.forEach((p) => info.describe(p)); await info.lookupPending();
     const current = await native('app-info', { paths });
     for (const item of current) {
-      const old = info.cache.get(item.path.toLowerCase());
+      const old = info.cache.get(appKey(item.path));
       assert.equal(item.name, old.name, item.path);
       assert.equal(Boolean(item.icon), Boolean(old.icon));
       if (!item.icon) continue;
@@ -122,6 +123,7 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { args: { OLD: old.i
       const tuple = await runPowerShellJson(`$c = Get-NetTCPConnection -LocalPort $env:NETSWITCH_PORT -RemotePort $env:NETSWITCH_REMOTE -State Established -ErrorAction Stop | Select-Object -First 1
 [pscustomobject]@{ local=[string]$c.LocalAddress; lport=[int]$c.LocalPort; remote=[string]$c.RemoteAddress; rport=[int]$c.RemotePort; pid=[int]$c.OwningProcess; created=$c.CreationTime.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress`, { args: { PORT: client.localPort, REMOTE: port } });
       assert.equal((await native('close-tcp', { connections: [{ ...tuple, pid: tuple.pid + 1000000 }] })).gone, 1);
+      console.log(`TCP identity parity: ${JSON.stringify({ powerShell: tuple, native: await native('tcp-identity', { port: client.localPort }) })}`);
       const closed = once(client, 'close'); client.on('error', () => {});
       assert.deepEqual(await native('close-tcp', { connections: [tuple] }), { closed: 1, failed: 0, gone: 0, codes: [] });
       await closed;

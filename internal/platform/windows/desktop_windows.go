@@ -223,7 +223,7 @@ func resolveShortcut(path string) (string, string, error) {
 		return "", "", err
 	}
 	target, args := make([]uint16, 32768), make([]uint16, 32768)
-	if _, err := link.invokeSlot(3, uintptr(unsafe.Pointer(&target[0])), uintptr(len(target)), 0, 4); err != nil {
+	if _, err := link.invokeSlot(3, uintptr(unsafe.Pointer(&target[0])), uintptr(len(target)), 0, 0); err != nil {
 		return "", "", err
 	}
 	if _, err := link.invokeSlot(10, uintptr(unsafe.Pointer(&args[0])), uintptr(len(args))); err != nil {

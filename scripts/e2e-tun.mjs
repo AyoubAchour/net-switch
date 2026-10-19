@@ -203,8 +203,12 @@ try {
   // does not prove the engine survived, and warn-level output can be empty.
   log(`Engine at failure: ${JSON.stringify({ status: engine.status, error: engine.error,
     childPid: engine.child?.pid ?? null, exitCode: engine.child?.exitCode ?? null })}`);
-  log(`PID file at failure: ${await readFile(engine.pidPath, 'utf8').catch((error) => error.code)}`);
-  log(`Engine log at failure:\n${await readFile(engine.logPath, 'utf8').then((text) => text.slice(-8000) || '(empty)').catch((error) => error.code)}`);
+  log(`PID file at failure: ${await readFile(engine.pidPath ?? path.join(dir, 'engine.pid'), 'utf8').catch((error) => error.code)}`);
+  for (const file of ['server.log', 'engine.log']) {
+    const text = await readFile(path.join(dir, file), 'utf8').catch(() => 'unavailable');
+    log(`${file}:\n${text.split('\n').slice(-50).join('\n')}`);
+  }
+  log(`Control output:\n${engine.output}`);
   process.exitCode = 1;
 } finally {
   if (restoreDns) {
@@ -212,7 +216,9 @@ try {
     catch (error) { log(`DNS RESTORE FAILED: ${error.stack}`); process.exitCode = 1; }
   }
   if (worker.exitCode === null) worker.disconnect();
-  try { await engine.stop(); await clean('final cleanup'); await engine.quit(); }
+  try { await engine.stop(); await clean('final cleanup'); }
   catch (error) { log(`CLEANUP FAILED: ${error.stack}`); process.exitCode = 1; }
+  try { await engine.quit(); }
+  catch (error) { log(`CONTROL QUIT FAILED: ${error.stack}`); process.exitCode = 1; }
   await writeFile(path.join(dir, 'report.txt'), `${report.join('\n')}\n`);
 }
