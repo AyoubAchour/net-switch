@@ -252,19 +252,27 @@ try {
   });
   const gatewayReuse = await observe('TestISP 1,000 rapid fixed-tuple reuses', 'harness-baseline', async () => {
     assert.equal(harness.testisp.tcpReuseHook, true, 'TestISP must install the shared TIME_WAIT hook');
-    const samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000, maxMs: 100 });
-    const failed = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
-    const trace = failed && (await harness.control('stats')).tcpTrace;
-    let sockets;
-    if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection -LocalPort ${failed.port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess) | ConvertTo-Json -Compress`]);
-    if (samples.length !== 1000 || failed) {
-      const error = new Error(`Gateway reuse failed: ${JSON.stringify({ count: samples.length, failed, trace })}`);
-      error.evidence = { samples, sockets, trace };
-      throw error;
+    const rounds = [];
+    let samples;
+    // Consecutive rounds expose occasional relay delays. Every round must
+    // pass; a failure stops immediately and is never retried into a pass.
+    for (let round = 1; round <= 4; round++) {
+      samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000, maxMs: 100 });
+      const failed = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
+      const stats = failed && await harness.control('stats');
+      let sockets;
+      if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection -LocalPort ${failed.port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess) | ConvertTo-Json -Compress`]);
+      if (samples.length !== 1000 || failed) {
+        const error = new Error(`Gateway reuse failed: ${JSON.stringify({ round, count: samples.length, failed, trace: stats.tcpTrace })}`);
+        error.evidence = { rounds, samples, sockets, stats };
+        throw error;
+      }
+      assert.equal(new Set(samples.map((sample) => `${sample.port}:${sample.peerPort}`)).size, 1, 'TestISP reuse changed the tuple');
+      const result = { round, count: samples.length, maxMs: Math.max(...samples.map((sample) => sample.ms)), tuple: [samples[0].port, samples[0].peerPort], architecture: process.arch };
+      rounds.push(result);
+      console.log(`TESTISP REUSE ${JSON.stringify(result)}`);
     }
-    assert.equal(new Set(samples.map((sample) => `${sample.port}:${sample.peerPort}`)).size, 1, 'TestISP reuse changed the tuple');
-    console.log(`TESTISP REUSE ${JSON.stringify({ count: samples.length, maxMs: Math.max(...samples.map((sample) => sample.ms)), architecture: process.arch })}`);
-    return samples;
+    return { rounds, samples };
   });
   const icmpBaseline = await observe('controlled ICMP v4/v6 baselines', 'harness-baseline', async () => ({
     v4: await ping(responder.virtual.host, harness.testisp.address),

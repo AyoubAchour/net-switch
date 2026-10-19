@@ -103,6 +103,10 @@ TestISP installs the shared `tcp.SetTimeWaitHandler` before capture starts and
 retains gVisor's default 60-second TIME_WAIT. Its fixed-tuple 1,000-reuse
 prerequisite is mandatory: every attempt must finish under 100 ms. Engine freeze
 gates require both it and the native baseline, including reuse after 100 MB.
+The TestISP prerequisite runs four consecutive 1,000-reuse rounds to expose
+intermittent relay delays. Each round keeps its tuple fixed; all four must pass.
+The first slow or failed attempt stops the gate and retains its packet trace
+and connection/data/FIN timing phases. There is no retry of a failed round.
 Timeout zero was removed after a hosted ARM64 trace showed a lost final ACK,
 then a retransmitted FIN receiving RST. Increasing bind retries would hide it.
 
