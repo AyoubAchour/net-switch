@@ -93,6 +93,14 @@ func TestTimeWaitClosingQueue(t *testing.T) {
 				return false // A declined SYN must be dropped, never reset.
 			}
 			if late {
+				// Finish the relay's own Endpoint.Close before temporarily
+				// disabling the hook. Otherwise that deferred Close can freeze
+				// the queue after we reinstall the hook, before our late enqueue.
+				select {
+				case <-p.current.relayClosed:
+				case <-time.After(time.Second):
+					t.Fatal("relay did not finish closing")
+				}
 				// Leave an unfrozen closed endpoint using the stock close path.
 				// A demux lookup that already captured ep can still enqueue here.
 				tcp.SetTimeWaitHandler(p.stack, nil)

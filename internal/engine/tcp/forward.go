@@ -210,7 +210,6 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	if errTCP != nil {
 		return
 	}
-	complete(false)
 	closeEndpoint := sync.OnceFunc(ep.Close)
 	defer closeEndpoint()
 	stopApp := context.AfterFunc(ctx, ep.Abort)
@@ -239,6 +238,9 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	f.connections[id] = c
 	owned = false // the shared monitor now owns the reservation
 	f.mu.Unlock()
+	// Keep the pending entry through endpoint setup. A delayed reopen hook
+	// must see either pending or connections, never a gap between them.
+	complete(false)
 	defer close(c.done)
 	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint}
 	if a, ok := remote.LocalAddr().(*net.TCPAddr); ok {

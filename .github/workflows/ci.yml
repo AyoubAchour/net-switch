@@ -151,6 +151,9 @@ jobs:
       - name: Repeat clock and reopen boundaries under race detection
         if: matrix.name != 'Windows ARM64'
         run: go test -race -v -count=1000 -run '^TestTimeWait(LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState)$' ./internal/engine/stack
+      - name: Repeat reopen deduplication during endpoint setup
+        if: matrix.name != 'Windows ARM64'
+        run: go test -race -v -count=1000 -run '^TestReopenHookDuringEndpointSetupDeduplicates$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths
         if: matrix.name == 'Linux x64'
         run: |
