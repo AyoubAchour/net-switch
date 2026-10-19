@@ -250,6 +250,16 @@ func (p *peer) upload(payload []byte) []byte {
 
 func (p *peer) closeActive() []byte {
 	p.t.Helper()
+	fin, delivered := p.closeActiveWire()
+	<-delivered
+	return fin
+}
+
+// closeActiveWire exposes the ACK boundary independently of ingress completion.
+// Only a test deliberately holding the output writer should leave it unfenced;
+// timer tests must finish ingress before advancing the clock or arming cleanup.
+func (p *peer) closeActiveWire() ([]byte, <-chan struct{}) {
+	p.t.Helper()
 	if err := p.current.conn.CloseWrite(); err != nil {
 		p.t.Fatal(err)
 	}
@@ -260,7 +270,8 @@ func (p *peer) closeActive() []byte {
 	// A wire ACK can be visible while ingress is still completing the FIN.
 	// Let barrier tests observe that boundary without sharing peer state.
 	p.lastSent = fin
-	go p.deliver(fin)
+	delivered := make(chan struct{})
+	go func() { p.deliver(fin); close(delivered) }()
 	p.seq++
 	for {
 		h = p.wait(header.TCPFlagAck)
@@ -271,5 +282,5 @@ func (p *peer) closeActive() []byte {
 	// Immediately reuse after the wire ACK. Never wait for StateClose or for
 	// endpoint removal; TIME_WAIT must still protect lost final ACKs.
 	p.current.conn.Close()
-	return fin
+	return fin, delivered
 }

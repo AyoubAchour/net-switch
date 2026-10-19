@@ -53,7 +53,7 @@ func TestTimeWaitFinalACKReleasesAdmission(t *testing.T) {
 			unblock := sync.OnceFunc(func() { close(barrier.release) })
 			defer unblock()
 			link.barrier.Store(barrier)
-			p.closeActive()
+			p.closeActiveWire()
 			select {
 			case <-barrier.entered:
 			case <-time.After(time.Second):
