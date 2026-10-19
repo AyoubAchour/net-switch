@@ -5,14 +5,6 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      cold_scan:
-        description: Temporary cold scan probe with the complete built Node suite
-        type: boolean
-        default: false
-      native_tests:
-        description: Temporary native scan timing and repeat probe
-        type: boolean
-        default: false
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -22,90 +14,9 @@ permissions:
   contents: read
 
 jobs:
-  native-cold:
-    name: Cold scan with tray / ${{ matrix.arch }} / ${{ matrix.shard }}
-    if: github.event_name == 'workflow_dispatch' && inputs.native_tests && inputs.cold_scan
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      max-parallel: 6
-      matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-        arch: [arm64]
-        include:
-          - arch: arm64
-            runner: windows-11-arm
-          - arch: x64
-            shard: 1
-            runner: windows-latest
-          - arch: x64
-            shard: 2
-            runner: windows-latest
-    defaults:
-      run:
-        shell: powershell
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: '24'
-          architecture: ${{ matrix.arch }}
-          package-manager-cache: false
-      - name: Build the native helper
-        run: ./scripts/build-helper.ps1 -Arch ${{ matrix.arch }}
-      - name: Build the tray as in the failing CI job
-        run: ./scripts/build-tray.ps1
-      - name: Measure a cold scan during the complete Node suite
-        env:
-          NETSWITCH_SCAN_TIMING: '1'
-        run: |
-          npm test
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-  native-repeats:
-    name: Native repeats / ${{ matrix.arch }} / ${{ matrix.shard }}
-    if: github.event_name == 'workflow_dispatch' && inputs.native_tests && !inputs.cold_scan
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3]
-        arch: [x64, arm64]
-        include:
-          - arch: x64
-            runner: windows-latest
-          - arch: arm64
-            runner: windows-11-arm
-    defaults:
-      run:
-        shell: powershell
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: '24'
-          architecture: ${{ matrix.arch }}
-          package-manager-cache: false
-      - name: Build the native helper
-        run: ./scripts/build-helper.ps1 -Arch ${{ matrix.arch }}
-      - name: Repeat the native Node tests ten times without retries
-        run: |
-          for ($repeat = 1; $repeat -le 10; $repeat++) {
-            Write-Host "NATIVE REPEAT $repeat / 10 (${{ matrix.arch }}, shard ${{ matrix.shard }})"
-            node --test --test-reporter=tap test/helper.test.mjs test/monitor.test.mjs test/ps.test.mjs
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          Write-Host 'NATIVE REPEATS COMPLETE: 10 / 10'
-
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.native_tests
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
