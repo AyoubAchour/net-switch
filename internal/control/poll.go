@@ -226,10 +226,13 @@ func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connecti
 
 var defaultTargets = []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}
 
-func probeTargets(v any) []string {
+func probeTargets(v any, custom bool) []string {
 	out := []string{}
 	for _, x := range array(v) {
 		out = append(out, js.Text(x))
+	}
+	if custom && len(out) > 0 {
+		return out
 	}
 	// The inherited default pair denotes the product defaults. A custom list
 	// replaces all operators, rather than being silently appended to them.
@@ -298,7 +301,7 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 			}
 		}
 		realPassed := len(c.evidence[id]) >= 2 && l.health.Up != nil && *l.health.Up && !l.health.Offline && !l.health.AwaitingPass
-		targets := probeTargets(c.values["probeTargets"])
+		targets := probeTargets(c.values["probeTargets"], c.values["probeTargetsCustom"] == true)
 		operator := l.operator % len(targets)
 		l.operator = (operator + 1) % len(targets)
 		jobs = append(jobs, func() {

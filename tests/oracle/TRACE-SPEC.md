@@ -122,7 +122,11 @@ redirects and retain normal TLS certificate verification for the address.
 Two different hosts reached by new connections in the preceding 30 s suppress
 checks while a line is healthy. Recovery of a down line still requires full
 HTTPS checks. Busy-line suppression remains unchanged. `engineUnavailable`
-does not add a failure or a pass. User targets replace the default set.
+does not add a failure or a pass. User targets replace the default set. The
+inherited Node default pair denotes the new three-operator defaults; an explicit
+target edit atomically stores `probeTargetsCustom` alongside the list, so even
+an explicit choice of that old pair remains a two-target override after restart.
+That internal settings marker does not add a field to the HTTP state contract.
 
 The named `probeFailover` expectation advances its down transition from 26 s to
 16 s: one failed quick vote plus two failed full votes reaches the existing

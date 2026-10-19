@@ -430,6 +430,9 @@ func (c *Core) changeSettings(ctx context.Context, b map[string]any) error {
 			return bad("Enter one to 4 test addresses as address:port, like 1.1.1.1:443.")
 		}
 		changes["probeTargets"] = targets
+		// Preserve an explicit choice even when it equals the inherited Node
+		// default pair. Save the marker and list in the same atomic document.
+		changes["probeTargetsCustom"] = true
 	}
 	if on, exists := b["autostart"]; exists {
 		if !c.op.AutostartAllowed {
