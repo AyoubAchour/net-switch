@@ -19,7 +19,15 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/journal"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	"golang.zx2c4.com/wireguard/tun"
 )
+
+type byteCountingTun struct{ tun.Device }
+func(*byteCountingTun)Write(p [][]byte,offset int)(int,error){return len(p[0])-offset+10,nil}
+func TestLinuxTunWriteReturnsBytes(t *testing.T){
+	d:=&Tun{device:&byteCountingTun{}}
+	if err:=d.WritePacket(context.Background(),make([]byte,60));err!=nil{t.Fatalf("successful Linux TUN write must not terminate forwarding: %v",err)}
+}
 
 func TestDiagCookieAndCgroup(t *testing.T){
 	b:=make([]byte,84);b[0]=unix.AF_INET
