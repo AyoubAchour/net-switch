@@ -27,6 +27,62 @@ import (
 
 type byteCountingTun struct{ tun.Device }
 
+func TestTCPReadinessPreservesDataEOFAndClose(t *testing.T) {
+	l, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	client, err := net.DialTCP("tcp4", nil, l.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server, err := l.AcceptTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+	raw, err := client.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := &tcpSocket{TCPConn: client, raw: raw}
+	ready := make(chan error, 1)
+	go func() { ready <- socket.WaitReadable(context.Background()) }()
+	select {
+	case err := <-ready:
+		t.Fatalf("idle socket was readable: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if _, err := server.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("data did not wake readiness")
+	}
+	var data [5]byte
+	if _, err := io.ReadFull(socket, data[:]); err != nil || string(data[:]) != "hello" {
+		t.Fatalf("peek consumed data: %q %v", data, err)
+	}
+	server.CloseWrite()
+	if err := socket.WaitReadable(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := socket.Read(data[:]); err != io.EOF {
+		t.Fatalf("EOF lost: %v", err)
+	}
+	client.Close()
+	if err := socket.WaitReadable(context.Background()); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("closed socket: %v", err)
+	}
+}
+
 func (*byteCountingTun) Write(p [][]byte, offset int) (int, error) {
 	return len(p[0]) - offset + 10, nil
 }

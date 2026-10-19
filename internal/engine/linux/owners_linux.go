@@ -430,9 +430,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return nil
 		}
 		seen[pid] = true
-		if !complete && result.AppID!="" {
-			o.mu.Lock();observed:=o.windows[pid].observed;o.mu.Unlock()
-			if time.Since(observed)<5*time.Millisecond{return nil}
+		if !complete && result.AppID != "" {
+			o.mu.Lock()
+			observed := o.windows[pid].observed
+			o.mu.Unlock()
+			if time.Since(observed) < 5*time.Millisecond {
+				return nil
+			}
 		}
 		start, err := processStart(pid)
 		if err != nil {

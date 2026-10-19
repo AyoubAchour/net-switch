@@ -39,7 +39,34 @@ func (p *Platform) DialTCP(ctx context.Context, id string, dst netip.AddrPort) (
 	if err != nil {
 		return nil, err
 	}
-	return c.(*net.TCPConn), nil
+	tcp := c.(*net.TCPConn)
+	raw, err := tcp.SyscallConn()
+	if err != nil {
+		tcp.Close()
+		return nil, err
+	}
+	return &tcpSocket{TCPConn: tcp, raw: raw}, nil
+}
+
+type tcpSocket struct {
+	*net.TCPConn
+	raw syscall.RawConn
+}
+
+// Peek without consuming: the relay borrows its buffer only after data, EOF
+// or an error is ready. RawConn.Read waits through Go's poller and Close wakes
+// it, so no polling goroutine or per-idle-flow payload buffer is necessary.
+func (s *tcpSocket) WaitReadable(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var readErr error
+	var peek [1]byte
+	err := s.raw.Read(func(fd uintptr) bool {
+		_, _, readErr = unix.Recvfrom(int(fd), peek[:], unix.MSG_PEEK|unix.MSG_DONTWAIT)
+		return readErr != unix.EAGAIN && readErr != unix.EWOULDBLOCK
+	})
+	return errors.Join(err, readErr)
 }
 func (p *Platform) OpenUDP(ctx context.Context, id string, v6 bool) (platform.UDPConn, error) {
 	// Compatibility for callers without a first destination. This is only a

@@ -12,6 +12,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -277,7 +278,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	// must see either pending or connections, never a gap between them.
 	complete(false)
 	defer close(c.done)
-	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission}
+	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission, ep: ep, wq: &wq}
 	if a, ok := remote.LocalAddr().(*net.TCPAddr); ok {
 		ticket.Established(a.AddrPort().Addr())
 	} else {
@@ -305,6 +306,8 @@ type onceCloseConn struct {
 	*gonet.TCPConn
 	close           func()
 	afterCloseWrite func()
+	ep    tcpip.Endpoint
+	wq    *waiter.Queue
 }
 
 func (c *onceCloseConn) Close() error { c.close(); return nil }
@@ -315,4 +318,18 @@ func (c *onceCloseConn) CloseWrite() error {
 		c.afterCloseWrite()
 	}
 	return err
+}
+
+func (c *onceCloseConn) WaitReadable(ctx context.Context) error {
+	entry, wake := waiter.NewChannelEntry(waiter.ReadableEvents)
+	c.wq.EventRegister(&entry)
+	defer c.wq.EventUnregister(&entry)
+	for c.ep.Readiness(waiter.ReadableEvents) == 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-wake:
+		}
+	}
+	return nil
 }
