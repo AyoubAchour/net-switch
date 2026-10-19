@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: local-app TIME_WAIT and buffer accounting.
+// Modified by Net Switch, 2026-10-19: local-app close admission, TIME_WAIT and buffer accounting.
 
 // Package tcp contains the implementation of the TCP transport protocol.
 package tcp
@@ -203,6 +203,22 @@ func DrainLocalClose(s *stack.Stack) {
 			return
 		}
 	}
+}
+
+// releaseIfOnlyFIN keeps queued and retransmittable payload counted. Once
+// both directions have ended and only FIN remains, losing its last ACK must
+// not hold admission hostage. The endpoint still retransmits FIN normally.
+// +checklocks:e.mu
+func (e *Endpoint) releaseIfOnlyFIN(state EndpointState) {
+	if e.closeHandler == nil || (state != StateLastAck && state != StateClosing) {
+		return
+	}
+	for seg := e.snd.writeList.Front(); seg != nil; seg = seg.Next() {
+		if seg.payloadSize() != 0 {
+			return
+		}
+	}
+	e.releaseClose()
 }
 
 // releaseClose retires admission once no further network data can be sent.

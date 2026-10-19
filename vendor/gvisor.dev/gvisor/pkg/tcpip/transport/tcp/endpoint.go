@@ -793,6 +793,7 @@ func (e *Endpoint) TryLock() bool {
 //
 // +checklocks:e.mu
 func (e *Endpoint) setEndpointState(state EndpointState) {
+	e.releaseIfOnlyFIN(state)
 	// Release live admission before publishing TIME_WAIT or its final ACK.
 	// Defer a cap-driven close until the current segment is fully consumed.
 	if state == StateTimeWait && e.timeWaitEnter != nil {

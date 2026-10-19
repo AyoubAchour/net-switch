@@ -362,6 +362,13 @@ func TestCloseKeepsQueuedDataCounted(t *testing.T) {
 			}
 			p.stack.Pause()
 			defer p.stack.Resume()
+			// Acknowledge all payload but deliberately leave FIN unacknowledged.
+			// Capacity becomes reusable here, not at FIN emission while data
+			// was still retransmittable, and not only after the last FIN ACK.
+			p.inject(p.packet(p.seq, p.ack-1, header.TCPFlagAck, nil))
+			if g := p.table.Stats(); g.Flows != 0 {
+				t.Fatal("payload ACK did not retire the FIN-only flow", g)
+			}
 			p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 			if g := p.table.Stats(); g.Flows != 0 {
 				t.Fatal("final ACK did not retire", g)
@@ -394,5 +401,32 @@ func TestCloseRSTDuringHandshake(t *testing.T) {
 	p.closeActive()
 	if p.table.Stats().Rejected != 0 {
 		t.Fatal(p.diagnostics())
+	}
+}
+
+func TestCloseBeforeFinalACK(t *testing.T) {
+	for _, simultaneous := range []bool{false, true} {
+		name := "last_ack"
+		if simultaneous {
+			name = "closing"
+		}
+		t.Run(name, func(t *testing.T) {
+			limits := flows.Defaults()
+			limits.Flows = 1
+			p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+			p.open(1000)
+			p.upload([]byte("old"))
+			p.prepareFinalACK(simultaneous) // Lose the final ACK entirely.
+			if g := p.table.Stats(); g.Flows != 0 {
+				t.Error("a lost final ACK retained a payload-free flow", p.diagnostics())
+			}
+			p.port++
+			p.open(500)
+			p.upload([]byte("replacement"))
+			p.closeActive()
+			if g := p.table.Stats(); g.Rejected != 0 || g.Admitted != 2 {
+				t.Fatal(p.diagnostics())
+			}
+		})
 	}
 }

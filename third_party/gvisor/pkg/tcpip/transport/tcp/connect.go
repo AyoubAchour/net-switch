@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: local SYN handoff and release before reset.
+// Modified by Net Switch, 2026-10-19: local SYN handoff and payload-aware close admission.
 
 package tcp
 
@@ -1406,6 +1406,7 @@ func (e *Endpoint) handleSegmentLocked(s *segment) (cont bool, err tcpip.Error) 
 		}
 
 		e.snd.handleRcvdSegment(s)
+		e.releaseIfOnlyFIN(e.EndpointState())
 	}
 
 	return true, nil

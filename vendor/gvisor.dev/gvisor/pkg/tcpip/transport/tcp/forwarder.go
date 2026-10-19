@@ -153,8 +153,9 @@ func (r *ForwarderRequest) CreateEndpoint(queue *waiter.Queue) (tcpip.Endpoint, 
 }
 
 // CreateEndpointWithCloseHandler installs onClose before exposing the endpoint.
-// It runs once before reset output or removal, under the endpoint lock; it must
-// not block or call endpoint methods. TIME_WAIT admission remains a separate
+// It runs once when both directions end with no queued/unacknowledged payload,
+// or before reset output/removal, under the endpoint lock. It must not block
+// or call endpoint methods. TIME_WAIT admission remains a separate
 // policy. Use ordered ingress with SetTimeWaitHandler for synchronous RST and
 // final closing ACK processing. The ingress owner must call DrainLocalClose.
 func (r *ForwarderRequest) CreateEndpointWithCloseHandler(queue *waiter.Queue, onClose func()) (tcpip.Endpoint, tcpip.Error) {

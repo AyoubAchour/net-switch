@@ -249,8 +249,9 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		ep.Abort()
 	}
 	app.Close()
-	// TCP releases admission at TIME_WAIT, reset or removal. The monitor keeps
-	// the ticket until removal and relay completion for final byte accounting.
+	// TCP releases admission once both directions end and payload drains, or
+	// on reset/removal. Keep the ticket until removal and relay completion
+	// for final byte accounting.
 }
 
 // Stop cancels dials and relays. The owner must close the stack before Wait,
