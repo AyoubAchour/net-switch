@@ -56,7 +56,7 @@ function setup(t) {
     const started = performance.now();
     const child = spawn(file, args, { stdio: 'ignore', ...options });
     const elapsed = () => Math.round(performance.now() - started);
-    t.diagnostic(`spawn returned pid=${child.pid} file=${path.basename(file)} ms=${elapsed()}`);
+    t.diagnostic(`spawn returned pid=${child.pid} file=${path.basename(file)} ms=${elapsed()} at=${new Date().toISOString()}`);
     child.once('spawn', () => t.diagnostic(`spawn event pid=${child.pid} ms=${elapsed()}`));
     const run = { child, started, exited: once(child, 'exit').then(([code]) => {
       t.diagnostic(`exit pid=${child.pid} code=${code} ms=${elapsed()}`);
