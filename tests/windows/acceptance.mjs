@@ -25,7 +25,7 @@ const mtuExe = path.resolve('dist/windows-test/mtuprobe.exe');
 const udpRejectExe = path.resolve('dist/windows-test/udpreject.exe');
 const rejections = new Set(['ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EACCES']);
 const publicDestination = '1.0.0.1:443';
-const crashOrphans = new Set();
+const appDeviceIDs = new Set();
 const destinationCount = (stats, destination) => stats.destinations?.[destination] ?? 0;
 
 async function applied(route, body, matches) {
@@ -93,24 +93,25 @@ async function pnpDevices() {
   return Array.isArray(value) ? value : [value];
 }
 
-async function crashCleanup(name) {
-  // Keep connectivity/route checks mandatory. A recognized non-present device
-  // is reported separately, before a restart or Wintun shutdown can remove it.
+function rememberAppDevices(devices) {
+  for (const device of devices.filter((device) => device.present)) appDeviceIDs.add(device.instanceId);
+}
+
+async function stoppedSnapshot() {
   const state = await until(async () => {
     const value = await network('state');
     assert(Object.values(value).every((list) => list.length === 0), JSON.stringify(value));
     return value;
-  }, 'crashed app routes and present adapters disappear', 20000);
+  }, 'stopped app routes and present adapters disappear', 20000);
   const pnp = await pnpDevices();
-  assert(!pnp.some((device) => device.present), `Present device survived crash: ${JSON.stringify(pnp)}`);
-  await recordCrashPnP(name, state, pnp);
+  assert(!pnp.some((device) => device.present), `Present device survived stop: ${JSON.stringify(pnp)}`);
   return { state, pnp };
 }
 
-async function recordCrashPnP(name, state, pnp) {
-  for (const device of pnp) crashOrphans.add(device.instanceId);
+async function recordOrphanPnP(name, state, pnp) {
   await observe(name, pnp.length ? 'baseline-defect' : 'parity', async () => {
-    if (pnp.length) throw new BaselineDefect('Abrupt app exit left a non-present Wintun device; Get-NetAdapter could not see it', { state, pnp });
+    assert(pnp.every((device) => !device.present && appDeviceIDs.has(device.instanceId)), `Unrecognized PnP leftover: ${JSON.stringify(pnp)}`);
+    if (pnp.length) throw new BaselineDefect('Engine exit left an owned, non-present Wintun device; Get-NetAdapter could not see it', { state, pnp });
     return { state, pnp };
   });
 }
@@ -189,6 +190,7 @@ async function start() {
   server = await startServer(options, dataDir, (chunk) => output.write(chunk));
   const state = await server.on();
   await verifyEngineProcess(options, dataDir);
+  rememberAppDevices(await pnpDevices());
   return state;
 }
 
@@ -612,14 +614,18 @@ try {
       await pin(second.id);
     }
   });
-  await report.test('20 start/stop cycles clean up routes and adapters', 'parity', async () => {
-    const cycles = [];
+  await report.test('20 start/stop cycles clean up routes and present adapters', 'parity', async () => {
+    const cycles = [], snapshots = [];
     for (let n = 1; n <= 20; n++) {
-      await server.api('routing', { on: false }); await clean();
+      await server.api('routing', { on: false });
+      snapshots.push({ cycle: n, ...await stoppedSnapshot() });
       await server.api('routing', { on: true }); await server.on();
+      rememberAppDevices(await pnpDevices());
       await client('open', { target: responder.virtual }); await client('close');
       cycles.push(n); console.log(`cycle ${n}/20`);
     }
+    const devices = [...new Map(snapshots.flatMap((s) => s.pnp).map((device) => [device.instanceId, device])).values()];
+    await recordOrphanPnP('PnP cleanup across 20 normal routing stops', { snapshots }, devices);
     return cycles;
   });
   await report.test('engine crash with automatic restart', 'parity', async () => {
@@ -631,8 +637,9 @@ try {
     }, 'engine automatic restart', 90_000);
     await server.on();
     const response = await client('open', { target: responder.virtual }); await client('close');
-    const pnp = (await pnpDevices()).filter((device) => !device.present);
-    await recordCrashPnP('PnP cleanup after automatic engine restart', { engine, restarted }, pnp);
+    const devices = await pnpDevices();
+    rememberAppDevices(devices);
+    await recordOrphanPnP('PnP cleanup after automatic engine restart', { engine, restarted }, devices.filter((device) => !device.present));
     return { engine, restarted, response };
   });
   await report.test('crash without a restart restores direct connectivity', 'parity', async () => {
@@ -645,7 +652,8 @@ try {
       try { process.kill(engine.pid, 0); return false; }
       catch (error) { if (error.code !== 'ESRCH') throw error; return { pid: engine.pid, exitedWithoutHarnessKill: true }; }
     }, 'engine exits on its own after control process death', 30_000);
-    const state = await crashCleanup('PnP cleanup immediately after control-process crash');
+    const state = await stoppedSnapshot();
+    await recordOrphanPnP('PnP cleanup immediately after control-process crash', state.state, state.pnp);
     const direct = await harness.probe();
     await start();
     const response = await client('open', { target: responder.virtual }); await client('close');
@@ -663,16 +671,17 @@ try {
   if (quicServer?.exitCode === null) quicServer.kill();
   if (server?.child.exitCode === null) try { await server.quit(); } catch (error) { console.error(error); process.exitCode = 1; }
   // Check before TestISP's Wintun shutdown can erase an orphan. Only the same
-  // non-present IDs observed after our crashes may use this baseline exemption.
+  // non-present IDs observed while our engine was running may use this baseline
+  // exemption. The normal 0.3.x stop also terminates its child on Windows.
   let finalPnP = [], finalPnPError;
   try { if (server) finalPnP = await pnpDevices(); } catch (error) { finalPnPError = error; }
-  const knownOrphans = finalPnP.length > 0 && finalPnP.every((device) => !device.present && crashOrphans.has(device.instanceId));
+  const knownOrphans = finalPnP.length > 0 && finalPnP.every((device) => !device.present && appDeviceIDs.has(device.instanceId));
   await observe('final NetSwitch adapter, route and firewall cleanup', knownOrphans ? 'baseline-defect' : server ? 'parity' : 'harness-baseline', async () => {
     if (finalPnPError) throw finalPnPError;
     if (!knownOrphans) return clean();
     const state = await network('state');
     assert(Object.values(state).every((list) => list.length === 0), JSON.stringify(state));
-    throw new BaselineDefect('Previously recorded crash orphan still exists before TestISP shuts down', { state, pnp: finalPnP });
+    throw new BaselineDefect('An owned non-present Wintun device remains before TestISP shuts down', { state, pnp: finalPnP });
   });
   if (harness) try { await harness.close(); } catch (error) { console.error(error); process.exitCode = 1; }
   try { await targetFirewall('clean'); } catch (error) { console.error(error); process.exitCode = 1; }

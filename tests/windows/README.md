@@ -149,13 +149,21 @@ fresh random payloads and record source tuples, so stale replies cannot pass.
 ## Design deviations and limits
 
 Cleanup checks query the Net Plug and Play class without `-PresentOnly`, as well
-as adapters, routes and firewall rules. The two crash cases snapshot non-present
-Wintun devices before restarting or shutting TestISP down. An orphan caused by
-abrupt 0.3.x termination is a measured `baseline-defect` when present and a parity
-pass when absent; it is intermittent, so absence is not treated as a changed
-oracle. The final gate exempts only those same recorded non-present instance IDs
-under the baseline profile. A new/present device or a route/firewall leftover
-still fails, and all orphans fail the v1 profile.
+as adapters, routes and firewall rules. Normal routing stops and both crash
+cases snapshot non-present Wintun devices before another startup or TestISP
+shutdown can sweep them away. Instance IDs are recorded while the app's device
+is present. Only those owned IDs can become an intermittent `baseline-defect`
+when non-present; absence is a parity pass. A new/present device or a route or
+firewall leftover still fails, and all orphans fail the v1 profile.
+
+This is also a normal-stop defect in 0.3.x, not just a crash consequence. In run
+`39259073469`, ARM64 job `118081706767`, the first ordinary stop left a
+`sing-tun Tunnel` PnP device after a 20-second wait, and it remained at final
+cleanup. `lib/engine.mjs:530` calls `child.kill()` for a normal stop; Node's
+[pinned Windows implementation](https://github.com/nodejs/node/blob/v24.21.0/deps/uv/src/win/process.c)
+uses `TerminateProcess` for that signal. The harness calls the app API correctly.
+The app needs graceful engine shutdown and owned-device recovery after crashes;
+this acceptance branch records the defect without deleting its evidence.
 
 TestISP is a separately observable virtual path sharing the real uplink, not a
 physically separate uplink. Physical cable loss cannot be isolated on a runner
