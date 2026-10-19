@@ -55,8 +55,8 @@ failure with a successful baseline and records its measured evidence. The
 `baseline` profile reports such defects without failing the job; `v1` makes
 them failures. A defect which no longer reproduces is reported as a pass.
 
-Hosted x64 testing also found that today's app fragments oversized UDP despite
-the app requesting no fragmentation, on both IPv4 and IPv6. This extra
+Hosted x64 and ARM64 testing also found that today's app returns oversized UDP
+despite the app requesting no fragmentation, on both IPv4 and IPv6. This extra
 `baseline-defect` requires the direct DF baseline to reject the same size and the
 TUN probe to return the full payload. A timeout is not exempted.
 
@@ -64,7 +64,8 @@ Immediate TCP reuse records Winsock bind retries separately. A `close` event can
 arrive before Windows consumes the final ACK; the captured exchange showed a
 complete passive close and `EADDRINUSE` before any new SYN. Only that failed bind
 is retried, for at most 100 ms. Connected attempts and TCP timeouts are never
-retried, and the recorded latency includes the bind wait.
+retried, and the recorded latency includes the bind wait. Both the physical and
+TestISP baselines perform 1,000 immediate reuses before the engine starts.
 
 | Area | Checks |
 | --- | --- |

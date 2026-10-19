@@ -183,16 +183,16 @@ try {
     return result;
   });
   const directReuse = await observe('physical controlled port reuse baseline', 'parity', async () => {
-    const samples = await client('reuse', { target: { ...responder.direct, source: harness.uplink.address }, count: 20 });
-    assert(samples.length === 20 && samples.every((sample) => sample.outcome === 'closed'), `Physical reuse failed: ${JSON.stringify(samples)}`);
+    const samples = await client('reuse', { target: { ...responder.direct, source: harness.uplink.address }, count: 1000 });
+    assert(samples.length === 1000 && samples.every((sample) => sample.outcome === 'closed'), `Physical reuse failed: ${JSON.stringify(samples)}`);
     return samples;
   });
   await observe('gateway controlled port reuse baseline', 'parity', async () => {
-    const samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 20 });
+    const samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000 });
     const failed = samples.find((sample) => sample.outcome !== 'closed');
     let sockets;
     if (failed) sockets = await run('powershell.exe', ['-NoProfile', '-Command', `@(Get-NetTCPConnection -LocalPort ${failed.port} -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess) | ConvertTo-Json -Compress`]);
-    assert(samples.length === 20 && !failed, `Gateway reuse failed: ${JSON.stringify({ samples, sockets, trace: failed && (await harness.control('stats')).tcpTrace })}`);
+    assert(samples.length === 1000 && !failed, `Gateway reuse failed: ${JSON.stringify({ samples, sockets, trace: failed && (await harness.control('stats')).tcpTrace })}`);
     return samples;
   });
   const icmpBaseline = await observe('controlled ICMP v4/v6 baselines', 'parity', async () => ({
@@ -304,7 +304,7 @@ try {
       const small = await mtuProbe(host, 1200);
       assert.equal(small.outcome, 'reply', JSON.stringify(small));
       const large = await mtuProbe(host, 2000);
-      if (large.outcome === 'reply') throw new BaselineDefect('Oversize UDP is fragmented despite the app requesting no fragmentation', { baseline: mtuBaselines[host], small, large });
+      if (large.outcome === 'reply') throw new BaselineDefect('Oversize UDP succeeds instead of reporting packet too large', { baseline: mtuBaselines[host], small, large });
       assert.equal(large.outcome, 'message-too-large', JSON.stringify(large));
       return { small, large };
     });
