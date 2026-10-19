@@ -423,6 +423,9 @@ func (s Selector) Validate() error {
 	if s.OutsideOnly {
 		return errors.New("outside connections are handled by Control")
 	}
+	if (s.App == "") != (s.NotLine == "") {
+		return errors.New("reconnect requires both app and notLine")
+	}
 	n := 0
 	if len(s.IDs) > 0 {
 		n++
