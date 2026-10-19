@@ -159,5 +159,9 @@ export async function startHarness(directory) {
       return result;
     };
     return { uplink, testisp: state, control, diagnosticClient: { url: state.control, token }, network, probe, close };
-  } catch (error) { await close(); throw error; }
+  } catch (error) {
+    try { await close(); }
+    catch (cleanupError) { throw new AggregateError([error, cleanupError], 'TestISP startup and cleanup failed'); }
+    throw error;
+  }
 }
