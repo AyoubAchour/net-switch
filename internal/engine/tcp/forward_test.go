@@ -34,6 +34,10 @@ func (o channelOut) Send(b []byte) bool {
 }
 
 func harness(t *testing.T, c flowapi.Controller, d testfake.Dialer) (*Forwarder, func() (*gonet.TCPConn, error)) {
+	return harnessPackets(t, c, d, nil)
+}
+
+func harnessPackets(t *testing.T, c flowapi.Controller, d testfake.Dialer, observe func(*Forwarder, []byte)) (*Forwarder, func() (*gonet.TCPConn, error)) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	links := [2]*channel.Endpoint{channel.New(1024, ns.MTU, ""), channel.New(1024, ns.MTU, "")}
@@ -59,6 +63,9 @@ func harness(t *testing.T, c flowapi.Controller, d testfake.Dialer) (*Forwarder,
 					return
 				}
 				v := p.ToView()
+				if i == 1 && observe != nil {
+					observe(f, v.AsSlice())
+				}
 				wire := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), v.AsSlice()...))})
 				v.Release()
 				p.DecRef()

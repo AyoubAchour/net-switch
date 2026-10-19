@@ -147,8 +147,8 @@ type protocol struct {
 // only safe for a local-app stack with ordered ingress: a host cannot reuse
 // a tuple it still owns, and no old segment may arrive after the new SYN.
 // This applies to every TCP endpoint on s, not just forwarded connections.
-// All close paths freeze the old queue, hand off at most one bare SYN, and
-// silently drop the rest. The bool result is ignored: false also means drop.
+// All close paths hand off at most one bare SYN and silently drop the rest,
+// including late enqueues. The bool result is ignored: false also means drop.
 // The handler receives a borrowed packet after endpoint removal. It can run
 // on a TCP processor, timer, or closing goroutine, with the old endpoint locked:
 // it must not block or call methods that lock that endpoint. In particular,

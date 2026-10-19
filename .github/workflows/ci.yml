@@ -136,7 +136,7 @@ jobs:
       - name: Sustain 1000 successful connections per second at default limits
         env:
           NETSWITCH_TIMEWAIT_GATE: '1'
-        run: go test -v -count=1 -run '^TestTimeWaitThousandPerSecondSuccess$' ./internal/engine/stack
+        run: go test -v -count=1 -run '^TestTimeWait(ThousandPerSecondSuccess|SameTupleUnderLoad)$' ./internal/engine/stack
       - name: Measure retained TIME_WAIT memory after payload buffers drain
         env:
           NETSWITCH_TIMEWAIT_PROFILE: timewait.pprof
@@ -148,12 +148,10 @@ jobs:
           path: internal/engine/stack/timewait.pprof
           if-no-files-found: error
           retention-days: 14
-      - name: Repeat clock and reopen boundaries under race detection
-        if: matrix.name != 'Windows ARM64'
-        run: go test -race -v -count=1000 -run '^TestTimeWait(LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState)$' ./internal/engine/stack
-      - name: Repeat reopen deduplication during endpoint setup
-        if: matrix.name != 'Windows ARM64'
-        run: go test -race -v -count=1000 -run '^TestReopenHookDuringEndpointSetupDeduplicates$' ./internal/engine/tcp
+      - name: Repeat clock and reopen boundaries 1000 times
+        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^TestTimeWait(LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState|SYNBeforeRemoval|ZeroCapClosingBatch)$' ./internal/engine/stack
+      - name: Repeat endpoint setup deduplication and cancellation 1000 times
+        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths
         if: matrix.name == 'Linux x64'
         run: |

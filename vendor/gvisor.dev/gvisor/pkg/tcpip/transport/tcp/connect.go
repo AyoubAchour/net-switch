@@ -13,6 +13,7 @@
 // limitations under the License.
 
 // Modified by Net Switch, 2026-10-19: send reopened TIME_WAIT SYNs to admission.
+
 package tcp
 
 import (
@@ -1197,7 +1198,6 @@ func (e *Endpoint) tryDeliverSegmentFromClosedEndpoint(s *segment) {
 // +checklocksexclude:e.segmentQueue.mu
 func (e *Endpoint) drainClosingSegmentQueue() {
 	if handler := e.protocol.timeWaitHandler.Load(); handler != nil {
-		e.segmentQueue.freeze()
 		var syn *segment
 		for s := e.segmentQueue.dequeue(); s != nil; s = e.segmentQueue.dequeue() {
 			if s.flags.Contains(header.TCPFlagSyn) && s.flags&(header.TCPFlagAck|header.TCPFlagFin|header.TCPFlagRst) == 0 && e.localSynHandled.CompareAndSwap(false, true) {
@@ -1554,6 +1554,7 @@ func (e *Endpoint) handleTimeWaitSegments() (extendTimeWait bool, reuseTW func()
 						}
 						// We explicitly do not DecRef the segment as it's still valid and
 						// being reflected to a listening endpoint.
+						e.localSynHandled.Store(true)
 						return false, reuseTW
 					}
 				}
@@ -1561,6 +1562,7 @@ func (e *Endpoint) handleTimeWaitSegments() (extendTimeWait bool, reuseTW func()
 		}
 		if newSyn && s.flags&(header.TCPFlagAck|header.TCPFlagFin|header.TCPFlagRst) == 0 {
 			if handler := e.protocol.timeWaitHandler.Load(); handler != nil {
+				e.localSynHandled.Store(true)
 				return false, func() { defer s.DecRef(); (*handler)(e.TransportEndpointInfo.ID, s.pkt) }
 			}
 		}

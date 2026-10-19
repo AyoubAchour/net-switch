@@ -1,6 +1,7 @@
 package stack_test
 
 import (
+	"fmt"
 	"os"
 	"runtime"
 	"runtime/pprof"
@@ -9,8 +10,54 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
+
+func TestTimeWaitSameTupleUnderLoad(t *testing.T) {
+	if os.Getenv("NETSWITCH_TIMEWAIT_GATE") != "1" {
+		t.Skip("sustained load runs in the dedicated CI gate")
+	}
+	for _, cap := range []int{0, 1} {
+		t.Run(fmt.Sprintf("cap_%d", cap), func(t *testing.T) {
+			limits := flows.Defaults()
+			limits.TimeWait, limits.Flows, limits.PerApp = cap, 1, 1
+			p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+			const n = 2000
+			start := time.Now()
+			for i := range n {
+				if i%100 == 0 {
+					time.Sleep(time.Until(start.Add(time.Duration(i) * time.Millisecond)))
+				}
+				p.open(1000) // The same port and overlapping sequence space every time.
+				p.upload([]byte("reuse"))
+				p.closeActive()
+			}
+			elapsed := time.Since(start)
+			if elapsed > 3*time.Second {
+				t.Fatalf("could not sustain 1000 same-tuple reuses/s: %s", elapsed)
+			}
+			deadline := time.Now().Add(time.Second)
+			for p.table.Stats().Flows != 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			wantSkipped := uint64(0)
+			if cap == 0 {
+				wantSkipped = n
+			}
+			if g := p.table.Stats(); g.Admitted != n || g.Flows != 0 || g.TimeWait != cap || g.TimeWaitSkipped != wantSkipped || g.Rejected != 0 || p.dials.Load() != n {
+				t.Fatal("same-tuple load lost or duplicated a connection", g)
+			}
+			if p.stack.Stats().TCP.ResetsSent.Value() != 0 || p.forward.Rejected.Load() != 0 || len(p.stack.RegisteredEndpoints()) != cap {
+				t.Fatal("same-tuple load reset, rejected or retained an extra endpoint")
+			}
+			if got := p.table.Totals().Apps["peer"].Up; got != 5*n {
+				t.Fatalf("payload accounting = %d, want %d", got, 5*n)
+			}
+			t.Logf("%d/%d same-tuple connections in %s; cap=%d skipped=%d; RST=0; payloads hash-checked", n, n, elapsed, cap, wantSkipped)
+		})
+	}
+}
 
 // Run once in the CI gate, outside the race suite. It exercises real wire
 // handshakes, relay payloads and graceful closes using the unmodified defaults.

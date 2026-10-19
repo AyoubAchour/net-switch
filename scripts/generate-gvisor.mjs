@@ -46,6 +46,9 @@ if (`h1:${summary.digest('base64')}` !== expected) throw new Error('Extracted up
 
 const files = fs.readFileSync(path.join(root, 'third_party/gvisor.files'), 'utf8').trim().split(/\r?\n/);
 const staging = fs.mkdtempSync(path.join(tmpdir(), 'netswitch-gvisor-'));
+// Print a normal git diff against clean upstream for patch maintenance. The
+// caller saves it with their file-editing tool; this never rewrites the patch.
+const diffOnly = process.argv.includes('--diff');
 try {
   for (const name of files) {
     if (!name || path.isAbsolute(name) || name.split('/').includes('..') || name.includes('\\')) throw new Error(`Invalid manifest path: ${name}`);
@@ -53,14 +56,22 @@ try {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.copyFileSync(path.join(upstream.Dir, name), destination);
   }
+  if (diffOnly) {
+    run('git', ['init', '--quiet'], staging);
+    run('git', ['-c', 'core.autocrlf=false', 'add', '.'], staging);
+  }
   run('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'apply', '--unsafe-paths', '--whitespace=nowarn', path.join(root, 'third_party/gvisor-timewait.patch')], staging);
-  const target = path.resolve(root, 'third_party', 'gvisor');
-  if (path.relative(root, target) !== path.join('third_party', 'gvisor')) throw new Error('Generated target escapes repository');
-  if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) throw new Error('Generated target is a symlink');
-  fs.rmSync(target, { recursive: true, force: true });
-  fs.mkdirSync(target, { recursive: true });
-  fs.cpSync(staging, target, { recursive: true });
-  console.log(`Generated ${files.length} gVisor files from verified ${version} plus gvisor-timewait.patch`);
+  if (diffOnly) {
+    process.stdout.write(run('git', ['-c', 'core.autocrlf=false', 'diff', '--no-ext-diff', '--no-color'], staging));
+  } else {
+    const target = path.resolve(root, 'third_party', 'gvisor');
+    if (path.relative(root, target) !== path.join('third_party', 'gvisor')) throw new Error('Generated target escapes repository');
+    if (fs.existsSync(target) && fs.lstatSync(target).isSymbolicLink()) throw new Error('Generated target is a symlink');
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.mkdirSync(target, { recursive: true });
+    fs.cpSync(staging, target, { recursive: true });
+    console.log(`Generated ${files.length} gVisor files from verified ${version} plus gvisor-timewait.patch`);
+  }
 } finally {
   if (path.dirname(staging) !== tmpdir() || !path.basename(staging).startsWith('netswitch-gvisor-')) throw new Error('Unexpected temporary directory');
   fs.rmSync(staging, { recursive: true, force: true });

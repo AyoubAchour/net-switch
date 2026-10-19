@@ -9,11 +9,106 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
 	"gvisor.dev/gvisor/pkg/buffer"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/faketime"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
+
+type cleanupClock struct {
+	*faketime.ManualClock
+	entered, release chan struct{}
+	once             sync.Once
+}
+
+func (c *cleanupClock) AfterFunc(d time.Duration, f func()) tcpip.Timer {
+	timer := c.ManualClock.AfterFunc(d, f)
+	if d == 60*time.Second {
+		return &cleanupTimer{Timer: timer, clock: c}
+	}
+	return timer
+}
+
+type cleanupTimer struct {
+	tcpip.Timer
+	clock *cleanupClock
+}
+
+func (t *cleanupTimer) Stop() bool {
+	t.clock.once.Do(func() { close(t.clock.entered); <-t.clock.release })
+	return t.Timer.Stop()
+}
+
+func TestTimeWaitSYNBeforeRemoval(t *testing.T) {
+	clock := &cleanupClock{ManualClock: faketime.NewManualClock(), entered: make(chan struct{}), release: make(chan struct{})}
+	unblock := sync.OnceFunc(func() { close(clock.release) })
+	defer unblock()
+	o := ns.DefaultOptions()
+	o.Clock = clock
+	p := newPeerOptions(t, false, flows.Defaults(), o)
+	p.open(1000)
+	p.upload([]byte("old"))
+	p.closeActive()
+	id := gv.TransportEndpointID{LocalAddress: remoteAddr, LocalPort: 443, RemoteAddress: appAddr, RemotePort: p.port}
+	ep := p.stack.FindTransportEndpoint(header.IPv4ProtocolNumber, tcp.ProtocolNumber, id, ns.NIC).(*tcp.Endpoint)
+	ep.LockUser()
+	ep.UnlockUser() // Wait for the TIME_WAIT timer to be installed.
+	expired := make(chan struct{})
+	go func() { clock.Advance(60 * time.Second); close(expired) }()
+	select {
+	case <-clock.entered:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not stop its timer")
+	}
+	if got := p.stack.FindTransportEndpoint(header.IPv4ProtocolNumber, tcp.ProtocolNumber, id, ns.NIC); got != ep {
+		t.Fatal("cleanup barrier must precede demux removal")
+	}
+	p.openWith(1000, func(syn []byte) {
+		p.inject(syn) // The old endpoint still owns the tuple at this point.
+		unblock()
+		<-expired
+	})
+	p.upload([]byte("replacement"))
+	p.closeActive()
+	if g := p.table.Stats(); g.Admitted != 2 || g.Rejected != 0 || p.dials.Load() != 2 || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
+		t.Fatal("cleanup lost or reset the replacement SYN", g)
+	}
+}
+
+func TestTimeWaitZeroCapClosingBatch(t *testing.T) {
+	limits := flows.Defaults()
+	limits.TimeWait = 0
+	limits.Flows, limits.PerApp = 1, 1
+	p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+	p.open(1000)
+	p.upload([]byte("old"))
+	p.current.conn.CloseWrite()
+	h := p.wait(header.TCPFlagFin)
+	p.ack = h.SequenceNumber() + 1
+	fin := p.packet(p.seq, p.ack, header.TCPFlagFin|header.TCPFlagAck, nil)
+	id := gv.TransportEndpointID{LocalAddress: remoteAddr, LocalPort: 443, RemoteAddress: appAddr, RemotePort: p.port}
+	ep := p.stack.FindTransportEndpoint(header.IPv4ProtocolNumber, tcp.ProtocolNumber, id, ns.NIC).(*tcp.Endpoint)
+	old := p.current
+	p.openWith(1000, func(syn []byte) {
+		ep.LockUser()
+		defer ep.UnlockUser()
+		p.inject(fin)
+		for range 3 {
+			p.inject(syn)
+		}
+	})
+	old.conn.Close()
+	p.upload([]byte("replacement"))
+	p.closeActive()
+	deadline := time.Now().Add(time.Second)
+	for p.table.Stats().TimeWaitSkipped != 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if g := p.table.Stats(); g.Admitted != 2 || g.Rejected != 0 || g.TimeWait != 0 || g.TimeWaitSkipped != 2 || p.dials.Load() != 2 || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
+		t.Fatal("zero-cap batch lost, reset or duplicated the replacement", g)
+	}
+}
 
 func TestTimeWaitSYNBeforeCloseState(t *testing.T) {
 	clock := faketime.NewManualClock()
@@ -92,24 +187,20 @@ func TestTimeWaitClosingQueue(t *testing.T) {
 				}
 				return false // A declined SYN must be dropped, never reset.
 			}
+			tcp.SetTimeWaitHandler(p.stack, handler)
 			if late {
-				// Finish the relay's own Endpoint.Close before temporarily
-				// disabling the hook. Otherwise that deferred Close can freeze
-				// the queue after we reinstall the hook, before our late enqueue.
+				// Finish both normal close drains with the hook still installed.
+				// A demux lookup that captured ep can enqueue even after these.
 				select {
 				case <-p.current.relayClosed:
 				case <-time.After(time.Second):
 					t.Fatal("relay did not finish closing")
 				}
-				// Leave an unfrozen closed endpoint using the stock close path.
-				// A demux lookup that already captured ep can still enqueue here.
-				tcp.SetTimeWaitHandler(p.stack, nil)
 				clock.Advance(60 * time.Second)
 				if tcp.EndpointState(ep.State()) != tcp.StateClose {
 					t.Fatal("timer did not close endpoint")
 				}
 			}
-			tcp.SetTimeWaitHandler(p.stack, handler)
 			queue := func(flags header.TCPFlags) {
 				raw := p.packet(1000, p.ack, flags, nil)
 				pkt := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(raw)})

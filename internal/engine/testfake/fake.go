@@ -84,6 +84,9 @@ func (*Ticket) Buffers() (int, int)          { return 64 << 10, 64 << 10 }
 func (*Ticket) Established(netip.Addr)       {}
 func (t *Ticket) Add(up, down uint64)        { t.c.Up.Add(up); t.c.Down.Add(down) }
 func (*Ticket) SetCancel(context.CancelFunc) {}
+func (*Ticket) TimeWait() bool               { return true }
+func (*Ticket) EndTimeWait()                 {}
+func (*Ticket) Retire()                      {}
 func (t *Ticket) Close()                     { t.once.Do(func() { t.c.Closed.Add(1) }) }
 
 type Conn struct {

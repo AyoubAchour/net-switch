@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: close-time TIME_WAIT budget and queue freeze.
+// Modified by Net Switch, 2026-10-19: close-time TIME_WAIT budget and single SYN handoff.
+
 package tcp
 
 import (
@@ -1204,9 +1205,6 @@ func (e *Endpoint) closePendingAcceptableConnectionsLocked() {
 // cleanupLocked frees all resources associated with the endpoint.
 // +checklocks:e.mu
 func (e *Endpoint) cleanupLocked() {
-	if e.protocol.timeWaitHandler.Load() != nil {
-		e.segmentQueue.freeze()
-	}
 	if e.snd != nil {
 		e.snd.resendTimer.cleanup()
 		e.snd.probeTimer.cleanup()

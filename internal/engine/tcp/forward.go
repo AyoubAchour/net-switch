@@ -83,9 +83,7 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		// without waiting on the endpoint lock.
 		registered := f.stack.FindTransportEndpoint(p.NetworkProtocolNumber, gtcp.ProtocolNumber, id, p.NICID)
 		if state == gtcp.StateClose || state == gtcp.StateError || any(registered) != any(c.ep) {
-			if t, ok := c.ticket.(interface{ Retire() }); ok {
-				t.Retire()
-			}
+			c.ticket.Retire()
 			select {
 			case <-c.done:
 				// Final accounting is ready; no need to retain this old graph.
@@ -215,6 +213,8 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	stopApp := context.AfterFunc(ctx, ep.Abort)
 	defer stopApp()
 	if ctx.Err() != nil {
+		// The handshake succeeded; Abort owns the reset, not admission.
+		complete(false)
 		ep.Abort()
 		return
 	}
@@ -222,16 +222,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	ep.SocketOptions().SetReceiveBufferSize(int64(rx), true)
 	ep.SocketOptions().SetSendBufferSize(int64(tx), true)
 	ep.SocketOptions().SetKeepAlive(true)
-	if t, ok := ticket.(interface {
-		TimeWait() bool
-		EndTimeWait()
-	}); ok {
-		ep.(*gtcp.Endpoint).SetTimeWaitPolicy(t.TimeWait, t.EndTimeWait)
-	}
+	ep.(*gtcp.Endpoint).SetTimeWaitPolicy(ticket.TimeWait, ticket.EndTimeWait)
 	c := &connection{id: id, ep: ep, ticket: ticket, last: time.Now(), done: make(chan struct{})}
 	f.mu.Lock()
 	if f.ctx.Err() != nil {
 		f.mu.Unlock()
+		complete(false)
 		ep.Abort()
 		return
 	}

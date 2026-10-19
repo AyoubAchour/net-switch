@@ -29,6 +29,12 @@ type Ticket interface {
 	Established(netip.Addr)
 	Add(up, down uint64)
 	SetCancel(context.CancelFunc)
+	// TimeWait releases live-flow capacity and reserves a retained endpoint.
+	// False skips TIME_WAIT; EndTimeWait releases a successful reservation.
+	TimeWait() bool
+	EndTimeWait()
+	// Retire releases live-flow capacity while preserving final accounting.
+	Retire()
 	Close()
 }
 
