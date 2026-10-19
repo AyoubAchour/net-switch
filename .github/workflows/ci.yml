@@ -3,12 +3,14 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   engine:
+    if: github.event_name != 'workflow_dispatch'
     name: Windows ${{ matrix.arch }} / engine configs and TUN
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -64,6 +66,7 @@ jobs:
   # Net Switch 1.0, in progress: the Go code in the root module (cmd/, internal/).
   # Nothing here ships until 1.0; 0.3.x keeps building from the jobs below.
   go1:
+    if: github.event_name != 'workflow_dispatch'
     name: Go 1.0 / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -172,6 +175,7 @@ jobs:
           go test -run '^$' -fuzz '^FuzzProtocol$' -fuzztime 30s -parallel 2 ./internal/engine/protocol
 
   linux:
+    if: github.event_name != 'workflow_dispatch'
     name: Linux / Node ${{ matrix.node }} (shared code)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -190,6 +194,7 @@ jobs:
       - run: npm test
 
   linux-helper:
+    if: github.event_name != 'workflow_dispatch'
     name: Linux / helper build and shared tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -216,6 +221,7 @@ jobs:
       - run: go build ./...
 
   test:
+    if: github.event_name != 'workflow_dispatch'
     name: Windows / Node ${{ matrix.node }}
     runs-on: windows-latest
     timeout-minutes: 20
@@ -250,6 +256,7 @@ jobs:
         run: ./scripts/build-release.ps1 -SkipInstaller
 
   installer:
+    if: github.event_name != 'workflow_dispatch'
     name: Installer smoke test
     runs-on: windows-latest
     timeout-minutes: 30
@@ -268,6 +275,7 @@ jobs:
           ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-x64.exe"
 
   arm64:
+    if: github.event_name != 'workflow_dispatch'
     name: Windows ARM64 / tests and installer
     runs-on: windows-11-arm
     timeout-minutes: 30
@@ -326,3 +334,40 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           . ./scripts/build-common.ps1
           if ((Get-NativeArchitecture) -ne 'arm64') { throw 'Source engine download would use the wrong architecture.' }
+
+  tray-repeat:
+    if: github.event_name == 'workflow_dispatch'
+    name: Tray fresh runner / ${{ matrix.arch }} / ${{ matrix.sample }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        arch: [x64, arm64]
+        sample: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the pinned Node version
+        id: pins
+        run: |
+          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "node=$($pins.node.version)`n")
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.pins.outputs.node }}
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Build the frozen tray
+        run: ./scripts/build-tray.ps1
+      - name: One cold warm-up and all three timed cases, with no retries
+        env:
+          NETSWITCH_TEST_TRAY_RUNTIME: '1'
+        run: |
+          node --test --test-reporter=tap test/tray-program.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
