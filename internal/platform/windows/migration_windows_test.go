@@ -7,9 +7,32 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestDirectoryRenameBufferIsCountedAndTerminated(t *testing.T) {
+	for _, destination := range []string{`C:\folder\next`, `C:\folder\مرحبا-🌐`, `C:\` + strings.Repeat("x", 147)} {
+		b, err := directoryRenameBuffer(destination)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, _ := windows.UTF16FromString(destination)
+		info := (*directoryRenameInfo)(unsafe.Pointer(&b[0]))
+		offset := int(unsafe.Offsetof(info.Name))
+		if info.Length != uint32((len(name)-1)*2) {
+			t.Fatal("filename length must exclude the terminator", info.Length)
+		}
+		if len(b) < offset+len(name)*2 {
+			t.Fatalf("Win32 filename has no terminator inside its allocation: %d bytes", len(b))
+		}
+		words := unsafe.Slice(&info.Name[0], len(name))
+		if words[len(words)-1] != 0 || windows.UTF16ToString(words) != destination || info.Root != 0 || info.Replace != 0 {
+			t.Fatal("invalid rename buffer")
+		}
+	}
+}
 
 func TestLegacyACLHardeningDoesNotCertifyPublicMarker(t *testing.T) {
 	// Node 0.3.x sets every descendant's owner to BA and replaces its DACL.

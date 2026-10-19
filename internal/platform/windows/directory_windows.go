@@ -604,23 +604,38 @@ func setDirectorySecurity(h windows.Handle, desired *windows.SECURITY_DESCRIPTOR
 	return nil
 }
 
-func renameDirectoryHandle(h windows.Handle, destination string) error {
+type directoryRenameInfo struct {
+	Replace uint32
+	Root    windows.Handle
+	Length  uint32
+	Name    [1]uint16
+}
+
+func directoryRenameBuffer(destination string) ([]byte, error) {
 	name, err := windows.UTF16FromString(destination)
+	if err != nil {
+		return nil, err
+	}
+	var layout directoryRenameInfo
+	offset := int(unsafe.Offsetof(layout.Name))
+	// FileNameLength excludes the NUL, but the Win32 DOS-path conversion
+	// consumes a terminated FileName before issuing the counted NT rename.
+	// Keep that terminator inside our allocation, including at size classes
+	// where there is no spare zeroed allocator padding after the pathname.
+	b := make([]byte, max(int(unsafe.Sizeof(layout)), offset+len(name)*2))
+	info := (*directoryRenameInfo)(unsafe.Pointer(&b[0]))
+	info.Length = uint32((len(name) - 1) * 2)
+	copy(unsafe.Slice(&info.Name[0], len(name)), name)
+	return b, nil
+}
+
+func renameDirectoryHandle(h windows.Handle, destination string) error {
+	b, err := directoryRenameBuffer(destination)
 	if err != nil {
 		return err
 	}
-	name = name[:len(name)-1]
-	type renameInfo struct {
-		Replace uint32
-		Root    windows.Handle
-		Length  uint32
-		Name    [1]uint16
+	if err := windows.SetFileInformationByHandle(h, windows.FileRenameInfo, &b[0], uint32(len(b))); err != nil {
+		return fmt.Errorf("rename machine folder to %q: %w", destination, err)
 	}
-	var layout renameInfo
-	offset := int(unsafe.Offsetof(layout.Name))
-	b := make([]byte, offset+len(name)*2)
-	info := (*renameInfo)(unsafe.Pointer(&b[0]))
-	info.Length = uint32(len(name) * 2)
-	copy(unsafe.Slice(&info.Name[0], len(name)), name)
-	return windows.SetFileInformationByHandle(h, windows.FileRenameInfo, &b[0], uint32(len(b)))
+	return nil
 }
