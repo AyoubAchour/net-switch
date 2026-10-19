@@ -310,6 +310,8 @@ type FaultAck struct {
 
 // Stats are the engine's counters and gauges (5.6, 5.9, 5.10).
 type Stats struct {
+	PeakUnknown, PeakUnknownUDP                                   int
+	AdmittedUnknown, AdmittedUnknownUDP                           uint64
 	OwnerLookup                                                   json.RawMessage
 	TunKernel                                                     json.RawMessage
 	PeakFlows, PeakHandshakes, PeakUDP, PeakPerApp, PeakUDPPerApp int

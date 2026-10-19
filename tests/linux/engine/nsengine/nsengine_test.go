@@ -349,9 +349,9 @@ func TestFlowsPageAndConvert(t *testing.T) {
 }
 
 func TestStatsShapes(t *testing.T) {
-	runtimeShape := `{"engine":{"flows":{"Flows":3,"Handshakes":1,"TCPBytes":65536,"Admitted":9,"LookupCount":4,"LookupNanoseconds":8000000,"LookupAmbiguous":1,"EventsDropped":2},"tunDropped":5,"fatal":"x"},"eventsDropped":1}`
+	runtimeShape := `{"engine":{"flows":{"Flows":3,"Handshakes":1,"TCPBytes":65536,"Admitted":9,"AdmittedUnknown":4,"AdmittedUnknownUDP":2,"PeakUnknown":3,"PeakUnknownUDP":2,"LookupCount":4,"LookupNanoseconds":8000000,"LookupAmbiguous":1,"EventsDropped":2},"tunDropped":5,"fatal":"x"},"eventsDropped":1}`
 	s, err := decodeStats([]byte(runtimeShape))
-	if err != nil || s.Flows != 3 || s.Handshakes != 1 || s.TCPBytes != 65536 || s.Admitted != 9 || s.LookupAmbiguous != 1 ||
+	if err != nil || s.Flows != 3 || s.Handshakes != 1 || s.TCPBytes != 65536 || s.Admitted != 9 || s.LookupAmbiguous != 1 || s.AdmittedUnknown != 4 || s.AdmittedUnknownUDP != 2 || s.PeakUnknown != 3 || s.PeakUnknownUDP != 2 ||
 		s.LookupMean().Milliseconds() != 2 || s.EventsDropped != 3 || s.Counters["tunDropped"] != 5 {
 		t.Errorf("the engine runtime's stats: %+v, %v", s, err)
 	}

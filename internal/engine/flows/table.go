@@ -46,6 +46,8 @@ type Totals struct {
 	Lines map[string]Bytes `json:"lines"`
 }
 type Gauges struct {
+	PeakUnknown, PeakUnknownUDP                                   int
+	AdmittedUnknown, AdmittedUnknownUDP                           uint64
 	PeakFlows, PeakHandshakes, PeakUDP, PeakPerApp, PeakUDPPerApp int
 	PendingPeakBytes                                              int64
 	// Non-cumulative buckets: 100 us wide through 20 ms, then overflow.
@@ -256,8 +258,12 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	t.apps[owner.AppID] = c
 	if unknown {
 		t.gauges.Unknown++
+		t.gauges.AdmittedUnknown++
+		t.gauges.PeakUnknown = max(t.gauges.PeakUnknown, t.gauges.Unknown)
 		if udp {
 			t.gauges.UnknownUDP++
+			t.gauges.AdmittedUnknownUDP++
+			t.gauges.PeakUnknownUDP = max(t.gauges.PeakUnknownUDP, t.gauges.UnknownUDP)
 		}
 	}
 	t.point++

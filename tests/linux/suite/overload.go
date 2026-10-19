@@ -280,24 +280,62 @@ func tcpStorm(e *Env) {
 	// limit, and 9,000 flows are far under the total: only the per-app
 	// limit can refuse.
 	const storm = 9000
+	from := e.Mark()
 	hold := e.Start(Run{App: "bravo", Args: append([]string{"tcphold", "--to", floodTargets(0, wire.PortHold), "--count", strconv.Itoa(storm),
 		"--concurrency", "300", "--timeout", "5000"}, release.Arg()...)})
 	hold.WaitLine(e, "holding ", 3*time.Minute)
 	e.ExpectTCP("foxtrot during the storm", "foxtrot", AsUser, "a", topo.Server4, 3)
 	e.T.Check(hold.Running(), "bravo still holds its connections")
+	known, unknown := 0, 0
+	_, v10 := e.Eng.(engine.V1)
+	if v10 {
+		bad := 0
+		for _, flow := range e.Flows() {
+			if flow.Protocol != "tcp" || flow.Destination.Port() != wire.PortHold {
+				continue
+			}
+			if flow.App == "" {
+				unknown++
+				if flow.Line != "a" {
+					bad++
+				}
+			} else {
+				known++
+				if flow.App != AppPath("bravo") || flow.Line != "b" {
+					bad++
+				}
+			}
+		}
+		e.T.Check(bad == 0 && unknown <= 2048, "held identities use their correct lanes and unknown stays bounded (%d known, %d unknown, %d invalid)", known, unknown, bad)
+		// Unknown flows are a separate pool on the main lane (5.4). The
+		// known app must actually reach its limit for this case to prove it.
+		e.T.Check(known >= tcpFlowsPerApp, "identified bravo connections reach the %d per-app limit (%d)", tcpFlowsPerApp, known)
+	}
 	release.Open(e)
 	var r app.HoldResult
 	hold.WaitJSON(e, time.Minute, &r)
 	refused := r.Errors["ECONNREFUSED"] + r.Errors["ECONNRESET"]
-	e.T.Check(r.Established >= tcpFlowsPerApp*95/100, "bravo still got at least 95%% of its allowed %d connections (%d established, errors %v)", tcpFlowsPerApp, r.Established, r.Errors)
+	if !v10 {
+		known = r.Established
+	} else {
+		e.T.Check(known+unknown == r.Established, "the client's held connections match the identified and unknown pools (%d = %d + %d)", r.Established, known, unknown)
+		isHold := func(record inet.Record) bool {
+			return record.Kind == "tcp" && record.T >= from && strings.HasSuffix(record.Dst, ":"+strconv.Itoa(wire.PortHold))
+		}
+		recs, _ := e.WaitRecords(10*time.Second, func(records []inet.Record) bool { return len(Select(records, isHold)) >= r.Established })
+		accepted := Select(recs, isHold)
+		lines := RecordLines(accepted)
+		e.T.Check(len(accepted) == r.Established && lines["b"] == known && lines["a"] == unknown, "servers independently confirm both pools on their required lines (%s)", Describe(lines))
+	}
+	e.T.Check(known >= tcpFlowsPerApp*95/100, "identified bravo still got at least 95%% of its allowed %d connections (%d identified, %d unknown, errors %v)", tcpFlowsPerApp, known, unknown, r.Errors)
 	e.T.Check(r.StillOpen == r.Established, "admitted connections stay open (%d of %d)", r.StillOpen, r.Established)
 	var s Stream
 	stream.WaitJSON(e, 30*time.Second, &s)
 	e.keptOpen("charlie's stream through the storm", s, "c")
 	e.T.Check(e.Eng.Running(), "the engine is still running")
-	e.T.Expect(r.Established <= tcpFlowsPerApp && refused == storm-r.Established && r.FailedMS.Max < 3000 && responsive(s),
-		"at most %d of %d are admitted and every other one is refused within 3 s, while charlie's stream never waits 2 s for an answer (%d admitted, %d refused, slowest refusal %.0f ms, longest silence %d ms, errors %v)",
-		tcpFlowsPerApp, storm, r.Established, refused, r.FailedMS.Max, s.MaxGapMS, r.Errors)
+	e.T.Expect(known <= tcpFlowsPerApp && refused == storm-r.Established && refused > 0 && r.FailedMS.Max < 3000 && responsive(s),
+		"the identified app stays within %d, the separately counted unknown pool is bounded, and every other attempt is refused within 3 s while charlie stays responsive (%d identified, %d unknown, %d refused; slowest refusal %.0f ms, longest silence %d ms)",
+		tcpFlowsPerApp, known, unknown, refused, r.FailedMS.Max, s.MaxGapMS)
 }
 
 func tcpHandshakesCase(e *Env) {
@@ -401,14 +439,18 @@ func tcpFlowsTotalCase(e *Env) {
 	}
 	recs, _ := e.WaitRecords(10*time.Second, func(recs []inet.Record) bool { return len(Select(recs, isHold)) >= established })
 	accepted := Select(recs, isHold)
-	e.T.Check(len(accepted) == established && RecordLines(accepted)["c"] == len(accepted),
-		"the servers accepted exactly the %d connections the apps hold, all over line c (%d accepted, lines %s)", established, len(accepted), Describe(RecordLines(accepted)))
-	e.T.Check(established >= tcpFlowsTotal*95/100, "together the apps still got at least 95%% of the %d flows allowed in total (%d)", tcpFlowsTotal, established)
+	unknown := 0
 	if v1, ok := e.Eng.(engine.V1); ok {
 		st, err := v1.Session().Stats(e.Ctx())
 		e.T.Require(err == nil, "stats while all TCP flows are held (%v)", err)
+		unknown = int(st.Unknown)
+		e.T.Check(unknown <= 2048 && st.PeakUnknown <= 2048, "unknown TCP admission never exceeds its separate 2048-flow budget (%d held, %d peak)", unknown, st.PeakUnknown)
 		e.T.Logf("held TCP flows: %d; runtime memory and queues: %v", established, st.Counters)
 	}
+	lines := RecordLines(accepted)
+	e.T.Check(len(accepted) == established && lines["c"] == established-unknown && lines["a"] == unknown,
+		"servers confirm every held connection: identified flows on c, unknown flows on the main lane a (%d held, %d unknown; lines %s)", established, unknown, Describe(lines))
+	e.T.Check(established >= tcpFlowsTotal*95/100, "together the apps still got at least 95%% of the %d flows allowed in total (%d)", tcpFlowsTotal, established)
 	release.Open(e)
 	refused, stillOpen := 0, 0
 	var parts []string
@@ -557,7 +599,7 @@ func (e *Env) cappedFloods(names []string, sockets, rate int) (refusals, sends m
 	}
 	refusals, sends = map[string]map[int64]int{}, map[string]map[int64]int{}
 	var firstWhole, lastWhole int64 // the whole seconds every app sent through
-	sent, refused := 0, 0
+	sent, refused, answered := 0, 0, 0
 	for i, name := range names {
 		var r app.FloodResult
 		bgs[name].WaitJSON(e, 2*time.Minute, &r)
@@ -581,7 +623,7 @@ func (e *Env) cappedFloods(names []string, sockets, rate int) (refusals, sends m
 		} else {
 			firstWhole, lastWhole = max(firstWhole, first/1000+1), min(lastWhole, last/1000-1)
 		}
-		e.T.Check(r.Answered == 0, "none of capped %s's datagrams was answered (%d)", name, r.Answered)
+		answered += r.Answered
 		sent += r.Sent
 		refused += r.Refused
 	}
@@ -594,11 +636,16 @@ func (e *Env) cappedFloods(names []string, sockets, rate int) (refusals, sends m
 	}
 	e.Sleep(500 * time.Millisecond)
 	escaped := Select(e.Records(), func(r inet.Record) bool { return r.Kind == "udp" && r.T >= from })
-	e.T.Check(len(escaped) == 0, "nothing the capped apps sent got out (%d datagrams reached the servers)", len(escaped))
 	after, err := s.Stats(e.Ctx())
 	e.T.Require(err == nil, "stats (%v)", err)
+	unknown := after.AdmittedUnknownUDP - before.AdmittedUnknownUDP
+	admitted := after.Admitted - before.Admitted
+	e.T.Require(unknown <= uint64(sent), "unknown admission counter stays within actual sends (%d of %d)", unknown, sent)
+	e.T.Check(admitted == unknown && after.PeakUnknownUDP <= 512, "no identified capped flow was admitted; unknown flows obey their separate pool (%d admitted, %d unknown, %d peak unknown UDP)", admitted, unknown, after.PeakUnknownUDP)
+	e.T.Check(uint64(len(escaped)) == unknown && RecordLines(escaped)["a"] == len(escaped) && answered == len(escaped), "server records and replies account for exactly the unknown flows allowed on the main lane (%d recorded, %d answered, %d unknown; lines %s)", len(escaped), answered, unknown, Describe(RecordLines(escaped)))
+	e.T.Require(refused+int(unknown) <= sent, "allowed and refused sessions are disjoint (%d allowed, %d refused, %d sent)", unknown, refused, sent)
 	dropped := after.DroppedNotices - before.DroppedNotices
-	e.T.Check(dropped >= uint64(sent-refused)*9/10, "the notices held back were counted (%d sessions, %d told, %d counted as dropped)", sent, refused, dropped)
+	e.T.Check(dropped >= uint64(sent-int(unknown)-refused)*9/10, "the notices held back for rejected sessions were counted (%d sessions, %d allowed unknown, %d told, %d counted as dropped)", sent, unknown, refused, dropped)
 	return refusals, sends, whole
 }
 
