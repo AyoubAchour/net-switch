@@ -21,6 +21,7 @@ dist/
 
 # Net Switch 1.0 Go builds.
 /bin/
+/tests/differential/runner.exe
 
 node_modules/
 *.log
