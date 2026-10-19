@@ -5,6 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      native_tests:
+        description: Temporary native scan timing and repeat probe
+        type: boolean
+        default: false
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -14,9 +18,45 @@ permissions:
   contents: read
 
 jobs:
+  native-repeats:
+    name: Native scan timing / ${{ matrix.arch }} / ${{ matrix.shard }}
+    if: github.event_name == 'workflow_dispatch' && inputs.native_tests
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+        arch: [x64, arm64]
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Build the native helper
+        run: ./scripts/build-helper.ps1 -Arch ${{ matrix.arch }}
+      - name: Measure the cold scan during the Node suite
+        env:
+          NETSWITCH_SCAN_TIMING: '1'
+        run: |
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.native_tests
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:

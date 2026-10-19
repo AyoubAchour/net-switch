@@ -16,7 +16,9 @@ const sample = { readAt: 1000, adapters: [{ alias: 'Cable', index: 3, status: 'U
 
 test('native adapters match the PowerShell scan field by field', needsHelper, async (t) => {
   const native = JSON.parse(await runFile(helper, ['network', '--once']));
-  const shell = await runPowerShellJson(ADAPTERS_SCRIPT, { timeoutMs: 30_000 });
+  const shell = process.env.NETSWITCH_SCAN_TIMING === '1'
+    ? await (await import('./powershell-scan-timing.mjs')).timedScan()
+    : await runPowerShellJson(ADAPTERS_SCRIPT, { timeoutMs: 30_000 });
   assert.deepEqual(native.adapters.map((a) => a.alias).sort(), shell.map((a) => a.alias).sort(),
     `Visible adapter list differs. Native: ${JSON.stringify(native.adapters)}; PowerShell: ${JSON.stringify(shell)}`);
   for (const adapter of shell) {
