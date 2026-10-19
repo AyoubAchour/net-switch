@@ -102,6 +102,46 @@ func TestSequentialColdSocketsReuseLowDescriptors(t *testing.T) {
 	}
 }
 
+func TestSocketBeyondFiveThousandRegularFiles(t *testing.T) {
+	var files []*os.File
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+	}()
+	for i := 0; i < 5000; i++ {
+		f, err := os.Open("/dev/null")
+		if err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, f)
+	}
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	key := c.LocalAddr().(*net.UDPAddr).AddrPort()
+	rows, err := diagDump(ctx, unix.AF_INET, unix.IPPROTO_UDP, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := matchUDP(rows, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := NewOwners()
+	owner, err := o.holders(ctx, r)
+	if err != nil || owner.PID != uint32(os.Getpid()) {
+		t.Fatalf("socket after 5,000 files: %+v %v", owner, err)
+	}
+	if !o.windows[owner.PID].tailProbed {
+		t.Fatal("lookup didn't use the bounded descriptor-tail search")
+	}
+}
+
 func TestRuleActionAndOneByteProtocol(t *testing.T) {
 	b := make([]byte, 20)
 	b[0] = unix.AF_INET
