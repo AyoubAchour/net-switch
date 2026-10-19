@@ -5,6 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      wintun_repeat:
+        description: Temporary Wintun pause-burst investigation
+        type: boolean
+        default: false
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -14,9 +18,57 @@ permissions:
   contents: read
 
 jobs:
+  wintun-reproduction:
+    name: Wintun repeat / ${{ matrix.arch }} / ${{ matrix.repeat }}
+    if: github.event_name == 'workflow_dispatch' && inputs.wintun_repeat
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        repeat: [1, 2]
+        arch: [x64, arm64]
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Compile native tests and fetch the signed DLL
+        run: |
+          go test -c -o ./bin/wintun.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/prepare-wintun-tests.ps1
+      - name: Prove pause classification, recorded burst and robust comparison
+        run: ./bin/wintun.test.exe '-test.v' '-test.run=^Test(PauseClassification|PerformanceMedian|WintunPauseMonitor)$'
+      - name: Ten complete ping-pong runs, retaining every failure
+        run: |
+          $failed = 0
+          foreach ($iteration in 1..10) {
+            Write-Output "WINTUN_REPEAT arch=${{ matrix.arch }} shard=${{ matrix.repeat }} iteration=$iteration"
+            ./bin/wintun.test.exe '-test.v' '-test.timeout=3m' '-test.run=^TestWintunPingPong$'
+            if ($LASTEXITCODE -ne 0) { $failed++ }
+          }
+          if ($failed -ne 0) { throw "$failed ping-pong runs failed" }
+
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.wintun_repeat
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:

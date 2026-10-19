@@ -81,10 +81,12 @@ recorded, then one retry releases the DLL's queued packet; the slow attempt stay
 in the distribution. Our path must have zero missed-wake rescues, without
 exceptions. Every round trip over 50 ms is classified after the run. A 1 ms
 QPC heartbeat on a locked OS thread uses a native high-resolution timer; an
-independent Go timer sampler detects pauses across the process. Only a common
-gap covering the delay to within five sampling periods (5 ms), without a
-rescue, counts as an environment pause. A partial overlap or a delayed sampler
-alone still fails our session. This identifies process/host scheduling pauses,
+independent Go timer sampler detects pauses across the process. Only shared
+pause coverage leaving at most five sampling periods (5 ms) unexplained, without
+a rescue, counts as an environment pause. A delayed sampler alone or more than
+5 ms unexplained still fails our session. Coverage is the union of the intersections of
+both samplers' gaps, clipped to the reply: multiple pauses count, but overlapping
+or split observations cannot count the same time twice. This identifies process/host scheduling pauses,
 not whether the Go runtime, OS or hypervisor caused them; the old uninstrumented
 failure cannot be classified retroactively.
 

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -172,19 +173,37 @@ func overlappingGaps(gaps []pauseGap, start, end int64) []pauseGap {
 	return result
 }
 
-// Require ONE shared gap to cover the delay to within 5 ms (five sampling
-// periods). A merely overlapping pause, many tiny gaps, or a rescued packet
-// cannot excuse a session stall. Keep every raw interval for later inspection.
+// Count only time covered by BOTH samplers, clipped to this reply. A burst may
+// contain several pauses separated by real scheduling progress. Merge their
+// intersections before summing so neither a split nor a duplicate interval
+// changes the evidence. The unexplained remainder must still be at most 5 ms
+// (five sampling periods), and a rescue can never be exempted.
 func classifyPause(start, end int64, rescued bool, heartbeat, scheduler []pauseGap) (string, time.Duration) {
-	var covered time.Duration
+	type interval struct{ start, end int64 }
+	var common []interval
 	for _, a := range heartbeat {
 		for _, b := range scheduler {
 			left, right := max(start, a.Start, b.Start), min(end, a.End, b.End)
 			if right > left {
-				covered = max(covered, qpcDuration(left, right))
+				common = append(common, interval{left, right})
 			}
 		}
 	}
+	sort.Slice(common, func(i, j int) bool { return common[i].start < common[j].start })
+	var coveredTicks int64
+	if len(common) != 0 {
+		merged := common[0]
+		for _, next := range common[1:] {
+			if next.start <= merged.end {
+				merged.end = max(merged.end, next.end)
+			} else {
+				coveredTicks += merged.end - merged.start
+				merged = next
+			}
+		}
+		coveredTicks += merged.end - merged.start
+	}
+	covered := qpcDuration(0, coveredTicks)
 	if !rescued && covered > 0 && qpcDuration(start, end)-covered <= 5*time.Millisecond {
 		return "environment_pause", covered
 	}
@@ -210,6 +229,11 @@ func TestPauseClassification(t *testing.T) {
 		{"unexplained six ms", gap(100, 154), gap(100, 154), false, "session_stall"},
 		{"rescue during pause", gap(99, 161), gap(99, 161), true, "session_stall"},
 		{"disjoint samplers", gap(99, 130), gap(130, 161), false, "session_stall"},
+		{"two pauses", append(gap(99, 130), gap(133, 161)...), gap(99, 161), false, "environment_pause"},
+		{"split observation", append(gap(99, 130), gap(130, 161)...), gap(99, 161), false, "environment_pause"},
+		{"duplicates cannot inflate coverage", append(gap(100, 130), gap(100, 130)...), gap(99, 161), false, "session_stall"},
+		{"unexplained time between pauses", append(gap(99, 125), gap(135, 161)...), gap(99, 161), false, "session_stall"},
+		{"rescue across pauses", append(gap(99, 130), gap(133, 161)...), gap(99, 161), true, "session_stall"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, _ := classifyPause(100*ms, 160*ms, tc.rescued, tc.heartbeat, tc.scheduler)
@@ -218,6 +242,27 @@ func TestPauseClassification(t *testing.T) {
 			}
 		})
 	}
+	t.Run("recorded ARM64 pause burst", func(t *testing.T) {
+		// Job 118309008902, sequence 87713, QPC at 10 MHz. The old
+		// longest-gap calculation explained only 45.3379 of 52.5101 ms.
+		// The union explains 49.0729 ms, leaving 3.4372 ms unexplained.
+		// Scale offsets so this test also works on other QPC frequencies.
+		qpc := func(recorded int64) int64 {
+			return (recorded - 3619320455) * performanceFrequency() / 10000000
+		}
+		heartbeat := []pauseGap{
+			{Start: qpc(3617782743), End: qpc(3619357805)},
+			{Start: qpc(3619390857), End: qpc(3619850339)},
+		}
+		scheduler := []pauseGap{
+			{Start: qpc(3617773167), End: qpc(3619321255)},
+			{Start: qpc(3619321255), End: qpc(3619844236)},
+		}
+		classification, covered := classifyPause(qpc(3619320455), qpc(3619845556), false, heartbeat, scheduler)
+		if classification != "environment_pause" || covered < 49072*time.Microsecond || covered > 49074*time.Microsecond {
+			t.Fatalf("recorded pause burst: %s, covered %s", classification, covered)
+		}
+	})
 }
 
 func TestPerformanceMedian(t *testing.T) {
@@ -329,5 +374,5 @@ func TestWintunPauseMonitor(t *testing.T) {
 	if live, _ := classifyPause(liveStart, liveEnd, false, gaps[0], gaps[1]); live != "session_stall" {
 		t.Fatal("an idle caller was mistaken for a process-wide pause")
 	}
-	report(t, map[string]any{"test": "pause_detector_proof", "arch": runtime.GOARCH, "classification": classification, "suspended_ms": qpcDuration(start, end).Seconds() * 1000, "common_gap_ms": covered.Seconds() * 1000})
+	report(t, map[string]any{"test": "pause_detector_proof", "arch": runtime.GOARCH, "classification": classification, "suspended_ms": qpcDuration(start, end).Seconds() * 1000, "common_pause_ms": covered.Seconds() * 1000})
 }

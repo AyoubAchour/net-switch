@@ -509,7 +509,7 @@ func TestWintunPingPong(t *testing.T) {
 				} else {
 					result.SessionStalls++
 				}
-				report(t, map[string]any{"test": "slow_round_trip", "arch": runtime.GOARCH, "mode": mode, "sequence": trip.sequence, "ms": qpcDuration(trip.start, trip.end).Seconds() * 1000, "start_qpc": trip.start, "end_qpc": trip.end, "qpc_frequency": performanceFrequency(), "rescued": trip.rescued, "classification": classification, "common_gap_ms": covered.Seconds() * 1000, "heartbeat_gaps": heartbeat, "scheduler_gaps": scheduler, "states_during_delay": states, "state_at_reply": trip.state})
+				report(t, map[string]any{"test": "slow_round_trip", "arch": runtime.GOARCH, "mode": mode, "sequence": trip.sequence, "ms": qpcDuration(trip.start, trip.end).Seconds() * 1000, "start_qpc": trip.start, "end_qpc": trip.end, "qpc_frequency": performanceFrequency(), "rescued": trip.rescued, "classification": classification, "common_pause_ms": covered.Seconds() * 1000, "heartbeat_gaps": heartbeat, "scheduler_gaps": scheduler, "states_during_delay": states, "state_at_reply": trip.state})
 			}
 			report(t, map[string]any{"test": "pause_monitor", "arch": runtime.GOARCH, "mode": mode, "samples": monitor.samples, "heartbeat_gaps": len(monitor.gaps[0]), "scheduler_gaps": len(monitor.gaps[1])})
 			sort.Slice(timings, func(i, j int) bool { return timings[i] < timings[j] })
