@@ -194,6 +194,12 @@ try {
     const { stdout, stderr } = await promisify(execFile)('go', ['test', '-v', '-count=1', '-timeout=90s', '-run=^TestReadWorkerCannotWriteControlHKLMOrTCP$', './internal/platform/worker'], {
       cwd: ROOT, windowsHide: true, timeout: 120_000, maxBuffer: 2 * 1024 * 1024,
       env: { ...process.env, NETSWITCH_CONTROL_PID: String(server.pid), GOMAXPROCS: '2' },
+    }).catch((error) => {
+      // execFile's message omits stdout, where Go prints failed assertions.
+      // Keep the live-Control proof visible even when the test exits nonzero.
+      if (error.stdout) console.error(error.stdout);
+      if (error.stderr) console.error(error.stderr);
+      throw error;
     });
     console.log(stdout); if (stderr) console.error(stderr);
     check(true, 'read workers cannot modify the running Control process, HKLM or TCP rows');

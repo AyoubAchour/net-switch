@@ -81,8 +81,8 @@ func TestWorkerBootstrapDiagnostics(t *testing.T) {
 	}
 	var empty uint16
 	for _, test := range []struct {
-		name string
-		desktop *uint16
+		name      string
+		desktop   *uint16
 		flags, ui uint32
 	}{
 		{"inherited/no-window/all-UI-limits", nil, windows.CREATE_NO_WINDOW, 255},

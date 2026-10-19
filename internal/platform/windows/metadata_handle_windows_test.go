@@ -97,22 +97,32 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, kind := range []string{"root", "child"} {
+	for _, kind := range []string{"root", "child", "nested-directory"} {
 		t.Run(kind, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "machine")
 			if err := ProtectDirectory(root); err != nil {
 				t.Fatal(err)
 			}
 			target, sentinel := root, filepath.Join(root, "sentinel")
-			if kind == "child" {
+			if kind != "root" {
 				setProofSecurity(t, root, user.User.Sid.String(), "0x1200a9")
-				target = filepath.Join(root, "record")
-				sentinel = target
-				if err := os.WriteFile(target, []byte("original"), 0600); err != nil {
-					t.Fatal(err)
+				if kind == "nested-directory" {
+					target = filepath.Join(root, "child", "nested")
+					if err := os.MkdirAll(target, 0700); err != nil {
+						t.Fatal(err)
+					}
+					setProofSecurity(t, filepath.Dir(target), user.User.Sid.String(), "0x1200a9")
+					sentinel = filepath.Join(target, "sentinel")
+				} else {
+					target = filepath.Join(root, "record")
+					sentinel = target
+					if err := os.WriteFile(target, []byte("original"), 0600); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			setProofSecurity(t, target, user.User.Sid.String(), "0x00040000")
+			before := fileSecurity(t, target)
 			p, err := worker.Start(exe, []string{"worker", "acl-proof"})
 			if err != nil {
 				t.Fatal(err)
@@ -132,6 +142,14 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			}
 			if err := ProtectDirectory(root); err != nil {
 				t.Fatal(err)
+			}
+			old, err := filepath.Glob(root + ".untrusted-*")
+			if err != nil || len(old) != 1 {
+				t.Fatalf("untrusted objects were not quarantined: %v %v", old, err)
+			}
+			relative, _ := filepath.Rel(root, target)
+			if after := fileSecurity(t, filepath.Join(old[0], relative)); before != after {
+				t.Fatalf("original ACL was changed before quarantine: %s -> %s", before, after)
 			}
 			if err := encoder.Encode(true); err != nil {
 				t.Fatal(err)

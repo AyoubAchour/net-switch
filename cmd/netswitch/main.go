@@ -178,12 +178,6 @@ func run() (runErr error) {
 		}
 	}()
 	system := &win.System{Workers: worker.Supervisor{Executable: exe, Log: func(err error) { log.append("worker: " + err.Error()) }, Crash: crash}, EnginePath: path, Root: *root, UserDir: *user, MachineDir: *machine}
-	if *machine != *user && !*dev {
-		if _, err := system.Call(ctx, "protect-directory", map[string]any{"path": *machine}); err != nil {
-			log.append("Net Switch cannot start: machine folder protection failed: " + err.Error())
-			return err
-		}
-	}
 	lock, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(lockPort))
 	if err != nil {
 		holder, why := system.Call(ctx, "port-holder", map[string]any{"port": lockPort})
@@ -191,6 +185,12 @@ func run() (runErr error) {
 		return nil
 	}
 	defer lock.Close()
+	if *machine != *user && !*dev {
+		if _, err := system.Call(ctx, "protect-directory", map[string]any{"path": *machine}); err != nil {
+			log.append("Net Switch cannot start: machine folder protection failed: " + err.Error())
+			return err
+		}
+	}
 	go func() {
 		defer crash.Recover("single-instance listener")
 		for {

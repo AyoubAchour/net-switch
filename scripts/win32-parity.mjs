@@ -90,9 +90,26 @@ ConvertTo-Json -InputObject @($items | ForEach-Object { [pscustomobject]@{ famil
     const old = path.join(folder, 'old'), current = path.join(folder, 'new');
     for (const p of [old, current]) { await mkdir(path.join(p, 'child'), { recursive: true }); await writeFile(path.join(p, 'child', 'record'), 'probe'); }
     await windows.protectMachineDir(old, path.join(folder, 'acl.log'));
+    // Existing legitimate machine data already has the installed admin-only
+    // boundary. Hostile owner/grant fixtures have separate quarantine tests.
+    await windows.protectMachineDir(current, path.join(folder, 'acl.log'));
     await native('protect-directory', { path: current });
     const sddl = async (dir) => runPowerShellJson(`ConvertTo-Json -InputObject @((Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'child')).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'child\\record')).Sddl) -Compress`, { args: { DIR: dir } });
     assert.deepEqual(await sddl(current), await sddl(old));
+    assert.equal(await readFile(path.join(current, 'child', 'record'), 'utf8'), 'probe');
+  });
+  await check('single-instance lock prevents a second Control from quarantining data', async () => {
+    const machine = path.join(folder, 'second-machine'), user = path.join(folder, 'second-user');
+    await mkdir(machine); await mkdir(user);
+    const sentinel = path.join(machine, 'record');
+    await writeFile(sentinel, 'must remain at the original path');
+    const listener = createServer((socket) => socket.end());
+    listener.listen(47820, '127.0.0.1'); await once(listener, 'listening');
+    try {
+      await run(executable, ['--user-data', user, '--machine-data', machine], { windowsHide: true, timeout: 30_000 });
+      assert.equal(await readFile(sentinel, 'utf8'), 'must remain at the original path');
+      assert.match(await readFile(path.join(user, 'server.log'), 'utf8'), /refusing a second control process/);
+    } finally { await new Promise((resolve) => listener.close(resolve)); }
   });
   await check('Start-menu resolved app list', async () => {
     const before = await new InstalledApps().list();
