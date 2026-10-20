@@ -83,6 +83,13 @@ func desktopDenied() error   { return nil }
 func legacyMutex() error     { return errors.New("Windows only") }
 func probeMain([]string) int { return 2 }
 func hostedMain(*testing.M) (bool, int) {
+	if len(os.Args) == 3 && os.Args[1] == "tun-relay" && hosted() {
+		if err := tunRelay(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return true, 1
+		}
+		return true, 0
+	}
 	if len(os.Args) > 1 && os.Args[1] == "serve" && hosted() {
 		if err := inet.Main(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)

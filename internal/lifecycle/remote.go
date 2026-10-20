@@ -29,6 +29,8 @@ type Remote struct {
 	ctx                  context.Context
 	log                  func(string)
 	recovering, stopping bool
+	recovery             uint64
+	attempt              uint64
 	forgotten            map[string]uint64
 	forgetSequence       uint64
 	dial                 func(context.Context, localipc.Endpoint) (*localipc.Conn, error)
@@ -48,11 +50,21 @@ func (r *Remote) Snapshot() ce.Snapshot {
 	b, _ := json.Marshal(r.snapshot)
 	var s ce.Snapshot
 	_ = json.Unmarshal(b, &s)
+	if s.Status == "on" && r.rpc != nil {
+		select {
+		case <-r.rpc.Done():
+			s.Status = "starting"
+		default:
+		}
+	}
 	return s
 }
 func (r *Remote) Fail(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.failLocked(err)
+}
+func (r *Remote) failLocked(err error) {
 	message := err.Error()
 	if r.snapshot.Status != "error" || r.snapshot.FailureID == "" {
 		r.snapshot.FailureID = r.instance
@@ -65,18 +77,37 @@ func (r *Remote) Fail(err error) {
 }
 func (r *Remote) disconnect(rpc *RPC, err error) {
 	r.mu.Lock()
-	if r.rpc != rpc || r.stopping || r.recovering || r.ctx.Err() != nil {
+	if r.rpc != rpc || r.stopping || r.ctx.Err() != nil {
 		r.mu.Unlock()
 		return
 	}
-	r.rpc, r.recovering = nil, true
+	r.rpc = nil
+	if r.snapshot.Status != "error" {
+		r.snapshot.Status = "starting"
+	}
+	already := r.recovering
+	if !already {
+		r.recovering = true
+		r.recovery++
+	}
+	id := r.recovery
 	r.mu.Unlock()
-	rpc.Close()
+	if rpc != nil {
+		rpc.Close()
+	}
 	r.log("engine transport interrupted; checking the existing service before counting a failure: " + err.Error())
-	go r.recoverConnection(err)
+	if !already {
+		go r.recoverConnection(err, id)
+	}
 }
-func (r *Remote) recoverConnection(cause error) {
-	defer func() { r.mu.Lock(); r.recovering = false; r.mu.Unlock() }()
+func (r *Remote) recoverConnection(cause error, id uint64) {
+	defer func() {
+		r.mu.Lock()
+		if r.recovery == id {
+			r.recovering = false
+		}
+		r.mu.Unlock()
+	}()
 	for r.ctx.Err() == nil {
 		r.mu.Lock()
 		stopping := r.stopping
@@ -88,23 +119,46 @@ func (r *Remote) recoverConnection(cause error) {
 		err := r.Attach(ctx, false)
 		cancel()
 		if err == nil {
-			r.log("reattached to engine after transport interruption")
-			return
+			r.mu.Lock()
+			live := r.rpc != nil
+			if live {
+				select {
+				case <-r.rpc.Done():
+					live = false
+				default:
+				}
+			}
+			if live {
+				r.recovering = false
+			}
+			r.mu.Unlock()
+			if live {
+				r.log("reattached to engine after transport interruption")
+				return
+			}
+			continue
 		}
+		r.mu.Lock()
+		instance, attempt := r.instance, r.attempt
+		r.mu.Unlock()
 		status, queryErr := r.queryService(service.Engine)
 		if queryErr == nil && status.Stopped {
 			r.mu.Lock()
 			stopping = r.stopping
 			grace := time.Now().Before(r.wakeGrace)
+			current := r.recovery == id && r.rpc == nil && r.instance == instance && r.attempt == attempt
+			if current && !stopping && !grace {
+				r.failLocked(fmt.Errorf("engine instance exited: %w", cause))
+			}
 			r.mu.Unlock()
+			if !current {
+				continue
+			}
 			if grace {
 				if localipc.Pause(r.ctx, time.Second) != nil {
 					return
 				}
 				continue
-			}
-			if !stopping {
-				r.Fail(fmt.Errorf("engine instance exited: %w", cause))
 			}
 			return
 		}
@@ -300,6 +354,7 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	defer cancel()
 	r.mu.Lock()
 	r.stopping = false
+	r.attempt++
 	// Failures before an instance exists belong to this one start attempt.
 	if r.rpc == nil && !r.recovering {
 		r.instance = ""
@@ -314,6 +369,10 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 		status, queryErr := r.queryService(service.Engine)
 		if queryErr == nil && status.Stopped {
 			r.Fail(err)
+		} else {
+			// SCM may still be bringing up the instance after our wait timed
+			// out. Keep following it; do not leave a permanent "starting".
+			r.disconnect(nil, err)
 		}
 		return err
 	}

@@ -58,6 +58,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          go test -count=1 ./internal/winlock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles 'NetSwitch-Lifecycle-CI'
           foreach ($name in @('netswitch', 'netswitch-engine', 'netswitch-desktop', 'netswitchctl')) {
             go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"

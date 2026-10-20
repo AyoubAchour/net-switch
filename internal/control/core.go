@@ -742,6 +742,16 @@ func (c *Core) Routing(ctx context.Context, on bool) error {
 	})
 }
 
+// SignIn starts routing without resetting an already active recovery budget.
+func (c *Core) SignIn(ctx context.Context) error {
+	// A second owner session or a retry after an interrupted handshake must
+	// not erase an existing crash budget.
+	if c.WantsRouting() {
+		return c.Start(ctx)
+	}
+	return c.Routing(ctx, true)
+}
+
 // ResumeRouting preserves the crash budget when SCM restarts Control.
 func (c *Core) ResumeRouting(ctx context.Context) error {
 	if !c.WantsRouting() {
@@ -925,7 +935,9 @@ func (c *Core) Supervise(ctx context.Context) error {
 		if now-s.StartedAt.UnixMilli() >= 120000 {
 			c.retryAttempts = 0
 		}
-		restart := c.monitorFailures >= 20
+		// Service liveness comes from the lease and verified process lifetime.
+		// Slow flow snapshots under CPU pressure do not prove engine death.
+		restart := !c.op.ServiceMode && c.monitorFailures >= 20
 		settledIPv6 := false
 		if s.StartedWith != nil {
 			restart = restart || c.bindingChangedLocked(s)
@@ -944,7 +956,7 @@ func (c *Core) Supervise(ctx context.Context) error {
 			return c.laneQueue.Do(ctx, func() error {
 				c.mu.Lock()
 				fresh := c.op.Engine.Snapshot()
-				hung := c.monitorFailures >= 20
+				hung := !c.op.ServiceMode && c.monitorFailures >= 20
 				rebound := c.bindingChangedLocked(fresh)
 				needed := hung || rebound
 				if fresh.StartedWith != nil {

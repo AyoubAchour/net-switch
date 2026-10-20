@@ -736,6 +736,44 @@ func TestRealServices(t *testing.T) {
 		c.must(t, "routing", map[string]any{"on": true}, nil)
 		wait(t, "restart after explicit stop", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	})
+	t.Run("binding-change-waits-for-old-service-exit", func(t *testing.T) {
+		before := getStatus(t, c)
+		body, _ := json.Marshal(map[string]string{"alias": nic})
+		code, b := api(t, session.URL, session.Token, "POST", "/api/lines/add", string(body))
+		if code != 200 {
+			t.Fatal("add fixture binding", code, string(b))
+		}
+		wait(t, "new service after binding addition", 40*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
+		var state struct {
+			Lines []lines.Line `json:"lines"`
+		}
+		if json.Unmarshal(b, &state) != nil || len(state.Lines) != 2 {
+			t.Fatal("two-line precondition", string(b))
+		}
+		before = getStatus(t, c)
+		body, _ = json.Marshal(map[string]string{"id": state.Lines[1].ID})
+		code, b = api(t, session.URL, session.Token, "POST", "/api/lines/remove", string(body))
+		if code != 200 {
+			t.Fatal("remove fixture binding", code, string(b))
+		}
+		wait(t, "new service after binding removal", 40*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
+		stream := proxyStream(t, session.URL, session.Token, echo)
+		defer stream.Close()
+		checkEcho(t, stream)
+		entries, err := os.ReadDir(data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for _, entry := range entries {
+			if strings.HasPrefix(entry.Name(), "adapter-") {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Fatal("retired adapter directories still present", count)
+		}
+	})
 	t.Run("enrollment-preserves-routing-and-same-owner-is-noop", func(t *testing.T) {
 		before := getStatus(t, c)
 		stream := proxyStream(t, session.URL, session.Token, echo)

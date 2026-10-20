@@ -22,12 +22,12 @@ type DesktopBridge struct {
 	Base     platform.System
 	mu       sync.Mutex
 	sessions map[string]*desktopEndpoint
-	next     int
 }
 type desktopEndpoint struct {
-	pid     uint32
-	queue   []DesktopWork
-	pending map[string]chan desktopResult
+	pid      uint32
+	lastPoll time.Time
+	queue    []DesktopWork
+	pending  map[string]chan desktopResult
 }
 
 func (d *DesktopBridge) Connect(id string, pid uint32) {
@@ -37,7 +37,7 @@ func (d *DesktopBridge) Connect(id string, pid uint32) {
 		d.sessions = map[string]*desktopEndpoint{}
 	}
 	if d.sessions[id] == nil {
-		d.sessions[id] = &desktopEndpoint{pid: pid, pending: map[string]chan desktopResult{}}
+		d.sessions[id] = &desktopEndpoint{pid: pid, lastPoll: time.Now(), pending: map[string]chan desktopResult{}}
 	}
 }
 func (d *DesktopBridge) Disconnect(id string) {
@@ -55,10 +55,16 @@ func (d *DesktopBridge) Disconnect(id string) {
 func (d *DesktopBridge) PID() uint32 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	var newest *desktopEndpoint
 	for _, session := range d.sessions {
-		return session.pid
+		if newest == nil || session.lastPoll.After(newest.lastPoll) {
+			newest = session
+		}
 	}
-	return 0
+	if newest == nil {
+		return 0
+	}
+	return newest.pid
 }
 func (d *DesktopBridge) Poll(id string) []DesktopWork {
 	d.mu.Lock()
@@ -67,6 +73,7 @@ func (d *DesktopBridge) Poll(id string) []DesktopWork {
 	if session == nil {
 		return nil
 	}
+	session.lastPoll = time.Now()
 	batch := session.queue
 	session.queue = nil
 	return batch
@@ -93,7 +100,7 @@ func (d *DesktopBridge) Call(ctx context.Context, op string, args map[string]any
 		d.mu.Lock()
 		var session *desktopEndpoint
 		for _, candidate := range d.sessions {
-			if session == nil || len(candidate.pending) < len(session.pending) {
+			if session == nil || candidate.lastPoll.After(session.lastPoll) {
 				session = candidate
 			}
 		}

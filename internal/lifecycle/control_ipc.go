@@ -59,7 +59,7 @@ func (a *Access) request(ctx context.Context, peer localipc.Peer, statusOnly boo
 	case "signin":
 		a.Desktop.Connect(session, peer.PID)
 		a.Core.DesktopConnected()
-		return true, a.Core.Routing(ctx, true)
+		return true, a.Core.SignIn(ctx)
 	case "desktop-connect":
 		a.Desktop.Connect(session, peer.PID)
 		a.Core.DesktopConnected()

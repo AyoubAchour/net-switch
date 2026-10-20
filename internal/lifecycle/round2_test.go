@@ -91,6 +91,55 @@ func TestTransportFailureReattachesWithoutEngineFailure(t *testing.T) {
 	}
 }
 
+func TestOldStoppedQueryCannotFailReplacement(t *testing.T) {
+	r, _ := fakeRemote(t, buildinfo.String())
+	original := r.dial
+	var refusing atomic.Bool
+	r.dial = func(ctx context.Context, e localipc.Endpoint) (*localipc.Conn, error) {
+		if refusing.Load() {
+			return nil, errors.New("old connection is gone")
+		}
+		return original(ctx, e)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	r.queryService = func(string) (service.Status, error) {
+		close(entered)
+		<-release
+		return service.Status{Stopped: true}, nil
+	}
+	if err := r.Attach(r.ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	old := r.rpc
+	r.mu.Unlock()
+	refusing.Store(true)
+	r.disconnect(old, errors.New("old transport"))
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not query service")
+	}
+	refusing.Store(false)
+	if err := r.Attach(r.ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		busy := r.recovering
+		r.mu.Unlock()
+		if !busy {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if s := r.Snapshot(); s.Status != "on" || s.FailureID != "" {
+		t.Fatal("stale stopped result failed a healthy attachment", s)
+	}
+}
+
 func TestOneFailureIdentityPerEngineInstance(t *testing.T) {
 	r, _ := fakeRemote(t, buildinfo.String())
 	if err := r.Attach(r.ctx, false); err != nil {

@@ -117,7 +117,37 @@ func TestServiceNoLinesWaitsWithoutAnEngineAttempt(t *testing.T) {
 	c.mu.Lock()
 	c.syncLanesLocked()
 	c.mu.Unlock()
-	if err := c.Start(context.Background()); err != nil || !started {
+	if err := c.Supervise(context.Background()); err != nil || !started {
 		t.Fatal("a configured line did not unblock the pending start", err)
+	}
+}
+
+func TestSlowServiceSnapshotsDoNotRestartLiveEngine(t *testing.T) {
+	c, e, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	e.calls = nil
+	c.monitorFailures = 50
+	if err := c.Supervise(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, call := range e.calls {
+		if call == "stop" || call == "start" {
+			t.Fatal("flow timeout restarted healthy engine", e.calls)
+		}
+	}
+}
+
+func TestSecondOwnerSignInPreservesFailureBudget(t *testing.T) {
+	c, _, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	c.failureTimes = []int64{c.now()}
+	if err := c.SignIn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.failureTimes) != 1 {
+		t.Fatal("second session erased the crash budget")
 	}
 }

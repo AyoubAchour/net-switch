@@ -65,7 +65,7 @@ func EngineService(ctx context.Context, ready func(), c Config, log func(string)
 		return err
 	}
 	base := nativePlatform(c, log)
-	runtime.adapter = singbox.New(singbox.Options{Executable: c.Adapter, DataDir: instanceDir, Mode: c.Mode, Platform: base, Log: log, StartProcess: startAdapter, NormalizeProcessPath: normalizeAdapterPath})
+	runtime.adapter = singbox.New(singbox.Options{Executable: c.Adapter, DataDir: instanceDir, Mode: c.Mode, Platform: base, Log: log, StartProcess: startAdapter, NormalizeProcessPath: normalizeAdapterPath, PrepareConfig: adapterOwnership(c, store, boot, server.Instance)})
 	record := journal.Record{ID: randomID(), Boot: boot, Instance: server.Instance, Kind: "adapter-service-scope", Fingerprint: journal.Fingerprint{"service": service.Engine, "executable": c.Adapter, "directory": instanceDir, "lifetime": "kernel-guard"}, Phase: "intent"}
 	if err = store.Append(record); err != nil {
 		return err
@@ -161,6 +161,13 @@ running:
 	}
 	cancel()
 	listener.Close()
+	records, err = store.Records()
+	if err != nil {
+		return errors.Join(result, err)
+	}
+	if err := retireAdapterScopes(store, records); err != nil {
+		return errors.Join(result, err)
+	}
 	record.Phase = "removed"
 	if err := store.Append(record); err != nil {
 		return errors.Join(result, err)
@@ -215,10 +222,10 @@ func removeRetiredAdapterFolders(data string) error {
 func retireAdapterScopes(store *journal.FileStore, records []journal.Record) error {
 	pending := map[string]journal.Record{}
 	for _, record := range records {
-		if record.Kind != "adapter-service-scope" {
+		if record.Kind != "adapter-service-scope" && record.Kind != "adapter-linux-rule" {
 			return fmt.Errorf("cleanup driver for %q belongs to the native platform; refusing to guess", record.Kind)
 		}
-		if record.Fingerprint["service"] != service.Engine || record.Fingerprint["lifetime"] != "kernel-guard" || record.Instance == "" {
+		if record.Instance == "" || record.Kind == "adapter-service-scope" && (record.Fingerprint["service"] != service.Engine || record.Fingerprint["lifetime"] != "kernel-guard") {
 			return errors.New("invalid adapter lifetime fingerprint")
 		}
 		if record.Phase == "removed" {
@@ -228,6 +235,11 @@ func retireAdapterScopes(store *journal.FileStore, records []journal.Record) err
 		}
 	}
 	for _, record := range pending {
+		if record.Kind == "adapter-linux-rule" {
+			if err := removeAdapterRule(record); err != nil {
+				return err
+			}
+		}
 		record.Phase = "removed"
 		if err := store.Append(record); err != nil {
 			return err

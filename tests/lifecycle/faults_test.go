@@ -92,6 +92,12 @@ func durableCrash(t *testing.T, data, point, url, token, echo string, owner acto
 	stream := proxyStream(t, url, token, echo)
 	defer stream.Close()
 	checkEcho(t, stream)
+	var previousEngine struct {
+		Instance string `json:"engineInstanceId"`
+	}
+	if err := lifecycle.Read(filepath.Join(data, "engine-state.json"), &previousEngine); err != nil {
+		t.Fatal(err)
+	}
 	arm(t, data, point)
 	label := point
 	pending := mutateAsync(url, token, label)
@@ -122,7 +128,10 @@ func durableCrash(t *testing.T, data, point, url, token, echo string, owner acto
 		directEcho(t, echo)
 	}
 	c := openClient(t, owner, false)
-	wait(t, "routing recovers after durable interruption", 35*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+	wait(t, "routing recovers after durable interruption", 35*time.Second, func() bool {
+		s := getStatus(t, c)
+		return s.Routing == "on" && (strings.HasPrefix(point, "control-") || s.Instance != previousEngine.Instance)
+	})
 	checkAppliedJournal(t, data, label)
 	if strings.HasPrefix(point, "control-") {
 		checkEcho(t, stream)

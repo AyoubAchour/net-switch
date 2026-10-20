@@ -48,6 +48,7 @@ type Options struct {
 	Verify                    func() error
 	StartProcess              func(string, string, string) (Child, error)
 	NormalizeProcessPath      func(string) string
+	PrepareConfig             func([]byte) ([]byte, error)
 	Crash                     *crashnet.Net
 }
 type Child interface {
@@ -789,6 +790,9 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 		}
 	}
 	b, err := ConfigBytes(ConfigOptions{a.o.Mode, p.Lines, apiPort, secret, proxyPort, a.o.DataDir, p.IPv6})
+	if err == nil && a.o.PrepareConfig != nil {
+		b, err = a.o.PrepareConfig(b)
+	}
 	if err != nil {
 		return err
 	}
