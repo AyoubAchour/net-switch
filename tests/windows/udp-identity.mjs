@@ -18,6 +18,7 @@ export async function udpIdentity({ server, responder, directory, main, second, 
   const invoke = async (exe, token, duration) => JSON.parse((await run(exe, [
     '--address', `${responder.virtual.host}:${responder.virtual.udp[0]}`, '--stream',
     '--local-port', String(port), '--duration', duration, '--token', token,
+    ...(blocked ? ['--capture'] : []),
   ], { timeout: 15_000 })).stdout);
   await server.api('app-line', { path: firstExe, line: second.id });
   await server.api('app-line', { path: nextExe, line: main.id });
