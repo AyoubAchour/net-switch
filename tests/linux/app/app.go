@@ -39,6 +39,7 @@ var modes = map[string]mode{
 	"bulkhold":    {runBulkHold, "a full-speed download that then trickles, every byte checked, held until released"},
 	"http":        {runHTTP, "one HTTP GET; the body is the source the server saw"},
 	"udp":         {runUDP, "UDP datagrams to echo servers"},
+	"udpreply":    {runUDPReply, "small UDP requests with large replies checked by SHA-256"},
 	"udpstream":   {runUDPStream, "continuous UDP from one source port"},
 	"stun":        {runSTUN, "STUN bindings from one socket, and a poke from a third host"},
 	"ping":        {runPing, "ICMP echo through an unprivileged ping socket"},

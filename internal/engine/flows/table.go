@@ -54,6 +54,7 @@ type Gauges struct {
 	// Histograms can be subtracted across a cold-socket test phase.
 	LookupHistogram                                                                                   [201]uint64
 	UDPReadBytes                                                                                      int64
+	UDPAdapterBytes                                                                                   int64
 	DoubleReleases                                                                                    uint64
 	TimeWait                                                                                          int
 	TimeWaitSkipped                                                                                   uint64
@@ -87,6 +88,7 @@ type Table struct {
 	events               chan flowapi.Event
 	eventsDropped        atomic.Uint64
 	pendingBytes         atomic.Int64
+	udpReadBytes         atomic.Int64
 	pendingPeakBytes     atomic.Int64
 	doubleReleases       atomic.Uint64
 }
@@ -198,7 +200,7 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	if protocol == "udp" {
 		t.gauges.UDP++
 		t.gauges.PeakUDP = max(t.gauges.PeakUDP, t.gauges.UDP)
-		t.gauges.UDPReadBytes += flowapi.UDPReadBuffer + flowapi.UDPAdapterBuffer
+		t.gauges.UDPAdapterBytes += flowapi.UDPAdapterBuffer
 	} else {
 		f.handshake = true
 		f.receive, f.send = 64<<10, 64<<10
@@ -404,7 +406,7 @@ func (f *ticket) retireLocked() {
 	udp := f.record.Protocol == "udp"
 	if udp {
 		t.gauges.UDP--
-		t.gauges.UDPReadBytes -= flowapi.UDPReadBuffer + flowapi.UDPAdapterBuffer
+		t.gauges.UDPAdapterBytes -= flowapi.UDPAdapterBuffer
 	}
 	if f.resolved {
 		app := f.record.Owner.AppID
@@ -534,11 +536,16 @@ func (t *Table) Stats() Gauges {
 	defer t.mu.Unlock()
 	g := t.gauges
 	g.PendingBytes = t.pendingBytes.Load()
+	g.UDPReadBytes = t.udpReadBytes.Load()
 	g.PendingPeakBytes = t.pendingPeakBytes.Load()
 	g.DoubleReleases = t.doubleReleases.Load()
 	g.EventsDropped = t.eventsDropped.Load()
 	return g
 }
+
+// Receive storage is borrowed only after readability and is already charged
+// to PendingBytes. This gauge distinguishes it from per-socket adapter state.
+func (t *Table) ObserveUDPRead(delta int) { t.udpReadBytes.Add(int64(delta)) }
 
 func (t *Table) Events() <-chan flowapi.Event { return t.events }
 

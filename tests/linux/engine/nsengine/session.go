@@ -336,6 +336,7 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		TCPBytes: g.TCPBytes, PendingBytes: g.PendingBytes, SnapshotBytes: g.SnapshotBytes,
 		PendingPeakBytes: g.PendingPeakBytes,
 		UDPReadBytes:     g.UDPReadBytes,
+		UDPAdapterBytes:  g.UDPAdapterBytes,
 		Admitted:         g.Admitted, Rejected: g.Rejected, DroppedNotices: g.DroppedNotices, TimeWaitSkipped: g.TimeWaitSkipped,
 		EventsDropped: top.EventsDropped + g.EventsDropped,
 		LookupCount:   g.LookupCount, LookupMisses: g.LookupMisses, LookupAmbiguous: g.LookupAmbiguous,

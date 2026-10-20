@@ -19,13 +19,14 @@ import (
 // Ports served by the fake internet. Every service reports the source address
 // it saw, which names the line a connection used.
 const (
-	PortUDPEcho = 7001 // UDP: replies "<ip>:<port> <payload>"
-	PortStream  = 7002 // TCP: each "ping N" line gets "pong N <ip>"
-	PortWhoami  = 7003 // TCP: writes "<ip>\n" and closes
-	PortBulk    = 7004 // TCP: "GET n" sends n bytes; "PUT n" + n bytes gets their SHA-256
-	PortPoke    = 7005 // UDP: "poke <token>" is answered from another host (see PokeFrom)
-	PortPokeSrc = 7006 // the port the third host answers pokes from
-	PortHold    = 7008 // TCP: accepts and holds the connection, sending nothing
+	PortUDPEcho  = 7001 // UDP: replies "<ip>:<port> <payload>"
+	PortStream   = 7002 // TCP: each "ping N" line gets "pong N <ip>"
+	PortWhoami   = 7003 // TCP: writes "<ip>\n" and closes
+	PortBulk     = 7004 // TCP: "GET n" sends n bytes; "PUT n" + n bytes gets their SHA-256
+	PortPoke     = 7005 // UDP: "poke <token>" is answered from another host (see PokeFrom)
+	PortPokeSrc  = 7006 // the port the third host answers pokes from
+	PortUDPReply = 7007 // UDP: a small request asks for a large, hashed reply
+	PortHold     = 7008 // TCP: accepts and holds the connection, sending nothing
 	// PortBlackhole: the fake internet drops every TCP packet to this port,
 	// so a connection there never gets past its handshake.
 	PortBlackhole = 7009
