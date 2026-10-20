@@ -448,7 +448,7 @@ try {
     await client('close');
     const { udpIdentity } = await import('./udp-identity.mjs');
     for (const blocked of [false, true]) {
-      await report.test(`UDP source-port reuse by an app with ${blocked ? 'a blocked pin' : 'the opposite pin'} changes policy within 1 second`, 'parity',
+      await observe(`UDP source-port reuse by an app with ${blocked ? 'a blocked pin' : 'the opposite pin'} changes policy within 1 second`, 'parity',
         () => udpIdentity({ server, responder, directory: dir, main, second, blocked }));
     }
   }

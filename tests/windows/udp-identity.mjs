@@ -3,9 +3,12 @@ import { copyFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { run } from './testisp/harness.mjs';
+import { hostedOnly, run } from './testisp/harness.mjs';
 
 export async function udpIdentity({ server, responder, directory, main, second, blocked }) {
+  hostedOnly();
+  const evidence = {};
+  let capture = false;
   const firstExe = path.join(directory, 'identity-first.exe');
   const nextExe = path.join(directory, 'identity-next.exe');
   await copyFile(path.resolve('dist/windows-test/udpreject.exe'), firstExe);
@@ -20,21 +23,29 @@ export async function udpIdentity({ server, responder, directory, main, second, 
   await server.api('app-line', { path: nextExe, line: main.id });
   try {
     if (blocked) {
+      await run('pktmon.exe', ['filter', 'add', 'NetSwitchIdentityUDP', '-i', responder.virtual.host, '-t', 'UDP']);
+      await run('pktmon.exe', ['filter', 'add', 'NetSwitchIdentityICMP', '-i', responder.virtual.host, '-t', 'ICMP']);
+      await run('pktmon.exe', ['start', '--capture', '--pkt-size', '256', '--flags', '0x01f', '--file-size', '16',
+        '--file-name', path.join(directory, 'udp-reuse-packets.etl')]);
+      capture = true;
       // Establish the second app's block before the first socket exists; a
       // closeFlows call must not accidentally perform identity invalidation.
       await server.api('lines/order', { ids: [second.id, main.id] });
       await server.api('lines/update', { id: second.id, strict: true });
       await server.api('lines/update', { id: main.id, cap: { bytes: 1, period: 'day' } });
       const state = await server.api('state');
+      evidence.blockedState = state;
       assert(state.lines.find((l) => l.id === main.id).blocked, 'Blocked reuse needs an already-blocked destination lane');
     }
     const first = await invoke(firstExe, tokenA, '2s');
     const firstObserved = responder.seen.filter((r) => r.token === tokenA);
+    Object.assign(evidence, { first, firstObserved });
     assert(firstObserved.length >= 50 && first.events.filter((e) => e.outcome === 'reply').length >= 50, 'The old socket did not establish a real NAT mapping');
     const nextResult = invoke(nextExe, tokenB, '3s');
     await delay(1250);
     const flows = await server.api('engine-command', { method: 'flows' });
     const next = await nextResult;
+    Object.assign(evidence, { next, flows: flows.flows });
     assert.equal(next.source, first.source, 'Reuse changed the source tuple');
     assert(next.sent >= 100);
     const late = responder.seen.filter((r) => r.token === tokenB && r.at >= next.startedAt + 1000);
@@ -49,7 +60,19 @@ export async function udpIdentity({ server, responder, directory, main, second, 
       assert(row.up > 0 && row.app.socketGeneration, 'The replacement needs an active, attributed native socket');
     }
     return { first, next, firstObserved, late, flows: flows.flows, virtualDestinationOnlyOnTestISP: true };
+  } catch (error) {
+    error.evidence = { ...evidence, stats: await server.api('engine-command', { method: 'stats' }).catch((e) => ({ error: e.message })) };
+    throw error;
   } finally {
+    if (capture) {
+      await run('pktmon.exe', ['stop']);
+      await run('pktmon.exe', ['etl2txt', path.join(directory, 'udp-reuse-packets.etl'), '--out',
+        path.join(directory, 'udp-reuse-packets.txt'), '--verbose', '3', '--hex'], { timeout: 120_000 });
+    }
+    if (blocked) {
+      await run('pktmon.exe', ['filter', 'remove', 'NetSwitchIdentityUDP']);
+      await run('pktmon.exe', ['filter', 'remove', 'NetSwitchIdentityICMP']);
+    }
     if (blocked) {
       await server.api('lines/update', { id: main.id, cap: null });
       await server.api('lines/update', { id: second.id, strict: false });
