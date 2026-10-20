@@ -56,7 +56,10 @@ type readyRelay struct {
 }
 
 func newRelayWorkers() *relayWorkers {
-	n := min(8, max(2, runtime.GOMAXPROCS(0)))
+	// Leave scheduling capacity for ordered ingress, the TUN writer and
+	// ACK processing. Relay work alone must not occupy every processor while
+	// its writes wait for those same consumers to make progress.
+	n := min(8, max(1, (runtime.GOMAXPROCS(0)+1)/2))
 	w := &relayWorkers{wake: make(chan struct{}, n), stop: make(chan struct{})}
 	for range n {
 		w.wg.Go(w.run)

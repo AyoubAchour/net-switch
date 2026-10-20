@@ -40,6 +40,7 @@ type cachedHolders struct {
 type fdWindow struct {
 	start      uint64
 	directory  uint64 // inode of the pinned kernel proc fd directory
+	fdCount    int64  // descriptor count at the last complete pass; ordering hint only
 	next       int64
 	high       int64 // end of the sequentially indexed range; tail probes cannot advance it
 	extent     int64 // largest descriptor observed, including tail probes
@@ -832,6 +833,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				current.extent = max(current.extent, maxSeen)
 				current.observed = time.Now()
 				if whole && canIndex {
+					current.fdCount = metadata.Size
 					current.fullScan, current.fullUID = scanStarted, r.uid
 				}
 				o.windows[pid] = current
@@ -994,6 +996,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		if !slices.Contains(ordered, pid) {
 			ordered = append(ordered, pid)
 		}
+	}
+	if result.AppID == "" {
+		o.prioritizeScope(ctx, ordered, recent, r.uid)
 	}
 	for _, pid := range ordered {
 		if err := scan(pid, false); err != nil {
