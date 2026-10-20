@@ -99,6 +99,9 @@ func runUDPClient(t *testing.T, streams int) (float64, error) {
 	child.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	child.Env = append(os.Environ(), fmt.Sprintf("NETSWITCH_WINTUN_UDP_STREAMS=%d", streams))
 	output, err := child.CombinedOutput()
+	if child.ProcessState != nil {
+		performanceChildCPU.Add(uint64(child.ProcessState.UserTime() + child.ProcessState.SystemTime()))
+	}
 	if err != nil {
 		return 0, fmt.Errorf("UDP client: %w\n%s", err, output)
 	}

@@ -362,7 +362,11 @@ func TestWintunPerformance(t *testing.T) {
 		for _, mode := range modes {
 			t.Run(fmt.Sprintf("trial%d/%s", trial, mode), func(t *testing.T) {
 				f := newFixture(t, mode, 0)
+				cpuBefore := captureCPU(t)
 				measure := func(name string, value float64) {
+					cpuAfter := captureCPU(t)
+					reportCPU(t, mode, name, trial, cpuBefore, cpuAfter)
+					cpuBefore = cpuAfter
 					results[mode][name] = append(results[mode][name], value)
 					report(t, map[string]any{"test": "performance", "arch": runtime.GOARCH, "trial": trial, "mode": mode, "metric": name, "value": value})
 				}
