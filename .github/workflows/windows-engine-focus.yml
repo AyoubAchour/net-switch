@@ -127,13 +127,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/fetch-engine.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Compare route-first native teardown with the same-run baseline
+      - name: Compare current and adapter-first cleanup with the same-run baseline
         if: ${{ success() && endsWith(github.ref, '-lifecycle') }}
         env:
           NETSWITCH_ENGINE_TEST_TRACE: '1'
-          NETSWITCH_ENGINE_CLOSE_AFTER_ROUTES: '1'
         run: |
-          node tests/windows/lifecycle-profile.mjs --profile v1 --engine-exe dist/windows-test/netswitch-engine.exe
+          node tests/windows/lifecycle-profile.mjs --profile v1 --engine-exe dist/windows-test/netswitch-engine.exe --adapter-first-comparison
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Compare owner timing with the production processor default
         if: ${{ !cancelled() && contains(github.ref, 'windows-platform-native') && !endsWith(github.ref, '-ports') }}
