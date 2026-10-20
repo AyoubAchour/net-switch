@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -214,7 +216,34 @@ func readProcLink(path string) (string, error) {
 // deliberately ignored; they can never be socket identities.
 func socketInodeAt(dir int, name string) (uint32, bool) {
 	var b [64]byte
-	n, err := unix.Readlinkat(dir, name, b[:])
+	var n int
+	var err error
+	if dir >= 0 {
+		// This descriptor pins a kernel /proc/PID/fd directory. Its numeric
+		// children return link text from the kernel's file table; this never
+		// opens a target or invokes a filesystem read. Keep these tiny calls
+		// on the scanner's P instead of handing it off at every descriptor
+		// while hundreds of followers wait for this same scanner's batch.
+		var entry [16]byte
+		if len(name) == 0 || len(name) >= len(entry) {
+			return 0, false
+		}
+		for i := range name {
+			if name[i] < '0' || name[i] > '9' {
+				return 0, false
+			}
+			entry[i] = name[i]
+		}
+		count, _, errno := syscall.RawSyscall6(unix.SYS_READLINKAT, uintptr(dir), uintptr(unsafe.Pointer(&entry[0])), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0)
+		n = int(count)
+		if errno != 0 {
+			err = errno
+		}
+	} else {
+		// Full path validation remains an ordinary syscall. Only an already
+		// pinned proc descriptor directory uses the bounded fast path above.
+		n, err = unix.Readlinkat(dir, name, b[:])
+	}
 	if err != nil || n >= len(b) || n < 10 || !bytes.HasPrefix(b[:n], []byte("socket:[")) || b[n-1] != ']' {
 		return 0, false
 	}
