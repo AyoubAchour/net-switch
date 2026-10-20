@@ -9,9 +9,9 @@ $arch = Get-NativeArchitecture
 $pin = (Get-Content "$PSScriptRoot/../../../packaging/versions.json" -Raw | ConvertFrom-Json).nativeSources.wintun
 $directoryPath = [IO.Path]::GetFullPath($Directory)
 [IO.Directory]::CreateDirectory($directoryPath) | Out-Null
-$archive = Join-Path $directoryPath 'wintun.zip'
-Invoke-WebRequest -UseBasicParsing -Uri $pin.url -OutFile $archive
-if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $pin.sha256) { throw 'Wintun archive hash mismatch.' }
+$cache = Get-BuildCache (Join-Path $PSScriptRoot '../../../dist')
+[IO.Directory]::CreateDirectory($cache) | Out-Null
+$archive = Get-Artifact $pin $cache
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::OpenRead($archive)
 try {

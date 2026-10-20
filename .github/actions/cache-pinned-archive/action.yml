@@ -1,0 +1,45 @@
+name: Cache a verified build archive
+description: Restore only an archive, verify its pinned hash, and save it before the build starts.
+inputs:
+  artifact:
+    description: Pin to cache (go or wintun)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Read the archive identity
+      id: pin
+      shell: powershell
+      env:
+        ARTIFACT: ${{ inputs.artifact }}
+      run: |
+        $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+        $pin = switch ($env:ARTIFACT) {
+          'go' { $pins.go }
+          'wintun' { $pins.nativeSources.wintun }
+          default { throw "Unknown archive: $env:ARTIFACT" }
+        }
+        $name = [IO.Path]::GetFileName(([Uri]$pin.url).AbsolutePath)
+        [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "path=dist/cache/$name`nkey=pinned-archive-v1-$($env:ARTIFACT)-$($pin.version)-$($pin.sha256)`n")
+    - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      id: cache
+      with:
+        path: ${{ steps.pin.outputs.path }}
+        key: ${{ steps.pin.outputs.key }}
+    - name: Verify the restored archive or download a verified replacement
+      shell: powershell
+      env:
+        ARTIFACT: ${{ inputs.artifact }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+        . ./scripts/build-common.ps1
+        $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+        $pin = if ($env:ARTIFACT -eq 'go') { $pins.go } else { $pins.nativeSources.wintun }
+        [IO.Directory]::CreateDirectory("$PWD/dist/cache") | Out-Null
+        Get-Artifact $pin "$PWD/dist/cache"
+    - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      if: steps.cache.outputs.cache-hit != 'true'
+      with:
+        path: ${{ steps.pin.outputs.path }}
+        key: ${{ steps.pin.outputs.key }}
