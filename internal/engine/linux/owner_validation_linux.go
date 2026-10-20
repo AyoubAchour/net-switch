@@ -61,6 +61,10 @@ func (o *Owners) validationFor(h holder) *ownerValidation {
 }
 
 func (v *ownerValidation) resolve(ctx context.Context, checked time.Time, o *Owners) (platform.Owner, error) {
+	return v.resolveTimed(ctx, checked, o, nil)
+}
+
+func (v *ownerValidation) resolveTimed(ctx context.Context, checked time.Time, o *Owners, timing *lookupTiming) (platform.Owner, error) {
 	if err := ctx.Err(); err != nil {
 		return platform.Owner{}, err
 	}
@@ -77,7 +81,7 @@ func (v *ownerValidation) resolve(ctx context.Context, checked time.Time, o *Own
 	}
 	began := time.Now()
 	o.metadataPasses.Add(1)
-	owner, err := processOwnerAt(v.pid, v.start)
+	owner, err := processOwnerAtTimed(v.pid, v.start, timing)
 	if v.mu.TryLock() {
 		if !v.complete || v.began.Before(began) {
 			v.began, v.owner, v.err, v.complete = began, owner, err, true

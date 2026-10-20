@@ -158,7 +158,7 @@ func TestMatchedHolderDoesNotWaitForBatchCompletion(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("matched owner waited for unrelated descriptor publication")
 	}
-	o.batches.mu.Lock()
+	o.batches.liveMu.Lock()
 	var batch *descriptorBatch
 	for key, candidate := range o.batches.live {
 		if key.pid == pid {
@@ -166,7 +166,7 @@ func TestMatchedHolderDoesNotWaitForBatchCompletion(t *testing.T) {
 			break
 		}
 	}
-	o.batches.mu.Unlock()
+	o.batches.liveMu.Unlock()
 	if batch == nil {
 		t.Fatal("fixture did not leave its later descriptor batch pending")
 	}
