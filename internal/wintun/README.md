@@ -125,7 +125,11 @@ particular stress sample. Lifetime tests count process handles and their kernel
 object types after warming Go's OS-thread cache (six handles per Windows thread),
 measure private memory after GC/scavenging, and enumerate PnP
 records without filtering out non-present devices. A separate recovery test
-measures these across 32 injected recoveries after eight warm-ups. Removal runs
+measures these across 32 injected recoveries after eight warm-ups. Both tests
+warm the runtime thread cache before measuring handles; recovery reports also
+include thread counts and kernel object types when an assertion fails. The
+recovery leak fault uses the reader-owned Send.Head, so driver discovery traffic
+cannot overwrite it before detection. Removal runs
 with a busy reader and writer; close-failure tests force GC with retained memory.
 Crash cleanup runs in a fresh process, asserts the phantom existed, and removes
 it without loading the DLL.
