@@ -201,6 +201,7 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 		}
 		held = append(held, c, server)
 	}
+	rowsBefore, timeWaitBefore := nativeTCPRowCounts(t)
 	o := NewOwners()
 	var mu sync.Mutex
 	var durations []time.Duration
@@ -256,8 +257,9 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 		t.Fatalf("only %d/1000 cold socket lookups ran", len(durations))
 	}
 	p95 := durations[949]
+	rowsAfter, timeWaitAfter := nativeTCPRowCounts(t)
 	raw, _ := json.Marshal(o.Stats())
-	t.Logf("WINDOWS OWNER BURST cold=1000 found=%d p95_us=%d processors=%d cpus=%d old_combined_gate_would_pass=%t histogram=%s", 1000-misses, p95.Microseconds(), runtime.GOMAXPROCS(0), runtime.NumCPU(), misses <= 5 && p95 < 5*time.Millisecond, raw)
+	t.Logf("WINDOWS OWNER BURST cold=1000 found=%d p95_us=%d raw_rows_before=%d raw_rows_after=%d timewait_before=%d timewait_after=%d processors=%d cpus=%d old_combined_gate_would_pass=%t histogram=%s", 1000-misses, p95.Microseconds(), rowsBefore, rowsAfter, timeWaitBefore, timeWaitAfter, runtime.GOMAXPROCS(0), runtime.NumCPU(), misses <= 5 && p95 < 5*time.Millisecond, raw)
 	if misses > 5 {
 		t.Fatalf("owner burst gate: found=%d/1000 (requires at least 995), p95=%s", 1000-misses, p95)
 	}
@@ -303,8 +305,55 @@ func TestOwnerConcurrentSnapshots(t *testing.T) {
 	work.Wait()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := owners.tcpSnapshot(ctx, time.Time{}); !errors.Is(err, context.Canceled) {
+	if _, err := owners.tcpSnapshot(ctx, time.Time{}, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled snapshot returned %v", err)
+	}
+}
+
+func TestOwnerIPv6AndMappedIPv4(t *testing.T) {
+	hosted(t)
+	for _, scenario := range []struct{ network, address, destination string }{
+		{"tcp4", "127.0.0.1:0", "::ffff:127.0.0.1"},
+		{"tcp6", "[::1]:0", "::1"},
+	} {
+		t.Run(scenario.network, func(t *testing.T) {
+			listener, err := net.Listen(scenario.network, scenario.address)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			socket, err := windows.Socket(windows.AF_INET6, windows.SOCK_STREAM, windows.IPPROTO_TCP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer windows.Closesocket(socket)
+			if err := windows.SetsockoptInt(socket, windows.IPPROTO_IPV6, windows.IPV6_V6ONLY, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := windows.SetsockoptLinger(socket, windows.SOL_SOCKET, windows.SO_LINGER, &windows.Linger{Onoff: 1}); err != nil {
+				t.Fatal(err)
+			}
+			if err := windows.Bind(socket, &windows.SockaddrInet6{}); err != nil {
+				t.Fatal(err)
+			}
+			destination := netip.MustParseAddr(scenario.destination).As16()
+			if err := windows.Connect(socket, &windows.SockaddrInet6{Addr: destination, Port: listener.Addr().(*net.TCPAddr).Port}); err != nil {
+				t.Fatal(err)
+			}
+			peer, err := listener.Accept()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer peer.Close()
+			peer.(*net.TCPConn).SetLinger(0)
+			tuple := platform.Tuple{Source: peer.RemoteAddr().(*net.TCPAddr).AddrPort(), Destination: peer.LocalAddr().(*net.TCPAddr).AddrPort()}
+			owners := NewOwners()
+			owner, err := owners.TCP(context.Background(), tuple)
+			if err != nil || owner.PID != uint32(os.Getpid()) {
+				t.Fatalf("IPv6 socket attribution: %+v %v", owner, err)
+			}
+			t.Logf("native IPv6 socket to %s: sampled families=%v", scenario.destination, owners.Stats().TCPFamiliesSampled)
+		})
 	}
 }
 
