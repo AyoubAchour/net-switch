@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"io"
 	"io/fs"
 	"net/netip"
@@ -59,8 +60,8 @@ type Owners struct {
 	cgroups         map[uint64]string
 	recent          map[uint32][]uint32
 	cache           map[uint64]cachedHolders
-	inodes          map[uint32]inodeHolders
-	waiters         map[uint32]*inodeWaiter
+	index           [ownerIndexShards]ownerIndex
+	indexSeed       maphash.Seed
 	windows         map[uint32]fdWindow
 	ambiguousPorts  map[uint16]time.Time
 	// Fault callbacks are assigned only by the acceptance build.
@@ -143,9 +144,15 @@ func (o *Owners) Warm(ctx context.Context) error {
 }
 
 func NewOwners() *Owners {
-	// Allocate the bounded index's backing tables before capture. Growing
-	// them under the shared lock can turn one GC assist into many timeouts.
-	return &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32][]uint32, 64), cache: make(map[uint64]cachedHolders, 65536), inodes: make(map[uint32]inodeHolders, 131072), waiters: make(map[uint32]*inodeWaiter, 32768), windows: make(map[uint32]fdWindow, 4096), ambiguousPorts: map[uint16]time.Time{}}
+	// Inode hints and their subscribers share a shard, not the process-state
+	// lock. Small workloads need not retain and scan tens of MiB of empty
+	// index space, and a growing shard cannot stall every other lookup.
+	o := &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32][]uint32, 64), cache: make(map[uint64]cachedHolders, 16384), windows: make(map[uint32]fdWindow, 4096), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
+	for i := range o.index {
+		o.index[i].inodes = make(map[uint32]inodeHolders, 128)
+		o.index[i].waiters = make(map[uint32]*inodeWaiter, 128)
+	}
+	return o
 }
 
 func (o *Owners) Close() { o.queries.close() }
@@ -167,6 +174,7 @@ func (o *Owners) TCP(ctx context.Context, t platform.Tuple) (owner platform.Owne
 	}
 	ctx, cancel := lookupContext(ctx)
 	defer cancel()
+	queryStarted := time.Now()
 	rows, err := o.query(ctx, familyOf(t.Source.Addr()), unix.IPPROTO_TCP, t.Source, t.Destination)
 	if errors.Is(err, unix.ENOENT) && t.Source.Addr().Is4() {
 		rows, err = o.query(ctx, unix.AF_INET6, unix.IPPROTO_TCP, t.Source, t.Destination)
@@ -177,11 +185,12 @@ func (o *Owners) TCP(ctx context.Context, t platform.Tuple) (owner platform.Owne
 	if err != nil {
 		return platform.Owner{}, fmt.Errorf("TCP socket query: %w", err)
 	}
+	queryTime := time.Since(queryStarted)
 	for _, r := range rows {
 		if r.local == t.Source && r.remote == t.Destination {
 			owner, err = o.holders(ctx, r)
 			if err != nil {
-				err = fmt.Errorf("TCP holder scan: %w", err)
+				err = fmt.Errorf("TCP holder scan: %w (socket query %s)", err, queryTime)
 			}
 			return owner, err
 		}
@@ -521,10 +530,10 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	}
 	o.mu.Lock()
 	cached := o.cache[r.cookie].holders
-	indexed := o.inodes[r.inode]
-	hinted += len(cached) + indexed.count()
 	recent := o.recent[r.uid]
 	o.mu.Unlock()
+	indexed := o.indexed(r.inode)
+	hinted += len(cached) + indexed.count()
 	for _, h := range cached {
 		if err := accept(h); err != nil {
 			return platform.Owner{}, err
@@ -564,7 +573,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	// seen along the way. The index is only a hint; accept rechecks the live fd
 	// and PID start time on every use. Regular files never enter the index.
 	var heavy []uint32
-	scan := func(pid uint32, complete bool) error {
+	scan := func(pid uint32, complete bool) (scanErr error) {
 		if err := checkHints(); err != nil {
 			return err
 		}
@@ -661,6 +670,14 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		current.scanning = gate
 		o.windows[pid] = current
 		o.mu.Unlock()
+		// Validate identity only after publishing the fd batch and releasing
+		// the scanner gate. Metadata reads must not keep every follower of
+		// this process waiting, especially when a reader is descheduled.
+		defer func() {
+			if scanErr == nil && !expired() {
+				scanErr = o.indexed(r.inode).visit(accept)
+			}
+		}()
 		defer func() {
 			o.mu.Lock()
 			window := o.windows[pid]
@@ -704,17 +721,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		maxSeen := window.extent
 		advancing := false
 		whole := false
+		matched := false
 		visit := func(names []string) error {
 			for _, fd := range names {
 				if expired() {
 					break
 				}
 				scannedFDs++
-				if scannedFDs%32 == 0 && result.AppID == "" {
-					if err := checkHints(); err != nil {
-						return err
-					}
-				}
 				if number, err := strconv.ParseInt(fd, 10, 64); err == nil {
 					maxSeen = max(maxSeen, number)
 					if advancing {
@@ -734,9 +747,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					}
 				}
 				if uint32(inode) == r.inode {
-					if err := accept(h); err != nil {
-						return err
-					}
+					matched = true
 				}
 			}
 			return nil
@@ -772,7 +783,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			if err := recentRange(); err != nil {
 				return err
 			}
-			if hasHolder(pid) {
+			if matched {
 				return nil
 			}
 		}
@@ -791,7 +802,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					if whole {
 						return nil
 					}
-					if len(found) > 0 && found[len(found)-1].pid == pid {
+					if matched {
 						return nil
 					}
 				}
@@ -802,7 +813,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				if err := visit([]string{strconv.FormatInt(window.lastFD, 10)}); err != nil {
 					return err
 				}
-				if len(found) > 0 && found[len(found)-1].pid == pid {
+				if matched {
 					return nil
 				}
 			}
@@ -821,7 +832,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					return err
 				}
 				advancing = false
-				if len(found) > 0 && found[len(found)-1].pid == pid {
+				if matched {
 					return nil
 				}
 			}
@@ -829,7 +840,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				if err := recentRange(); err != nil {
 					return err
 				}
-				if hasHolder(pid) {
+				if matched {
 					return nil
 				}
 			}
@@ -852,7 +863,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 						if err := visit(names); err != nil {
 							return err
 						}
-						if len(found) > 0 && found[len(found)-1].pid == pid {
+						if matched {
 							return nil
 						}
 					}
@@ -868,7 +879,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				return err
 			}
 			whole = position == 0 && len(names) < 64 && (readErr == nil || errors.Is(readErr, io.EOF)) && !expired()
-			if len(found) > 0 && found[len(found)-1].pid == pid {
+			if matched {
 				return nil
 			}
 			if readErr != nil || len(names) < 64 {
@@ -891,6 +902,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		return nil
 	}
 	finish := func() (platform.Owner, error) {
+		// Another scanner may have published a conflicting live holder while
+		// this lookup validated its first one. Recheck all available hints.
+		if !expired() {
+			if err := o.indexed(r.inode).visit(accept); err != nil {
+				return platform.Owner{}, err
+			}
+		}
 		if result.AppID == "" {
 			if expired() {
 				return result, fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d scanWait=%s waitPID=%d lastPID=%d fdUID=%d indexed=%t frontier=%d)", context.DeadlineExceeded, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, scanWait, waitPID, lastPID, lastUID, lastIndexed, lastPosition)

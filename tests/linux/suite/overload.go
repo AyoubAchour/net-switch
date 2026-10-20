@@ -559,7 +559,7 @@ func exerciseTCPBufferBudget(e *Env, s engine.Controller) {
 	}
 	release.Open(e)
 	intact, open, earned := 0, 0, 0
-	for _, bg := range bgs {
+	for i, bg := range bgs {
 		var r app.BulkHoldResult
 		bg.WaitJSON(e, time.Minute, &r)
 		if r.Intact {
@@ -568,8 +568,11 @@ func exerciseTCPBufferBudget(e *Env, s engine.Controller) {
 		if r.Open {
 			open++
 		}
-		if steadyMS(r.Bins, r.BinMS, earnWindowBins, earnPerWindow) >= earnSteadyMS {
+		steady := steadyMS(r.Bins, r.BinMS, earnWindowBins, earnPerWindow)
+		if steady >= earnSteadyMS {
 			earned++
+		} else {
+			e.T.Logf("download %d did not earn growth: steady=%d ms burstBytes=%d totalBytes=%d error=%q bins=%v", i, steady, r.BurstBytes, r.Bytes, r.Err, r.Bins)
 		}
 	}
 	least := most
