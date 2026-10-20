@@ -56,6 +56,7 @@ type fdWindow struct {
 }
 type Owners struct {
 	queries              diagPool
+	batches              descriptorBatches
 	warmed               bool
 	lookupErrors         [4]atomic.Uint64
 	cgroupStats          [3]atomic.Uint64
@@ -86,19 +87,21 @@ type Owners struct {
 }
 
 type lookupStats struct {
-	Timeout, Missing, Ambiguous, Other             uint64
-	CgroupHints, CgroupResolved, CgroupPopulated   uint64
-	LastError                                      string
-	MetadataRejected                               uint64
-	LastMetadataError                              string
-	SharedScans                                    uint64
-	AssistedScans                                  uint64
-	TargetedProbes                                 uint64
-	MetadataPasses, SharedMetadata                 uint64
-	SharedScopes                                   uint64
-	HolderTimeouts                                 uint64
-	TimeoutStages                                  map[string]lookupPhaseStat
-	TimeoutWaitRequestedNanos, TimeoutMaxWaitNanos uint64
+	Timeout, Missing, Ambiguous, Other                             uint64
+	CgroupHints, CgroupResolved, CgroupPopulated                   uint64
+	LastError                                                      string
+	MetadataRejected                                               uint64
+	LastMetadataError                                              string
+	SharedScans                                                    uint64
+	AssistedScans                                                  uint64
+	TargetedProbes                                                 uint64
+	MetadataPasses, SharedMetadata                                 uint64
+	SharedScopes                                                   uint64
+	HolderTimeouts                                                 uint64
+	TimeoutStages                                                  map[string]lookupPhaseStat
+	TimeoutWaitRequestedNanos, TimeoutMaxWaitNanos                 uint64
+	DescriptorBatches, SharedBatches, EarlyBatchMatches            uint64
+	BatchDescriptors, BatchSockets, BatchQueueFull, AbortedBatches uint64
 }
 
 func (o *Owners) Stats() any {
@@ -110,6 +113,9 @@ func (o *Owners) Stats() any {
 	s.TargetedProbes = o.targetedProbes.Load()
 	s.MetadataPasses, s.SharedMetadata = o.metadataPasses.Load(), o.sharedMetadata.Load()
 	s.SharedScopes = o.sharedScopes.Load()
+	s.DescriptorBatches, s.SharedBatches, s.EarlyBatchMatches = o.batches.started.Load(), o.batches.shared.Load(), o.batches.early.Load()
+	s.BatchDescriptors, s.BatchSockets = o.batches.fds.Load(), o.batches.sockets.Load()
+	s.BatchQueueFull, s.AbortedBatches = o.batches.full.Load(), o.batches.aborted.Load()
 	s.HolderTimeouts = o.holderTimeouts.Load()
 	s.TimeoutWaitRequestedNanos = o.timeoutWaitRequested.Load()
 	s.TimeoutMaxWaitNanos = o.timeoutWaitMaximum.Load()
@@ -194,7 +200,10 @@ func NewOwners() *Owners {
 	return o
 }
 
-func (o *Owners) Close() { o.queries.close() }
+func (o *Owners) Close() {
+	o.closeDescriptorBatches()
+	o.queries.close()
+}
 func (o *Owners) query(ctx context.Context, family, protocol int, local, remote netip.AddrPort) ([]socketRow, error) {
 	return diagQuery(ctx, family, protocol, local, remote, false, &o.queries)
 }
@@ -963,9 +972,52 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		}
 		visitFDs := func(limit int) (int, error) {
 			started := time.Now()
-			count, err := f.Visit(limit, visit)
-			timing.add(phaseDescriptors, time.Since(started))
-			return count, err
+			defer func() { timing.add(phaseDescriptors, time.Since(started)) }()
+			offset, err := f.Seek(0, io.SeekCurrent)
+			if err != nil {
+				return 0, err
+			}
+			key := descriptorBatchKey{pid: pid, uid: r.uid, start: start, directory: metadata.Ino, offset: offset, limit: limit, advance: advancing}
+			if !canIndex {
+				key.onlyInode = r.inode
+			}
+			for !expired() {
+				job, err := o.descriptorBatch(key)
+				if err != nil {
+					return 0, err
+				}
+				var ready <-chan struct{}
+				if notice != nil && result.AppID == "" {
+					ready = notice.ready
+				}
+				select {
+				case <-ready:
+					matched = true
+					o.batches.early.Add(1)
+					return 0, nil
+				case <-job.done:
+					out := job.result
+					scannedFDs += out.count
+					maxSeen = max(maxSeen, out.lastFD)
+					if advancing {
+						maxFD = max(maxFD, out.lastFD)
+					}
+					matched = matched || slices.Contains(out.inodes, r.inode)
+					// A window begun before this request can supply a live
+					// positive hint, but a miss needs a fresh pass. Newly
+					// created descriptors may be absent from its kernel buffer.
+					if !matched && out.began.Before(requested) {
+						continue
+					}
+					if out.began.Before(requested) && errors.Is(out.err, io.EOF) {
+						return out.count, nil
+					}
+					return out.count, out.err
+				case <-ctx.Done():
+					return 0, ctx.Err()
+				}
+			}
+			return 0, context.DeadlineExceeded
 		}
 		defer func() {
 			o.publish(remember)
