@@ -26,6 +26,11 @@ const (
 	phaseProcessClose
 	phaseDescriptors
 	phaseValidation
+	phaseMetadataExe
+	phaseMetadataScratch
+	phaseMetadataFlatpak
+	phaseMetadataEnviron
+	phaseMetadataStart
 	phaseOther
 	lookupPhases
 )
@@ -33,7 +38,9 @@ const (
 var lookupPhaseNames = [lookupPhases]string{
 	"index", "scope-map", "scope-scratch", "scope-open", "scope-stat",
 	"scope-read", "scope-close", "scope-parse", "scope-rank", "process-open",
-	"process-start", "process-close", "descriptor-batch-wait", "validation", "other",
+	"process-start", "process-close", "descriptor-batch-wait", "validation",
+	"metadata-exe", "metadata-scratch", "metadata-flatpak", "metadata-environ",
+	"metadata-start", "other",
 }
 
 type lookupTiming struct {
@@ -44,6 +51,14 @@ func (t *lookupTiming) add(phase lookupPhase, elapsed time.Duration) {
 	if t != nil {
 		t.phases[phase] += elapsed
 	}
+}
+
+func (t *lookupTiming) metadataDuration() time.Duration {
+	var total time.Duration
+	for phase := phaseMetadataExe; phase <= phaseMetadataStart; phase++ {
+		total += t.phases[phase]
+	}
+	return total
 }
 
 type lookupPhaseCounter struct {

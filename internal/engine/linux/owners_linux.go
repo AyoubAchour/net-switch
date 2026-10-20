@@ -364,25 +364,35 @@ func processOwner(pid uint32) (platform.Owner, error) {
 // The caller supplies the incarnation from its descriptor scan or cache hint.
 // Verify it after reading metadata and before returning any usable identity.
 func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
+	return processOwnerAtTimed(pid, start, nil)
+}
+
+func processOwnerAtTimed(pid uint32, start uint64, timing *lookupTiming) (platform.Owner, error) {
 	root := fmt.Sprintf("/proc/%d/", pid)
+	started := time.Now()
 	exe, err := readProcLink(root + "exe")
+	timing.add(phaseMetadataExe, time.Since(started))
 	if err != nil {
 		return platform.Owner{}, err
 	}
 	exe = strings.TrimSuffix(exe, " (deleted)")
 	id := apppath.Normalize(exe, apppath.Linux)
+	started = time.Now()
 	storage := processBuffers.Get()
+	timing.add(phaseMetadataScratch, time.Since(started))
 	// Flatpak's mount namespace metadata identifies apps that have identical
 	// /app/bin executable paths. It belongs to the holder, never to the socket.
 	// Native apps have no metadata file. Do not borrow 64 KiB for every
 	// concurrent lookup just to receive ENOENT; the small scratch also covers
 	// normal Flatpak headers. Only a header beyond it needs the larger bound.
+	started = time.Now()
 	info, infoErr := readFlatpakInfo(root+"root", storage[:])
 	var flatpak *[64 << 10]byte
 	if errors.Is(infoErr, errKernelFileLimit) {
 		flatpak = flatpakBuffers.Get()
 		info, infoErr = readFlatpakInfo(root+"root", flatpak[:])
 	}
+	timing.add(phaseMetadataFlatpak, time.Since(started))
 	if infoErr != nil && !errors.Is(infoErr, unix.ENOENT) && !errors.Is(infoErr, unix.ESRCH) {
 		rejectedMetadata.Add(1)
 		message := fmt.Sprintf("pid %d Flatpak metadata rejected: %v", pid, infoErr)
@@ -406,10 +416,12 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 			id = "snap:" + parts[2]
 		}
 	} else {
+		started = time.Now()
 		b, err := readInto(root+"environ", storage[:])
 		if errors.Is(err, errKernelFileLimit) {
 			b, err = readKernelFile(root+"environ", 8<<20)
 		}
+		timing.add(phaseMetadataEnviron, time.Since(started))
 		for err == nil && len(b) > 0 {
 			v, rest, _ := bytes.Cut(b, []byte{0})
 			b = rest
@@ -422,11 +434,15 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 			}
 		}
 	}
+	started = time.Now()
 	if flatpak != nil {
 		flatpakBuffers.Put(flatpak)
 	}
 	processBuffers.Put(storage)
+	timing.add(phaseMetadataScratch, time.Since(started))
+	started = time.Now()
 	end, err := processStart(pid)
+	timing.add(phaseMetadataStart, time.Since(started))
 	if err != nil || end != start {
 		return platform.Owner{}, os.ErrNotExist
 	}
@@ -575,10 +591,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			}
 		}
 		validationStarted := time.Now()
+		metadataBefore := timing.metadataDuration()
 		defer func() {
 			elapsed := time.Since(validationStarted)
 			validationTime += elapsed
-			timing.add(phaseValidation, elapsed)
+			// Subphases account for metadata I/O separately; do not count it
+			// twice when finding the operation that consumed the deadline.
+			timing.add(phaseValidation, max(0, elapsed-(timing.metadataDuration()-metadataBefore)))
 		}()
 		path := fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd)
 		got, ok := socketInodeAt(unix.AT_FDCWD, path)
@@ -588,7 +607,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		// A shared metadata read must begin after this descriptor check.
 		// Check the descriptor again afterward, before accepting the holder.
 		checked := time.Now()
-		live, err := o.validationFor(h).resolve(ctx, checked, o)
+		live, err := o.validationFor(h).resolveTimed(ctx, checked, o, &timing)
 		if err != nil || live.StartTime != h.start {
 			if errors.Is(err, os.ErrNotExist) {
 				o.invalidateStart(h)

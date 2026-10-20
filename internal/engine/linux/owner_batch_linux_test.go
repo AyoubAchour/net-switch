@@ -386,7 +386,7 @@ func TestCloseJoinsAnActiveCallerOwnedScan(t *testing.T) {
 	select {
 	case <-reading:
 	case <-time.After(time.Second):
-		t.Fatal("cancelled scan did not return after publication unblocked")
+		t.Fatal("cancelled scan did not return after scratch acquisition unblocked")
 	}
 	select {
 	case <-closed:
