@@ -96,7 +96,14 @@ func (l *Link) Send(p []byte) bool {
 func (l *Link) WritePackets(pkts gv.PacketBufferList) (int, tcpip.Error) {
 	for _, p := range pkts.AsSlice() {
 		l.enqueue(p.Size(), func(dst []byte) {
-			for _, part := range p.AsSlices() {
+			views, skip := p.AsViewList()
+			for view := views.Front(); view != nil; view = view.Next() {
+				part := view.AsSlice()
+				if skip >= len(part) {
+					skip -= len(part)
+					continue
+				}
+				part, skip = part[skip:], 0
 				dst = dst[copy(dst, part):]
 			}
 		})

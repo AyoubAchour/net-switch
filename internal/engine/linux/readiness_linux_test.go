@@ -3,11 +3,13 @@
 package linux
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"net"
 	"os"
+	"slices"
 	"testing"
 	"time"
 
@@ -18,6 +20,46 @@ import (
 type errorBatchTun struct {
 	tun.Device
 	reads int
+}
+
+type groCountingTun struct {
+	tun.Device
+	runs []int
+}
+
+func (d *groCountingTun) Write(packets [][]byte, offset int) (int, error) {
+	d.runs = append(d.runs, len(packets))
+	bytes := 0
+	for _, p := range packets {
+		bytes += len(p)
+		// The real GRO implementation may mutate every supplied packet.
+		p[offset] ^= 0xff
+	}
+	return bytes - (len(packets)-1)*50, nil // coalesced bytes, never packet count
+}
+
+func TestTunBatchDoesNotCoalesceAcrossControlOrMutateCaller(t *testing.T) {
+	data := func(flags byte) []byte {
+		p := make([]byte, 41)
+		p[0], p[3], p[9], p[32], p[33], p[40] = 0x45, 41, 6, 0x50, flags, 7
+		return p
+	}
+	packets := [][]byte{data(0x10), data(0x18), data(0x12), data(0x10), data(0x18)}
+	var original [][]byte
+	for _, p := range packets {
+		original = append(original, bytes.Clone(p))
+	}
+	d := &groCountingTun{}
+	device := &Tun{device: d}
+	n, err := device.WriteBatch(packets)
+	if err != nil || n != len(packets) || !slices.Equal(d.runs, []int{2, 1, 2}) {
+		t.Fatalf("GRO control boundary/count: %d %v %v", n, d.runs, err)
+	}
+	for i, p := range packets {
+		if !bytes.Equal(p, original[i]) {
+			t.Fatal("GRO modified a caller-owned packet")
+		}
+	}
 }
 
 func (d *errorBatchTun) Read(b [][]byte, sizes []int, _ int) (int, error) {

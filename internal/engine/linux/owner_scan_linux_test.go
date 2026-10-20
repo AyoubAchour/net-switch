@@ -4,6 +4,7 @@ package linux
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"os"
@@ -39,5 +40,23 @@ func TestCompletedSmallScanDoesNotHideLaterSocket(t *testing.T) {
 		if completed.IsZero() {
 			t.Fatal("fixture did not establish a completed small descriptor scan")
 		}
+	}
+}
+
+func TestExpiredHolderLookupDoesNotWaitForIndex(t *testing.T) {
+	o := newTestOwners(t)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { _, err := o.holders(ctx, socketRow{inode: 1}); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expired lookup: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expired lookup entered shared index work")
 	}
 }

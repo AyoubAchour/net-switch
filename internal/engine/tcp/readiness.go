@@ -31,6 +31,13 @@ type relayDirection struct {
 	eof, finished bool
 }
 
+// Endpoint I/O consumes these adapters synchronously. Reuse them per worker
+// rather than allocating an interface-backed reader/writer for every chunk.
+type relayScratch struct {
+	receive tcpip.SliceWriter
+	send    bytes.Reader
+}
+
 type readyRelay struct {
 	workers                        *relayWorkers
 	next                           *readyRelay
@@ -87,6 +94,7 @@ func (w *relayWorkers) appendLocked(r *readyRelay) {
 }
 
 func (w *relayWorkers) run() {
+	scratch := new(relayScratch)
 	for {
 		select {
 		case <-w.stop:
@@ -107,7 +115,7 @@ func (w *relayWorkers) run() {
 			if r == nil {
 				break
 			}
-			r.step()
+			r.step(scratch)
 			w.mu.Lock()
 			if r.again && !r.closed.Load() {
 				w.appendLocked(r)
@@ -192,25 +200,27 @@ func stackError(err tcpip.Error) error {
 	}
 }
 
-func (r *readyRelay) read(up bool, b []byte) (int, error) {
+func (r *readyRelay) read(up bool, b []byte, scratch *relayScratch) (int, error) {
 	if !up {
 		return r.remote.TryRead(b)
 	}
-	w := tcpip.SliceWriter(b)
-	result, err := r.c.ep.Read(&w, tcpip.ReadOptions{})
+	scratch.receive = tcpip.SliceWriter(b)
+	result, err := r.c.ep.Read(&scratch.receive, tcpip.ReadOptions{})
+	scratch.receive = nil
 	return result.Count, stackError(err)
 }
 
-func (r *readyRelay) write(up bool, b []byte) (int, error) {
+func (r *readyRelay) write(up bool, b []byte, scratch *relayScratch) (int, error) {
 	if up {
 		return r.remote.TryWrite(b)
 	}
-	reader := bytes.NewReader(b)
-	n, err := r.c.ep.Write(reader, tcpip.WriteOptions{})
+	scratch.send.Reset(b)
+	n, err := r.c.ep.Write(&scratch.send, tcpip.WriteOptions{})
+	scratch.send.Reset(nil)
 	return int(n), stackError(err)
 }
 
-func (r *readyRelay) direction(d *relayDirection, up bool) (bool, error) {
+func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch) (bool, error) {
 	if d.finished {
 		return false, nil
 	}
@@ -219,7 +229,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool) (bool, error) {
 	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
 		if d.buffer == nil && !d.eof {
 			buffer := relayBuffers.Get().(*[]byte)
-			n, err := r.read(up, *buffer)
+			n, err := r.read(up, *buffer, scratch)
 			if n != 0 {
 				d.buffer, d.start, d.end = buffer, 0, n
 			} else {
@@ -238,7 +248,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool) (bool, error) {
 			}
 		}
 		if d.buffer != nil {
-			n, err := r.write(up, (*d.buffer)[d.start:d.end])
+			n, err := r.write(up, (*d.buffer)[d.start:d.end], scratch)
 			if n > 0 {
 				d.start += n
 				moved += n
@@ -288,17 +298,17 @@ func (r *readyRelay) direction(d *relayDirection, up bool) (bool, error) {
 	return true, nil
 }
 
-func (r *readyRelay) step() {
+func (r *readyRelay) step(scratch *relayScratch) {
 	if r.cancelled.Load() || r.ctx.Err() != nil {
 		r.close(true)
 		return
 	}
-	up, err := r.direction(&r.up, true)
+	up, err := r.direction(&r.up, true, scratch)
 	if err != nil {
 		r.close(true)
 		return
 	}
-	down, err := r.direction(&r.down, false)
+	down, err := r.direction(&r.down, false, scratch)
 	if err != nil {
 		r.close(true)
 		return
