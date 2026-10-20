@@ -116,6 +116,8 @@ jobs:
         run: |
           go build -o dist/windows-test/netswitch-engine.exe ./cmd/netswitch-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/recovery/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -v ./internal/engine/...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./tests/windows/testisp

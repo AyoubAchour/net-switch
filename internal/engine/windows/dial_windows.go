@@ -18,10 +18,16 @@ import (
 )
 
 type Dialer struct {
-	Routes  *Routes
-	once    sync.Once
-	pool    *readiness
-	poolErr error
+	Routes *Routes
+	pool   *readiness
+}
+
+func NewDialer(routes *Routes) (*Dialer, error) {
+	pool, err := newReadiness()
+	if err != nil {
+		return nil, err
+	}
+	return &Dialer{Routes: routes, pool: pool}, nil
 }
 
 func (d *Dialer) Close() error {
@@ -50,6 +56,9 @@ func bindSocket(a Adapter, v6 bool) func(string, string, syscall.RawConn) error 
 }
 
 func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort) (platform.TCPConn, error) {
+	if d.pool == nil {
+		return nil, errors.New("Windows socket readiness was not initialized")
+	}
 	a, source, err := d.Routes.binding(line, remote.Addr().Is6())
 	if err != nil {
 		return nil, err
@@ -63,11 +72,6 @@ func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort
 	c, err := dial.DialContext(ctx, network, remote.String())
 	if err != nil {
 		return nil, err
-	}
-	d.once.Do(func() { d.pool, d.poolErr = newReadiness() })
-	if d.poolErr != nil {
-		c.Close()
-		return nil, d.poolErr
 	}
 	return &readySocket{blocking: c.(*net.TCPConn), pool: d.pool, local: c.LocalAddr(), remote: c.RemoteAddr()}, nil
 }
