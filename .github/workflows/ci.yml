@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      handle_probe:
+        description: Diagnose runtime thread handles during recovery
+        type: boolean
+        default: false
       latency_probe:
         description: Diagnose the ARM64 median latency measurement
         type: boolean
@@ -28,6 +32,56 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  recovery-handle-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.handle_probe
+    name: ARM64 recovery handle ownership
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - run: ./scripts/prepare-wintun-tests.ps1
+      - name: Measure twenty cold processes with the original runtime baseline
+        run: |
+          $failures = 0
+          for ($i = 1; $i -le 20; $i++) {
+            Write-Host "COLD_PROCESS $i"
+            ./bin/wintun.test.exe '-test.v' '-test.timeout=1m' '-test.run=^TestWintunRecoveryLeak$'
+            if ($LASTEXITCODE -ne 0) { $failures++ }
+          }
+          Write-Host "COLD_FAILURES $failures/20"
+          if ($failures) { exit 1 }
+      - name: Measure twenty cold processes with the runtime cache warmed
+        if: ${{ !cancelled() }}
+        env:
+          NETSWITCH_WINTUN_WARM_THREADS: '1'
+        run: |
+          $failures = 0
+          for ($i = 1; $i -le 20; $i++) {
+            Write-Host "WARM_PROCESS $i"
+            ./bin/wintun.test.exe '-test.v' '-test.timeout=1m' '-test.run=^TestWintunRecoveryLeak$'
+            if ($LASTEXITCODE -ne 0) { $failures++ }
+          }
+          Write-Host "WARM_FAILURES $failures/20"
+          if ($failures) { exit 1 }
+
   latency-probe:
     if: github.event_name == 'workflow_dispatch' && inputs.latency_probe
     name: ARM64 latency probe / monitor ${{ matrix.monitor }}
@@ -68,7 +122,7 @@ jobs:
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.latency_probe
+    if: github.event_name == 'workflow_dispatch' && !inputs.latency_probe && !inputs.handle_probe
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:

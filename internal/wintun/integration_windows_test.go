@@ -757,9 +757,7 @@ func pnpExists(t *testing.T, instance string) bool {
 	}
 }
 
-func TestWintunLifetime(t *testing.T) {
-	requireRunner(t)
-	a := newAdapter(t, MinCapacity)
+func warmRuntimeThreads() {
 	// Go caches OS threads and each Windows M owns six native handles
 	// (runtime/os_windows.go: minit and semacreate). Warm that cache before
 	// taking the process baseline; do not excuse growth by raising the limit.
@@ -781,6 +779,12 @@ func TestWintunLifetime(t *testing.T) {
 	}
 	close(release)
 	warm.Wait()
+}
+
+func TestWintunLifetime(t *testing.T) {
+	requireRunner(t)
+	a := newAdapter(t, MinCapacity)
+	warmRuntimeThreads()
 	for i := 0; i < 100; i++ {
 		s, err := a.StartSession()
 		must(t, err)
@@ -1058,8 +1062,13 @@ func TestWintunRecoveryLeak(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		recoverOne()
 	}
+	if os.Getenv("NETSWITCH_WINTUN_WARM_THREADS") == "1" {
+		warmRuntimeThreads()
+	}
 	debug.FreeOSMemory()
 	beforeHandles, beforeBytes := processUsage(t)
+	beforeTypes := handleTypes(t)
+	beforeThreads, _ := runtime.ThreadCreateProfile(nil)
 	beforeDevices := pnpDevices(t)
 	start := time.Now()
 	for i := 0; i < 32; i++ {
@@ -1067,14 +1076,16 @@ func TestWintunRecoveryLeak(t *testing.T) {
 	}
 	debug.FreeOSMemory()
 	afterHandles, afterBytes := processUsage(t)
+	afterTypes := handleTypes(t)
+	afterThreads, _ := runtime.ThreadCreateProfile(nil)
 	afterDevices := pnpDevices(t)
+	report(t, map[string]any{"test": "recovery_leak", "arch": runtime.GOARCH, "measured_recoveries": 32, "seconds": time.Since(start).Seconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes, "pnp_before": beforeDevices, "pnp_after": afterDevices, "types_before": beforeTypes, "types_after": afterTypes, "go_threads_before": beforeThreads, "go_threads_after": afterThreads})
 	if afterHandles > beforeHandles+2 || afterBytes > beforeBytes+16<<20 || !slices.Equal(beforeDevices, afterDevices) {
 		t.Fatalf("recovery leak: handles %d -> %d, bytes %d -> %d, devices %v -> %v", beforeHandles, afterHandles, beforeBytes, afterBytes, beforeDevices, afterDevices)
 	}
 	if s.Stats().Recoveries != 40 || s.Stats().RecoveryFailures != 0 || time.Since(start) < 7*time.Second {
 		t.Fatalf("missing recoveries or backoff: %+v in %v", s.Stats(), time.Since(start))
 	}
-	report(t, map[string]any{"test": "recovery_leak", "arch": runtime.GOARCH, "measured_recoveries": 32, "seconds": time.Since(start).Seconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes, "pnp_before": beforeDevices, "pnp_after": afterDevices})
 }
 
 func pnpDevices(t *testing.T) []string {
