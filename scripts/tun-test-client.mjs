@@ -11,9 +11,11 @@ const held = new Map();
 let next = 0;
 async function requestOn(item) {
   const nonce = randomBytes(16).toString('hex');
+  const label = item.target.publicTrace ? 'Public HTTPS' : 'Local HTTPS';
   return new Promise((resolve, reject) => {
     const req = request({ ...item.target,
-      path: `/?nonce=${nonce}`, agent: item.agent, signal: AbortSignal.timeout(10_000) }, (res) => {
+      path: item.target.publicTrace ? '/cdn-cgi/trace' : `/?nonce=${nonce}`,
+      agent: item.agent, signal: AbortSignal.timeout(10_000) }, (res) => {
       const port = res.socket.localPort;
       let body = '';
       res.setEncoding('utf8');
@@ -21,26 +23,35 @@ async function requestOn(item) {
       res.on('error', reject);
       res.on('end', () => {
         try {
-          assert.equal(res.statusCode, 200, `Local HTTPS HTTP ${res.statusCode}: ${body.slice(0, 100)}`);
-          const reply = JSON.parse(body);
-          assert.equal(reply.nonce, nonce, 'Local HTTPS response did not echo this request');
-          assert(Number.isInteger(reply.connection), 'Missing responder connection identity');
+          if (item.target.publicTrace && res.statusCode >= 500 && res.statusCode < 600) {
+            throw new Error(`public target unavailable: ${item.target.host}:${item.target.port} HTTP ${res.statusCode}: ${body.slice(0, 100)}`);
+          }
+          assert.equal(res.statusCode, 200, `${label} HTTP ${res.statusCode}: ${body.slice(0, 100)}`);
+          let connection;
+          if (item.target.publicTrace) assert(body.includes('ip='), 'Public HTTPS trace body missing');
+          else {
+            const reply = JSON.parse(body);
+            assert.equal(reply.nonce, nonce, 'Local HTTPS response did not echo this request');
+            assert(Number.isInteger(reply.connection), 'Missing responder connection identity');
+            connection = reply.connection;
+          }
           if (item.port) {
-            assert(req.reusedSocket && item.port === port && item.connection === reply.connection,
+            assert(req.reusedSocket && item.port === port && (item.target.publicTrace || item.connection === connection),
               `Connection ${item.id} was replaced`);
           }
           item.port = port;
-          item.connection = reply.connection;
-          resolve({ id: item.id, port, bytes: body.length, reused: req.reusedSocket, connection: reply.connection });
+          item.connection = connection;
+          resolve({ id: item.id, port, bytes: body.length, reused: req.reusedSocket, connection });
         } catch (error) { reject(error); }
       });
     });
-    req.on('error', (cause) => reject(new Error(`Local HTTPS ${item.target.host}:${item.target.port}, connection ${item.id}: ${cause.message}`, { cause })));
+    req.on('error', (cause) => reject(new Error(`${label} ${item.target.host}:${item.target.port}, connection ${item.id}: ${cause.message}`, { cause })));
     req.end();
   });
 }
 async function open(count, target) {
-  assert(target?.ca && target.servername === 'netswitch.invalid', 'A local TLS target with its certificate is required');
+  assert(target?.publicTrace === true || (target?.ca && target.servername === 'netswitch.invalid'),
+    'An explicit public trace or a local TLS target with its certificate is required');
   const results = [];
   // Keep the existing concurrency and request deadline.
   for (let n = 0; n < count; n += 10) {

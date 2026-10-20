@@ -62,6 +62,16 @@ Node or Go control service; selector checks still use the engine API directly.
 Its identity record names the actual control binary and Node entry when used.
 `acceptance.mjs` provides the broader packet-level acceptance suite.
 
+The dedicated engine-config/TUN job passes `--engine-adapter`. That explicit
+mode tests today's Node `Engine` directly and refuses a different control
+executable; it never presents an adapter run as control-service coverage.
+Its HTTPS peer is local, with a fresh certificate trusted only by the client.
+One non-final destination rewrite leaves the real pins, selectors and bound
+outbounds in charge. TestISP counters prove the bb path, and client port reuse
+plus the responder's socket identity prove the original connections survive.
+All 20 lifecycle cycles use the unchanged product config. This job has no public
+traffic target; the default control-service mode keeps its public trace probes.
+
 ## Classification
 
 Pre-engine checks are `harness-baseline`, separate from engine `parity` passes.
