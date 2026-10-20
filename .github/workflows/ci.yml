@@ -12,11 +12,6 @@ on:
         description: Run only the focused Windows control security regressions
         type: boolean
         default: false
-      tun_https_repeat:
-        description: Temporary local HTTPS validation
-        type: choice
-        options: [off, smoke, ten]
-        default: off
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -58,7 +53,7 @@ jobs:
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.control_security && inputs.tun_https_repeat == 'off'
+    if: github.event_name == 'workflow_dispatch' && !inputs.control_security
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -234,16 +229,13 @@ jobs:
           retention-days: 14
 
   engine:
-    if: github.event_name != 'workflow_dispatch' || inputs.tun_https_repeat != 'off'
-    name: Windows ${{ matrix.arch }} / engine configs and TUN / ${{ matrix.repeat }}
+    if: github.event_name != 'workflow_dispatch'
+    name: Windows ${{ matrix.arch }} / engine configs and TUN
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      max-parallel: 4
       matrix:
-        repeat: ${{ fromJSON(inputs.tun_https_repeat == 'ten' && '[1,2,3,4,5,6,7,8,9,10]' || '[1]') }}
-        arch: [x64, arm64]
         include:
           - arch: x64
             runner: windows-latest
@@ -299,7 +291,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: tun-test-${{ matrix.arch }}-${{ matrix.repeat }}
+          name: tun-test-${{ matrix.arch }}
           path: |
             dist/tun-test/*.log*
             dist/tun-test/udp/*.log*
