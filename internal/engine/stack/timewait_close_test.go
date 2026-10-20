@@ -1,7 +1,6 @@
 package stack_test
 
 import (
-	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -25,31 +24,18 @@ type cleanupClock struct {
 	mu               sync.Mutex
 	latest           *cleanupTimer
 	target           atomic.Pointer[cleanupTimer]
-	events           []string
 }
 
 func (c *cleanupClock) AfterFunc(d time.Duration, f func()) tcpip.Timer {
+	timer := c.ManualClock.AfterFunc(d, f)
 	if d == 60*time.Second {
-		wrapped := &cleanupTimer{clock: c}
-		wrapped.Timer = c.ManualClock.AfterFunc(d, func() {
-			c.record(fmt.Sprintf("fire %p", wrapped))
-			f()
-		})
-		buf := make([]byte, 4096)
-		n := runtime.Stack(buf, false)
+		wrapped := &cleanupTimer{Timer: timer, clock: c}
 		c.mu.Lock()
-		c.events = append(c.events, fmt.Sprintf("create %p\n%s", wrapped, buf[:n]))
 		c.latest = wrapped
 		c.mu.Unlock()
 		return wrapped
 	}
-	return c.ManualClock.AfterFunc(d, f)
-}
-
-func (c *cleanupClock) record(event string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.events = append(c.events, event)
+	return timer
 }
 
 type cleanupTimer struct {
@@ -58,7 +44,6 @@ type cleanupTimer struct {
 }
 
 func (t *cleanupTimer) Stop() bool {
-	t.clock.record(fmt.Sprintf("stop %p target %p", t, t.clock.target.Load()))
 	if t.clock.target.Load() == t {
 		t.clock.once.Do(func() { close(t.clock.entered); <-t.clock.release })
 	}
@@ -95,7 +80,7 @@ func TestTimeWaitSYNBeforeRemoval(t *testing.T) {
 	case <-clock.entered:
 	case <-time.After(time.Second):
 		clock.mu.Lock()
-		t.Logf("target=%p latest=%p state=%s events=%v", clock.target.Load(), clock.latest, tcp.EndpointState(ep.State()), clock.events)
+		t.Logf("cleanup barrier: target=%p latest=%p state=%s", clock.target.Load(), clock.latest, tcp.EndpointState(ep.State()))
 		clock.mu.Unlock()
 		buf := make([]byte, 1<<20)
 		n := runtime.Stack(buf, true)

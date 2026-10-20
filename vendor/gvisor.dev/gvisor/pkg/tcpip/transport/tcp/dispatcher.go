@@ -217,7 +217,10 @@ func handleConnected(ep *Endpoint) {
 // +checklocksrelease:ep.mu
 func handleConnectedLocked(ep *Endpoint) {
 
-	if !ep.EndpointState().connected() {
+	// Ordered ingress may finish the FIN after the processor selects this
+	// handler but before it acquires mu. TIME_WAIT already owns its timer;
+	// do not restart it. The processor requeues any remaining segments.
+	if state := ep.EndpointState(); !state.connected() || state == StateTimeWait {
 		// If the endpoint has already transitioned out of a connected
 		// state then just return (only possible if it was closed or
 		// timed out by the time we got around to processing the wakeup.

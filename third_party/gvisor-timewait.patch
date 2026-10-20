@@ -61,7 +61,7 @@ index 62f42f4..b42da44 100644
  			extendTimeWait = true
  		}
 diff --git a/pkg/tcpip/transport/tcp/dispatcher.go b/pkg/tcpip/transport/tcp/dispatcher.go
-index d138e3b..ace2723 100644
+index d138e3b..fd89a21 100644
 --- a/pkg/tcpip/transport/tcp/dispatcher.go
 +++ b/pkg/tcpip/transport/tcp/dispatcher.go
 @@ -12,6 +12,8 @@
@@ -86,7 +86,7 @@ index d138e3b..ace2723 100644
  	cleanup := func() {
  		ep.mu.Unlock()
  		ep.drainClosingSegmentQueue()
-@@ -202,6 +210,12 @@ func handleConnected(ep *Endpoint) {
+@@ -202,8 +210,17 @@ func handleConnected(ep *Endpoint) {
  	if !ep.TryLock() {
  		return
  	}
@@ -97,9 +97,15 @@ index d138e3b..ace2723 100644
 +// +checklocksrelease:ep.mu
 +func handleConnectedLocked(ep *Endpoint) {
  
- 	if !ep.EndpointState().connected() {
+-	if !ep.EndpointState().connected() {
++	// Ordered ingress may finish the FIN after the processor selects this
++	// handler but before it acquires mu. TIME_WAIT already owns its timer;
++	// do not restart it. The processor requeues any remaining segments.
++	if state := ep.EndpointState(); !state.connected() || state == StateTimeWait {
  		// If the endpoint has already transitioned out of a connected
-@@ -235,6 +249,12 @@ func handleConnected(ep *Endpoint) {
+ 		// state then just return (only possible if it was closed or
+ 		// timed out by the time we got around to processing the wakeup.
+@@ -235,6 +252,12 @@ func handleConnected(ep *Endpoint) {
  //
  // +checklocks:ep.mu
  func startTimeWait(ep *Endpoint) {
@@ -112,7 +118,7 @@ index d138e3b..ace2723 100644
  	// Disable close timer as we are now entering real TIME_WAIT.
  	if ep.finWait2Timer != nil {
  		ep.finWait2Timer.Stop()
-@@ -501,6 +521,15 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
+@@ -501,6 +524,15 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
  		return
  	}
  
