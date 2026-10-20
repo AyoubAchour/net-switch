@@ -49,8 +49,10 @@ async function pinApp(program, line) {
 }
 
 async function combine(on) {
-  return applied('combine', { on, mode: 'manual', weights: { [main.id]: 1, [second.id]: 1 } },
+  const state = await applied('combine', { on, mode: 'manual', weights: { [main.id]: 1, [second.id]: 1 } },
     (state) => state.combine.on === on && (!on || state.combine.active));
+  await verifyTrafficConfig(`combining ${on ? 'on' : 'off'}`);
+  return state;
 }
 
 function exactTraffic(before, after, expected, destination = publicDestination) {
@@ -224,17 +226,22 @@ async function quicProbe(host, source, index) {
   return JSON.parse(result.stdout);
 }
 
+async function verifyTrafficConfig(phase, marker) {
+  const rule = JSON.parse(marker ?? await readFile(path.join(dataDir, httpsMarker), 'utf8'));
+  const product = JSON.parse(await readFile(path.join(dataDir, 'traffic-product-config.json'), 'utf8'));
+  const actual = JSON.parse(await readFile(path.join(dataDir, 'engine-config.json'), 'utf8'));
+  assert.deepEqual(rule, httpsRoute(tlsResponder), 'The marker must name this TLS responder');
+  assert.deepEqual(actual.route.rules.shift(), rule);
+  assert.equal(actual.log.level, 'info'); actual.log.level = product.log.level;
+  assert.deepEqual(actual, product, 'Only the local TLS rewrite and diagnostic log level may change');
+  console.log(`Traffic config verified: ${phase}; only TLS destination rewrite and diagnostic log level differ`);
+}
+
 async function start() {
   server = await startServer(options, dataDir, (chunk) => output.write(chunk));
   const state = await server.on();
   const marker = await readFile(path.join(dataDir, httpsMarker), 'utf8').catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
-  if (marker) {
-    const product = JSON.parse(await readFile(path.join(dataDir, 'traffic-product-config.json'), 'utf8'));
-    const actual = JSON.parse(await readFile(path.join(dataDir, 'engine-config.json'), 'utf8'));
-    assert.deepEqual(actual.route.rules.shift(), JSON.parse(marker));
-    assert.equal(actual.log.level, 'info'); actual.log.level = product.log.level;
-    assert.deepEqual(actual, product, 'Only the local TLS rewrite and diagnostic log level may change');
-  }
+  if (marker) await verifyTrafficConfig('startup', marker);
   await verifyEngineProcess(options, dataDir);
   rememberAppDevices(await pnpDevices());
   return state;
@@ -397,6 +404,7 @@ try {
   const state = await server.on();
   second = state.lines.find((line) => line.alias === 'TestISP');
   assert(second && state.lines.length === 2, JSON.stringify(state.lines));
+  await verifyTrafficConfig('two lines');
   await report.test('pins select both interfaces; secondary traffic crosses TestISP', 'parity', async () => ({ direct: await newTrafficOn(main), virtual: await newTrafficOn(second) }));
   await report.test('new pin leaves old connections alive', 'parity', async () => {
     const original = await client('open', { count: 3, target: tlsResponder.target });

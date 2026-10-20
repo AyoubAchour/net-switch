@@ -235,13 +235,13 @@ function Wait-Routing($Server) {
     Wait-Until {
       try {
         $state = Invoke-RestMethod -Uri "http://127.0.0.1:$($Server.port)/api/state" -Headers @{ 'X-Token' = $Server.token } -TimeoutSec 5
-        $script:lastRouting = $state.routing
-        if ($state.updateChecks -ne $false) { throw 'Background release check was enabled after restart.' }
-        return $state.routing.status -eq 'on'
       } catch { return $false }
+      $script:lastRouting = $state.routing
+      if ($state.updateChecks -ne $false) { throw 'Background release check was enabled after restart.' }
+      return $state.routing.status -eq 'on'
     } 'Routing did not turn on.' 90
   } catch {
-    throw "Routing did not turn on in the installed copy: $($script:lastRouting | ConvertTo-Json -Compress)"
+    throw "Installed startup check failed: $($_.Exception.Message) Routing: $($script:lastRouting | ConvertTo-Json -Compress)"
   }
 }
 
