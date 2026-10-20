@@ -139,10 +139,12 @@ jobs:
         if: ${{ !cancelled() && inputs.engine_build != 'release' && steps.harness.outcome == 'success' && steps.quic.outcome == 'success' }}
         env:
           RUN_FILTER: ${{ inputs.run }}
+          PROFILE: ${{ inputs.profile }}
         run: >-
           sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-faults-${{ github.run_id }}-${{ strategy.job-index }}" --
           env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
           "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs"
+          "NSACCEPT_PROFILE=$PROFILE"
           "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine-faults"
           --build-mode faults
           --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance/faults"
