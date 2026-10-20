@@ -119,6 +119,13 @@ The median averages the two central samples, retains the raw trial order in
 the report, and prevents one noisy trial from dominating either side. A
 sustained regression still fails the same 10% gate.
 
+TCP failures report session counters and ring cursors before socket or stack
+teardown, along with transferred byte counts and one goroutine snapshot.
+Both comparison paths use the engine's TCP stack: a TCP timeout is not evidence
+of a DLL missed wake. A deterministic stack test loses an entire TCP window and
+requires ACK-driven recovery after one timeout, including a new SACK during
+recovery. No TCP deadline or session gate is relaxed for the DLL comparison.
+
 Parallel senders verify every test payload. Deterministic malformed-entry tests
 independently prove recovery, even if the driver corruption does not occur in a
 particular stress sample. Lifetime tests count process handles and their kernel

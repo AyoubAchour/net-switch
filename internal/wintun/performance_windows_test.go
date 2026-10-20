@@ -77,6 +77,7 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 				return
 			}
 			if _, err := session.WriteBatch(packets[:n]); err != nil && ctx.Err() == nil {
+				f.recordFault(err)
 				t.Logf("TCP ring write: %v", err)
 			}
 			clear(packets[:n])
@@ -94,7 +95,10 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 				defer clients.Done()
 				defer c.Close()
 				c.SetDeadline(time.Now().Add(30 * time.Second))
-				io.Copy(c, c)
+				n, err := io.Copy(c, c)
+				if err != nil && ctx.Err() == nil {
+					t.Logf("TCP echo ended: copied_bytes=%d error=%v", n, err)
+				}
 			}()
 		}
 	}()
@@ -109,7 +113,7 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 	}
 }
 
-func tcpTransfer(t *testing.T, streams int) (float64, error) {
+func tcpTransfer(t *testing.T, f *fixture, streams int) (float64, error) {
 	t.Helper()
 	const size = 64 << 20
 	content := make([]byte, size)
@@ -118,7 +122,22 @@ func tcpTransfer(t *testing.T, streams int) (float64, error) {
 	}
 	want := sha256.Sum256(content)
 	var wg sync.WaitGroup
+	var diagnosticStack sync.Once
 	failures := make(chan error, streams)
+	diagnose := func(stage, local string, received int64, err error) {
+		s, _ := f.io.(*Session)
+		mode := "dll"
+		if s != nil {
+			mode = "ours"
+		}
+		// Capture the live session before closing a connection or stopping the
+		// echo pumps. Teardown otherwise destroys the evidence of a stalled ring.
+		report(t, map[string]any{"test": "tcp_failure_before_teardown", "arch": runtime.GOARCH, "mode": mode, "streams": streams, "stage": stage, "local": local, "received_bytes": received, "expected_bytes": size, "state": observeSession(s), "fault": fmt.Sprint(f.fault()), "error": err.Error()})
+		diagnosticStack.Do(func() {
+			buf := make([]byte, 1<<20)
+			t.Logf("TCP failure goroutines:\n%s", buf[:runtime.Stack(buf, true)])
+		})
+	}
 	start := ticks()
 	for i := 0; i < streams; i++ {
 		wg.Add(1)
@@ -127,23 +146,33 @@ func tcpTransfer(t *testing.T, streams int) (float64, error) {
 			d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("198.19.240.1")}, Timeout: 5 * time.Second}
 			c, err := d.Dial("tcp4", "198.19.240.2:9002")
 			if err != nil {
+				diagnose("connect", "", 0, err)
 				failures <- err
 				return
 			}
 			defer c.Close()
 			c.SetDeadline(time.Now().Add(30 * time.Second))
-			written := make(chan error, 1)
-			go func() { _, err := io.Copy(c, bytes.NewReader(content)); written <- err }()
+			type writeResult struct {
+				n   int64
+				err error
+			}
+			written := make(chan writeResult, 1)
+			go func() {
+				n, err := io.Copy(c, bytes.NewReader(content))
+				written <- writeResult{n, err}
+			}()
 			digest := sha256.New()
-			_, err = io.CopyN(digest, c, size)
+			received, err := io.CopyN(digest, c, size)
 			if err != nil {
+				diagnose("read", c.LocalAddr().String(), received, err)
 				c.Close()
-				<-written
-				failures <- err
+				sent := <-written
+				failures <- fmt.Errorf("TCP transfer read %d/%d and wrote %d/%d bytes: %w", received, size, sent.n, size, errors.Join(err, sent.err))
 				return
 			}
-			if err = <-written; err != nil {
-				failures <- err
+			if sent := <-written; sent.err != nil {
+				diagnose("write", c.LocalAddr().String(), received, sent.err)
+				failures <- fmt.Errorf("TCP transfer wrote %d/%d bytes: %w", sent.n, size, sent.err)
 				return
 			}
 			if !bytes.Equal(digest.Sum(nil), want[:]) {
@@ -332,7 +361,7 @@ func TestWintunProfile(t *testing.T) {
 	stop := tcpEcho(t, f)
 	defer stop()
 	for i := 0; i < 24; i++ {
-		value, err := tcpTransfer(t, 1)
+		value, err := tcpTransfer(t, f, 1)
 		must(t, err)
 		t.Logf("profile %s transfer %d: %.2f MB/s", mode, i, value)
 	}
@@ -404,14 +433,14 @@ func TestWintunPerformance(t *testing.T) {
 						// connections. The engine is long-lived: compare steady
 						// throughput after a fixed, visible warm-up for both paths.
 						for warm := 0; warm < 2; warm++ {
-							rate, warmErr := tcpTransfer(t, 1)
+							rate, warmErr := tcpTransfer(t, f, 1)
 							must(t, warmErr)
 							report(t, map[string]any{"test": "tcp_warmup", "arch": runtime.GOARCH, "mode": mode, "trial": trial, "streams": streams, "warmup": warm, "MBps": rate})
 						}
 						if s, ok := f.io.(*Session); ok {
 							before = s.Stats()
 						}
-						value, err = tcpTransfer(t, streams)
+						value, err = tcpTransfer(t, f, streams)
 					}()
 					if err != nil {
 						if mode != "dll" || !errors.Is(f.fault(), windows.ERROR_INVALID_DATA) {
