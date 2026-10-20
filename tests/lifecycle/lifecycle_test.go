@@ -482,6 +482,12 @@ func TestRealServices(t *testing.T) {
 		if err != nil || strings.TrimSpace(line) != "ready" {
 			t.Fatal("other user's traffic did not start", err, diagnostics.String())
 		}
+		var observed []string
+		defer func() {
+			if t.Failed() {
+				t.Logf("expected other-user executable %q; observed app paths: %q", path, observed)
+			}
+		}()
 		wait(t, "other user's executable appears in owner view", 15*time.Second, func() bool {
 			status, b := api(t, session.URL, session.Token, "GET", "/api/state", "")
 			if status != 200 {
@@ -495,7 +501,9 @@ func TestRealServices(t *testing.T) {
 			if json.Unmarshal(b, &state) != nil {
 				return false
 			}
+			observed = nil
 			for _, app := range state.Apps {
+				observed = append(observed, app.Path)
 				if strings.EqualFold(app.Path, path) {
 					return true
 				}

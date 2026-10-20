@@ -276,6 +276,9 @@ func (a *Adapter) Connections(ctx context.Context) ([]engine.Connection, error) 
 		if err := json.Unmarshal(raw, &c); err != nil {
 			return nil, err
 		}
+		if runtime.GOOS == "linux" {
+			c.Metadata.ProcessPath = LinuxProcessPath(c.Metadata.ProcessPath)
+		}
 		var meta struct {
 			Metadata struct {
 				Host string `json:"host"`
