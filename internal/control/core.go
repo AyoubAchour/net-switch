@@ -527,6 +527,11 @@ func (c *Core) resetLocked() {
 	}
 }
 func (c *Core) statusLocked(s engine.Snapshot) {
+	// Poll may have sampled before Start or its asynchronous recovery finished.
+	// Classify and settle the attempt from the same current observation.
+	if c.engineStarting && c.startReturned {
+		s = c.op.Engine.Snapshot()
+	}
 	// Windows can throttle services during Modern Standby. Neither an
 	// observation while suspended nor a start spanning a power transition
 	// is evidence for the crash latch. Keep genuine prior failures intact.
@@ -537,9 +542,8 @@ func (c *Core) statusLocked(s engine.Snapshot) {
 	}
 	// A start whose reply was lost returns while the engine is still starting;
 	// Remote's connection recovery publishes the outcome later. The attempt and
-	// its power classification last until Control observes that outcome. The
-	// re-read keeps a sample taken before Start returned from ending it early.
-	if c.engineStarting && c.startReturned && settledStatus(s.Status) && settledStatus(c.op.Engine.Snapshot().Status) {
+	// its power classification last until Control observes that outcome.
+	if c.engineStarting && c.startReturned && settledStatus(s.Status) {
 		c.engineStarting = false
 	}
 	freshFailure := s.FailureID != "" && s.FailureID != c.lastFailureID

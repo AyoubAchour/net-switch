@@ -146,6 +146,21 @@ func TestDelayedAwakeStartFailureCountsAndKeepsBudget(t *testing.T) {
 	}
 }
 
+func TestStaleSettledSampleCannotEndInterruptedStartBeforeItsError(t *testing.T) {
+	c, e := lostReplyCore(t)
+	e.duringStart = func() { standby(c) }
+	_ = c.Start(context.Background())
+	e.publish(engine.Snapshot{Status: "error", FailureID: "delayed-after-wake"})
+	c.mu.Lock()
+	// Poll sampled off before Start; its lock acquisition loses to recovery.
+	c.statusLocked(engine.Snapshot{Status: "off"})
+	c.statusLocked(e.Snapshot())
+	c.mu.Unlock()
+	if len(c.failureTimes) != 0 {
+		t.Fatal("stale settled sample discarded interrupted-attempt classification", c.failureTimes)
+	}
+}
+
 func TestRecoveredStartEndsPowerClassification(t *testing.T) {
 	c, e := lostReplyCore(t)
 	c.failureTimes = []int64{c.now() - 1000}
