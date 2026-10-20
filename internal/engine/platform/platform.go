@@ -67,6 +67,26 @@ type TCPConn interface {
 	SetLinger(int) error
 }
 
+// ReadyTCP optionally transfers a connection to the nonblocking relay. Arm
+// replaces its one-shot interest; readiness invokes wake without doing I/O.
+// Detach removes the registration before the socket can be closed or reused.
+// TryRead/TryWrite report ErrWouldBlock without waiting or changing deadlines.
+// A successful Watch transfers exclusive I/O ownership: callers then use only
+// TryRead/TryWrite, addresses, shutdown, linger and Close, not blocking I/O or
+// deadlines. An adapter may release its original Go poll descriptor at transfer.
+var ErrWouldBlock = errors.New("socket would block")
+
+type ReadyTCP interface {
+	TCPConn
+	TryRead([]byte) (int, error)
+	TryWrite([]byte) (int, error)
+	Watch(func()) (Readiness, error)
+}
+type Readiness interface {
+	Arm(read, write bool) error
+	Detach()
+}
+
 // ReadFrom errors describe individual datagrams unless errors.Is(net.ErrClosed).
 // Translate EMSGSIZE/WSAEMSGSIZE to TooBig; other receive errors remain
 // recoverable. Close unblocks ReadFrom. The NAT keeps the same public port
@@ -120,10 +140,15 @@ type Line struct {
 
 type ProbeResult struct {
 	OK      bool          `json:"ok"`
+	Outcome string        `json:"outcome,omitempty"`
 	Latency time.Duration `json:"latency"`
 	Error   string        `json:"error,omitempty"`
 }
 
 type Prober interface {
 	Probe(context.Context, string, string) (ProbeResult, error)
+}
+
+type Echoer interface {
+	Echo(context.Context, string, netip.Addr, []byte) ([]byte, error)
 }
