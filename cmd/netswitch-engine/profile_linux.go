@@ -33,6 +33,7 @@ func startProfiles(dir string, cpu bool) (func(), error) {
 		return nil, errors.New("profile directory must be absolute, private and owned by the engine user")
 	}
 	var cpuFile *os.File
+	previousMutexRate := 0
 	if cpu {
 		cpuFile, err = os.OpenFile(filepath.Join(dir, "cpu.pprof"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
@@ -42,6 +43,8 @@ func startProfiles(dir string, cpu bool) (func(), error) {
 			cpuFile.Close()
 			return nil, err
 		}
+		runtime.SetBlockProfileRate(1000000)
+		previousMutexRate = runtime.SetMutexProfileFraction(100)
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGUSR1)
@@ -66,6 +69,17 @@ func startProfiles(dir string, cpu bool) (func(), error) {
 		if cpuFile != nil {
 			pprof.StopCPUProfile()
 			cpuFile.Close()
+			runtime.SetBlockProfileRate(0)
+			runtime.SetMutexProfileFraction(previousMutexRate)
+			for _, name := range []string{"block", "mutex"} {
+				f, err := os.OpenFile(filepath.Join(dir, name+".pprof"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+				if err == nil {
+					err = errors.Join(pprof.Lookup(name).WriteTo(f, 0), f.Close())
+				}
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "capture contention profile:", err)
+				}
+			}
 		}
 	}, nil
 }

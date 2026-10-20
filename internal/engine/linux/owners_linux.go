@@ -272,7 +272,7 @@ func (o *Owners) resolveUDP(ctx context.Context, r socketRow, unknown bool) (own
 }
 
 func processStart(pid uint32) (uint64, error) {
-	storage := processBuffers.Get().(*[16 << 10]byte)
+	storage := processBuffers.Get()
 	defer processBuffers.Put(storage)
 	b, err := readInto(fmt.Sprintf("/proc/%d/stat", pid), storage[:4096])
 	if err != nil {
@@ -324,7 +324,7 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 	}
 	exe = strings.TrimSuffix(exe, " (deleted)")
 	id := apppath.Normalize(exe, apppath.Linux)
-	storage := processBuffers.Get().(*[16 << 10]byte)
+	storage := processBuffers.Get()
 	// Flatpak's mount namespace metadata identifies apps that have identical
 	// /app/bin executable paths. It belongs to the holder, never to the socket.
 	// Native apps have no metadata file. Do not borrow 64 KiB for every
@@ -333,7 +333,7 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 	info, infoErr := readFlatpakInfo(root+"root", storage[:])
 	var flatpak *[64 << 10]byte
 	if errors.Is(infoErr, errKernelFileLimit) {
-		flatpak = flatpakBuffers.Get().(*[64 << 10]byte)
+		flatpak = flatpakBuffers.Get()
 		info, infoErr = readFlatpakInfo(root+"root", flatpak[:])
 	}
 	if infoErr != nil && !errors.Is(infoErr, unix.ENOENT) && !errors.Is(infoErr, unix.ESRCH) {
@@ -404,7 +404,7 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 		return nil
 	}
 	o.cgroupStats[1].Add(1)
-	storage := processBuffers.Get().(*[16 << 10]byte)
+	storage := processBuffers.Get()
 	defer processBuffers.Put(storage)
 	path := filepath.Join(dir, "cgroup.procs")
 	b, err := readInto(path, storage[:])
@@ -473,6 +473,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	var result platform.Owner
 	var found []holder
 	var scanWait time.Duration
+	var validationTime, initialIndexTime, scopeTime time.Duration
 	var scannedPIDs, scannedFDs, hinted int
 	var lastPID, lastUID, waitPID uint32
 	var lastIndexed bool
@@ -487,6 +488,8 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				return nil
 			}
 		}
+		validationStarted := time.Now()
+		defer func() { validationTime += time.Since(validationStarted) }()
 		got, ok := socketInodeAt(unix.AT_FDCWD, fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd))
 		if !ok || got != r.inode {
 			return nil
@@ -528,11 +531,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 		return false
 	}
+	indexStarted := time.Now()
 	o.mu.Lock()
 	cached := o.cache[r.cookie].holders
 	recent := o.recent[r.uid]
 	o.mu.Unlock()
 	indexed := o.indexed(r.inode)
+	initialIndexTime = time.Since(indexStarted)
 	hinted += len(cached) + indexed.count()
 	for _, h := range cached {
 		if err := accept(h); err != nil {
@@ -686,12 +691,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			close(gate)
 			o.mu.Unlock()
 		}()
-		f, err := os.Open(dir)
+		f, err := openProcDescriptors(dir)
 		if err != nil {
 			return nil
 		}
 		defer f.Close()
-		descriptor := int(f.Fd())
+		descriptor := f.fd
 		var metadata unix.Stat_t
 		canIndex := (unix.Fstat(descriptor, &metadata) == nil && metadata.Uid == r.uid) || slices.Contains(recent, pid)
 		lastPID, lastUID, lastIndexed = pid, metadata.Uid, canIndex
@@ -722,35 +727,32 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		advancing := false
 		whole := false
 		matched := false
-		visit := func(names []string) error {
-			for _, fd := range names {
-				if expired() {
-					break
-				}
-				scannedFDs++
-				if number, err := strconv.ParseInt(fd, 10, 64); err == nil {
-					maxSeen = max(maxSeen, number)
-					if advancing {
-						maxFD = max(maxFD, number)
-					}
-				}
-				inode, ok := socketInodeAt(descriptor, fd)
-				if !ok {
-					continue
-				}
-				h := holder{pid, start, fd}
-				if canIndex || uint32(inode) == r.inode {
-					remember[uint32(inode)] = h
-					if len(remember) >= 32 {
-						o.publish(remember)
-						clear(remember)
-					}
-				}
-				if uint32(inode) == r.inode {
-					matched = true
+		visit := func(fd []byte) bool {
+			if expired() {
+				return false
+			}
+			scannedFDs++
+			if number, err := strconv.ParseInt(string(fd), 10, 64); err == nil {
+				maxSeen = max(maxSeen, number)
+				if advancing {
+					maxFD = max(maxFD, number)
 				}
 			}
-			return nil
+			inode, ok := socketInodeAt(descriptor, string(fd))
+			if !ok {
+				return true
+			}
+			if canIndex || uint32(inode) == r.inode {
+				remember[uint32(inode)] = holder{pid, start, string(fd)}
+				if len(remember) >= 32 {
+					o.publish(remember)
+					clear(remember)
+				}
+			}
+			if uint32(inode) == r.inode {
+				matched = true
+			}
+			return true
 		}
 		defer func() {
 			o.publish(remember)
@@ -772,10 +774,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			// full fallback walk; a lone lastFD hint misses concurrent holes.
 			end := window.extent
 			if _, err := f.Seek(max(0, end-1023)+2, 0); err == nil {
-				names, _ := f.Readdirnames(1024)
-				if err := visit(names); err != nil {
-					return err
-				}
+				_, _ = f.Visit(1024, visit)
 			}
 			return nil
 		}
@@ -792,13 +791,10 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			// connections. The last descriptor alone misses its neighbours.
 			if window.extent < 128 || (window.lastFD >= 0 && window.lastFD < 128) {
 				if _, err := f.Seek(0, 0); err == nil {
-					names, readErr := f.Readdirnames(128)
 					advancing = true
-					if err := visit(names); err != nil {
-						return err
-					}
+					names, readErr := f.Visit(128, visit)
 					advancing = false
-					whole = len(names) < 128 && (readErr == nil || errors.Is(readErr, io.EOF)) && !expired()
+					whole = names < 128 && (readErr == nil || errors.Is(readErr, io.EOF)) && !expired()
 					if whole {
 						return nil
 					}
@@ -810,9 +806,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			// Reopening normally reuses the previous descriptor. Check that
 			// one live link even when another lookup just scanned this process.
 			if window.lastFD >= 0 {
-				if err := visit([]string{strconv.FormatInt(window.lastFD, 10)}); err != nil {
-					return err
-				}
+				visit([]byte(strconv.FormatInt(window.lastFD, 10)))
 				if matched {
 					return nil
 				}
@@ -826,11 +820,8 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				if canIndex {
 					count = 512
 				}
-				names, _ := f.Readdirnames(count)
 				advancing = true
-				if err := visit(names); err != nil {
-					return err
-				}
+				_, _ = f.Visit(count, visit)
 				advancing = false
 				if matched {
 					return nil
@@ -849,7 +840,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				return nil
 			}
 			if !window.tailProbed && result.AppID == "" && !expired() {
-				if tail, err := descriptorTail(f, pid, expired); err == nil {
+				if tail, err := descriptorTail(&f, pid, expired); err == nil {
 					o.mu.Lock()
 					current := o.windows[pid]
 					if current.start == start {
@@ -859,10 +850,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					}
 					o.mu.Unlock()
 					if _, err := f.Seek(max(0, tail-255)+2, 0); err == nil {
-						names, _ := f.Readdirnames(256)
-						if err := visit(names); err != nil {
-							return err
-						}
+						_, _ = f.Visit(256, visit)
 						if matched {
 							return nil
 						}
@@ -874,15 +862,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return nil
 		}
 		for !expired() {
-			names, readErr := f.Readdirnames(64)
-			if err := visit(names); err != nil {
-				return err
-			}
-			whole = position == 0 && len(names) < 64 && (readErr == nil || errors.Is(readErr, io.EOF)) && !expired()
+			names, readErr := f.Visit(64, visit)
+			whole = position == 0 && names < 64 && (readErr == nil || errors.Is(readErr, io.EOF)) && !expired()
 			if matched {
 				return nil
 			}
-			if readErr != nil || len(names) < 64 {
+			if readErr != nil || names < 64 {
 				if !complete && position > 0 {
 					heavy = append(heavy, pid)
 				}
@@ -911,7 +896,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 		if result.AppID == "" {
 			if expired() {
-				return result, fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d scanWait=%s waitPID=%d lastPID=%d fdUID=%d indexed=%t frontier=%d)", context.DeadlineExceeded, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, scanWait, waitPID, lastPID, lastUID, lastIndexed, lastPosition)
+				return result, fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d scanWait=%s waitPID=%d lastPID=%d fdUID=%d indexed=%t frontier=%d indexWait=%s validation=%s scope=%s)", context.DeadlineExceeded, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, scanWait, waitPID, lastPID, lastUID, lastIndexed, lastPosition, initialIndexTime, validationTime, scopeTime)
 			}
 			return result, os.ErrNotExist
 		}
@@ -933,7 +918,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	}
 	// Search each tier for actual holders, then fall back only if it found
 	// none. A matching scope never supplies identity by itself.
+	scopeStarted := time.Now()
 	groups := o.cgroupPIDs(ctx, r.cgroup)
+	scopeTime = time.Since(scopeStarted)
 	if expired() {
 		return finish()
 	}
@@ -1086,7 +1073,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 // let us locate its occupied tail without reading thousands of regular-file
 // symlinks. This is a search hint only; socket inode and process identity are
 // still checked by holders. The tiny getdents buffer asks for one entry.
-func descriptorTail(f *os.File, pid uint32, expired func() bool) (int64, error) {
+func descriptorTail(f *procDescriptors, pid uint32, expired func() bool) (int64, error) {
 	b, err := readKernelFile(fmt.Sprintf("/proc/%d/status", pid), 64<<10)
 	if err != nil {
 		return 0, err
@@ -1111,7 +1098,7 @@ func descriptorTail(f *os.File, pid uint32, expired func() bool) (int64, error) 
 		if _, err := f.Seek(mid+2, 0); err != nil {
 			return 0, err
 		}
-		n, err := unix.ReadDirent(int(f.Fd()), data[:])
+		n, err := unix.ReadDirent(f.fd, data[:])
 		if err != nil {
 			return 0, err
 		}
