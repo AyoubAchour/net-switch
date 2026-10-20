@@ -41,6 +41,7 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 	listener, err := gonet.ListenTCP(stack, tcpip.FullAddress{NIC: ns.NIC, Addr: address, Port: 9002}, ipv4.ProtocolNumber)
 	must(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
+	probe := startTCPProbe(t, f, link, stack)
 	var pumps, clients sync.WaitGroup
 	pumps.Add(3)
 	go func() {
@@ -59,6 +60,7 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 				return
 			}
 			for i := 0; i < n; i++ {
+				probe.packet("in", bufs[i][:sizes[i]])
 				p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(bytes.Clone(bufs[i][:sizes[i]]))})
 				if s, ok := session.(*Session); ok {
 					p.RXChecksumValidated = s.RXChecksumVerified(bufs[i][:sizes[i]])
@@ -76,8 +78,12 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 			if n == 0 {
 				return
 			}
+			for _, p := range packets[:n] {
+				probe.packet("out", p)
+			}
 			if _, err := session.WriteBatch(packets[:n]); err != nil && ctx.Err() == nil {
 				t.Logf("TCP ring write: %v", err)
+				f.recordFault(err)
 			}
 			clear(packets[:n])
 		}
@@ -94,11 +100,17 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 				defer clients.Done()
 				defer c.Close()
 				c.SetDeadline(time.Now().Add(30 * time.Second))
-				io.Copy(c, c)
+				observed := &tcpProgressConn{Conn: c}
+				n, err := io.Copy(observed, observed)
+				if err != nil {
+					t.Logf("TCP echo stopped: peer=%s copied=%d read=%d written=%d error=%v", c.RemoteAddr(), n, observed.read.Load(), observed.written.Load(), err)
+					probe.snapshot("server_error")
+				}
 			}()
 		}
 	}()
 	return func() {
+		probe.stop()
 		cancel()
 		listener.Close()
 		stack.Close()
@@ -131,12 +143,14 @@ func tcpTransfer(t *testing.T, streams int) (float64, error) {
 				return
 			}
 			defer c.Close()
+			observed := &tcpProgressConn{Conn: c}
 			c.SetDeadline(time.Now().Add(30 * time.Second))
 			written := make(chan error, 1)
-			go func() { _, err := io.Copy(c, bytes.NewReader(content)); written <- err }()
+			go func() { _, err := io.Copy(observed, bytes.NewReader(content)); written <- err }()
 			digest := sha256.New()
-			_, err = io.CopyN(digest, c, size)
+			_, err = io.CopyN(digest, observed, size)
 			if err != nil {
+				t.Logf("TCP client failure before close: local=%s read=%d written=%d seconds=%.3f error=%v", c.LocalAddr(), observed.read.Load(), observed.written.Load(), elapsed(start).Seconds(), err)
 				c.Close()
 				<-written
 				failures <- err
@@ -406,6 +420,11 @@ func TestWintunPerformance(t *testing.T) {
 							before = s.Stats()
 						}
 						value, err = tcpTransfer(t, streams)
+						if err != nil {
+							report(t, map[string]any{"test": "tcp_failure_before_teardown", "mode": mode, "trial": trial, "streams": streams, "state": observeSession(session), "error": err.Error(), "fault": fmt.Sprint(f.fault())})
+							stack := make([]byte, 1<<20)
+							t.Logf("TCP failure goroutines:\n%s", stack[:runtime.Stack(stack, true)])
+						}
 					}()
 					if err != nil {
 						if mode != "dll" || !errors.Is(f.fault(), windows.ERROR_INVALID_DATA) {
