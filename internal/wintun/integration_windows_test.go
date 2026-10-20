@@ -180,7 +180,12 @@ func startIO(t *testing.T, a *Adapter, mode string) batchIO {
 
 func newFixture(t *testing.T, mode string, capacity uint32) *fixture {
 	t.Helper()
-	f := &fixture{a: newAdapter(t, capacity)}
+	return fixtureOnAdapter(t, mode, newAdapter(t, capacity))
+}
+
+func fixtureOnAdapter(t *testing.T, mode string, adapter *Adapter) *fixture {
+	t.Helper()
+	f := &fixture{a: adapter}
 	f.io = startIO(t, f.a, mode)
 	f.startEcho(t)
 	t.Cleanup(func() { f.stopEcho(); must(t, f.io.Close()) })
@@ -268,6 +273,8 @@ type dllSession struct {
 	event, stop, cancelEvent              windows.Handle
 	receive, release, allocate, send, end uintptr
 	closed                                atomic.Bool
+	readPackets, readWaits, readWakes     atomic.Uint64
+	writtenPackets, writeBatches          atomic.Uint64
 }
 
 var nativeCopy = windows.NewLazySystemDLL("ntdll.dll").NewProc("RtlMoveMemory")
@@ -305,7 +312,8 @@ func startDLL(t *testing.T, a *Adapter) *dllSession {
 	return s
 }
 
-func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) (int, error) {
+func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) (n int, err error) {
+	defer func() { s.readPackets.Add(uint64(n)) }()
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
 	s.mu.RLock()
@@ -364,14 +372,24 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 		if cancelEvent != 0 {
 			handles = append(handles, cancelEvent)
 		}
+		s.readWaits.Add(1)
 		_, err := windows.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		if err == nil {
+			s.readWakes.Add(1)
+		}
 		if err != nil {
 			return 0, err
 		}
 	}
 }
 
-func (s *dllSession) WriteBatch(packets [][]byte) (int, error) {
+func (s *dllSession) WriteBatch(packets [][]byte) (n int, err error) {
+	defer func() {
+		s.writtenPackets.Add(uint64(n))
+		if n != 0 {
+			s.writeBatches.Add(1)
+		}
+	}()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.RLock()
@@ -379,7 +397,6 @@ func (s *dllSession) WriteBatch(packets [][]byte) (int, error) {
 	if s.closed.Load() {
 		return 0, net.ErrClosed
 	}
-	n := 0
 	for _, b := range packets {
 		p, _, e := syscall.SyscallN(s.allocate, s.h, uintptr(len(b)))
 		if p == 0 {
@@ -757,9 +774,7 @@ func pnpExists(t *testing.T, instance string) bool {
 	}
 }
 
-func TestWintunLifetime(t *testing.T) {
-	requireRunner(t)
-	a := newAdapter(t, MinCapacity)
+func warmRuntimeThreads() {
 	// Go caches OS threads and each Windows M owns six native handles
 	// (runtime/os_windows.go: minit and semacreate). Warm that cache before
 	// taking the process baseline; do not excuse growth by raising the limit.
@@ -781,6 +796,12 @@ func TestWintunLifetime(t *testing.T) {
 	}
 	close(release)
 	warm.Wait()
+}
+
+func TestWintunLifetime(t *testing.T) {
+	requireRunner(t)
+	a := newAdapter(t, MinCapacity)
+	warmRuntimeThreads()
 	for i := 0; i < 100; i++ {
 		s, err := a.StartSession()
 		must(t, err)
@@ -979,6 +1000,13 @@ func TestWintunCrashCleanupChild(t *testing.T) {
 	fmt.Println("PHANTOM_REMOVED_WITHOUT_DLL")
 }
 
+func injectRecoveryFault(r *rings) {
+	// Send.Head belongs to the reader. Unlike packet bytes and Send.Tail, the
+	// driver cannot overwrite it with discovery traffic after a reconnect.
+	// The normal ReadBatch corruption check must detect it and request recovery.
+	r.send.store(0, r.send.capacity)
+}
+
 func TestWintunRecoveryLeak(t *testing.T) {
 	requireRunner(t)
 	a := newAdapter(t, 0)
@@ -987,23 +1015,28 @@ func TestWintunRecoveryLeak(t *testing.T) {
 	defer s.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	readerErr := make(chan error, 1)
 	go func() {
 		defer close(done)
 		buf := make([]byte, MaxPacketSize)
 		for ctx.Err() == nil {
 			if _, err := s.ReadPacket(ctx, buf); err != nil {
+				readerErr <- err
 				return
 			}
 		}
 	}()
 	defer func() { cancel(); <-done }()
+	iteration := 0
 	recoverOne := func() {
+		iteration++
+		started := time.Now()
+		before := s.Stats()
 		// A native read wait holds mu.RLock; wake it before taking the writer lock.
 		windows.SetEvent(s.wake)
 		s.mu.Lock()
 		r := s.rings
-		binary.LittleEndian.PutUint32(r.send.data()[r.head:], MaxPacketSize+1)
-		r.send.store(4, (r.head+8)&(r.send.capacity-1))
+		injectRecoveryFault(r)
 		windows.SetEvent(r.readEvent)
 		windows.ResetEvent(s.wake)
 		s.mu.Unlock()
@@ -1013,12 +1046,32 @@ func TestWintunRecoveryLeak(t *testing.T) {
 			select {
 			case e := <-s.Events():
 				if e.Kind == "recovered" {
+					if stats := s.Stats(); stats.Corruptions != before.Corruptions+1 || stats.Recoveries != before.Recoveries+1 {
+						t.Fatalf("recovery %d: before=%+v after=%+v", iteration, before, stats)
+					}
 					return
 				}
 				if e.Kind == "failed" {
 					t.Fatal(e.Err)
 				}
 			case <-deadline.C:
+				t.Logf("recovery %d timed out after %v: recovering=%v closed=%v before=%+v after=%+v", iteration, time.Since(started), s.recovering.Load(), s.closed.Load(), before, s.Stats())
+				if s.mu.TryRLock() {
+					if r := s.rings; r != nil {
+						t.Logf("current ring: head=%d tail=%d", r.send.load(0), r.send.load(4))
+					}
+					t.Logf("session error: %v", s.err)
+					s.mu.RUnlock()
+				} else {
+					t.Log("session mutex held exclusively")
+				}
+				select {
+				case err := <-readerErr:
+					t.Logf("reader exited: %v", err)
+				default:
+				}
+				stacks := make([]byte, 64<<10)
+				t.Logf("goroutines:\n%s", stacks[:runtime.Stack(stacks, true)])
 				t.Fatal("injected recovery did not complete")
 			}
 		}
@@ -1026,8 +1079,11 @@ func TestWintunRecoveryLeak(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		recoverOne()
 	}
+	warmRuntimeThreads()
 	debug.FreeOSMemory()
 	beforeHandles, beforeBytes := processUsage(t)
+	beforeTypes := handleTypes(t)
+	beforeThreads, _ := runtime.ThreadCreateProfile(nil)
 	beforeDevices := pnpDevices(t)
 	start := time.Now()
 	for i := 0; i < 32; i++ {
@@ -1035,14 +1091,16 @@ func TestWintunRecoveryLeak(t *testing.T) {
 	}
 	debug.FreeOSMemory()
 	afterHandles, afterBytes := processUsage(t)
+	afterTypes := handleTypes(t)
+	afterThreads, _ := runtime.ThreadCreateProfile(nil)
 	afterDevices := pnpDevices(t)
+	report(t, map[string]any{"test": "recovery_leak", "arch": runtime.GOARCH, "measured_recoveries": 32, "seconds": time.Since(start).Seconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes, "pnp_before": beforeDevices, "pnp_after": afterDevices, "types_before": beforeTypes, "types_after": afterTypes, "go_threads_before": beforeThreads, "go_threads_after": afterThreads})
 	if afterHandles > beforeHandles+2 || afterBytes > beforeBytes+16<<20 || !slices.Equal(beforeDevices, afterDevices) {
 		t.Fatalf("recovery leak: handles %d -> %d, bytes %d -> %d, devices %v -> %v", beforeHandles, afterHandles, beforeBytes, afterBytes, beforeDevices, afterDevices)
 	}
 	if s.Stats().Recoveries != 40 || s.Stats().RecoveryFailures != 0 || time.Since(start) < 7*time.Second {
 		t.Fatalf("missing recoveries or backoff: %+v in %v", s.Stats(), time.Since(start))
 	}
-	report(t, map[string]any{"test": "recovery_leak", "arch": runtime.GOARCH, "measured_recoveries": 32, "seconds": time.Since(start).Seconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes, "pnp_before": beforeDevices, "pnp_after": afterDevices})
 }
 
 func pnpDevices(t *testing.T) []string {

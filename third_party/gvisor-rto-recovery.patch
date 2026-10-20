@@ -1,0 +1,62 @@
+diff --git a/pkg/tcpip/transport/tcp/rack.go b/pkg/tcpip/transport/tcp/rack.go
+index e53b2f1..96b14db 100644
+--- a/pkg/tcpip/transport/tcp/rack.go
++++ b/pkg/tcpip/transport/tcp/rack.go
+@@ -12,6 +12,8 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++// Modified by Net Switch, 2026-10-20: preserve timeout recovery until its flight drains.
++
+ package tcp
+ 
+ import (
+@@ -442,7 +444,9 @@ func (rc *rackControl) reorderTimerExpired() tcpip.Error {
+ 	// (gvisor#9707/#9778). detectLoss arms the timer from rcvdTime-derived
+ 	// values, so evaluating it at the timer target keeps the two consistent.
+ 	numLost := rc.detectLoss(rc.snd.reorderTimer.target)
+-	if numLost == 0 {
++	// A queued reordering timer must not replace RTO slow start with a
++	// second fast-recovery episode for the same unacknowledged flight.
++	if numLost == 0 || rc.snd.state == tcpip.RTORecovery {
+ 		return nil
+ 	}
+ 
+diff --git a/pkg/tcpip/transport/tcp/snd.go b/pkg/tcpip/transport/tcp/snd.go
+index b9227e0..4184b4e 100644
+--- a/pkg/tcpip/transport/tcp/snd.go
++++ b/pkg/tcpip/transport/tcp/snd.go
+@@ -12,6 +12,8 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++// Modified by Net Switch, 2026-10-20: keep ACK-driven RTO recovery out of fast recovery.
++
+ package tcp
+ 
+ import (
+@@ -1269,6 +1271,12 @@ func (s *sender) shouldEnterRecovery() bool {
+ func (s *sender) detectLoss(seg *segment) (fastRetransmit bool) {
+ 	// We're not in fast recovery yet.
+ 
++	// A timeout already owns recovery of this flight. Duplicate ACKs
++	// must not replace that state with Disorder before it is acknowledged.
++	if s.state == tcpip.RTORecovery {
++		return false
++	}
++
+ 	// If RACK is enabled and there is no reordering we should honor the
+ 	// three duplicate ACK rule to enter recovery.
+ 	// See: https://tools.ietf.org/html/draft-ietf-tcpm-rack-08#section-4
+@@ -1775,7 +1783,10 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
+ 		// After the reorder window is calculated, detect any loss by checking
+ 		// if the time elapsed after the segments are sent is greater than the
+ 		// reorder window.
+-		if numLost := s.rc.detectLoss(rcvdSeg.rcvdTime); numLost > 0 && !s.FastRecovery.Active {
++		// During RTO recovery, sendData advances from the retransmission
++		// cursor as ACKs arrive. Starting fast recovery here would count the
++		// old flight against its reduced window again and stop that progress.
++		if numLost := s.rc.detectLoss(rcvdSeg.rcvdTime); numLost > 0 && !s.FastRecovery.Active && s.state != tcpip.RTORecovery {
+ 			// If any segment is marked as lost by
+ 			// RACK, enter recovery and retransmit
+ 			// the lost segments.

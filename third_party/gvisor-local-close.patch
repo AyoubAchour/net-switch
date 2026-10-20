@@ -136,10 +136,13 @@ index d138e3b..fd89a21 100644
  	// segment queue is not empty.
 diff --git a/pkg/tcpip/transport/tcp/dispatcher_netswitch_test.go b/pkg/tcpip/transport/tcp/dispatcher_netswitch_test.go
 new file mode 100644
-index 0000000..2101b3d
+index 0000000..01300e0
 --- /dev/null
 +++ b/pkg/tcpip/transport/tcp/dispatcher_netswitch_test.go
-@@ -0,0 +1,70 @@
+@@ -0,0 +1,73 @@
++// Net Switch addition, not upstream.
++// Copyright (c) 2026 Ayoub Achour. Licensed under the MIT license; see the repository LICENSE.
++
 +package tcp
 +
 +import (

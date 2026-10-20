@@ -101,23 +101,42 @@ process pause, and verifies that an idle caller alone is not exempted.
 Throughput uses delivered UDP bytes over a fixed interval and complete, hashed
 TCP transfers, with one and eight streams. The UDP load generator is a separate
 process, so it does not compete with only the Go session for Go scheduler slots
-while the DLL executes outside that limit. Six pairs alternate implementation
-order. Each TCP stack first runs two fixed, logged warm-up transfers: CPU profiles
+while the DLL executes outside that limit. Twelve matched pairs alternate
+implementation order, starting with ours. Within each pair, each metric runs
+back to back through the two sessions on the same adapter before proceeding to
+the next metric. Each TCP stack first runs two fixed, logged warm-up transfers: CPU profiles
 show both implementations' initial connections warming from roughly 320–450 to
 540–600 MB/s on the same x64 runner. The measured pairs compare the steady
-state of a long-lived engine. All measured samples remain in the comparison:
-a DLL `ERROR_INVALID_DATA` is logged
-as a baseline failure, its partial UDP goodput (or zero for an incomplete TCP
-transfer) is retained, and a fresh DLL session is used only for the next metric.
-No failed sample is retried into a pass. The locked design's 10% performance
-regression gate applies to the median of all six samples per implementation,
-never to an individual pair. UDP packets per wake-up and isolated batch copy,
-publication and SetEvent cost (1, 8 and 64 packets) are reported separately.
+state of a long-lived engine. All measured samples and errors are reported:
+a failed DLL measurement also fails the comparison instead of supplying a
+favorable denominator. No failed sample is retried into a pass.
+The 10% regression gate applies to the median of the twelve **per-pair**
+ours/DLL ratios, not the ratio of separately pooled medians. Throughput must
+reach 0.90; latency must stay at or below 1.10. This design decision controls
+for changing runner conditions without changing the regression allowance.
+Both implementations report read packets per successful native read wake-up
+and written packets per accepted nonempty write batch for every sample.
+The DLL hides its conditional write-event signals, so its batch count is
+explicitly not a signal count. Our actual write signals are reported too.
+Isolated batch copy, publication and SetEvent cost (1, 8 and 64 packets) are
+reported separately.
 Packet corruption in delivered data,
 unknown reference errors and failures of our session fail CI.
-The median averages the two central samples, retains the raw trial order in
-the report, and prevents one noisy trial from dominating either side. A
+The median averages the two central ratios and retains raw pair order and
+all sample values in the report. A
 sustained regression still fails the same 10% gate.
+
+TCP failures report session counters and ring cursors before socket or stack
+teardown, along with transferred byte counts and one goroutine snapshot.
+Both comparison paths use the engine's TCP stack: a TCP timeout is not evidence
+of a DLL missed wake. A deterministic stack test loses an entire TCP window and
+requires ACK-driven recovery after one timeout, including a new SACK and a
+real reordering-timer expiry during recovery. In the
+[round-2 mutation proof](https://github.com/AyoubAchour/net-switch/actions/runs/39439354881/job/118684802958),
+the fixed stack passed all four cases 25 times each; removing each of the
+three guards independently failed its targeted case all ten times. The SACK
+control passed in every mutation. The temporary switches were removed after
+this proof. No TCP deadline or session gate is relaxed for the DLL comparison.
 
 Parallel senders verify every test payload. Deterministic malformed-entry tests
 independently prove recovery, even if the driver corruption does not occur in a
@@ -125,7 +144,11 @@ particular stress sample. Lifetime tests count process handles and their kernel
 object types after warming Go's OS-thread cache (six handles per Windows thread),
 measure private memory after GC/scavenging, and enumerate PnP
 records without filtering out non-present devices. A separate recovery test
-measures these across 32 injected recoveries after eight warm-ups. Removal runs
+measures these across 32 injected recoveries after eight warm-ups. Both tests
+warm the runtime thread cache before measuring handles; recovery reports also
+include thread counts and kernel object types when an assertion fails. The
+recovery leak fault uses the reader-owned Send.Head, so driver discovery traffic
+cannot overwrite it before detection. Removal runs
 with a busy reader and writer; close-failure tests force GC with retained memory.
 Crash cleanup runs in a fresh process, asserts the phantom existed, and removes
 it without loading the DLL.

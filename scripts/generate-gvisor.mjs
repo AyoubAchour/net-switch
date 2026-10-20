@@ -7,6 +7,14 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const patches = fs.readdirSync(path.join(root, 'third_party'))
+  .filter(name => /^gvisor-.*\.patch$/.test(name)).sort();
+const args = process.argv.slice(2);
+const diffOnly = args[0] === '--diff';
+const selected = args[1];
+if (!patches.length || (args.length && (!diffOnly || args.length !== 2 || !patches.includes(selected)))) {
+  throw new Error(`Usage: generate-gvisor.mjs [--diff <patch>]; patches in order: ${patches.join(', ')}`);
+}
 const go = process.env.GO_BINARY || 'go';
 function run(exe, args, cwd = root) {
   const result = spawnSync(exe, args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 8 << 20 });
@@ -46,9 +54,8 @@ if (`h1:${summary.digest('base64')}` !== expected) throw new Error('Extracted up
 
 const files = fs.readFileSync(path.join(root, 'third_party/gvisor.files'), 'utf8').trim().split(/\r?\n/);
 const staging = fs.mkdtempSync(path.join(tmpdir(), 'netswitch-gvisor-'));
-// Print a normal git diff against clean upstream for patch maintenance. The
-// caller saves it with their file-editing tool; this never rewrites the patch.
-const diffOnly = process.argv.includes('--diff');
+// Regenerate one patch against upstream plus all its predecessors. The caller
+// saves stdout with their file-editing tool; this never rewrites a patch.
 try {
   for (const name of files) {
     if (!name || path.isAbsolute(name) || name.split('/').includes('..') || name.includes('\\')) throw new Error(`Invalid manifest path: ${name}`);
@@ -56,11 +63,16 @@ try {
     fs.mkdirSync(path.dirname(destination), { recursive: true });
     fs.copyFileSync(path.join(upstream.Dir, name), destination);
   }
-  if (diffOnly) {
-    run('git', ['init', '--quiet'], staging);
-    run('git', ['-c', 'core.autocrlf=false', 'add', '.'], staging);
+  for (const patch of patches) {
+    if (diffOnly && patch === selected) {
+      run('git', ['init', '--quiet'], staging);
+      run('git', ['-c', 'core.autocrlf=false', 'add', '.'], staging);
+    }
+    run('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'apply',
+      ...(diffOnly && patch === selected ? ['--recount'] : []),
+      '--unsafe-paths', '--whitespace=nowarn', path.join(root, 'third_party', patch)], staging);
+    if (diffOnly && patch === selected) break;
   }
-  run('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'apply', ...(diffOnly ? ['--recount'] : []), '--unsafe-paths', '--whitespace=nowarn', path.join(root, 'third_party/gvisor-timewait.patch')], staging);
   if (diffOnly) {
     // Include regression tests introduced by the patch, not just upstream files.
     run('git', ['-c', 'core.autocrlf=false', 'add', '--intent-to-add', '.'], staging);
@@ -81,7 +93,7 @@ try {
     fs.rmSync(target, { recursive: true, force: true });
     fs.mkdirSync(target, { recursive: true });
     fs.cpSync(staging, target, { recursive: true });
-    console.log(`Generated ${files.length} gVisor files from verified ${version} plus gvisor-timewait.patch`);
+    console.log(`Generated ${filesIn(staging).length} gVisor files from verified ${version} plus ${patches.join(', ')}`);
   }
 } finally {
   if (path.dirname(staging) !== tmpdir() || !path.basename(staging).startsWith('netswitch-gvisor-')) throw new Error('Unexpected temporary directory');
