@@ -28,6 +28,33 @@ type Store interface {
 	Records() ([]Record, error)
 	Append(Record) error
 }
+
+// BatchStore returns only after every record in the batch is durable. A failed
+// append may leave a recoverable prefix, but callers must perform no mutations.
+// Existing Store implementations remain valid and retain per-record durability.
+type BatchStore interface {
+	AppendBatch([]Record) error
+}
+
+func appendRecords(store Store, records []Record) error {
+	if len(records) == 0 {
+		return nil
+	}
+	if batch, ok := store.(BatchStore); ok {
+		return batch.AppendBatch(records)
+	}
+	for _, record := range records {
+		if err := store.Append(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type Creation struct {
+	Kind        string
+	Fingerprint Fingerprint
+}
 type Locker interface {
 	Acquire(context.Context) (release func() error, err error)
 }
@@ -103,48 +130,75 @@ func (j *Journal) live() ([]Record, error) {
 	return live, nil
 }
 func (s *Session) Create(ctx context.Context, kind string, fingerprint Fingerprint) error {
+	return s.CreateBatch(ctx, []Creation{{Kind: kind, Fingerprint: fingerprint}})
+}
+
+// CreateBatch groups one independent setup phase. Every object must be absent
+// before the phase starts; dependencies such as adapter then address use separate
+// phases. All intents are durable before the first Create, and all created marks
+// are durable before returning success.
+func (s *Session) CreateBatch(ctx context.Context, creations []Creation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed || s.failed {
 		return errors.New("journal session closed or requires recovery")
 	}
-	driver := s.j.Kinds[kind]
-	if driver == nil {
-		return fmt.Errorf("unknown journal object kind %q", kind)
+	records := make([]Record, 0, len(creations))
+	for _, creation := range creations {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		driver := s.j.Kinds[creation.Kind]
+		if driver == nil {
+			return fmt.Errorf("unknown journal object kind %q", creation.Kind)
+		}
+		fp := maps.Clone(creation.Fingerprint)
+		if err := driver.Validate(maps.Clone(fp)); err != nil {
+			return err
+		}
+		for _, prior := range records {
+			if prior.Kind == creation.Kind && maps.Equal(prior.Fingerprint, fp) {
+				return errors.New("duplicate object in journal creation batch")
+			}
+		}
+		if _, found, err := driver.Inspect(ctx, maps.Clone(fp)); err != nil {
+			return err
+		} else if found {
+			return errors.New("object already exists; refusing to claim ownership")
+		}
+		var id [16]byte
+		if _, err := rand.Read(id[:]); err != nil {
+			return err
+		}
+		records = append(records, Record{ID: hex.EncodeToString(id[:]), Boot: s.boot, Instance: s.instance,
+			Kind: creation.Kind, Fingerprint: fp, Phase: "intent"})
 	}
-	fp := maps.Clone(fingerprint)
-	if err := driver.Validate(fp); err != nil {
-		return err
-	}
-	if _, found, err := driver.Inspect(ctx, maps.Clone(fp)); err != nil {
-		return err
-	} else if found {
-		return errors.New("object already exists; refusing to claim ownership")
-	}
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err != nil {
-		return err
-	}
-	r := Record{ID: hex.EncodeToString(id[:]), Boot: s.boot, Instance: s.instance, Kind: kind, Fingerprint: fp, Phase: "intent"}
-	if err := s.j.Store.Append(r); err != nil {
+	if err := appendRecords(s.j.Store, records); err != nil {
 		s.failed = true
-		return fmt.Errorf("persist %s intent: %w", kind, err)
+		return fmt.Errorf("persist creation intents: %w", err)
 	}
-	if err := driver.Create(ctx, maps.Clone(fp)); err != nil {
-		s.failed = true
-		return fmt.Errorf("create %s: %w", kind, err)
+	for i := range records {
+		r := &records[i]
+		if err := ctx.Err(); err != nil {
+			s.failed = true
+			return err
+		}
+		if err := s.j.Kinds[r.Kind].Create(ctx, maps.Clone(r.Fingerprint)); err != nil {
+			s.failed = true
+			return fmt.Errorf("create %s: %w", r.Kind, err)
+		}
+		r.Phase = "created"
 	}
-	r.Phase = "created"
-	if err := s.j.Store.Append(r); err != nil {
+	if err := appendRecords(s.j.Store, records); err != nil {
 		s.failed = true
-		return fmt.Errorf("persist %s created mark: %w", kind, err)
+		return fmt.Errorf("persist created marks: %w", err)
 	}
 	return nil
 }
 
 // Cleanup checks the live object again immediately before deletion. Drivers
 // must also compare the supplied complete fingerprint inside Remove.
-func (s *Session) Cleanup(ctx context.Context) error {
+func (s *Session) Cleanup(ctx context.Context) (err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -154,13 +208,27 @@ func (s *Session) Cleanup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var removed []Record
+	// A crash before or during this mark batch leaves the original intents.
+	// Recovery repeats the same fingerprint checks and safely skips missing
+	// objects. On a mid-cleanup error, retain marks for the completed prefix.
+	s.failed = true
+	defer func() {
+		err = errors.Join(err, appendRecords(s.j.Store, removed))
+		if err == nil {
+			s.failed = false
+		}
+	}()
 	for i := len(records) - 1; i >= 0; i-- {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		r := records[i]
 		driver := s.j.Kinds[r.Kind]
 		if driver == nil {
 			return fmt.Errorf("cannot clean unknown object kind %q", r.Kind)
 		}
-		if err := driver.Validate(r.Fingerprint); err != nil {
+		if err := driver.Validate(maps.Clone(r.Fingerprint)); err != nil {
 			return err
 		}
 		live, found, err := driver.Inspect(ctx, maps.Clone(r.Fingerprint))
@@ -174,11 +242,8 @@ func (s *Session) Cleanup(ctx context.Context) error {
 		}
 		// Missing and replaced objects no longer belong to us.
 		r.Phase = "removed"
-		if err := s.j.Store.Append(r); err != nil {
-			return err
-		}
+		removed = append(removed, r)
 	}
-	s.failed = false
 	return nil
 }
 func (s *Session) Close() error {
