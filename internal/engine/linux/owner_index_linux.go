@@ -21,6 +21,33 @@ func (o *Owners) indexFor(inode uint32) *ownerIndex {
 	return &o.index[maphash.Comparable(o.indexSeed, inode)%ownerIndexShards]
 }
 
+// Most bursts keep matching the same process. Do not allocate and replace a
+// 32-entry hint slice on every such match, or serialize those readers behind
+// unrelated scanner state. Published slices remain immutable.
+func (o *Owners) rememberPID(uid, pid uint32) {
+	o.recentMu.RLock()
+	previous := o.recent[uid]
+	current := len(previous) != 0 && previous[0] == pid
+	o.recentMu.RUnlock()
+	if current {
+		return
+	}
+	next := make([]uint32, 1, 32)
+	next[0] = pid
+	o.recentMu.Lock()
+	defer o.recentMu.Unlock()
+	previous = o.recent[uid]
+	if len(previous) != 0 && previous[0] == pid {
+		return
+	}
+	for _, candidate := range previous {
+		if candidate != pid && len(next) < cap(next) {
+			next = append(next, candidate)
+		}
+	}
+	o.recent[uid] = next
+}
+
 // The common one-holder entry lives directly in the map. Publishing a batch
 // of new sockets therefore needs no per-entry allocation under an index lock.
 // Published slice prefixes are immutable; later holders only append to them.

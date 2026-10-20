@@ -14,6 +14,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
+	"gvisor.dev/gvisor/pkg/tcpip"
 )
 
 // A nonblocking peer with explicit readiness and short writes exercises the
@@ -203,5 +204,61 @@ func TestReadyRelayActiveClosePreservesTimeWait(t *testing.T) {
 	}
 	if resets := f.stack.Stats().TCP.ResetsSent.Value(); resets != 0 {
 		t.Fatalf("normal close sent %d resets", resets)
+	}
+}
+
+type readableEndpoint struct {
+	tcpip.Endpoint
+	data []byte
+}
+
+func (e *readableEndpoint) Read(out io.Writer, _ tcpip.ReadOptions) (tcpip.ReadResult, tcpip.Error) {
+	if len(e.data) == 0 {
+		return tcpip.ReadResult{}, &tcpip.ErrWouldBlock{}
+	}
+	n, _ := out.Write(e.data)
+	e.data = e.data[n:]
+	return tcpip.ReadResult{Count: n}, nil
+}
+
+func TestBlockedRelayOwnsBytesAcrossWorkerScratchReuse(t *testing.T) {
+	control := &testfake.Controller{}
+	makeRelay := func(data []byte, peer *readyPeer) *readyRelay {
+		ticket, err := control.Begin("tcp", platform.Tuple{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(ticket.Close)
+		return &readyRelay{remote: peer, c: &connection{ep: &readableEndpoint{data: data}, ticket: ticket}}
+	}
+	firstBytes := bytes.Repeat([]byte("first connection\n"), 500)
+	firstPeer := newReadyPeer()
+	firstPeer.blocked = true
+	first := makeRelay(firstBytes, firstPeer)
+	scratch := new(relayScratch)
+	if _, err := first.direction(&first.up, true, scratch); err != nil {
+		t.Fatal(err)
+	}
+	if first.up.buffer == nil || firstPeer.upload.Len() != 0 {
+		t.Fatal("fixture must retain the first connection's unwritten bytes")
+	}
+	secondBytes := bytes.Repeat([]byte("second connection uses the same worker\n"), 500)
+	secondPeer := newReadyPeer()
+	second := makeRelay(secondBytes, secondPeer)
+	if _, err := second.direction(&second.up, true, scratch); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(secondPeer.upload.Bytes(), secondBytes) {
+		t.Fatal("second connection did not overwrite the worker scratch")
+	}
+	firstPeer.blocked = false
+	if _, err := first.direction(&first.up, true, scratch); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(firstPeer.upload.Bytes(), firstBytes) {
+		t.Fatal("worker reuse changed another connection's pending bytes")
+	}
+	if first.up.buffer != nil || second.up.buffer != nil {
+		t.Fatal("drained connections retained their pending buffer")
 	}
 }

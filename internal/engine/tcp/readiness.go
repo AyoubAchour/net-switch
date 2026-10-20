@@ -36,6 +36,7 @@ type relayDirection struct {
 type relayScratch struct {
 	receive tcpip.SliceWriter
 	send    bytes.Reader
+	buffer  [RelayBuffer]byte
 }
 
 type readyRelay struct {
@@ -227,14 +228,15 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 	// A busy flow yields after a bounded amount of work, so it cannot starve
 	// other readiness events, the ordered TUN reader, or process lookups.
 	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
-		if d.buffer == nil && !d.eof {
-			buffer := relayBuffers.Get().(*[]byte)
-			n, err := r.read(up, *buffer, scratch)
-			if n != 0 {
-				d.buffer, d.start, d.end = buffer, 0, n
-			} else {
-				relayBuffers.Put(buffer)
-			}
+		var pending []byte
+		if d.buffer != nil {
+			pending = (*d.buffer)[d.start:d.end]
+		} else if !d.eof {
+			// A worker owns this scratch until step returns. The usual full
+			// write needs no pool access or allocation, even during repeated
+			// collections. Only blocked/short writes retain a private buffer.
+			n, err := r.read(up, scratch.buffer[:], scratch)
+			pending = scratch.buffer[:n]
 			if errors.Is(err, io.EOF) {
 				d.eof = true
 			} else if errors.Is(err, platform.ErrWouldBlock) {
@@ -247,10 +249,9 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 				return false, io.ErrNoProgress
 			}
 		}
-		if d.buffer != nil {
-			n, err := r.write(up, (*d.buffer)[d.start:d.end], scratch)
+		if len(pending) != 0 {
+			n, err := r.write(up, pending, scratch)
 			if n > 0 {
-				d.start += n
 				moved += n
 				if up {
 					r.c.up.Add(uint64(n))
@@ -260,9 +261,15 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 					r.c.ticket.Add(0, uint64(n))
 				}
 			}
-			if d.start == d.end {
-				relayBuffers.Put(d.buffer)
-				d.buffer = nil
+			if d.buffer != nil {
+				d.start += n
+				if d.start == d.end {
+					relayBuffers.Put(d.buffer)
+					d.buffer = nil
+				}
+			} else if n < len(pending) {
+				d.buffer = relayBuffers.Get().(*[]byte)
+				d.start, d.end = 0, copy(*d.buffer, pending[n:])
 			}
 			if errors.Is(err, platform.ErrWouldBlock) {
 				return false, nil
