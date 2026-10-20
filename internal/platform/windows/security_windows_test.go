@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"unsafe"
 
@@ -221,7 +220,7 @@ func TestMachineFolderQuarantinesUntrustedOwner(t *testing.T) {
 	}
 }
 
-func TestMachineFolderRejectsHardlinkBeforeChangingOutsideACL(t *testing.T) {
+func TestMachineFolderQuarantinesHardlinkBeforeChangingOutsideACL(t *testing.T) {
 	hostedSecurity(t)
 	base := t.TempDir()
 	root := filepath.Join(base, "machine")
@@ -236,15 +235,19 @@ func TestMachineFolderRejectsHardlinkBeforeChangingOutsideACL(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := fileSecurity(t, outside)
-	if err := ProtectDirectory(root); err == nil || !strings.Contains(err.Error(), "hard links") {
+	if err := ProtectDirectory(root); err != nil {
 		t.Fatal(err)
+	}
+	old, err := filepath.Glob(root + ".untrusted-*")
+	if err != nil || len(old) != 1 {
+		t.Fatal("linked tree was not quarantined", old, err)
 	}
 	if after := fileSecurity(t, outside); after != before {
 		t.Fatalf("outside ACL changed: %s -> %s", before, after)
 	}
 }
 
-func TestMachineFolderRefusesPreopenedWriter(t *testing.T) {
+func TestMachineFolderQuarantinesPreopenedWriter(t *testing.T) {
 	hostedSecurity(t)
 	root := filepath.Join(t.TempDir(), "machine")
 	if err := ProtectDirectory(root); err != nil {
@@ -256,7 +259,11 @@ func TestMachineFolderRefusesPreopenedWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer windows.CloseHandle(h)
-	if err := ProtectDirectory(root); err == nil {
-		t.Fatal("preopened directory writer was accepted")
+	if err := ProtectDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	old, err := filepath.Glob(root + ".untrusted-*")
+	if err != nil || len(old) != 1 {
+		t.Fatal("preopened directory writer was not quarantined", old, err)
 	}
 }

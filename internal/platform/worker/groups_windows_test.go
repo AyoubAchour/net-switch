@@ -16,7 +16,7 @@ import (
 
 func TestElevatedGroupNamespaces(t *testing.T) {
 	for _, prefix := range []string{"S-1-5-32", "S-1-5-21-1-2-3", "S-1-5-21-999-888-777"} {
-		rids := []int{544, 547, 548, 549, 550, 551, 554, 556}
+		rids := []int{544, 547, 548, 549, 550, 551, 554, 556, 569}
 		if prefix != "S-1-5-32" {
 			rids = []int{512, 516, 517, 518, 519, 520, 553}
 		}
@@ -33,6 +33,25 @@ func TestElevatedGroupNamespaces(t *testing.T) {
 		if err != nil || elevatedGroup(sid) {
 			t.Fatal("ordinary or unrelated SID disabled", text, err)
 		}
+	}
+}
+
+func TestWorkerGroupSelectionUsesFilteredToken(t *testing.T) {
+	admin, _ := windows.StringToSid("S-1-5-32-544")
+	custom, _ := windows.StringToSid("S-1-5-21-1-2-3-1234")
+	groups := []windows.SIDAndAttributes{{Sid: admin, Attributes: windows.SE_GROUP_ENABLED}, {Sid: custom, Attributes: windows.SE_GROUP_ENABLED}}
+	filtered := []windows.SIDAndAttributes{{Sid: admin, Attributes: windows.SE_GROUP_USE_FOR_DENY_ONLY}, {Sid: custom, Attributes: windows.SE_GROUP_USE_FOR_DENY_ONLY}}
+	for _, test := range []struct {
+		name     string
+		filtered []windows.SIDAndAttributes
+		count    int
+	}{{"linked-token-includes-nonstandard-group", filtered, 2}, {"unsplit-token-fallback", nil, 1}} {
+		t.Run(test.name, func(t *testing.T) {
+			disabled, err := disabledWorkerGroups(groups, test.filtered)
+			if err != nil || len(disabled) != test.count {
+				t.Fatal(disabled, err)
+			}
+		})
 	}
 }
 
@@ -102,7 +121,7 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 			t.Errorf("delete disposable account: %d", status)
 		}
 	})
-	groupSIDs := []string{"S-1-5-32-544", "S-1-5-32-547", "S-1-5-32-551", "S-1-5-32-556"}
+	groupSIDs := []string{"S-1-5-32-544", "S-1-5-32-547", "S-1-5-32-551", "S-1-5-32-556", "S-1-5-32-569"}
 	for _, text := range groupSIDs {
 		sid, err := windows.StringToSid(text)
 		if err != nil {
@@ -127,6 +146,46 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 		t.Fatal("log on disposable account", err)
 	}
 	defer source.Close()
+	// Interactive logons create the UAC pair. Query both sides, including
+	// the identification-only linked handle, without trying to launch it.
+	var interactive windows.Token
+	ok, _, err = advapi.NewProc("LogonUserW").Call(uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(domain)), uintptr(unsafe.Pointer(password)), 2, 0, uintptr(unsafe.Pointer(&interactive)))
+	if ok == 0 {
+		t.Fatal("interactive logon for linked-token proof", err)
+	}
+	defer interactive.Close()
+	linked, err := interactive.GetLinkedToken()
+	if err != nil {
+		t.Fatal("hosted proof requires a real UAC token pair", err)
+	}
+	defer linked.Close()
+	var full, limited windows.Token
+	if interactive.IsElevated() {
+		full, limited = interactive, linked
+	} else {
+		full, limited = linked, interactive
+	}
+	expected, err := limited.GetTokenGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := filteredTokenGroups(full)
+	if err != nil || len(actual) == 0 {
+		t.Fatal("production did not query the linked filtered groups", err)
+	}
+	want := map[string]uint32{}
+	for _, group := range expected.AllGroups() {
+		want[group.Sid.String()] = group.Attributes
+	}
+	for _, group := range actual {
+		if want[group.Sid.String()] != group.Attributes {
+			t.Fatal("linked token group mismatch", group.Sid.String())
+		}
+	}
+	if len(actual) != len(want) || want["S-1-5-32-544"]&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 {
+		t.Fatal("fixture did not exercise a filtered administrator token")
+	}
+	t.Logf("queried %d groups from the real filtered UAC token through the full token's linked handle", len(actual))
 	control, err := workerToken(source, true)
 	if err != nil {
 		t.Fatal(err)

@@ -3,7 +3,7 @@
 // expected value. Temporary settings and connections are restored in finally.
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, realpath, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer, connect } from 'node:net';
@@ -204,15 +204,18 @@ ConvertTo-Json -InputObject @($result) -Compress`);
     assert.equal(await native('autostart'), false);
     assert.equal(await windows.readAutostart(), false);
   });
-  await check('reparse-point rejection leaves the target ACL unchanged', async () => {
+  await check('reparse-point quarantine allows startup and leaves the target ACL unchanged', async () => {
     const target = path.join(folder, 'link-target'), link = path.join(folder, 'root-link');
     const parent = path.join(folder, 'linked-child');
     await mkdir(target); await mkdir(parent); await symlink(target, link, 'junction');
     await symlink(target, path.join(parent, 'nested-link'), 'junction');
     const acl = () => runPowerShellJson(`(Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl | ConvertTo-Json -Compress`, { args: { DIR: target } });
     const before = await acl();
-    await assert.rejects(native('protect-directory', { path: link }), /reparse point/i);
-    await assert.rejects(native('protect-directory', { path: parent }), /reparse point/i);
+    for (const root of [link, parent]) {
+      await native('protect-directory', { path: root });
+      await native('protect-directory', { path: root });
+      assert.equal((await readdir(folder)).filter((name) => name.startsWith(`${path.basename(root)}.untrusted-`)).length, 1);
+    }
     assert.equal(await acl(), before);
   });
   await check('process identity is checked before stopping a child', async () => {

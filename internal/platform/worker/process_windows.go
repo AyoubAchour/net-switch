@@ -208,14 +208,13 @@ func workerToken(token windows.Token, administrative bool) (windows.Token, error
 		if err != nil {
 			return 0, err
 		}
-		for _, group := range groups.AllGroups() {
-			text := group.Sid.String()
-			if text == "" {
-				return 0, fmt.Errorf("could not read a worker token group SID")
-			}
-			if elevatedGroupText(text) {
-				disabled = append(disabled, windows.SIDAndAttributes{Sid: group.Sid})
-			}
+		filtered, err := filteredTokenGroups(token)
+		if err != nil {
+			return 0, err
+		}
+		disabled, err = disabledWorkerGroups(groups.AllGroups(), filtered)
+		if err != nil {
+			return 0, err
 		}
 	}
 	var disabledSIDs *windows.SIDAndAttributes
@@ -237,6 +236,56 @@ func workerToken(token windows.Token, administrative bool) (windows.Token, error
 	return restricted, nil
 }
 
+func filteredTokenGroups(token windows.Token) ([]windows.SIDAndAttributes, error) {
+	var elevation, size uint32
+	if err := windows.GetTokenInformation(token, windows.TokenElevationType, (*byte)(unsafe.Pointer(&elevation)), 4, &size); err != nil {
+		return nil, fmt.Errorf("read worker elevation type: %w", err)
+	}
+	if elevation == 1 { // TokenElevationTypeDefault
+		return nil, nil // No split token (SYSTEM, UAC disabled, batch logon).
+	}
+	filtered := token
+	if elevation == 2 { // TokenElevationTypeFull
+		linked, err := token.GetLinkedToken()
+		if err != nil {
+			return nil, fmt.Errorf("read worker linked token: %w", err)
+		}
+		defer linked.Close()
+		filtered = linked
+	} else if elevation != 3 { // TokenElevationTypeLimited
+		return nil, fmt.Errorf("unexpected worker elevation type %d", elevation)
+	}
+	// An identification-level linked token is sufficient: query its groups,
+	// never try to impersonate it or launch a process with it.
+	groups, err := filtered.GetTokenGroups()
+	if err != nil {
+		return nil, fmt.Errorf("read filtered worker groups: %w", err)
+	}
+	return groups.AllGroups(), nil
+}
+
+func disabledWorkerGroups(groups, filtered []windows.SIDAndAttributes) ([]windows.SIDAndAttributes, error) {
+	denyOnly := map[string]bool{}
+	for _, group := range filtered {
+		text := group.Sid.String()
+		if text == "" {
+			return nil, fmt.Errorf("could not read a filtered worker token group SID")
+		}
+		denyOnly[text] = group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY != 0
+	}
+	var disabled []windows.SIDAndAttributes
+	for _, group := range groups {
+		text := group.Sid.String()
+		if text == "" {
+			return nil, fmt.Errorf("could not read a worker token group SID")
+		}
+		if denyOnly[text] || (filtered == nil && elevatedGroupText(text)) {
+			disabled = append(disabled, windows.SIDAndAttributes{Sid: group.Sid})
+		}
+	}
+	return disabled, nil
+}
+
 func mediumIntegrity(token windows.Token) error {
 	medium, err := windows.CreateWellKnownSid(windows.WinMediumLabelSid)
 	if err != nil {
@@ -249,8 +298,8 @@ func mediumIntegrity(token windows.Token) error {
 	return nil
 }
 
-// UAC's elevated group set, from Microsoft's "Teach Your Apps To Work With
-// Windows Vista User Account Control", Figure 3. Match the full SID namespace:
+// Fallback for tokens without a UAC pair: the 16 restricted RIDs in Microsoft's
+// Windows Vista Application Development Requirements for UAC. Match the full SID namespace:
 // a foreign-domain privileged group is just as powerful as the local domain's,
 // while an unrelated SID with the same final RID must remain untouched.
 func elevatedGroup(sid *windows.SID) bool {
@@ -270,7 +319,7 @@ func elevatedGroupText(text string) bool {
 	}
 	if len(parts) == 5 && parts[3] == "32" {
 		switch parts[4] {
-		case "544", "547", "548", "549", "550", "551", "554", "556":
+		case "544", "547", "548", "549", "550", "551", "554", "556", "569":
 			return true
 		}
 	}

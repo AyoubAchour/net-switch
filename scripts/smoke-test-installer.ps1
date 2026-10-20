@@ -50,7 +50,7 @@ function Assert-Installed {
   $expected = @(
     'launch.ps1', 'tray.ps1', 'server.mjs', 'package.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md',
     'lib\engine.mjs', 'lib\tray.cs', 'ui\index.html', 'assets\net-switch.ico',
-    'tools\stop.ps1', 'tools\restore-windows.mjs', 'tools\remove-autostart.mjs', 'tools\update-autostart.mjs',
+    'tools\stop.ps1', 'tools\restore-windows.mjs', 'tools\remove-autostart.mjs', 'tools\update-autostart.mjs', 'tools\netswitch-cleanup.exe',
     'runtime\node.exe', 'runtime\LICENSE',
     'engine\sing-box.exe', 'engine\SHA256SUMS.txt', 'engine\LICENSE',
     'helper\netswitch-helper.exe', 'tray\NetSwitchTray.exe',
@@ -432,6 +432,31 @@ Write-Host 'Starting with Windows works: the sign-in start ran the server throug
 $userMarker = Join-Path $userData 'installer-smoke-retain.txt'
 [IO.File]::WriteAllText($userMarker, 'User data must survive uninstall.')
 
+# Exercise cleanup on real installer leftovers, including links outside them.
+# All fixtures belong to this disposable runner; establish their ACLs before
+# planting links so fixture setup itself never rewrites a linked target.
+$cleanupOutside = Join-Path $logs 'cleanup-outside'
+New-Item -ItemType Directory -Path $cleanupOutside | Out-Null
+$cleanupRecord = Join-Path $cleanupOutside 'record'
+[IO.File]::WriteAllText($cleanupRecord, 'outside uninstall cleanup')
+$cleanupOutsideACL = (Get-Acl -LiteralPath $cleanupOutside).Sddl
+$cleanupRecordACL = (Get-Acl -LiteralPath $cleanupRecord).Sddl
+$cleanupArtifacts = @("$machineData.untrusted-$('1' * 24)", "$machineData.migrating")
+foreach ($fixture in $cleanupArtifacts) {
+  New-Item -ItemType Directory -Path $fixture | Out-Null
+  $security = New-Object Security.AccessControl.DirectorySecurity
+  $security.SetSecurityDescriptorSddlForm('O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+  Set-Acl -LiteralPath $fixture -AclObject $security
+  New-Item -ItemType Junction -Path (Join-Path $fixture 'junction') -Target $cleanupOutside | Out-Null
+  New-Item -ItemType HardLink -Path (Join-Path $fixture 'hardlink') -Target $cleanupRecord | Out-Null
+  if (-not (Test-Path -LiteralPath (Join-Path $fixture 'hardlink'))) { throw 'Cleanup fixture was not created.' }
+}
+$cleanupUntrusted = "$machineData.untrusted-$('2' * 24)"
+New-Item -ItemType Directory -Path $cleanupUntrusted | Out-Null
+$security = Get-Acl -LiteralPath $cleanupUntrusted
+$security.SetOwner([Security.Principal.WindowsIdentity]::GetCurrent().User)
+Set-Acl -LiteralPath $cleanupUntrusted -AclObject $security
+
 # Inno keeps the original process alive while its TEMP copy runs. -Wait waits
 # for that handoff; then check the final filesystem state (including self-delete).
 $uninstallLog = Join-Path $logs 'uninstall.log'
@@ -449,6 +474,13 @@ if (-not (Test-Path -LiteralPath $userMarker)) { throw 'Uninstall deleted user d
 $uninstallText = Get-Content -LiteralPath $uninstallLog -Raw
 if ($uninstallText -match 'Net Switch Windows restore result: 0') {
   if (Test-Path -LiteralPath $machineData) { throw 'Successful restore left ProgramData behind.' }
+  if ($uninstallText -notmatch 'Net Switch machine cleanup result: 0') { throw 'Machine cleanup did not succeed.' }
+  foreach ($fixture in $cleanupArtifacts) {
+    if (Test-Path -LiteralPath $fixture) { throw "Uninstall left admin-owned recovery data: $fixture" }
+  }
+  $remaining = @(Get-ChildItem -LiteralPath $env:ProgramData -Filter 'Net Switch.migrating*')
+  if ($remaining.Count) { throw 'Uninstall left quarantined staging data.' }
+  if (Test-Path 'HKLM:\SOFTWARE\NetSwitch.ControlDirectoryCertificates.v1') { throw 'Uninstall left its certification key.' }
 } elseif ($uninstallText -match 'Net Switch Windows restore result: -?\d+') {
   # A runner may lack an adapter needed to undo routing. The record must survive.
   $undo = Join-Path $machineData 'windows-undo.json'
@@ -457,6 +489,13 @@ if ($uninstallText -match 'Net Switch Windows restore result: 0') {
   }
   Write-Host 'Windows restore could not finish; uninstall preserved its undo record'
 } else { throw 'Uninstall log does not show whether Windows settings were restored.' }
+if (-not (Test-Path -LiteralPath $cleanupUntrusted)) { throw 'Uninstall removed non-admin-owned data.' }
+if ((Get-Acl -LiteralPath $cleanupOutside).Sddl -ne $cleanupOutsideACL -or
+    (Get-Acl -LiteralPath $cleanupRecord).Sddl -ne $cleanupRecordACL -or
+    [IO.File]::ReadAllText($cleanupRecord) -ne 'outside uninstall cleanup') {
+  throw 'Uninstall followed a link or changed its outside target.'
+}
+Write-Host 'Uninstall cleanup kept link targets and non-admin-owned data unchanged'
 Write-Host 'Uninstall removed the program and its shortcut'
 Write-Host 'Installer smoke test passed'
 } catch {
