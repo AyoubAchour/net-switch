@@ -11,10 +11,10 @@ const held = new Map();
 let next = 0;
 async function requestOn(item) {
   const nonce = randomBytes(16).toString('hex');
-  const label = item.target.publicTrace ? 'Public HTTPS' : 'Local HTTPS';
+  const label = 'Local HTTPS';
   return new Promise((resolve, reject) => {
     const req = request({ ...item.target,
-      path: item.target.publicTrace ? '/cdn-cgi/trace' : `/?nonce=${nonce}`,
+      path: `/?nonce=${nonce}`,
       agent: item.agent, signal: AbortSignal.timeout(10_000) }, (res) => {
       const port = res.socket.localPort;
       let body = '';
@@ -23,20 +23,13 @@ async function requestOn(item) {
       res.on('error', reject);
       res.on('end', () => {
         try {
-          if (item.target.publicTrace && res.statusCode >= 500 && res.statusCode < 600) {
-            throw new Error(`public target unavailable: ${item.target.host}:${item.target.port} HTTP ${res.statusCode}: ${body.slice(0, 100)}`);
-          }
           assert.equal(res.statusCode, 200, `${label} HTTP ${res.statusCode}: ${body.slice(0, 100)}`);
-          let connection;
-          if (item.target.publicTrace) assert(body.includes('ip='), 'Public HTTPS trace body missing');
-          else {
-            const reply = JSON.parse(body);
-            assert.equal(reply.nonce, nonce, 'Local HTTPS response did not echo this request');
-            assert(Number.isInteger(reply.connection), 'Missing responder connection identity');
-            connection = reply.connection;
-          }
+          const reply = JSON.parse(body);
+          assert.equal(reply.nonce, nonce, 'Local HTTPS response did not echo this request');
+          assert(Number.isInteger(reply.connection), 'Missing responder connection identity');
+          const connection = reply.connection;
           if (item.port) {
-            assert(req.reusedSocket && item.port === port && (item.target.publicTrace || item.connection === connection),
+            assert(req.reusedSocket && item.port === port && item.connection === connection,
               `Connection ${item.id} was replaced`);
           }
           item.port = port;
@@ -45,18 +38,31 @@ async function requestOn(item) {
         } catch (error) { reject(error); }
       });
     });
+    req.on('socket', (socket) => {
+      if (item.socket === socket) return;
+      item.socket = socket;
+      const event = (name, extra = {}) => {
+        const detail = { at: new Date().toISOString(), event: name, id: item.id,
+          port: item.port ?? socket.localPort, connection: item.connection, ...extra };
+        item.events.push(detail);
+        console.log(`TLS socket: ${JSON.stringify(detail)}`);
+      };
+      socket.on('end', () => event('peer FIN'));
+      socket.on('error', (error) => event('error', { code: error.code, message: error.message }));
+      socket.on('close', (hadError) => event('close', { hadError, requestedByTest: !!item.closing }));
+    });
     req.on('error', (cause) => reject(new Error(`${label} ${item.target.host}:${item.target.port}, connection ${item.id}: ${cause.message}`, { cause })));
     req.end();
   });
 }
 async function open(count, target) {
-  assert(target?.publicTrace === true || (target?.ca && target.servername === 'netswitch.invalid'),
-    'An explicit public trace or a local TLS target with its certificate is required');
+  assert(target?.ca && target.servername === 'netswitch.invalid',
+    'A local TLS target with its certificate is required');
   const results = [];
   // Keep the existing concurrency and request deadline.
   for (let n = 0; n < count; n += 10) {
     results.push(...await Promise.all(Array.from({ length: Math.min(10, count - n) }, async () => {
-      const item = { id: ++next, target, agent: new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 }) };
+      const item = { id: ++next, target, events: [], agent: new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 }) };
       held.set(item.id, item);
       return requestOn(item);
     })));
@@ -103,7 +109,8 @@ async function reuseProbe(target, localAddress) {
   }
   return attempts;
 }
-async function udp(size, target = { host: '1.1.1.1', port: 53 }, localAddress) {
+async function udp(size, target, localAddress) {
+  assert(target?.host && target.port, 'An explicit local UDP target is required');
   const socket = createSocket('udp4');
   // A real DNS query with RFC 7830 EDNS padding, including a >1500-byte packet.
   const question = Buffer.from('076578616d706c6503636f6d0000010001', 'hex');
@@ -115,7 +122,7 @@ async function udp(size, target = { host: '1.1.1.1', port: 53 }, localAddress) {
   const packet = Buffer.concat([header, question, opt]);
   try {
     return await new Promise((resolve, reject) => {
-      const servers = target.host === '1.1.1.1' ? ['1.1.1.1', '8.8.8.8'] : [target.host];
+      const servers = [target.host];
       let attempts = 0, done = false;
       const send = () => {
         // Five attempts per resolver, one each second. Keep the same socket
@@ -148,7 +155,9 @@ process.on('message', async ({ id, command, count, ids, size, target, localAddre
     else if (command === 'refresh') result = await Promise.all(ids.map((key) => requestOn(held.get(key))));
     else if (command === 'reuse') result = await reuseProbe(target, localAddress);
     else if (command === 'udp') result = await udp(size, target, localAddress);
-    else if (command === 'close') { for (const item of held.values()) item.agent.destroy(); held.clear(); result = true; }
+    else if (command === 'diagnostics') result = [...held.values()].map(({ id, port, connection, events, socket }) =>
+      ({ id, port, connection, events, destroyed: socket?.destroyed, bytesRead: socket?.bytesRead, bytesWritten: socket?.bytesWritten }));
+    else if (command === 'close') { for (const item of held.values()) { item.closing = true; item.agent.destroy(); } held.clear(); result = true; }
     else throw new Error(`Unknown command ${command}`);
     process.send({ id, result });
   } catch (error) { process.send({ id, error: error.stack }); }

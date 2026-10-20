@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      control_https_repeat:
+        description: Temporary Control local TLS repeat
+        type: boolean
+        default: false
       control_security:
         description: Run only the focused Windows control security regressions
         type: boolean
@@ -28,6 +32,74 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  control-https-repeat:
+    if: github.event_name == 'workflow_dispatch' && inputs.control_https_repeat
+    name: Control TLS repeat / ${{ matrix.arch }} / ${{ matrix.repeat }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        repeat: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        arch: [x64, arm64]
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+      TEST_CONTROL: ${{ matrix.repeat <= 5 && 'node' || 'go' }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Build selected control and harness
+        run: |
+          if ($env:TEST_CONTROL -eq 'go') {
+            go build -tags control_test_https -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-https-fixture" -o bin/netswitch.exe ./cmd/netswitch
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
+      - name: Fetch verified sing-box
+        run: ./scripts/fetch-engine.ps1
+      - name: Repeat complete Control routing and TUN assertions once
+        run: |
+          $server = if ($env:TEST_CONTROL -eq 'go') { (Resolve-Path bin/netswitch.exe).Path } else { (Get-Command node).Source }
+          Write-Host "REPEAT ${{ matrix.repeat }} / ${{ matrix.arch }} / $env:TEST_CONTROL"
+          node scripts/e2e-routing.mjs --server-executable $server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/e2e-tun.mjs --server-executable $server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: control-https-${{ matrix.arch }}-${{ matrix.repeat }}
+          path: |
+            dist/tun-test/*.json
+            dist/tun-test/*.txt
+            dist/tun-test/*.log*
+            dist/tun-test/testisp/*.json
+            dist/tun-test/testisp/*.log*
+          retention-days: 7
+
   control-security:
     name: Control security / Windows x64
     if: github.event_name == 'workflow_dispatch' && inputs.control_security
@@ -53,7 +125,7 @@ jobs:
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.control_security
+    if: github.event_name == 'workflow_dispatch' && !inputs.control_security && !inputs.control_https_repeat
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:

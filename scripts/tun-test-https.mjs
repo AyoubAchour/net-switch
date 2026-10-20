@@ -50,8 +50,7 @@ export async function startTrafficEngine(engine, lines, responder) {
   engine.apiSecret = randomBytes(24).toString('hex');
   const config = buildEngineConfig({ mode: 'tun', lines, ruleDir: engine.ruleDir,
     apiPort: engine.apiPort, apiSecret: engine.apiSecret });
-  config.route.rules.unshift({ ip_cidr: [`${responder.target.host}/32`], network: 'tcp', port: 443,
-    action: 'route-options', override_address: responder.address, override_port: responder.port });
+  config.route.rules.unshift(httpsRoute(responder));
   await writeFile(engine.configPath, JSON.stringify(config, null, 2));
   await engine.log.rotate();
   const child = spawn(engine.singBoxPath, ['run', '-c', engine.configPath, '--disable-color'], {
@@ -71,4 +70,9 @@ export async function startTrafficEngine(engine, lines, responder) {
   await writeFile(engine.pidPath, String(child.pid));
   await engine.waitUntilReady(child);
   engine.setStatus('on');
+}
+
+export function httpsRoute(responder) {
+  return { ip_cidr: [`${responder.target.host}/32`], network: 'tcp', port: 443,
+    action: 'route-options', override_address: responder.address, override_port: responder.port };
 }

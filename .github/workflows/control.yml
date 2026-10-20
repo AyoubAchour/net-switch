@@ -4,7 +4,7 @@ on:
   push:
     branches: [port/control-service]
   pull_request:
-    paths: ['internal/**', 'cmd/**', 'assets.go', 'go.mod', 'go.sum', 'scripts/*e2e*', 'scripts/*under-test*', 'scripts/tun-control-adapter.mjs', 'scripts/win32-parity.mjs', 'tests/oracle/**', '.github/workflows/control.yml']
+    paths: ['internal/**', 'cmd/**', 'assets.go', 'go.mod', 'go.sum', 'scripts/*e2e*', 'scripts/*under-test*', 'scripts/tun-*.mjs', 'scripts/tun-*.ps1', 'scripts/control-test-https.mjs', 'scripts/win32-parity.mjs', 'tests/oracle/**', '.github/workflows/control.yml']
 
 permissions:
   contents: read
@@ -65,7 +65,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: TUN against the selected control executable
         run: |
-          $server = if ('${{ matrix.control }}' -eq 'go') { (Resolve-Path bin/netswitch.exe).Path } else { (Get-Command node).Source }
+          if ('${{ matrix.control }}' -eq 'go') {
+            go build -tags control_test_https -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-https-fixture" -o bin/netswitch-tun.exe ./cmd/netswitch
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $server = if ('${{ matrix.control }}' -eq 'go') { (Resolve-Path bin/netswitch-tun.exe).Path } else { (Get-Command node).Source }
           node scripts/e2e-tun.mjs --server-executable $server
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Require native parity to pass

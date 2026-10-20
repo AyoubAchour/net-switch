@@ -1,11 +1,14 @@
 // The TUN harness keeps its existing engine assertions while startup and app
 // choices run through the selected control service. Direct selector PUTs remain
 // explicit engine tests, just as in the original harness.
-import { appendFile, readFile, writeFile } from 'node:fs/promises';
+import assert from 'node:assert/strict';
+import { appendFile, readFile, writeFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { launchServer, recordServerAndEngine } from './server-under-test.mjs';
 import { killTree } from '../lib/ps.mjs';
+import { httpsRoute } from './tun-test-https.mjs';
+import { httpsMarker } from './control-test-https.mjs';
 
 export class ControlUnderTest {
   constructor(dataDir) {
@@ -35,7 +38,10 @@ export class ControlUnderTest {
     }
     this.appLines = { ...next };
   }
-  async start({ lines }) {
+  async start({ lines, httpsResponder }) {
+    const marker = path.join(this.dir, httpsMarker);
+    if (httpsResponder) await writeFile(marker, JSON.stringify(httpsRoute(httpsResponder)));
+    else await unlink(marker).catch((error) => { if (error.code !== 'ENOENT') throw error; });
     if (!this.server) {
       await recordServerAndEngine();
       await writeFile(path.join(this.dir, 'settings.json'), JSON.stringify({ lines: lines.map((line) => ({ ...line, guid: null, label: line.id, kind: 'wired', metered: false, strict: false, cap: null, weight: 1 })), appLines: this.appLines, checkForUpdates: false }));
@@ -55,6 +61,15 @@ export class ControlUnderTest {
       this.status = state.routing.status; this.error = state.routing.error;
       if (this.status === 'on') {
         this.config = JSON.parse(await readFile(path.join(this.dir, 'engine-config.json'), 'utf8'));
+        if (httpsResponder) {
+          const product = JSON.parse(await readFile(path.join(this.dir, 'traffic-product-config.json'), 'utf8'));
+          const actual = structuredClone(this.config);
+          assert.deepEqual(actual.route.rules.shift(), httpsRoute(httpsResponder), 'Missing local TLS destination rewrite');
+          assert.deepEqual(actual, product, 'The fixture must preserve the entire selected Control configuration');
+        } else {
+          assert(!this.config.route.rules.some((rule) => rule.action === 'route-options'),
+            'Lifecycle cycles must use the ordinary product configuration');
+        }
         return;
       }
       await delay(200);

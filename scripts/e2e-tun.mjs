@@ -1,6 +1,6 @@
 // NEVER run this on a developer's PC. It changes routes and briefly changes DNS.
 // The guard also excludes self-hosted runners. The engine-config job explicitly
-// uses --engine-adapter with local TLS; the default still tests selected Control.
+// uses --engine-adapter; the default tests selected Control. Both use local TLS.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -38,9 +38,6 @@ await copyFile(process.execPath, clientExe);
 const engine = engineAdapter
   ? new Engine({ singBoxPath: launchSpec.engine, dataDir: dir, mode: 'tun' })
   : new ControlUnderTest(dir);
-// The separate control-service suite keeps its public trace probe. The engine
-// job never selects this target; its requests require the fixture certificate.
-const publicTarget = { host: '1.1.1.1', port: 443, servername: 'one.one.one.one', publicTrace: true };
 const report = [];
 function log(message) { console.log(message); report.push(message); }
 async function network(action, adapter, timeoutMs = 45_000) {
@@ -83,7 +80,7 @@ function client(command, args = {}) {
     const id = ++serial;
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Test app ${command} timed out`)); }, 60_000);
     pending.set(id, { resolve, reject, timer });
-    const target = engineAdapter ? httpsResponder?.target : publicTarget;
+    const target = httpsResponder?.target;
     worker.send({ id, command, ...(command === 'open' ? { target } : {}), ...args });
   });
 }
@@ -136,10 +133,8 @@ try {
   adapter = await network('inspect');
   harness = await startHarness(path.join(dir, 'testisp'));
   responder = await targets(harness.uplink.address);
-  if (engineAdapter) {
-    httpsResponder = await localHttps(harness.uplink.address);
-    log(`Local HTTPS fixture: ${httpsResponder.target.host}:443 -> ${httpsResponder.address}:${httpsResponder.port}; certificate name netswitch.invalid`);
-  }
+  httpsResponder = await localHttps(harness.uplink.address);
+  log(`Local HTTPS fixture: ${httpsResponder.target.host}:443 -> ${httpsResponder.address}:${httpsResponder.port}; certificate name netswitch.invalid`);
   await harness.control('targets', { ports: [responder.direct.http, ...responder.direct.udp] });
   const udpTarget = { host: responder.virtual.host, port: responder.virtual.udp[0] };
   log(`Physical adapter: ${JSON.stringify(adapter)}`);
@@ -152,7 +147,7 @@ try {
   const lines = [{ id: 'aa', alias: adapter.alias }, { id: 'bb', alias: 'TestISP' }];
   await engine.setAppLines({ [clientExe]: 'bb' });
   if (engineAdapter) await startTrafficEngine(engine, lines, httpsResponder);
-  else await engine.start({ lines });
+  else await engine.start({ lines, httpsResponder });
   alive();
   // The app's warn-level log can legitimately be empty. Keep a marked test
   // header so the artifact exists even when the engine emitted no warnings.
@@ -166,8 +161,8 @@ try {
   const beforeFirst = await tlsCount();
   const first = await client('open', { count: 3 });
   const connections = await routed(first, 'bb');
-  if (engineAdapter) assert.equal(await tlsCount() - beforeFirst, 3, 'The three bb TLS sockets must cross TestISP');
-  log(`ok - pinned app received ${engineAdapter ? 'local' : 'public'} HTTPS responses through TUN: ${JSON.stringify(connections.find((c) => Number(c.metadata.sourcePort) === first[0].port))}`);
+  assert.equal(await tlsCount() - beforeFirst, 3, 'The three bb TLS sockets must cross TestISP');
+  log(`ok - pinned app received local HTTPS responses through TUN: ${JSON.stringify(connections.find((c) => Number(c.metadata.sourcePort) === first[0].port))}`);
 
   await engine.setAppLines({ [clientExe]: 'aa' });
   // Local rule sets are watched asynchronously; wait for the new mapping while
@@ -187,9 +182,11 @@ try {
   const beforeMany = await tlsCount();
   const many = await client('open', { count: 100 });
   await routed(many, 'aa');
-  if (engineAdapter) assert.equal(await tlsCount(), beforeMany, 'The aa TLS sockets must use the physical line');
-  const oldIds = new Set((await engine.connections()).filter((c) => many.some(({ port }) => port === Number(c.metadata.sourcePort))).map((c) => c.id));
-  assert.equal(oldIds.size, 100);
+  assert.equal(await tlsCount(), beforeMany, 'The aa TLS sockets must use the physical line');
+  const beforeSelector = await engine.connections();
+  const oldIds = new Set(beforeSelector.filter((c) => many.some(({ port }) => port === Number(c.metadata.sourcePort))).map((c) => c.id));
+  assert.equal(oldIds.size, 100, `Before selector PUT: missing sockets ${JSON.stringify(many.filter(({ port }) =>
+    !beforeSelector.some((c) => Number(c.metadata.sourcePort) === port)))}`);
   const started = performance.now();
   await engine.pointLaneAt('aa', 'bb');
   const elapsed = performance.now() - started;
@@ -201,10 +198,8 @@ try {
   const beforeNew = await tlsCount();
   const newer = await client('open', { count: 3 });
   await routed(newer, 'bb');
-  if (engineAdapter) {
-    assert.equal(await tlsCount() - beforeNew, 3, 'New TLS sockets must physically cross bb after the selector change');
-    log('ok - TLS path counters: initial bb +3, 100 aa sockets +0, new bb +3 through TestISP');
-  }
+  assert.equal(await tlsCount() - beforeNew, 3, 'New TLS sockets must physically cross bb after the selector change');
+  log('ok - TLS path counters: initial bb +3, 100 aa sockets +0, new bb +3 through TestISP');
   log(`ok - selector PUT ${elapsed.toFixed(1)} ms with 100 open connections; all old sockets reused, new connections use bb`);
   await client('close');
 
@@ -245,9 +240,9 @@ try {
   await engine.log.append('[test] Traffic probes finished; engine still running.');
   await writeFile(path.join(dir, 'traffic-engine.log'), await readFile(engine.logPath));
   await engine.stop();
-  await clean(engineAdapter ? 'traffic fixture' : 'cycle 1/20');
+  await clean('traffic fixture');
   // All 20 lifecycle cycles still use the unmodified product configuration.
-  for (let cycle = engineAdapter ? 1 : 2; cycle <= 20; cycle += 1) {
+  for (let cycle = 1; cycle <= 20; cycle += 1) {
     await engine.start({ lines });
     alive();
     await engine.stop();
@@ -256,6 +251,9 @@ try {
   log('TUN end-to-end test passed');
 } catch (error) {
   log(`FAIL: ${error.stack}`);
+  const sockets = await client('diagnostics').catch((cause) => ({ error: cause.message }));
+  log(`TLS sockets at failure: ${JSON.stringify(sockets)}`);
+  await writeFile(path.join(dir, 'https-client-failure.json'), JSON.stringify(sockets, null, 2));
   // Keep the actual stop state and warnings beside the error. An unlink error
   // does not prove the engine survived, and warn-level output can be empty.
   log(`Engine at failure: ${JSON.stringify({ status: engine.status, error: engine.error,
