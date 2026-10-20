@@ -26,9 +26,10 @@ func TestVerifyMachineStoreWithLiveEngineDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	name, _ := windows.UTF16PtrFromString(child)
-	// A Windows process working directory denies delete sharing. Establish
-	// that starting condition explicitly instead of crediting background exit.
-	held, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	// Hold a directory read handle without delete sharing. Metadata-only
+	// access does not participate in sharing checks, so it cannot establish
+	// the live-directory conflict that this test must prove first.
+	held, err := windows.CreateFile(name, windows.FILE_LIST_DIRECTORY|windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
