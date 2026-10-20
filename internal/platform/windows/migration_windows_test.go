@@ -56,6 +56,27 @@ func TestLegacyACLHardeningDoesNotCertifyPublicMarker(t *testing.T) {
 
 const validUndo = `{"metrics":{"Wi-Fi":[{"family":"IPv6","automatic":false,"metric":25}]},"policy":{"value":-2147483648}}`
 
+func trustedLegacyDirectory(t *testing.T, path string) {
+	t.Helper()
+	hostedSecurity(t)
+	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attrs := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	if err := windows.CreateDirectory(p, &attrs); err != nil {
+		t.Fatal(err)
+	}
+	actual, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil || !trustedMachineSecurity(actual) {
+		t.Fatal("legacy fixture is not trusted", err)
+	}
+}
+
 // On Windows os.Stat can defer the file-ID query until os.SameFile. If the
 // pathname has been replaced by then, both snapshots describe the new object.
 // File.Stat captures the ID now; close the handle before testing any rename.
@@ -131,9 +152,7 @@ func TestMachineFolderMigrationResumesAfterInterruption(t *testing.T) {
 	for _, stopAt := range []string{"staged", "quarantined"} {
 		t.Run(stopAt, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "machine")
-			if err := os.Mkdir(root, 0700); err != nil {
-				t.Fatal(err)
-			}
+			trustedLegacyDirectory(t, root)
 			if err := os.WriteFile(filepath.Join(root, "windows-undo.json"), []byte(validUndo), 0600); err != nil {
 				t.Fatal(err)
 			}

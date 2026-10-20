@@ -126,9 +126,7 @@ func TestCertifiedMigrationQuarantinesPublishRace(t *testing.T) {
 			t.Run(name, func(t *testing.T) {
 				base := t.TempDir()
 				root := filepath.Join(base, "machine")
-				if err := os.Mkdir(root, 0700); err != nil {
-					t.Fatal(err)
-				}
+				trustedLegacyDirectory(t, root)
 				if err := os.WriteFile(filepath.Join(root, "windows-undo.json"), []byte(validUndo), 0600); err != nil {
 					t.Fatal(err)
 				}

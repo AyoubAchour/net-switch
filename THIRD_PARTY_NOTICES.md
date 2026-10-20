@@ -87,6 +87,7 @@ to Net Switch's code only, not to the installer as a whole.
 The new engine's own code is MIT licensed. Its root Go module includes these
 dependencies; this does not replace the 0.3.x programs listed above.
 
+- The unshipped `netswitch-cleanup` tool includes the Go runtime and golang.org/x/sys under the same BSD-3-Clause licenses as the helper.
 - gvisor.dev/gvisor `v0.0.0-20261017122056-1b7906fdee8c`, Apache-2.0.
   Copyright The gVisor Authors. License and authors are preserved in
   `third_party/gvisor/LICENSE` and `AUTHORS`, and in the generated vendor tree.

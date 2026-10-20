@@ -67,8 +67,9 @@ $arguments = @(
 ) + $references + @(
   "/win32icon:$icon", "/win32manifest:$manifest", "/out:$output"
 ) + $sources
-# AnyCPU (without Prefer32Bit) uses the native CLR on Windows 11 ARM64 with
-# .NET Framework 4.8.1, as well as the x64 CLR on x64 Windows.
+# AnyCPU (without Prefer32Bit) uses the x64 CLR on x64 Windows. On ARM64,
+# .NET Framework defaults to x64 emulation unless the application manifest
+# opts into native ARM64. Using the ARM64 compiler does not change that.
 $messages = @(& $csc @arguments)
 if ($LASTEXITCODE -ne 0) {
   throw ("The tray program didn't build (csc exit $LASTEXITCODE):`n" + ($messages -join "`n") +

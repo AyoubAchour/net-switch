@@ -303,6 +303,7 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 	}
 	// A complete stage is durable before the old root is renamed. Recover both
 	// crash windows (before/after quarantine) without losing the saved Undo.
+	var stageCleanupErr error
 	if staged, stageErr := open(stagePath, access, windows.FILE_SHARE_READ); stageErr == nil {
 		var tree []object
 		var m directoryMarker
@@ -334,13 +335,9 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			return ready(m)
 		}
 		staged.file.Close()
-		if err := quarantine(stagePath); err != nil {
-			return err
-		}
+		stageCleanupErr = quarantine(stagePath)
 	} else if !errors.Is(stageErr, os.ErrNotExist) {
-		if err := quarantine(stagePath); err != nil {
-			return err
-		}
+		stageCleanupErr = quarantine(stagePath)
 	}
 	{
 		p, err := windows.UTF16PtrFromString(path)
@@ -348,7 +345,10 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			return err
 		}
 		attrs := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: final}
-		createErr := windows.CreateDirectory(p, &attrs)
+		var createErr error = windows.ERROR_ALREADY_EXISTS
+		if stageCleanupErr == nil {
+			createErr = windows.CreateDirectory(p, &attrs)
+		}
 		if createErr != nil && createErr != windows.ERROR_ALREADY_EXISTS && createErr != windows.ERROR_FILE_EXISTS && createErr != windows.ERROR_ACCESS_DENIED {
 			return fmt.Errorf("create protected machine folder: %w", createErr)
 		}
@@ -366,12 +366,21 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			tree, trusted, err = inspect(root)
 			if err != nil {
 				// A linked or inaccessible descendant cannot authenticate a
-				// tree. Keep any readable, validated recovery records, then
-				// quarantine the whole original without altering its ACLs.
+				// tree or its recovery records. Quarantine the whole original
+				// without importing data or altering its ACLs.
 				trusted = false
 			}
 		}
 		m, migrated := marker(root, tree, trusted)
+		if stageCleanupErr != nil {
+			if !migrated {
+				return fmt.Errorf("cannot quarantine staging occupant without a certified live machine folder: %w", stageCleanupErr)
+			}
+			// The one HKLM certificate matches this live object, so no other
+			// stage can represent a pending certified migration. Keep serving
+			// from the pinned, trusted tree despite an unrelated held name.
+			log(fmt.Sprintf("skipped blocked staging occupant %s; using certified live machine folder: %v", stagePath, stageCleanupErr))
+		}
 		if (createErr == nil && trusted) || migrated {
 			// Only now is inheritance safe: no linked outside object or original
 			// untrusted grant remains to be hidden by an ACL rewrite.
@@ -405,21 +414,18 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			return err
 		}
 		saved := map[string][]byte{}
-		undoUncertain := unreadable || !root.directory
-		closeChildren(tree)
-		if !unreadable && root.directory {
-			// Inspect can stop at an unrelated hostile child. Read each
-			// allowlisted record independently through the pinned root.
-			for _, name := range []string{"windows-undo.json", "windows-undo.json.bak", "engine.pid"} {
-				item, err := open(filepath.Join(path, name), windows.FILE_READ_DATA, windows.FILE_SHARE_READ)
-				if err != nil {
-					if name != "engine.pid" && !errors.Is(err, os.ErrNotExist) {
-						undoUncertain = true
-					}
+		undoUncertain := false
+		if trusted {
+			// Validation proves shape, not authorship. Only the fully checked
+			// tree may supply records, through the same pinned handles whose
+			// ownership and permissions passed inspection.
+			for _, item := range tree {
+				name := strings.ToLower(filepath.Base(item.file.Name()))
+				if !strings.EqualFold(item.file.Name(), filepath.Join(path, name)) ||
+					(name != "windows-undo.json" && name != "windows-undo.json.bak" && name != "engine.pid") {
 					continue
 				}
 				b, err := read(item)
-				item.file.Close()
 				if err == nil && validMigratedFile(name, b) {
 					saved[name] = b
 				} else if name != "engine.pid" {
@@ -427,8 +433,11 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 				}
 			}
 		}
+		closeChildren(tree)
 		notes := []string{"generated engine files, old logs and the previous engine's control journal remain quarantined at " + oldName}
-		if saved["windows-undo.json"] == nil && saved["windows-undo.json.bak"] != nil {
+		if !trusted {
+			notes = append(notes, "WARNING: untrusted machine folder's Windows Undo record was not imported; Undo cannot recover those settings; original data remains at "+oldName)
+		} else if saved["windows-undo.json"] == nil && saved["windows-undo.json.bak"] != nil {
 			saved["windows-undo.json"] = saved["windows-undo.json.bak"]
 			notes = append(notes, "restored the validated Windows Undo backup into the fresh machine folder")
 		} else if saved["windows-undo.json"] != nil {

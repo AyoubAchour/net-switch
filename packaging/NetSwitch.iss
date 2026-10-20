@@ -117,19 +117,10 @@ begin
     if SuppressibleMsgBox('Undo the Windows settings Net Switch changed (connection priority, keeping Wi-Fi on with the cable)?',
       mbConfirmation, MB_YESNO or MB_DEFBUTTON1, IDYES) = IDYES then begin
       ExitCode := -1;
-      { A certified migration may hold the only Undo record while the live
-        folder is absent. Recover it before Node decides "nothing to undo". }
-      if Exec(ExpandConstant('{app}\tools\netswitch-cleanup.exe'), '--prepare',
-        ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then begin
-        Log(Format('Net Switch Undo recovery result: %d', [ExitCode]));
-        if ExitCode = 0 then begin
-          ExitCode := -1;
-          if Exec(ExpandConstant('{app}\runtime\node.exe'),
-            ExpandConstant('"{app}\tools\restore-windows.mjs" --machine-data "{commonappdata}\Net Switch"'),
-            ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
-            DeleteMachineData := ExitCode = 0;
-        end;
-      end;
+      if Exec(ExpandConstant('{app}\runtime\node.exe'),
+        ExpandConstant('"{app}\tools\restore-windows.mjs"'),
+        ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
+        DeleteMachineData := ExitCode = 0;
       Log(Format('Net Switch Windows restore result: %d', [ExitCode]));
       if not DeleteMachineData then
         SuppressibleMsgBox('Windows settings could not be fully restored. Your undo record is kept in ' +
@@ -139,16 +130,12 @@ begin
       DeleteMachineData := SuppressibleMsgBox('Delete the Windows undo record anyway? The current Windows settings will stay in place, and Net Switch will no longer be able to undo them.',
         mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES;
     end;
-    { Run while the cleanup binary still exists. Never follow a junction or
-      rewrite an ACL, and retain every recovery record if restoration failed. }
-    if DeleteMachineData then begin
-      ExitCode := -1;
-      Exec(ExpandConstant('{app}\tools\netswitch-cleanup.exe'), '--remove',
-        ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode);
-      Log(Format('Net Switch machine cleanup result: %d', [ExitCode]));
-      if ExitCode <> 0 then
+  end;
+  if CurUninstallStep = usPostUninstall then begin
+    { Never delete the undo record after a failed restore. }
+    if DeleteMachineData and DirExists(ExpandConstant('{commonappdata}\Net Switch')) then
+      if not DelTree(ExpandConstant('{commonappdata}\Net Switch'), True, True, True) then
         SuppressibleMsgBox('Some Net Switch machine data could not be deleted from ' + ExpandConstant('{commonappdata}\Net Switch') + '.', mbError, MB_OK, IDOK);
-    end;
     { User settings and logs are always retained. An elevated uninstaller may
       belong to a different account from the person who used the app. }
   end;

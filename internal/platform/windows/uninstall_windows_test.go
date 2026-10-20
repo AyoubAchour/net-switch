@@ -28,9 +28,7 @@ func TestUninstallRecoversPendingUndoAndRetainsUncertainty(t *testing.T) {
 	for _, body := range []string{validUndo, "damaged", "damaged-with-backup"} {
 		t.Run(body, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), "machine")
-			if err := os.Mkdir(root, 0700); err != nil {
-				t.Fatal(err)
-			}
+			trustedLegacyDirectory(t, root)
 			if err := os.WriteFile(filepath.Join(root, "windows-undo.json"), []byte(body), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -85,9 +83,7 @@ func TestUninstallRecoversPendingUndoAndRetainsUncertainty(t *testing.T) {
 func TestUninstallAllowsLegacyFolderWithoutUndo(t *testing.T) {
 	hostedSecurity(t)
 	root := filepath.Join(t.TempDir(), "machine")
-	if err := os.Mkdir(root, 0700); err != nil {
-		t.Fatal(err)
-	}
+	trustedLegacyDirectory(t, root)
 	for i := 0; i < 2; i++ {
 		if err := PrepareMachineUninstall(root, func(s string) { t.Log(s) }); err != nil {
 			t.Fatal("a never-configured installation was mistaken for damaged Undo", err)

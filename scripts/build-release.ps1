@@ -106,27 +106,6 @@ foreach ($file in $inputs) {
   New-Item -ItemType Directory -Path (Split-Path $destination -Parent) -Force | Out-Null
   Copy-Item -LiteralPath $file.FullName -Destination $destination
 }
-# The installer needs handle-based cleanup even while the installed control
-# remains Node. Build only this offline utility with the already verified Go.
-$cleanupEnv = @{
-  GOROOT = (Join-Path $cache "go-$($pins.go.version)\$($pins.go.archiveRoot)")
-  GOTOOLCHAIN = 'local'; GOWORK = 'off'; CGO_ENABLED = '0'; GOOS = 'windows'
-  GOARCH = $(if ($Arch -eq 'arm64') { 'arm64' } else { 'amd64' })
-  GOFLAGS = '-mod=vendor -p=2'; GOMAXPROCS = '2'
-}
-$cleanupSaved = @{}
-foreach ($name in $cleanupEnv.Keys) {
-  $cleanupSaved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-  [Environment]::SetEnvironmentVariable($name, $cleanupEnv[$name], 'Process')
-}
-try {
-  $cleanupGo = Join-Path $cache "go-$($pins.go.version)\$($pins.go.archiveRoot)\bin\go.exe"
-  & $cleanupGo build -C $repoRoot -trimpath -buildvcs=false -ldflags '-s -w -buildid= -H=windowsgui' -o (Join-Path $stage 'tools\netswitch-cleanup.exe') ./cmd/netswitch-cleanup
-  if ($LASTEXITCODE -ne 0) { throw "Machine cleanup build failed ($LASTEXITCODE)." }
-  Assert-PeWindowless (Join-Path $stage 'tools\netswitch-cleanup.exe')
-} finally {
-  foreach ($name in $cleanupSaved.Keys) { [Environment]::SetEnvironmentVariable($name, $cleanupSaved[$name], 'Process') }
-}
 Copy-Item -LiteralPath $engineChecksumFile -Destination (Join-Path $stage 'engine/SHA256SUMS.txt')
 Copy-ArchiveFile $nodeZip "$($targetPins.node.archiveRoot)/node.exe" (Join-Path $stage 'runtime/node.exe')
 Copy-ArchiveFile $nodeZip "$($targetPins.node.archiveRoot)/LICENSE" (Join-Path $stage 'runtime/LICENSE')
