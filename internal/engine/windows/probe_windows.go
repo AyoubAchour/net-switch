@@ -60,6 +60,11 @@ func (d *Dialer) Probe(ctx context.Context, line, operator string) (platform.Pro
 		}
 		if err != nil {
 			r.Error = err.Error()
+			if portLimit(err) {
+				// Local socket capacity says nothing about link health. In
+				// particular it must not trigger closure of surviving flows.
+				r.Outcome = "engineUnavailable"
+			}
 		}
 		return r, nil
 	}

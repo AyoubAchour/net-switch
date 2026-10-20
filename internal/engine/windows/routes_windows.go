@@ -47,8 +47,12 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 	timings := &phaseTimings{values: map[string]phaseTiming{}}
 	defer timings.begin("recovery.total")()
 	o := &objects{recovering: true, timings: timings}
-	j := &journal.Journal{Store: measuredJournalStore{Store: store, timings: timings, beforeRemoved: o.commitFirewallBatch},
-		Lock: lock, Kinds: make(map[string]journal.Object)}
+	measured := measuredJournalStore{Store: store, timings: timings, beforeRemoved: o.commitFirewallBatch}
+	var journalStore journal.Store = measured
+	if _, compact := store.(journal.Compactor); compact {
+		journalStore = compactingJournalStore{measured}
+	}
+	j := &journal.Journal{Store: journalStore, Lock: lock, Kinds: make(map[string]journal.Object)}
 	for _, kind := range []string{"adapter", "interface", "dns", "address", "route", "wfp-sublayer", "wfp-filter"} {
 		j.Kinds[kind] = object{o, kind}
 	}
@@ -87,6 +91,7 @@ func (r *Routes) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 	if err != nil {
 		r.objects.recovering = true
 		cleanup := r.session.Cleanup(context.WithoutCancel(ctx))
+		cleanup = errors.Join(cleanup, r.objects.abortFirewallBatch())
 		r.objects.recovering = false
 		return nil, errors.Join(err, cleanup)
 	}
@@ -353,6 +358,7 @@ func (r *Routes) Cleanup(ctx context.Context) (err error) {
 	}
 	r.objects.recovering = true
 	err = r.session.Cleanup(ctx)
+	err = errors.Join(err, r.objects.abortFirewallBatch())
 	r.objects.recovering = false
 	if err == nil {
 		r.capture = nil

@@ -58,6 +58,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/recovery/netswitch-engine.exe ./cmd/netswitch-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o dist/windows-test/windows-platform.test.exe ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
