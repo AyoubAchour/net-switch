@@ -32,11 +32,23 @@ func sackSYN(b []byte) []byte {
 }
 
 func TestTCPRecoveryAfterLostWindow(t *testing.T) {
+	for _, mode := range []string{"rack", "sack"} {
+		t.Run(mode, func(t *testing.T) { tcpRecoveryAfterLostWindow(t, mode) })
+	}
+}
+
+func tcpRecoveryAfterLostWindow(t *testing.T, mode string) {
 	clock := faketime.NewManualClock()
 	options := ns.DefaultOptions()
 	options.Clock = clock
 	options.ClockResolution = 0
 	p := newPeerOptions(t, false, flows.Defaults(), options)
+	if mode == "sack" {
+		recovery := tcpip.TCPRecovery(0)
+		if err := p.stack.SetTransportProtocolOption(tcp.ProtocolNumber, &recovery); err != nil {
+			t.Fatal(err)
+		}
+	}
 	p.fixedSendBuffer = 64 << 10
 	p.openWith(1000, func(b []byte) {
 		p.inject(sackSYN(b))
