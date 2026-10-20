@@ -59,6 +59,8 @@ jobs:
           }
           go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') ./tests/lifecycle
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle-other-app.exe') ./tests/lifecycle/trafficclient
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Set-Location tests/lifecycle
           & (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') run-hosted
           exit $LASTEXITCODE
@@ -73,6 +75,7 @@ jobs:
             go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o "$NETSWITCH_LIFECYCLE_DIR/$name" "./cmd/$name"
           done
           go test -c -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" ./tests/lifecycle
+          go build -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle-other-app" ./tests/lifecycle/trafficclient
           sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"
           cd tests/lifecycle
           sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v -test.timeout=8m
@@ -80,3 +83,10 @@ jobs:
         if: always() && matrix.os == 'Linux'
         shell: bash
         run: sudo journalctl -u netswitch.service -u netswitch-engine.service --no-pager --lines=150
+      - name: Windows service diagnostics
+        if: always() && matrix.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='NetSwitch'] or Provider[@Name='NetSwitchEngine']]]" -MaxEvents 30 -ErrorAction SilentlyContinue | ForEach-Object { $_.ToXml() }
+          Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'; StartTime=(Get-Date).AddMinutes(-25)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'NetSwitch' } | ForEach-Object { $_.ToXml() }
+          exit 0

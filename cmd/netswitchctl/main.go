@@ -1,5 +1,5 @@
-// Command netswitchctl installs, migrates, recovers and diagnoses Net Switch
-// 1.0. Only "version" works so far; the rest arrives with the 1.0 milestones.
+// Command netswitchctl manages 1.0 services, enrollment and recovery.
+// The 0.3.x migration transaction belongs to milestone five.
 package main
 
 import (

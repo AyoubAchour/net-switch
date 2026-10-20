@@ -44,13 +44,42 @@ func ConfigureAutostart(ctx context.Context, mode string) (any, error) {
 	return DesktopCall(ctx, "autostart-set", map[string]any{"on": mode == "on"})
 }
 func Desktop(ctx context.Context, show bool) error {
-	first := true
+	// Only the sign-in entry point requests automatic routing. Reopening a
+	// window must preserve an explicit Turn off or a latched recovery error.
+	first := !show
 	for ctx.Err() == nil {
 		connectCtx, stop := context.WithTimeout(ctx, 40*time.Second)
-		err := service.Activate(connectCtx)
+		status, err := ConnectDesktop(connectCtx, true)
+		if err != nil {
+			if err = service.Activate(connectCtx); err == nil {
+				status, err = ConnectDesktop(connectCtx, true)
+			}
+			if err != nil {
+				stop()
+				return err
+			}
+		}
+		var state struct {
+			Owner   Owner  `json:"owner"`
+			Routing string `json:"routing"`
+		}
+		err = status.Call(connectCtx, map[string]any{"method": "status"}, &state)
+		status.Close()
 		if err != nil {
 			stop()
 			return err
+		}
+		if state.Owner.User == "" || state.Owner.User != CurrentUser() {
+			stop()
+			message := "Owner enrolment is pending. Ask an administrator to run netswitchctl enroll."
+			if state.Owner.User != "" {
+				message = fmt.Sprintf("Net Switch is set up for %s. Routing is %s. This account can view status only.", state.Owner.Name, state.Routing)
+			}
+			if show {
+				return ShowStatus(message)
+			}
+			fmt.Println(message)
+			return nil
 		}
 		rpc, err := ConnectDesktop(connectCtx, false)
 		stop()
@@ -74,6 +103,7 @@ func desktopSession(ctx context.Context, rpc *RPC, show, signIn bool) error {
 	var session struct {
 		Token string `json:"token"`
 		URL   string `json:"url"`
+		Owner string `json:"ownerName"`
 	}
 	if err := rpc.Call(ctx, map[string]any{"method": "session"}, &session); err != nil {
 		return err
@@ -94,7 +124,7 @@ func desktopSession(ctx context.Context, rpc *RPC, show, signIn bool) error {
 		if err := rpc.Call(ctx, map[string]any{"method": "pair"}, &code); err != nil {
 			return err
 		}
-		if err := ShowPairing(session.URL+"pair", code); err != nil {
+		if err := ShowPairing(session.URL+"pair", code, session.Owner); err != nil {
 			return err
 		}
 	}

@@ -150,6 +150,7 @@ type Core struct {
 	saveMu                                       sync.Mutex
 	failureTimes                                 []int64
 	failureDirty                                 bool
+	lastFailureID                                string
 }
 
 func New(ctx context.Context, o Options) (*Core, error) {
@@ -219,7 +220,11 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		return nil, err
 	}
 	c.log("line readings come from native workers")
-	c.log("network readings come from native workers (Windows change notifications)")
+	if o.ServiceMode {
+		c.log("network readings come from isolated platform workers")
+	} else {
+		c.log("network readings come from native workers (Windows change notifications)")
+	}
 	if o.IO.Files != nil {
 		if b, err := o.IO.Files.ReadFile(filepath.Join(o.UserDir, "usage.json")); err == nil {
 			if v, err := js.Decode(b); err == nil {
@@ -270,8 +275,10 @@ func New(ctx context.Context, o Options) (*Core, error) {
 				}
 			}
 			_ = json.Unmarshal(raw["failures"], &c.failureTimes)
+			c.lastFailureID = js.Text(o.Journal.Values()["lastFailureId"])
 			if c.wanted && len(c.failureTimes) >= 5 {
 				o.Engine.Fail(fmt.Errorf("Routing stopped after five failures in ten minutes. Turn routing on to retry."))
+				c.lastFailureID = o.Engine.Snapshot().FailureID
 				c.lastStatus = "error"
 			}
 		}
@@ -514,16 +521,18 @@ func (c *Core) resetLocked() {
 	}
 }
 func (c *Core) statusLocked(s engine.Snapshot) {
-	if s.Status == c.lastStatus {
+	freshFailure := s.FailureID != "" && s.FailureID != c.lastFailureID
+	if s.Status == c.lastStatus && (!c.op.ServiceMode || !freshFailure) {
 		return
 	}
 	c.lastStatus = s.Status
 	if s.Status != "on" {
 		c.resetLocked()
 	}
-	if s.Status == "error" && c.wanted && !c.quitting {
+	if s.Status == "error" && c.wanted && !c.quitting && (!c.op.ServiceMode || freshFailure) {
 		d := []int64{5000, 15000, 30000, 60000}
 		if c.op.ServiceMode {
+			c.lastFailureID = s.FailureID
 			d = []int64{1000, 2000, 5000, 30000}
 			recent := c.failureTimes[:0]
 			for _, at := range c.failureTimes {
@@ -708,6 +717,9 @@ func (c *Core) Routing(ctx context.Context, on bool) error {
 		if err != nil {
 			return err
 		}
+	}
+	if c.op.ServiceMode && !on {
+		c.checkpoint("control-after-stop-intent")
 	}
 	if on {
 		return c.Start(ctx)

@@ -1,0 +1,51 @@
+package winplatform
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"golang.org/x/sys/windows"
+)
+
+func TestVerifyMachineStoreWithLiveEngineDirectory(t *testing.T) {
+	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Skip("native store protection is hosted-only")
+	}
+	path := filepath.Join(t.TempDir(), "machine")
+	if err := ProtectDirectory(path); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(path, "active-engine")
+	if err := os.Mkdir(child, 0700); err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(path, directoryMarkerName)
+	before, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name, _ := windows.UTF16PtrFromString(child)
+	// A Windows process working directory denies delete sharing. Establish
+	// that starting condition explicitly instead of crediting background exit.
+	held, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(held)
+	mutable, err := windows.CreateFile(name, windows.DELETE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err == nil {
+		windows.CloseHandle(mutable)
+		t.Fatal("test did not establish the live-directory sharing restriction")
+	}
+	if err != windows.ERROR_SHARING_VIOLATION {
+		t.Fatal("wrong precondition failure", err)
+	}
+	if err := VerifyDirectory(path); err != nil {
+		t.Fatal("live engine prevented read-only verification", err)
+	}
+	after, err := os.ReadFile(markerPath)
+	if err != nil || string(before) != string(after) {
+		t.Fatal("verification rewrote the installation identity", err)
+	}
+}

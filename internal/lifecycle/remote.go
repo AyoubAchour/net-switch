@@ -45,6 +45,9 @@ func (r *Remote) Fail(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	message := err.Error()
+	if r.snapshot.Status != "error" || r.snapshot.FailureID == "" {
+		r.snapshot.FailureID = randomID()
+	}
 	r.snapshot.Status = "error"
 	r.snapshot.Error = &message
 }
@@ -54,6 +57,7 @@ func (r *Remote) disconnect(rpc *RPC, err error) {
 	if r.rpc == rpc {
 		r.rpc = nil
 		r.snapshot.Status = "error"
+		r.snapshot.FailureID = randomID()
 		message := "Routing stopped, restarting: " + err.Error()
 		r.snapshot.Error = &message
 		rpc.Close()
@@ -116,6 +120,10 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 	r.epoch = attach.Epoch
 	r.snapshot = hello.Snapshot
 	r.snapshot.Instance = hello.Instance
+	if start && r.snapshot.Status != "on" {
+		r.snapshot.Status = "starting"
+		r.snapshot.Error = nil
+	}
 	r.mu.Unlock()
 	ok = true
 	go r.renew(rpc)
@@ -147,6 +155,9 @@ func (r *Remote) renew(rpc *RPC) {
 	}
 }
 func (r *Remote) call(ctx context.Context, method string, payload any, opID string, out any) error {
+	return r.request(ctx, method, payload, opID, "", out)
+}
+func (r *Remote) request(ctx context.Context, method string, payload any, opID, cursor string, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	r.mu.Lock()
@@ -161,6 +172,9 @@ func (r *Remote) call(ctx context.Context, method string, payload any, opID stri
 	}
 	if opID != "" {
 		request["opId"] = opID
+	}
+	if cursor != "" {
+		request["cursor"] = cursor
 	}
 	return rpc.Call(ctx, request, out)
 }
@@ -177,6 +191,12 @@ func (r *Remote) refresh(ctx context.Context) error {
 func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
+	r.mu.Lock()
+	if r.snapshot.Status != "on" {
+		r.snapshot.Status = "starting"
+		r.snapshot.Error = nil
+	}
+	r.mu.Unlock()
 	if err := r.Attach(ctx, true); err != nil {
 		r.Fail(err)
 		return err
@@ -245,9 +265,29 @@ func (r *Remote) Stop(ctx context.Context) error {
 	return nil
 }
 func (r *Remote) Connections(ctx context.Context) ([]ce.Connection, error) {
-	var out []ce.Connection
-	err := r.call(ctx, "flows", adapterPayload{}, "", &out)
-	return out, err
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out := []ce.Connection{}
+	cursor := ""
+	seen := map[string]bool{}
+	for {
+		var page connectionPage
+		if err := r.request(ctx, "flows", adapterPayload{}, "", cursor, &page); err != nil {
+			return nil, err
+		}
+		out = append(out, page.Connections...)
+		if len(out) > 65536 {
+			return nil, errors.New("engine flow snapshot exceeds its entry limit")
+		}
+		if page.Cursor == "" {
+			return out, nil
+		}
+		if seen[page.Cursor] || len(page.Connections) == 0 {
+			return nil, errors.New("engine flow cursor made no progress")
+		}
+		seen[page.Cursor] = true
+		cursor = page.Cursor
+	}
 }
 func (r *Remote) CloseFlows(ctx context.Context, request ce.CloseRequest) (ce.CloseResult, error) {
 	var out ce.CloseResult
@@ -260,9 +300,14 @@ func (r *Remote) Probe(ctx context.Context, request ce.ProbeRequest) ce.ProbeRes
 	return out
 }
 func (r *Remote) ForgetLane(line string) {
+	if r.Snapshot().Status != "on" {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.ctx, 3*time.Second)
 	defer cancel()
 	if err := r.call(ctx, "adapterForgetLane", adapterPayload{Line: line}, "", nil); err != nil {
 		r.log("forget lane: " + err.Error())
+	} else if err := r.refresh(ctx); err != nil {
+		r.log("refresh forgotten lane: " + err.Error())
 	}
 }

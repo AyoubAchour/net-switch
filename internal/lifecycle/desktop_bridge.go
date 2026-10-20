@@ -100,7 +100,17 @@ func (d *DesktopBridge) Call(ctx context.Context, op string, args map[string]any
 		d.pending[work.ID] = ch
 		d.queue = append(d.queue, work)
 		d.mu.Unlock()
-		defer func() { d.mu.Lock(); delete(d.pending, work.ID); d.mu.Unlock() }()
+		defer func() {
+			d.mu.Lock()
+			defer d.mu.Unlock()
+			delete(d.pending, work.ID)
+			for i, queued := range d.queue {
+				if queued.ID == work.ID {
+					d.queue = append(d.queue[:i], d.queue[i+1:]...)
+					break
+				}
+			}
+		}()
 		timer := time.NewTimer(30 * time.Second)
 		defer timer.Stop()
 		select {

@@ -52,9 +52,7 @@ func PrepareDirectory(path string) error {
 	return win.ProtectDirectory(path)
 }
 func CheckDirectory(path string) error {
-	// ProtectDirectory checks the independent HKLM certificate before reusing
-	// any existing tree; it never trusts a folder just because its ACL looks new.
-	return PrepareDirectory(path)
+	return win.VerifyDirectory(path)
 }
 func SyncDirectory(string) error {
 	// NTFS file handles are flushed before atomic replacement. Windows does
@@ -71,6 +69,26 @@ func durableRename(from, to string) error {
 		return err
 	}
 	return windows.MoveFileEx(src, dst, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+func writeStoreFile(path string, data []byte, _ os.FileMode) error {
+	// Installer/ctl writes must not leave their interactive user as the
+	// owner, who could then rewrite the DACL from an unelevated process.
+	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)")
+	if err != nil {
+		return err
+	}
+	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(name, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, &sa, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return err
+	}
+	f := os.NewFile(uintptr(h), path)
+	_, writeErr := f.Write(data)
+	return errors.Join(writeErr, f.Close())
 }
 func BootID() (string, error) {
 	var info struct {

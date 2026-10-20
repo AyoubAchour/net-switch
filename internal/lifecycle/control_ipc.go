@@ -50,7 +50,7 @@ func (a *Access) request(ctx context.Context, peer localipc.Peer, statusOnly boo
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"token": token, "url": fmt.Sprintf("http://127.0.0.1:%d/", a.Port)}, nil
+		return map[string]any{"token": token, "url": fmt.Sprintf("http://127.0.0.1:%d/", a.Port), "ownerName": a.Owner.Name}, nil
 	case "pair":
 		return a.Tokens.Pairing(session)
 	case "revoke":

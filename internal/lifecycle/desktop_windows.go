@@ -38,17 +38,26 @@ func desktopAutostart(on *bool) (any, error) {
 	}
 	return current == value, err
 }
-func ShowPairing(url, code string) error {
+func ShowPairing(url, code, owner string) error {
 	verb, _ := windows.UTF16PtrFromString("open")
 	address, _ := windows.UTF16PtrFromString(url)
 	if err := windows.ShellExecute(0, verb, address, nil, nil, windows.SW_SHOWNORMAL); err != nil {
 		return err
 	}
 	// This window belongs to the enrolled user's process and session.
-	message, _ := windows.UTF16PtrFromString("Enter this code in your browser:\n\n" + code + "\n\nIt expires in two minutes.")
+	message, _ := windows.UTF16PtrFromString("Net Switch is set up for " + owner + ".\n\nEnter this code in your browser:\n\n" + code + "\n\nIt expires in two minutes.")
 	title, _ := windows.UTF16PtrFromString("Connect to Net Switch")
 	go func() {
 		windows.NewLazySystemDLL("user32.dll").NewProc("MessageBoxW").Call(0, uintptr(unsafe.Pointer(message)), uintptr(unsafe.Pointer(title)), 0x40)
 	}()
+	return nil
+}
+func ShowStatus(text string) error {
+	message, err := windows.UTF16PtrFromString(text)
+	if err != nil {
+		return err
+	}
+	title, _ := windows.UTF16PtrFromString("Net Switch")
+	windows.NewLazySystemDLL("user32.dll").NewProc("MessageBoxW").Call(0, uintptr(unsafe.Pointer(message)), uintptr(unsafe.Pointer(title)), 0x40)
 	return nil
 }

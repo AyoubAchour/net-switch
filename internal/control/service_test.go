@@ -85,3 +85,17 @@ func TestServiceResumeHonorsCommittedStop(t *testing.T) {
 		t.Fatal("Control restart reversed the owner's committed stop")
 	}
 }
+func TestServiceCountsFailuresNotStatusObservations(t *testing.T) {
+	c, _, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	c.statusLocked(engine.Snapshot{Status: "error", FailureID: "failed-instance"})
+	c.statusLocked(engine.Snapshot{Status: "starting"})
+	c.statusLocked(engine.Snapshot{Status: "error", FailureID: "failed-instance"})
+	if len(c.failureTimes) != 1 {
+		t.Fatalf("one crash counted %d times", len(c.failureTimes))
+	}
+	c.statusLocked(engine.Snapshot{Status: "error", FailureID: "next-failed-attempt"})
+	if len(c.failureTimes) != 2 {
+		t.Fatal("a distinct failed attempt was not counted")
+	}
+}

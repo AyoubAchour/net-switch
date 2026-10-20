@@ -44,7 +44,19 @@ func desktopAutostart(on *bool) (any, error) {
 	}
 	return err == nil, err
 }
-func ShowPairing(url, code string) error {
+func ShowPairing(url, code, owner string) error {
+	if err := notify("Connect to Net Switch", "Net Switch is set up for "+owner+". Enter "+code+" in your browser. This code expires in two minutes."); err != nil {
+		return err
+	}
+	cmd := exec.Command("xdg-open", url)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go cmd.Wait()
+	return nil
+}
+func ShowStatus(message string) error { return notify("Net Switch", message) }
+func notify(title, message string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	bus, err := dbus.ConnectSessionBus(dbus.WithContext(ctx))
@@ -55,15 +67,10 @@ func ShowPairing(url, code string) error {
 	var id uint32
 	err = bus.Object("org.freedesktop.Notifications", "/org/freedesktop/Notifications").
 		CallWithContext(ctx, "org.freedesktop.Notifications.Notify", 0, "Net Switch", uint32(0), "network-workgroup",
-			"Connect to Net Switch", "Enter "+code+" in your browser. This code expires in two minutes.",
+			title, message,
 			[]string{}, map[string]dbus.Variant{"transient": dbus.MakeVariant(true)}, int32(120000)).Store(&id)
 	if err != nil {
 		return fmt.Errorf("show pairing code in the owner's session: %w", err)
 	}
-	cmd := exec.Command("xdg-open", url)
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	go cmd.Wait()
 	return nil
 }

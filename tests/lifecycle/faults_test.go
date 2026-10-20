@@ -42,9 +42,12 @@ func barrier(t *testing.T, data, point string) uint32 {
 	return hit.PID
 }
 func mutateAsync(url, token, label string) <-chan error {
+	return actionAsync(url, token, "api/lines/update", `{"id":"a1","label":"`+label+`"}`)
+}
+func actionAsync(url, token, route, body string) <-chan error {
 	done := make(chan error, 1)
 	go func() {
-		r, err := http.NewRequest("POST", url+"api/lines/update", strings.NewReader(`{"id":"a1","label":"`+label+`"}`))
+		r, err := http.NewRequest("POST", url+route, strings.NewReader(body))
 		if err != nil {
 			done <- err
 			return

@@ -81,6 +81,9 @@ func SyncDirectory(path string) error {
 	return f.Sync()
 }
 func durableRename(from, to string) error { return os.Rename(from, to) }
+func writeStoreFile(path string, data []byte, mode os.FileMode) error {
+	return os.WriteFile(path, data, mode)
+}
 func BootID() (string, error) {
 	b, err := os.ReadFile("/proc/sys/kernel/random/boot_id")
 	return strings.TrimSpace(string(b)), err

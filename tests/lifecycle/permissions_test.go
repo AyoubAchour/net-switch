@@ -27,7 +27,7 @@ func engineDenied() error {
 		conn.Close()
 		return errors.New("standard user connected to engine")
 	}
-	if !os.IsPermission(err) {
+	if !errors.Is(err, os.ErrPermission) {
 		return fmt.Errorf("engine connection failed for a reason other than permissions: %w", err)
 	}
 	return nil

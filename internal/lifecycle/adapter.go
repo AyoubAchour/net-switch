@@ -2,6 +2,8 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/engine/singbox"
 	"github.com/AyoubAchour/net-switch/internal/faultpoint"
+	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 )
 
 type adapterPayload struct {
@@ -28,10 +31,12 @@ type engineState struct {
 	Applied  *ce.Acknowledgement `json:"appliedRevision"`
 }
 type adapterRuntime struct {
-	mu      sync.Mutex
-	adapter *singbox.Adapter
-	data    string
-	state   engineState // serialized by the protocol's lease mutex
+	mu              sync.Mutex
+	adapter         *singbox.Adapter
+	data            string
+	state           engineState // serialized by the protocol's lease mutex
+	listConnections func(context.Context) ([]ce.Connection, error)
+	pages           adapterPages
 }
 
 func (a *adapterRuntime) InitialEpoch() uint64 { return a.state.Epoch }
@@ -71,6 +76,18 @@ func (a *adapterRuntime) AdapterRequest(ctx context.Context, r protocol.Request)
 		if p.Revision == nil {
 			return nil, errors.New("complete revision required")
 		}
+		encoded, err := js.Marshal(p.Revision.Policy)
+		if err != nil {
+			return nil, err
+		}
+		digest := sha256.Sum256(encoded)
+		if p.Revision.Number == 0 || p.Revision.Hash != hex.EncodeToString(digest[:]) {
+			return nil, errors.New("invalid revision number or policy hash")
+		}
+		before := a.adapter.Snapshot()
+		if r.Method == "start" && before.Instance != "" && before.Status != "on" {
+			return nil, errors.New("adapter lifetime ended; restart the engine service before starting again")
+		}
 		if r.Method == "apply" && a.adapter.Snapshot().Status != "on" {
 			return nil, errors.New("engine has no loaded revision; start is required")
 		}
@@ -107,7 +124,11 @@ func (a *adapterRuntime) AdapterRequest(ctx context.Context, r protocol.Request)
 		faultpoint.Hit(a.data, "engine-after-apply-commit")
 		return ack, nil
 	case "flows":
-		return a.adapter.Connections(ctx)
+		list := a.listConnections
+		if list == nil {
+			list = a.adapter.Connections
+		}
+		return a.pages.read(ctx, r.Cursor, list)
 	case "stats":
 		return a.AdapterSnapshot(), nil
 	case "closeFlows":

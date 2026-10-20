@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -68,6 +71,9 @@ func TestServiceAssetsDoNotPutCredentialsInURLs(t *testing.T) {
 	}
 }
 func TestDurableStorePrimaryAndBackup(t *testing.T) {
+	if runtime.GOOS == "windows" && (os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted") {
+		t.Skip("explicit Windows service-file ownership is tested on hosted runners")
+	}
 	path := filepath.Join(t.TempDir(), "state.json")
 	want := map[string]string{"engineInstanceId": "instance", "sha256": "hash"}
 	if err := Save(path, want); err != nil {
@@ -78,5 +84,13 @@ func TestDurableStorePrimaryAndBackup(t *testing.T) {
 		if err := Read(file, &got); err != nil || got["engineInstanceId"] != "instance" {
 			t.Fatal(got, err)
 		}
+	}
+}
+func TestRemoteSnapshotRetainsFailureBeforeFirstAttachment(t *testing.T) {
+	remote := NewRemote(context.Background(), func(string) {})
+	remote.Fail(errors.New("service could not start"))
+	state := remote.Snapshot()
+	if state.FailureID == "" || state.Status != "error" || state.Error == nil {
+		t.Fatal("failed-start identity was lost", state)
 	}
 }

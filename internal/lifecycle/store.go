@@ -30,7 +30,7 @@ type durableFiles struct{}
 
 func (durableFiles) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
 func (durableFiles) WriteFile(path string, b []byte, mode os.FileMode) error {
-	return os.WriteFile(path, b, mode)
+	return writeStoreFile(path, b, mode)
 }
 func (durableFiles) Remove(path string) error     { return os.Remove(path) }
 func (durableFiles) Rename(from, to string) error { return durableRename(from, to) }

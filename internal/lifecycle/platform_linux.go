@@ -37,6 +37,31 @@ func linuxCall(op string, args map[string]any) (any, error) {
 		return runtime.GOARCH, nil
 	case "policy":
 		return nil, nil
+	case "meters":
+		interfaces, err := net.Interfaces()
+		if err != nil {
+			return nil, err
+		}
+		adapters := []any{}
+		for _, nic := range interfaces {
+			if nic.Flags&net.FlagLoopback != 0 || nic.Name == "NetSwitch" {
+				continue
+			}
+			read := func(name string) (uint64, error) {
+				b, err := os.ReadFile(filepath.Join("/sys/class/net", nic.Name, "statistics", name))
+				if err != nil {
+					return 0, err
+				}
+				return strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+			}
+			rx, rxErr := read("rx_bytes")
+			tx, txErr := read("tx_bytes")
+			if rxErr != nil || txErr != nil {
+				return nil, fmt.Errorf("read %s counters: %w", nic.Name, errors.Join(rxErr, txErr))
+			}
+			adapters = append(adapters, map[string]any{"alias": nic.Name, "rx": rx, "tx": tx})
+		}
+		return map[string]any{"adapters": adapters}, nil
 	case "network":
 		interfaces, err := net.Interfaces()
 		if err != nil {
@@ -59,7 +84,7 @@ func linuxCall(op string, args map[string]any) (any, error) {
 			}
 		}
 		for _, nic := range interfaces {
-			if nic.Flags&net.FlagLoopback != 0 || nic.Flags&net.FlagUp == 0 {
+			if nic.Flags&net.FlagLoopback != 0 {
 				continue
 			}
 			addresses, err := nic.Addrs()
@@ -82,7 +107,15 @@ func linuxCall(op string, args map[string]any) (any, error) {
 					ipv6 = true
 				}
 			}
-			adapters = append(adapters, map[string]any{"alias": nic.Name, "name": nic.Name, "index": nic.Index, "ipv4s": ips, "ipv6": ipv6, "status": "Up", "kind": "wired", "gateway": defaults[nic.Name]})
+			status := "Down"
+			if nic.Flags&net.FlagUp != 0 {
+				status = "Up"
+			}
+			media := "Ethernet"
+			if _, err := os.Stat(filepath.Join("/sys/class/net", nic.Name, "wireless")); err == nil {
+				media = "Wireless"
+			}
+			adapters = append(adapters, map[string]any{"alias": nic.Name, "name": nic.Name, "index": nic.Index, "ipv4s": ips, "ipv6": ipv6, "status": status, "mediaType": media, "gateway": defaults[nic.Name]})
 		}
 		return map[string]any{"adapters": adapters, "defaultRoutes": routes, "readAt": time.Now().UnixMilli(), "policy": nil}, nil
 	case "line-check":
@@ -111,16 +144,12 @@ func Worker(args []string) int {
 		}
 		return 0
 	}
-	if len(args) == 1 && (args[0] == "network" || args[0] == "meters" || args[0] == "outside") {
+	if len(args) == 1 && (args[0] == "network" || args[0] == "meters") {
 		for {
-			var value any = map[string]any{"type": args[0], "rows": []any{}}
-			if args[0] == "network" {
-				var err error
-				value, err = linuxCall("network", nil)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, err)
-					return 1
-				}
+			value, err := linuxCall(args[0], nil)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				return 1
 			}
 			if json.NewEncoder(os.Stdout).Encode(value) != nil {
 				return 0

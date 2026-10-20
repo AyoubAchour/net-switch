@@ -1,5 +1,5 @@
-// Command netswitch is the milestone-one elevated control process. Packaging
-// still starts Node; --dev-proxy is reserved for the existing CI launchers.
+// Command netswitch hosts the 1.0 Control service. The elevated compatibility
+// launcher remains available to parity tests; 0.3.x packaging still starts Node.
 package main
 
 import (

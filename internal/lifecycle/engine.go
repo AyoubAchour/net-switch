@@ -21,7 +21,12 @@ func EngineService(ctx context.Context, ready func(), c Config, log func(string)
 	if err != nil {
 		return err
 	}
-	defer release()
+	releaseSafe := true
+	defer func() {
+		if releaseSafe {
+			_ = release()
+		}
+	}()
 	boot, err := BootID()
 	if err != nil {
 		return err
@@ -98,6 +103,10 @@ running:
 		case result = <-accepted:
 			break running
 		case <-watch.C:
+			if server.Expired() {
+				result = errors.New("control lease expired")
+				break running
+			}
 			if s := runtime.adapter.Snapshot(); s.Status == "error" {
 				result = errors.New("guarded adapter failed")
 				if s.Error != nil {
@@ -109,8 +118,19 @@ running:
 	}
 	stopCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
 	defer stop()
-	if err := runtime.Stop(stopCtx); err != nil {
-		return errors.Join(result, err)
+	stopped := make(chan error, 1)
+	go func() { stopped <- runtime.Stop(stopCtx) }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			releaseSafe = false
+			return errors.Join(result, err)
+		}
+	case <-stopCtx.Done():
+		// Keep the OS ownership lock until the process exits. A timed-out
+		// cleanup goroutine must not overlap another engine's startup.
+		releaseSafe = false
+		return errors.Join(result, fmt.Errorf("engine cleanup timed out; exiting to release the guarded child: %w", stopCtx.Err()))
 	}
 	cancel()
 	listener.Close()

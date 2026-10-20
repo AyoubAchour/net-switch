@@ -108,11 +108,11 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 	s.mu.Lock()
 	if r.Method == "hello" {
 		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks"}}
+		s.mu.Unlock()
 		if adapter, ok := s.runtime.(AdapterRuntime); ok {
 			v["capabilities"] = []string{"singbox-adapter-v1", "revisions", "lease"}
 			v["adapterSnapshot"] = adapter.AdapterSnapshot()
 		}
-		s.mu.Unlock()
 		return v, nil
 	}
 	if r.Method == "attach" {
@@ -122,9 +122,16 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		}
 		next := s.epoch + 1
 		if store, ok := s.runtime.(interface{ SaveEpoch(uint64) error }); ok {
-			if err := store.SaveEpoch(next); err != nil {
+			s.mu.Unlock()
+			err := store.SaveEpoch(next)
+			s.mu.Lock()
+			if err != nil {
 				s.mu.Unlock()
 				return nil, err
+			}
+			if s.stopping || s.stopped || s.attached && !s.now().Before(s.expires) {
+				s.mu.Unlock()
+				return nil, errors.New("attach refused after lease expiry")
 			}
 		}
 		s.epoch = next
@@ -310,18 +317,39 @@ func (s *Server) effect(ctx context.Context, r Request, run func() (any, error))
 	return result, err
 }
 
-// CheckLease shares the mutation/attach lock. Once cleanup begins, no new
-// controller can resurrect this engine instance.
-func (s *Server) CheckLease(ctx context.Context) error {
-	s.mutation.Lock()
-	defer s.mutation.Unlock()
+// Expired fences attachment immediately, including while an accepted mutation
+// is blocked in I/O. The service host can then bound whole-process cleanup.
+func (s *Server) Expired() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.attached || s.stopped || s.now().Before(s.expires) {
+		return false
+	}
+	s.stopping = true
+	return true
+}
+
+// CheckLease marks expiry before waiting for an in-flight mutation. Once
+// cleanup begins, no new controller can resurrect this engine instance.
+func (s *Server) CheckLease(ctx context.Context) error {
+	s.mu.Lock()
 	if !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {
+		s.mu.Unlock()
 		return nil
 	}
 	s.stopping = true
+	s.mu.Unlock()
+	s.mutation.Lock()
+	defer s.mutation.Unlock()
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
 	err := s.runtime.Stop(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err == nil {
 		s.stopped = true
 		s.finish()

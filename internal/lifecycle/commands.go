@@ -21,20 +21,24 @@ func ServiceCommand(name string, args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	c, err := LoadConfig(*data)
-	if err != nil {
+	return service.Run(name, func(ctx context.Context, ready func()) error {
+		c, err := LoadConfig(*data)
+		if err != nil {
+			service.ReportError(name, err)
+			return err
+		}
+		log := Log(c.Data, name)
+		run := ControlService
+		if name == service.Engine {
+			run = EngineService
+		}
+		err = run(ctx, ready, c, log)
+		if err != nil {
+			log("service failed: " + err.Error())
+			service.ReportError(name, err)
+		}
 		return err
-	}
-	log := Log(c.Data, name)
-	run := ControlService
-	if name == service.Engine {
-		run = EngineService
-	}
-	err = service.Run(name, func(ctx context.Context, ready func()) error { return run(ctx, ready, c, log) })
-	if err != nil {
-		log("service failed: " + err.Error())
-	}
-	return err
+	})
 }
 func Ctl(args []string) error {
 	if len(args) == 0 {

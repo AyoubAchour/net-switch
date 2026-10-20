@@ -90,3 +90,38 @@ func TestSlowApplyAllowsRenewalButSerializesAttach(t *testing.T) {
 		t.Fatal("old control remained active")
 	}
 }
+func TestExpiryFencesBeforeWaitingForBlockedMutation(t *testing.T) {
+	table := flows.New(flows.Defaults(), nil)
+	runtime := &durableRuntime{runtimeFake: runtimeFake{table: table}, entered: make(chan struct{}), release: make(chan struct{})}
+	s := New(runtime, table, nil)
+	ctx := context.Background()
+	call(t, s, Request{ID: "attach", Method: "attach", Instance: s.Instance})
+	rev := revision(1)
+	applied := make(chan Reply, 1)
+	go func() {
+		applied <- s.Handle(ctx, Request{ID: "start", Method: "start", Instance: s.Instance, Epoch: 1, Revision: &rev})
+	}()
+	<-runtime.entered
+	s.mu.Lock()
+	expired := s.expires.Add(time.Nanosecond)
+	s.now = func() time.Time { return expired }
+	s.mu.Unlock()
+	if !s.Expired() {
+		close(runtime.release)
+		t.Fatal("blocked apply hid lease expiry")
+	}
+	if reply := s.Handle(ctx, Request{ID: "renew", Method: "renew", Instance: s.Instance, Epoch: 1}); reply.Error == "" {
+		close(runtime.release)
+		t.Fatal("expired controller renewed")
+	}
+	cleaned := make(chan error, 1)
+	go func() { cleaned <- s.CheckLease(ctx) }()
+	close(runtime.release)
+	<-applied
+	if err := <-cleaned; err != nil {
+		t.Fatal(err)
+	}
+	if reply := s.Handle(ctx, Request{ID: "attach", Method: "attach", Instance: s.Instance}); reply.Error == "" {
+		t.Fatal("attachment resurrected expired engine")
+	}
+}

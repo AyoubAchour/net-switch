@@ -12,12 +12,22 @@ import (
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
+	"golang.org/x/sys/windows/svc/eventlog"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
 type handler struct {
 	run Program
 	err error
+}
+
+func ReportError(name string, err error) {
+	log, openErr := eventlog.Open(name)
+	if openErr == nil {
+		defer log.Close()
+		_ = log.Error(1, err.Error())
+	}
+	fmt.Fprintln(os.Stderr, name+":", err)
 }
 
 func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates chan<- svc.Status) (bool, uint32) {

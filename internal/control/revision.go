@@ -28,9 +28,9 @@ type closureRetry struct {
 	nextAt   int64
 }
 
-// All journal writes happen under applyMu, only when a revision or intent
-// changes. Memory remains authoritative if the recovery disk is unavailable;
-// stopping a lane switch would leave traffic on a dead or exhausted line.
+// Journal writes run under applyMu. The compatibility launcher retains its
+// milestone-one best-effort behavior. Services commit the complete desired
+// state before engine mutations and recover from that authoritative record.
 func (c *Core) persistJournal() error {
 	if c.op.Journal == nil {
 		return nil
@@ -45,6 +45,7 @@ func (c *Core) persistJournal() error {
 	}
 	failures := append([]int64{}, c.failureTimes...)
 	wanted := c.wanted
+	failureID := c.lastFailureID
 	c.mu.Unlock()
 	record := map[string]any{
 		"revision": number, "closures": intents,
@@ -53,6 +54,7 @@ func (c *Core) persistJournal() error {
 	if c.op.ServiceMode {
 		record["desired"], record["settings"], record["engineInstanceId"], record["failures"] = desired, values, instance, failures
 		record["wanted"], record["bootId"] = wanted, c.op.BootID
+		record["lastFailureId"] = failureID
 	}
 	_, err := c.op.Journal.Update(record)
 	if err != nil {
