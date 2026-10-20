@@ -15,6 +15,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/journal"
 )
@@ -30,12 +31,29 @@ func (r *Runtime) Stats() any {
 	stats["ownerLookup"] = r.owners.Stats()
 	stats["bindings"] = r.routes.Bindings()
 	stats["wintun"] = r.routes.TunStats()
+	stats["lifecyclePhases"] = r.routes.timings.snapshot()
 	if memory, err := processMemory(); err == nil {
 		stats["processMemory"] = memory
 	} else {
 		stats["processMemoryError"] = err.Error()
 	}
 	return stats
+}
+
+func (r *Runtime) Start(ctx context.Context, revision policy.Revision) (policy.Applied, error) {
+	finish := r.routes.timings.begin("engine.start.total")
+	applied, err := r.Engine.Start(ctx, revision)
+	finish()
+	r.routes.timings.report(r.routes.Instance, "start", err)
+	return applied, err
+}
+
+func (r *Runtime) Stop(ctx context.Context) error {
+	finish := r.routes.timings.begin("engine.stop.total")
+	err := r.Engine.Stop(ctx)
+	finish()
+	r.routes.timings.report(r.routes.Instance, "stop", err)
+	return err
 }
 
 func recoverRoutes(dir string) (*Routes, error) {
@@ -63,10 +81,13 @@ func Recover(dir string) error {
 }
 
 func Serve(parent context.Context, dir string, standalone bool) (err error) {
+	initStarted := time.Now()
 	if !Elevated() {
 		return errors.New("engine requires SYSTEM or an elevated administrator")
 	}
+	stateStarted := time.Now()
 	state, err := StateDirectory(dir)
+	stateElapsed := time.Since(stateStarted)
 	if err != nil {
 		return err
 	}
@@ -76,6 +97,7 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, routes.Close()) }()
+	routes.timings.record("state.directory", stateElapsed)
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	owners := NewOwners()
@@ -109,6 +131,7 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 	defer pipe.Close()
 	stopListen := context.AfterFunc(ctx, func() { pipe.Close() })
 	defer stopListen()
+	routes.timings.record("engine.init.total", time.Since(initStarted))
 	go server.RunLease(ctx)
 	var clients sync.WaitGroup
 	acceptDone := make(chan struct{})

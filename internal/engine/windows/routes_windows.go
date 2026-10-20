@@ -38,11 +38,14 @@ type Routes struct {
 	done     chan struct{}
 	Table    *flows.Table
 	Fatal    func(error)
+	timings  *phaseTimings
 }
 
 func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Routes, error) {
-	o := &objects{recovering: true}
-	j := &journal.Journal{Store: store, Lock: lock, Kinds: make(map[string]journal.Object)}
+	timings := &phaseTimings{values: map[string]phaseTiming{}}
+	defer timings.begin("recovery.total")()
+	o := &objects{recovering: true, timings: timings}
+	j := &journal.Journal{Store: measuredJournalStore{Store: store, timings: timings}, Lock: lock, Kinds: make(map[string]journal.Object)}
 	for _, kind := range []string{"adapter", "interface", "dns", "address", "route"} {
 		j.Kinds[kind] = object{o, kind}
 	}
@@ -63,7 +66,7 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 		return nil, fmt.Errorf("engine crash recovery: %w", err)
 	}
 	o.recovering = false
-	r := &Routes{Instance: instance, session: s, objects: o}
+	r := &Routes{Instance: instance, session: s, objects: o, timings: timings}
 	b := bindingTable{}
 	r.bindings.Store(&b)
 	return r, nil
@@ -74,6 +77,7 @@ func (r *Routes) Close() error {
 }
 
 func (r *Routes) OpenTun(ctx context.Context) (platform.TunDevice, error) {
+	defer r.timings.begin("tun.setup.total")()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	tun, err := r.openTun(ctx)
@@ -101,7 +105,9 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 	for _, family := range []uint16{windows.AF_INET, windows.AF_INET6} {
 		fp := maps.Clone(base)
 		fp["family"] = number(uint64(family))
+		finish := r.timings.begin("interface.inspect")
 		row, err := readInterface(fp)
+		finish()
 		if err != nil {
 			return nil, err
 		}
@@ -115,7 +121,9 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 				return nil, err
 			}
 		}
+		finish = r.timings.begin("dns.inspect")
 		registration, err := dnsRegistration(fp)
+		finish()
 		if err != nil {
 			return nil, err
 		}
@@ -133,7 +141,9 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 			return nil, err
 		}
 	}
+	finish := r.timings.begin("tun.session.open")
 	s, err := a.StartSession()
+	finish()
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +160,7 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 	}
 	// Session.Close leaves adapter ownership with the journal. Cleanup first
 	// removes capture, then addresses/settings, then the adapter itself.
-	return s, nil
+	return &measuredTun{Session: s, timings: r.timings}, nil
 }
 
 func (r *Routes) Bindings() map[string]Adapter {
@@ -187,6 +197,7 @@ func (r *Routes) resolve(lines []platform.Line) (bindingTable, error) {
 	return b, nil
 }
 func (r *Routes) Prepare(ctx context.Context, lines []platform.Line) error {
+	defer r.timings.begin("lines.prepare")()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -201,6 +212,7 @@ func (r *Routes) Prepare(ctx context.Context, lines []platform.Line) error {
 	return nil
 }
 func (r *Routes) Capture(ctx context.Context) error {
+	defer r.timings.begin("route.capture.total")()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, fp := range r.capture {
@@ -296,6 +308,7 @@ func (r *Routes) Quiesce() {
 }
 
 func (r *Routes) Cleanup(ctx context.Context) error {
+	defer r.timings.begin("cleanup.total")()
 	r.Quiesce()
 	r.mu.Lock()
 	defer r.mu.Unlock()
