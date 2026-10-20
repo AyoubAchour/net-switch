@@ -70,6 +70,15 @@ flows: only 65,224 live flows. That run correctly failed the unchanged exact
 capacity despite the separately reported attribution defect; it does not waive
 the cap, resource, refusal or survival checks.
 
+The per-app TCP storm likewise offers 12,000 fixed attempts, still 300 at a time
+and without retries. Run [39461404148](https://github.com/AyoubAchour/net-switch/actions/runs/39461404148),
+Ubuntu 24 x64 job 118761521489, offered 9,000 and held 8,153 identified plus 847
+unknown flows, with no refusals. It correctly failed: it had exercised neither
+the exact 8,192 identified cap nor refusal at that cap. The larger offer exceeds
+the identified and unknown pools combined; both pool limits, actual saturation,
+the three-second refusal bound and stream survival remain mandatory. Reports
+state the offered count; the failed 9,000-attempt sample remains a failure.
+
 The scanner remains a bounded fallback, reported as `proc-fallback` in owner
 stats. Recent process observations can defer unrelated candidate scans for 5 ms
 after a live owner is found. They never supply identity or prove absence, and
