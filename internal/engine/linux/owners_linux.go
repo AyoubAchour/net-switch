@@ -818,10 +818,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			if err != nil {
 				return 0, err
 			}
-			key := descriptorBatchKey{pid: pid, uid: r.uid, start: start, directory: metadata.Ino, offset: offset, limit: limit, advance: advancing}
-			if !canIndex {
-				key.onlyInode = r.inode
-			}
+			key := descriptorBatchKey{pid: pid, uid: r.uid, start: start, directory: metadata.Ino, offset: offset, limit: limit, advance: advancing, cacheAll: canIndex}
 			for !expired() {
 				job, err := o.descriptorBatch(key)
 				if err != nil {
@@ -874,7 +871,16 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 					if advancing {
 						maxFD = max(maxFD, out.lastFD)
 					}
-					matched = matched || slices.Contains(out.inodes, r.inode)
+					for _, socket := range out.sockets {
+						if socket.inode == r.inode {
+							// A foreign-process scan may have read this inode before
+							// our subscription. Publish its exact FD, then use the
+							// same live identity validation as every other hint.
+							o.publish(map[uint32]holder{r.inode: {pid: pid, start: start, fd: strconv.FormatInt(socket.fd, 10)}})
+							matched = true
+							break
+						}
+					}
 					if !matched && errors.Is(out.err, context.DeadlineExceeded) {
 						continue
 					}
