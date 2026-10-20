@@ -6,7 +6,7 @@ repeat does not prove either cause has been fixed.
 | Failure | Established by the original evidence | Root cause |
 | --- | --- | --- |
 | TestISP reset | Loopback control HTTP; no app or sing-box running | Unconfirmed |
-| Cap setup | Secondary HTTP setup; one reply reached sing-box, but the failing client socket is unidentified | Unconfirmed |
+| Cap setup | Secondary HTTP setup; one reply reached sing-box's outbound socket, but the failing client socket is unidentified | Unconfirmed |
 
 ## TestISP localhost reset
 
@@ -17,7 +17,7 @@ request before the HTTPS probe from the request after it.
 
 The gateway log contains its ready message and no panic or session error. Its
 final counters were written on shutdown: zero TestISP errors, zero upstream
-errors, and only background NetBIOS traffic through the virtual interface.
+errors, and `198.19.0.3:137` was the only counted destination.
 No app or sing-box process is involved in this proof case. The failing path is
 the harness's loopback HTTP control connection, not a request routed through
 the Wintun ring. These facts do not identify which end reset the connection.
@@ -36,8 +36,8 @@ a 243-byte reply at 22:43:09.922, and an acknowledgment of the whole reply at
 22:43:09.962. Its tuple was `50362 -> 60584`; the reset arrived during teardown
 at 22:43:18.034. This new controlled request places the failure in the secondary
 HTTP setup: the two main-line HTTPS requests must finish before that step starts.
-There was no global gateway stall: at least one setup request
-completed that leg. The client opened two secondary requests concurrently,
+At least one setup request completed that leg promptly; this does not exclude
+a later gateway or runner stall. The client opened two secondary requests concurrently,
 so the old trace cannot identify the missing request or locate its stall.
 The trace stops at sing-box's outbound socket; it does not prove delivery to
 the application's client socket.
