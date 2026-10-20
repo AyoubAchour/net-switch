@@ -24,7 +24,6 @@ const (
 	phaseProcessOpen
 	phaseProcessStart
 	phaseProcessClose
-	phaseScannerWait
 	phaseDescriptors
 	phaseValidation
 	phaseOther
@@ -34,13 +33,11 @@ const (
 var lookupPhaseNames = [lookupPhases]string{
 	"index", "scope-map", "scope-scratch", "scope-open", "scope-stat",
 	"scope-read", "scope-close", "scope-parse", "scope-rank", "process-open",
-	"process-start", "process-close", "scanner-wait", "descriptors", "validation", "other",
+	"process-start", "process-close", "descriptor-batch-wait", "validation", "other",
 }
 
 type lookupTiming struct {
-	phases        [lookupPhases]time.Duration
-	waitRequested time.Duration
-	waitMaximum   time.Duration
+	phases [lookupPhases]time.Duration
 }
 
 func (t *lookupTiming) add(phase lookupPhase, elapsed time.Duration) {
@@ -78,8 +75,6 @@ func (o *Owners) recordHolderTimeout(t lookupTiming, elapsed time.Duration) {
 		recordLookupMaximum(&counter.maximum, nanos)
 	}
 	o.timeoutPhases[largest].largest.Add(1)
-	o.timeoutWaitRequested.Add(uint64(t.waitRequested))
-	recordLookupMaximum(&o.timeoutWaitMaximum, uint64(t.waitMaximum))
 	o.holderTimeouts.Add(1)
 }
 

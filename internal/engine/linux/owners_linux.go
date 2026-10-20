@@ -42,66 +42,57 @@ type fdWindow struct {
 	directory  uint64 // inode of the pinned kernel proc fd directory
 	fdCount    int64  // descriptor count at the last complete pass; ordering hint only
 	next       int64
-	probeNext  int64
 	high       int64 // end of the sequentially indexed range; tail probes cannot advance it
 	extent     int64 // largest descriptor observed, including tail probes
 	lastFD     int64
 	tailProbed bool
 	observed   time.Time
-	scanning   chan struct{}
-	assisting  chan struct{}
 	fullScan   time.Time // start of a completed, wholly indexed descriptor pass
 	fullUID    uint32
 	identity   *ownerValidation
 }
 type Owners struct {
-	queries              diagPool
-	batches              descriptorBatches
-	warmed               bool
-	lookupErrors         [4]atomic.Uint64
-	cgroupStats          [3]atomic.Uint64
-	sharedScans          atomic.Uint64
-	assistedScans        atomic.Uint64
-	targetedProbes       atomic.Uint64
-	metadataPasses       atomic.Uint64
-	sharedMetadata       atomic.Uint64
-	sharedScopes         atomic.Uint64
-	holderTimeouts       atomic.Uint64
-	timeoutPhases        [lookupPhases]lookupPhaseCounter
-	timeoutWaitRequested atomic.Uint64
-	timeoutWaitMaximum   atomic.Uint64
-	lastLookupError      atomic.Pointer[string]
-	mu                   sync.Mutex
-	cgroupMu             sync.RWMutex
-	recentMu             sync.RWMutex
-	cgroups              map[uint64]string
-	scopeReads           [64]atomic.Pointer[scopePIDSnapshot]
-	recent               map[uint32]*recentOwners
-	index                [ownerIndexShards]ownerIndex
-	indexSeed            maphash.Seed
-	windows              map[uint32]fdWindow
-	ambiguousPorts       map[uint16]time.Time
+	queries         diagPool
+	batches         descriptorBatches
+	warmed          bool
+	lookupErrors    [4]atomic.Uint64
+	cgroupStats     [3]atomic.Uint64
+	sharedScans     atomic.Uint64
+	metadataPasses  atomic.Uint64
+	sharedMetadata  atomic.Uint64
+	sharedScopes    atomic.Uint64
+	holderTimeouts  atomic.Uint64
+	timeoutPhases   [lookupPhases]lookupPhaseCounter
+	lastLookupError atomic.Pointer[string]
+	mu              sync.Mutex
+	cgroupMu        sync.RWMutex
+	recentMu        sync.RWMutex
+	cgroups         map[uint64]string
+	scopeReads      [64]atomic.Pointer[scopePIDSnapshot]
+	recent          map[uint32]*recentOwners
+	index           [ownerIndexShards]ownerIndex
+	indexSeed       maphash.Seed
+	windows         map[uint32]fdWindow
+	ambiguousPorts  map[uint16]time.Time
 	// Fault callbacks are assigned only by the acceptance build.
 	fault        func(context.Context) error
 	destroyFault func(context.Context, socketRow, func())
 }
 
 type lookupStats struct {
-	Timeout, Missing, Ambiguous, Other                             uint64
-	CgroupHints, CgroupResolved, CgroupPopulated                   uint64
-	LastError                                                      string
-	MetadataRejected                                               uint64
-	LastMetadataError                                              string
-	SharedScans                                                    uint64
-	AssistedScans                                                  uint64
-	TargetedProbes                                                 uint64
-	MetadataPasses, SharedMetadata                                 uint64
-	SharedScopes                                                   uint64
-	HolderTimeouts                                                 uint64
-	TimeoutStages                                                  map[string]lookupPhaseStat
-	TimeoutWaitRequestedNanos, TimeoutMaxWaitNanos                 uint64
-	DescriptorBatches, SharedBatches, EarlyBatchMatches            uint64
-	BatchDescriptors, BatchSockets, BatchQueueFull, AbortedBatches uint64
+	Timeout, Missing, Ambiguous, Other                                           uint64
+	CgroupHints, CgroupResolved, CgroupPopulated                                 uint64
+	LastError                                                                    string
+	MetadataRejected                                                             uint64
+	LastMetadataError                                                            string
+	SharedScans                                                                  uint64
+	MetadataPasses, SharedMetadata                                               uint64
+	SharedScopes                                                                 uint64
+	HolderTimeouts                                                               uint64
+	TimeoutStages                                                                map[string]lookupPhaseStat
+	DescriptorBatches, SharedBatches, EarlyBatchHints                            uint64
+	BatchDescriptors, BatchSockets, BatchQueueFull, AbortedBatches               uint64
+	BatchQueueNanos, BatchServiceNanos, BatchMaxQueueNanos, BatchMaxServiceNanos uint64
 }
 
 func (o *Owners) Stats() any {
@@ -109,16 +100,14 @@ func (o *Owners) Stats() any {
 	s.CgroupHints, s.CgroupResolved, s.CgroupPopulated = o.cgroupStats[0].Load(), o.cgroupStats[1].Load(), o.cgroupStats[2].Load()
 	s.MetadataRejected = rejectedMetadata.Load()
 	s.SharedScans = o.sharedScans.Load()
-	s.AssistedScans = o.assistedScans.Load()
-	s.TargetedProbes = o.targetedProbes.Load()
 	s.MetadataPasses, s.SharedMetadata = o.metadataPasses.Load(), o.sharedMetadata.Load()
 	s.SharedScopes = o.sharedScopes.Load()
-	s.DescriptorBatches, s.SharedBatches, s.EarlyBatchMatches = o.batches.started.Load(), o.batches.shared.Load(), o.batches.early.Load()
+	s.DescriptorBatches, s.SharedBatches, s.EarlyBatchHints = o.batches.started.Load(), o.batches.shared.Load(), o.batches.early.Load()
 	s.BatchDescriptors, s.BatchSockets = o.batches.fds.Load(), o.batches.sockets.Load()
 	s.BatchQueueFull, s.AbortedBatches = o.batches.full.Load(), o.batches.aborted.Load()
+	s.BatchQueueNanos, s.BatchServiceNanos = o.batches.queueNanos.Load(), o.batches.serviceNanos.Load()
+	s.BatchMaxQueueNanos, s.BatchMaxServiceNanos = o.batches.maxQueue.Load(), o.batches.maxService.Load()
 	s.HolderTimeouts = o.holderTimeouts.Load()
-	s.TimeoutWaitRequestedNanos = o.timeoutWaitRequested.Load()
-	s.TimeoutMaxWaitNanos = o.timeoutWaitMaximum.Load()
 	for phase := range o.timeoutPhases {
 		counter := &o.timeoutPhases[phase]
 		if count := counter.count.Load(); count != 0 {
@@ -560,10 +549,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 	}
 	var result platform.Owner
 	var found []holder
-	var scanWait time.Duration
 	var validationTime, initialIndexTime, scopeTime time.Duration
 	var scannedPIDs, scannedFDs, hinted int
-	var lastPID, lastUID, waitPID uint32
+	var lastPID, lastUID uint32
 	var lastIndexed bool
 	var lastPosition int64
 	seen := map[uint32]bool{}
@@ -612,7 +600,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			o.mu.Lock()
 			window := o.windows[h.pid]
 			if window.start != h.start {
-				window = fdWindow{start: h.start, lastFD: -1, scanning: window.scanning, assisting: window.assisting}
+				window = fdWindow{start: h.start, lastFD: -1}
 			}
 			window.lastFD = fd
 			window.extent = max(window.extent, fd)
@@ -718,11 +706,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		}
 		canIndex := metadata.Uid == r.uid || slices.Contains(recent, pid)
 		lastPID, lastUID, lastIndexed = pid, metadata.Uid, canIndex
-		// Share the normal scanner's hints. A descheduled scanner must not
-		// hold every follower until its deadline: after a short wait, allow
-		// one targeted assistant for this same process, never an unrelated walk.
-		gate := make(chan struct{})
-		remember := make(map[uint32]holder, 32)
 		if expired() {
 			return nil
 		}
@@ -732,9 +715,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		if hasHolder(pid) {
 			return nil
 		}
-		// A proc-directory inode scopes this cached search generation. Read
-		// a new incarnation before acquiring its scanner gate: proc stat I/O
-		// and a runtime syscall handoff must not strand all followers.
 		var start uint64
 		o.mu.Lock()
 		previous := o.windows[pid]
@@ -752,8 +732,8 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		}
 		o.mu.Lock()
 		if len(o.windows) > 4096 {
-			for old, state := range o.windows {
-				if old != pid && state.scanning == nil && state.assisting == nil {
+			for old := range o.windows {
+				if old != pid {
 					delete(o.windows, old)
 				}
 				if len(o.windows) <= 4096 {
@@ -762,173 +742,33 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			}
 		}
 		current := o.windows[pid]
-		shared := func() bool {
-			return current.directory == metadata.Ino && current.fullUID == r.uid && !current.fullScan.Before(requested)
+		if current.directory != metadata.Ino || (current.start != 0 && current.start != start) {
+			current = fdWindow{directory: metadata.Ino, start: start, lastFD: -1}
 		}
-		if shared() {
+		if current.fullUID == r.uid && !current.fullScan.Before(requested) {
 			o.mu.Unlock()
 			o.sharedScans.Add(1)
 			return o.indexed(r.inode).visit(accept)
 		}
-		assist := false
-		assistAfter := time.Now().Add(time.Millisecond)
-		for current.scanning != nil {
-			if result.AppID != "" {
-				o.mu.Unlock()
-				return o.indexed(r.inode).visit(accept)
-			}
-			// Keep enough of the caller's budget for a targeted pass. At most
-			// two scans may be active for a process; further followers consume
-			// either scan's published matches or wait for one of those slots.
-			busy := current.scanning
-			assisting := current.assisting
-			waitPID = pid
-			o.mu.Unlock()
-			waiting := time.Now()
-			var ready <-chan struct{}
-			if notice != nil && result.AppID == "" {
-				ready = notice.ready
-			}
-			waitBudget := max(0, time.Until(assistAfter))
-			effectiveWait := waitBudget
-			if timed {
-				effectiveWait = min(effectiveWait, max(0, time.Until(deadline)))
-			}
-			timing.waitRequested += effectiveWait
-			timer := time.NewTimer(waitBudget)
-			select {
-			case <-busy:
-			case <-assisting:
-			case <-ready:
-			case <-timer.C:
-			case <-ctx.Done():
-			}
-			timer.Stop()
-			elapsed := time.Since(waiting)
-			scanWait += elapsed
-			timing.add(phaseScannerWait, elapsed)
-			timing.waitMaximum = max(timing.waitMaximum, elapsed)
-			if err := checkHints(); err != nil {
-				return err
-			}
-			if result.AppID != "" || expired() {
-				return nil
-			}
-			o.mu.Lock()
-			current = o.windows[pid]
-			if shared() {
-				o.mu.Unlock()
-				o.sharedScans.Add(1)
-				return o.indexed(r.inode).visit(accept)
-			}
-			if current.scanning != nil && current.assisting != nil && !time.Now().Before(assistAfter) {
-				// Neither long scanner owns our progress. Reserve a small,
-				// disjoint rotating probe in this PID rather than waiting until
-				// the caller times out or walking unrelated processes.
-				position := int64(0)
-				nextPosition := int64(0)
-				if current.directory == metadata.Ino {
-					position = current.probeNext
-					end := max(current.extent+3, metadata.Size+2)
-					current.probeNext = (position + 64) % max(end, 64)
-					nextPosition = current.probeNext
-					o.windows[pid] = current
-				}
-				o.mu.Unlock()
-				o.targetedProbes.Add(1)
-				probeStarted := time.Now()
-				if _, err := f.Seek(position, 0); err == nil {
-					_, probeErr := f.Visit(64, func(fd []byte) bool {
-						if expired() {
-							return false
-						}
-						scannedFDs++
-						inode, ok := socketInodeAt(descriptor, string(fd))
-						if ok && (canIndex || inode == r.inode) {
-							remember[inode] = holder{pid, start, string(fd)}
-						}
-						if len(remember) >= 32 {
-							o.publish(remember)
-							clear(remember)
-						}
-						return !ok || inode != r.inode
-					})
-					if errors.Is(probeErr, io.EOF) {
-						o.mu.Lock()
-						window := o.windows[pid]
-						if window.directory == metadata.Ino && window.probeNext == nextPosition {
-							window.probeNext = 0
-							o.windows[pid] = window
-						}
-						o.mu.Unlock()
-					}
-				}
-				timing.add(phaseDescriptors, time.Since(probeStarted))
-				o.publish(remember)
-				if err := checkHints(); err != nil {
-					return err
-				}
-				if result.AppID == "" {
-					heavy = append(heavy, pid)
-				}
-				return nil
-			}
-			if current.scanning != nil && current.assisting == nil && !time.Now().Before(assistAfter) {
-				assist = true
-				break
-			}
-		}
-		scanStarted := time.Now()
-		if current.directory != metadata.Ino || (current.start != 0 && current.start != start) {
-			current = fdWindow{directory: metadata.Ino, start: start, lastFD: -1, scanning: current.scanning, assisting: current.assisting}
-		}
 		current.start = start
-		if assist {
-			current.assisting = gate
-			o.assistedScans.Add(1)
-		} else {
-			current.scanning = gate
-		}
+		window := current
+		current.next += 64
 		o.windows[pid] = current
 		o.mu.Unlock()
-		// Validate identity only after publishing the fd batch and releasing
-		// the scanner gate. Metadata reads must not keep every follower of
-		// this process waiting, especially when a reader is descheduled.
+		// Shared descriptor jobs now serialize identical work. A caller's
+		// scheduling or metadata reads must not hold a separate PID gate.
+		var batchErr error
 		defer func() {
+			if scanErr == nil && batchErr != nil {
+				scanErr = batchErr
+			}
 			if scanErr == nil && !expired() {
 				scanErr = o.indexed(r.inode).visit(accept)
 			}
 		}()
-		// Defer order: publish, release the scanner slot, close the directory,
-		// then validate identity. The first defer also covers unclaimed slots.
 		defer closeDirectory()
-		defer func() {
-			o.mu.Lock()
-			window := o.windows[pid]
-			if window.scanning == gate {
-				window.scanning = nil
-			}
-			if window.assisting == gate {
-				window.assisting = nil
-			}
-			o.windows[pid] = window
-			close(gate)
-			o.mu.Unlock()
-		}()
-		o.mu.Lock()
-		window := o.windows[pid]
-		// Once a live holder is known, reuse other processes' very recent
-		// search windows. A burst must not rescan the same 64 descriptors in
-		// every concurrent lookup. Positive hints are always revalidated above.
-		if !complete && result.AppID != "" && time.Since(window.observed) < 5*time.Millisecond {
-			o.mu.Unlock()
-			return nil
-		}
 		position := window.next
 		lastPosition = window.high
-		window.next += 64
-		o.windows[pid] = window
-		o.mu.Unlock()
 		if position > 0 {
 			if _, err := f.Seek(position, 0); err != nil {
 				return nil
@@ -936,6 +776,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		}
 		maxFD := window.high
 		maxSeen := window.extent
+		remember := make(map[uint32]holder, 32)
 		advancing := false
 		whole := false
 		matched := false
@@ -984,6 +825,16 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			for !expired() {
 				job, err := o.descriptorBatch(key)
 				if err != nil {
+					var busy *descriptorQueueBusy
+					if errors.As(err, &busy) {
+						select {
+						case <-busy.ready:
+							continue
+						case <-ctx.Done():
+							err = ctx.Err()
+						}
+					}
+					batchErr = err
 					return 0, err
 				}
 				var ready <-chan struct{}
@@ -992,8 +843,29 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 				}
 				select {
 				case <-ready:
+					inThisPID := func() bool {
+						found := false
+						o.indexed(r.inode).visit(func(h holder) error {
+							found = found || (h.pid == pid && h.start == start)
+							return nil
+						})
+						return found
+					}
+					if !inThisPID() {
+						// Another holder's hint cannot finish this PID's search.
+						// Subscribe again, then close the publication race.
+						o.unsubscribe(r.inode, notice)
+						notice = o.subscribe(r.inode)
+						if !inThisPID() {
+							continue
+						}
+					}
 					matched = true
-					o.batches.early.Add(1)
+					select {
+					case <-job.done:
+					default:
+						o.batches.early.Add(1)
+					}
 					return 0, nil
 				case <-job.done:
 					out := job.result
@@ -1003,6 +875,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 						maxFD = max(maxFD, out.lastFD)
 					}
 					matched = matched || slices.Contains(out.inodes, r.inode)
+					if !matched && errors.Is(out.err, context.DeadlineExceeded) {
+						continue
+					}
 					// A window begun before this request can supply a live
 					// positive hint, but a miss needs a fresh pass. Newly
 					// created descriptors may be absent from its kernel buffer.
@@ -1014,9 +889,11 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 					}
 					return out.count, out.err
 				case <-ctx.Done():
+					batchErr = ctx.Err()
 					return 0, ctx.Err()
 				}
 			}
+			batchErr = context.DeadlineExceeded
 			return 0, context.DeadlineExceeded
 		}
 		defer func() {
@@ -1027,10 +904,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 				current.high = max(current.high, maxFD)
 				current.extent = max(current.extent, maxSeen)
 				current.observed = time.Now()
-				if whole && canIndex {
-					current.fdCount = metadata.Size
-					current.fullScan, current.fullUID = scanStarted, r.uid
-				}
 				o.windows[pid] = current
 			}
 		}()
@@ -1162,7 +1035,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		}
 		if result.AppID == "" {
 			if expired() {
-				return result, fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d scanWait=%s waitPID=%d lastPID=%d fdUID=%d indexed=%t frontier=%d indexWait=%s validation=%s scope=%s)", context.DeadlineExceeded, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, scanWait, waitPID, lastPID, lastUID, lastIndexed, lastPosition, initialIndexTime, validationTime, scopeTime)
+				return result, fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d lastPID=%d fdUID=%d indexed=%t frontier=%d indexWait=%s validation=%s scope=%s)", context.DeadlineExceeded, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, lastPID, lastUID, lastIndexed, lastPosition, initialIndexTime, validationTime, scopeTime)
 			}
 			return result, os.ErrNotExist
 		}

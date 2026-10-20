@@ -34,6 +34,7 @@ type descriptorBatchResult struct {
 
 type descriptorBatch struct {
 	key      descriptorBatchKey
+	queued   time.Time
 	deadline time.Time
 	done     chan struct{}
 	result   descriptorBatchResult // immutable after done closes
@@ -42,11 +43,17 @@ type descriptorBatch struct {
 type descriptorBatches struct {
 	mu                                                  sync.Mutex
 	jobs                                                chan *descriptorBatch
+	available                                           chan struct{}
 	live                                                map[descriptorBatchKey]*descriptorBatch
 	closed                                              atomic.Bool
 	workers                                             sync.WaitGroup
 	started, shared, early, fds, sockets, full, aborted atomic.Uint64
+	queueNanos, serviceNanos, maxQueue, maxService      atomic.Uint64
 }
+
+type descriptorQueueBusy struct{ ready <-chan struct{} }
+
+func (*descriptorQueueBusy) Error() string { return "descriptor scanner queue is full" }
 
 // A worker publishes a bounded descriptor window. Its caller can validate a
 // published match immediately while the worker continues serving neighbours.
@@ -65,13 +72,15 @@ func (o *Owners) descriptorBatch(key descriptorBatchKey) (*descriptorBatch, erro
 	}
 	if b.jobs == nil {
 		b.jobs = make(chan *descriptorBatch, 128)
+		b.available = make(chan struct{})
 		b.live = make(map[descriptorBatchKey]*descriptorBatch)
 		for range max(1, min(4, runtime.GOMAXPROCS(0)/2)) {
 			b.workers.Add(1)
 			go o.runDescriptorBatches()
 		}
 	}
-	job := &descriptorBatch{key: key, deadline: time.Now().Add(8 * time.Millisecond), done: make(chan struct{})}
+	queued := time.Now()
+	job := &descriptorBatch{key: key, queued: queued, deadline: queued.Add(8 * time.Millisecond), done: make(chan struct{})}
 	select {
 	case b.jobs <- job:
 		b.live[key] = job
@@ -79,7 +88,7 @@ func (o *Owners) descriptorBatch(key descriptorBatchKey) (*descriptorBatch, erro
 		return job, nil
 	default:
 		b.full.Add(1)
-		return nil, unix.EAGAIN
+		return nil, &descriptorQueueBusy{ready: b.available}
 	}
 }
 
@@ -88,6 +97,8 @@ func (o *Owners) closeDescriptorBatches() {
 	b.mu.Lock()
 	if !b.closed.Swap(true) && b.jobs != nil {
 		close(b.jobs)
+		close(b.available)
+		b.available = nil
 	}
 	b.mu.Unlock()
 	b.workers.Wait()
@@ -97,12 +108,23 @@ func (o *Owners) runDescriptorBatches() {
 	b := &o.batches
 	defer b.workers.Done()
 	for job := range b.jobs {
+		started := time.Now()
+		queued := uint64(started.Sub(job.queued))
+		b.queueNanos.Add(queued)
+		recordLookupMaximum(&b.maxQueue, queued)
 		job.result = o.readDescriptorBatch(job)
+		service := uint64(time.Since(started))
+		b.serviceNanos.Add(service)
+		recordLookupMaximum(&b.maxService, service)
 		if errors.Is(job.result.err, context.DeadlineExceeded) || errors.Is(job.result.err, context.Canceled) {
 			b.aborted.Add(1)
 		}
 		b.mu.Lock()
 		delete(b.live, job.key)
+		if b.available != nil {
+			close(b.available)
+			b.available = make(chan struct{})
+		}
 		close(job.done)
 		b.mu.Unlock()
 	}
