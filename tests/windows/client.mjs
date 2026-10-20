@@ -66,9 +66,10 @@ async function requestOn(item) {
       reject(new Error(`${label}: ${JSON.stringify(detail)}`, { cause }));
     };
     const request = target.tls ? httpsRequest : httpRequest;
+    const signal = AbortSignal.timeout(8000);
     const req = request({ host: target.host, port: target.port ?? target.http, path: target.path ?? `/echo?nonce=${nonce}`,
       localAddress: target.source,
-      servername: target.servername, ca: target.ca, agent: item.agent, signal: AbortSignal.timeout(8000) }, (res) => {
+      servername: target.servername, ca: target.ca, agent: item.agent, signal }, (res) => {
       phase('response');
       detail.statusCode = res.statusCode;
       detail.verified = res.socket.authorized === true;
@@ -76,6 +77,9 @@ async function requestOn(item) {
       item.socket = res.socket;
       let body = '';
       res.setEncoding('utf8'); res.on('data', (chunk) => { body += chunk; detail.bytesReceived += Buffer.byteLength(chunk); }); res.on('error', fail);
+      res.on('aborted', () => fail(Object.assign(new Error('HTTP response closed before completion'), {
+        code: signal.aborted ? 'ABORT_ERR' : 'ERR_STREAM_PREMATURE_CLOSE',
+      })));
       res.on('end', () => {
         if (settled) return;
         try {

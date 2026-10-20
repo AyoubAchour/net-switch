@@ -72,7 +72,9 @@ worker.on('message', async ({ id, result, error, publicSocket }) => {
     // strict engine row before the public server can close after its reply.
     try {
       const all = await routed([publicSocket], 'aa');
-      const record = all.find((c) => Number(c.metadata.sourcePort) === publicSocket.port);
+      const record = all.find((c) => Number(c.metadata.sourcePort) === publicSocket.port &&
+        c.metadata.processPath?.toLowerCase() === clientExe.toLowerCase() &&
+        c.metadata.type === 'tun/tun-in' && c.chains.includes(lineOutbound('aa')));
       worker.send({ command: 'public-recorded', id, record });
     } catch (cause) { worker.send({ command: 'public-recorded', id, error: cause.message }); }
     return;

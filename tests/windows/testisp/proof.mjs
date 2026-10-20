@@ -67,13 +67,13 @@ try {
   harness = null;
 } catch (error) { console.error(error); process.exitCode = 1; }
 finally {
-  if (responder) {
-    await writeFile(`${dir}/tls-observations.json`, JSON.stringify(responder.seen, null, 2));
-    await responder.close();
-  }
   if (harness) {
     try { await check('adapter, route and firewall cleanup', () => harness.close()); }
     catch (error) { console.error(error); process.exitCode = 1; }
+  }
+  if (responder) {
+    await writeFile(`${dir}/tls-observations.json`, JSON.stringify(responder.seen, null, 2));
+    await responder.close();
   }
   await writeFile(`${dir}/report.json`, JSON.stringify({ architecture: process.arch, results }, null, 2));
 }

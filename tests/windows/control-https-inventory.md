@@ -91,6 +91,23 @@ the same single public egress request.
   not traffic assertions. Verified caches can reduce those dependencies;
   an echo responder cannot substitute for their packages.
 
+## Follow-up #53 routing boundary
+
+Follow-up #53 applies the inventory with one explicit distinction: local traffic
+on the physical line proves selection, not physical egress. The owner requested
+keeping physical-egress assertions public. Acceptance therefore moves pins,
+pin-change survival, combining and recovered TestISP traffic to local TLS;
+failover onto main and both main-line cap cases stay on `1.0.0.1`.
+Public `1.1.1.1` baselines and post-crash connectivity also remain.
+
+TestISP pause/drop/withdrawal, recovery, and the unaffected TestISP side of the
+direct firewall block use local TLS. Their direct physical probes stay public.
+Both suites require the exact local TLS endpoint to fail with TestISP's default
+route withdrawn, without a request reaching the responder or a new TestISP
+destination count, then recover on restoration. There is no target host route.
+Product health traffic is untouched. Installer smoke setup seeds the existing
+update preference off before the installed shortcut first runs.
+
 ## What the 99/100 failure actually shows
 
 [Run 39469242976](https://github.com/AyoubAchour/net-switch/actions/runs/39469242976),

@@ -37,18 +37,14 @@ jobs:
     name: Local traffic / ${{ matrix.arch }} / ${{ matrix.repeat }}
     if: github.event_name == 'workflow_dispatch' && inputs.local_traffic != 'off' && inputs.local_traffic != ''
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: ${{ (matrix.suite == 'proof' || inputs.local_traffic == 'proof') && 15 || 25 }}
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
         repeat: ${{ fromJSON(inputs.local_traffic == 'repeat' && '[1,2,3,4,5]' || '[1]') }}
         arch: ${{ fromJSON(inputs.local_traffic == 'diagnostics' && '["x64"]' || '["x64","ARM64"]') }}
-        include:
-          - arch: x64
-            runner: windows-latest
-          - arch: ARM64
-            runner: windows-11-arm
+        include: ${{ fromJSON(inputs.local_traffic == 'diagnostics' && '[{"arch":"x64","runner":"windows-latest"}]' || inputs.local_traffic == 'repeat' && '[{"arch":"x64","runner":"windows-latest"},{"arch":"ARM64","runner":"windows-11-arm"},{"repeat":1,"suite":"acceptance"},{"repeat":2,"suite":"acceptance"},{"repeat":3,"suite":"acceptance"},{"repeat":4,"suite":"proof"},{"repeat":5,"suite":"proof"}]' || '[{"arch":"x64","runner":"windows-latest"},{"arch":"ARM64","runner":"windows-11-arm"}]') }}
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
@@ -81,23 +77,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Prove the local target and fault paths
-        if: inputs.local_traffic != 'diagnostics'
+        if: inputs.local_traffic == 'proof' || (inputs.local_traffic == 'repeat' && matrix.suite == 'proof')
         run: |
           node tests/windows/testisp/proof.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: ./.github/actions/cache-pinned-archive
-        if: inputs.local_traffic != 'proof'
+        if: inputs.local_traffic == 'diagnostics' || (inputs.local_traffic == 'repeat' && matrix.suite == 'acceptance')
         with:
           artifact: go
       - name: Build helper and fetch engine
-        if: inputs.local_traffic != 'proof'
+        if: inputs.local_traffic == 'diagnostics' || (inputs.local_traffic == 'repeat' && matrix.suite == 'acceptance')
         env:
           GOFLAGS: -mod=readonly -p=2
         run: |
           ./scripts/build-helper.ps1
           ./scripts/fetch-engine.ps1
       - name: Repeat complete acceptance
-        if: inputs.local_traffic == 'repeat'
+        if: inputs.local_traffic == 'repeat' && matrix.suite == 'acceptance'
         run: |
           go build -o dist/windows-test/quicprobe.exe ./tests/windows/quicprobe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

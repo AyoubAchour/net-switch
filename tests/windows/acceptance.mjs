@@ -4,7 +4,8 @@ import { createWriteStream } from 'node:fs';
 import { copyFile, mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { launchOptions, recordLaunch, startServer, verifyEngineProcess } from './launch.mjs';
+import { recordLaunch, startServer, verifyEngineProcess } from './launch.mjs';
+import { launchSpec } from '../../scripts/server-under-test.mjs';
 import { BaselineDefect, Report } from './report.mjs';
 import { targets } from './targets.mjs';
 import { hostedOnly, identity, run, startHarness, until } from './testisp/harness.mjs';
@@ -13,7 +14,7 @@ import { httpsRoute } from '../../scripts/tun-test-https.mjs';
 import { httpsMarker } from '../../scripts/control-test-https.mjs';
 
 hostedOnly();
-const options = launchOptions();
+const options = launchSpec;
 assert(['baseline', 'v1'].includes(options.profile), 'Use --profile baseline or v1');
 const dir = path.resolve('dist/windows-acceptance');
 const dataDir = path.join(dir, 'app');
