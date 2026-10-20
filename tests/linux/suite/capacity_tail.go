@@ -28,9 +28,9 @@ func (e *Env) capacityTail(release Release, apps map[string]*Bg, held map[string
 		before = stats(e, s)
 	}
 	e.T.Require(before.Handshakes == 0, "burst admissions have settled before the fixed tail (%d pending)", before.Handshakes)
-	e.T.Logf("CAP PREFIX: flows=%d UDP=%d peak=%d unknown=%d lookups=%d misses=%d; original burst-only held-cap verdict=%t; original attribution verdict=%t",
+	e.T.Logf("CAP PREFIX: flows=%d UDP=%d peak=%d unknown=%d lookups=%d misses=%d; original burst-only held-cap verdict=%t; original attribution verdict=%t; original reservation-cap verdict=%t",
 		before.Flows, before.UDP, before.PeakFlows, before.Unknown, before.LookupCount, before.LookupMisses,
-		before.Flows == tcpFlowsTotal, before.LookupCount > 0 && before.LookupMisses*200 <= before.LookupCount)
+		before.Flows == tcpFlowsTotal, before.LookupCount > 0 && before.LookupMisses*200 <= before.LookupCount, before.PeakFlows == tcpFlowsTotal)
 	if e.deferAttribution {
 		e.T.ReleaseCheck(before.LookupCount > 0 && before.LookupMisses*200 <= before.LookupCount,
 			"the original burst window identifies at least 99.5%% before any sequential tail can dilute it (%d misses of %d)", before.LookupMisses, before.LookupCount)
@@ -46,7 +46,7 @@ func (e *Env) capacityTail(release Release, apps map[string]*Bg, held map[string
 	refused := list.Errors["ECONNREFUSED"] + list.Errors["ECONNRESET"]
 	e.T.Check(list.Established+refused == capacityTailAttempts, "every fixed tail attempt either stays open or is explicitly refused (%d held, %d refused, errors %v)", list.Established, refused, list.Errors)
 	after := stats(e, s)
-	e.capacityAccounting("fixed new-process tail", "tcp", before, after, capacityTailAttempts, list.Established, refused, false)
+	e.capacityAccounting("fixed new-process tail", "tcp", before, after, capacityTailAttempts, list.Established, refused, capacityTotal)
 	// These sockets arrive while the large held workload still exists.
 	// Only proved unknown-pool failures are covered by its load declaration;
 	// the separate probes after fault/load cleanup remain hard.

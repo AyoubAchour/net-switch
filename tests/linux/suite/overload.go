@@ -270,7 +270,7 @@ func udpSessionsPerAppCase(e *Env) {
 			identified += all[name].listed
 			e.T.Logf("CAP OLD VERDICT UDP app %s: held=%d target=%d old-exact-count=%t", name, all[name].listed, udpSessionsPerApp, all[name].listed == udpSessionsPerApp)
 		}
-		credit := e.capacityAccounting("UDP per-app", "udp", before, after, perApp*len(names), total, refused, true)
+		credit := e.capacityAccounting("UDP per-app", "udp", before, after, perApp*len(names), total, refused, capacityPerApp)
 		e.exactCapacity("identified UDP apps together", identified, udpSessionsPerApp*len(names), credit)
 	}
 	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
@@ -315,7 +315,7 @@ func udpSessionsTotalCase(e *Env) {
 		st, err := v1.Session().Stats(e.Ctx())
 		e.T.Require(err == nil, "stats while the sessions are held (%v)", err)
 		listed = max(listed, int(st.UDP))
-		credit := e.capacityAccounting("UDP total", "udp", before, st, perApp*len(names), int(st.UDP), refused, false)
+		credit := e.capacityAccounting("UDP total", "udp", before, st, perApp*len(names), int(st.UDP), refused, capacityTotal)
 		e.exactCapacity("UDP total", int(st.UDP), udpSessionsTotal, credit)
 	}
 	admitted := max(gotOut, listed)
@@ -379,7 +379,7 @@ func tcpStorm(e *Env) {
 		v1 := e.Eng.(engine.V1)
 		after := stats(e, v1.Session())
 		refused := held.Errors["ECONNREFUSED"] + held.Errors["ECONNRESET"]
-		credit := e.capacityAccounting("TCP per-app", "tcp", before, after, storm, held.Established, refused, true)
+		credit := e.capacityAccounting("TCP per-app", "tcp", before, after, storm, held.Established, refused, capacityPerApp)
 		e.exactCapacity("identified bravo TCP", known, tcpFlowsPerApp, credit)
 		e.checkHeldTCP(map[string]app.HeldList{"bravo": held}, map[string]*Bg{"bravo": hold})
 	}
@@ -555,7 +555,7 @@ func tcpFlowsTotalCase(e *Env) {
 		for _, list := range held {
 			refused += list.Errors["ECONNREFUSED"] + list.Errors["ECONNRESET"]
 		}
-		credit := e.capacityAccounting("TCP total", "tcp", offerStart, st, perApp*len(names)+capacityTailAttempts, established, refused, false)
+		credit := e.capacityAccounting("TCP total", "tcp", offerStart, st, perApp*len(names)+capacityTailAttempts, established, refused, capacityTotal)
 		e.exactCapacity("TCP total", int(st.Flows), tcpFlowsTotal, credit)
 	}
 	lines := RecordLines(accepted)

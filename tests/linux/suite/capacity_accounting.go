@@ -7,6 +7,14 @@ import (
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
 )
 
+type capacityScope uint8
+
+const (
+	capacityTotal capacityScope = iota
+	capacityPerApp
+	capacityMixed
+)
+
 // Refusal counters count decisions; clients count completed attempts. A SYN
 // whose notice was throttled can be counted again. Subtract EVERY allowed cap
 // decision from client refusals, including repetitions, to get a conservative
@@ -26,18 +34,22 @@ func unknownRefusalFloor(clientRefused int, r flows.Refusals, capDecisions uint6
 // Every caller takes the two samples around exactly its offered traffic,
 // before releasing any holder. A different reason, lost attempt, failed dial
 // or admitted-then-lost flow fails hard even inside a declared load case.
-func (e *Env) capacityAccounting(label, protocol string, before, after engine.Stats, offered, held, refused int, perApp bool) uint64 {
+func (e *Env) capacityAccounting(label, protocol string, before, after engine.Stats, offered, held, refused int, scope capacityScope) uint64 {
 	r := after.RefusedTCP.Sub(before.RefusedTCP)
 	forward := after.Counters["tcpRejected"] - before.Counters["tcpRejected"]
 	capDecisions := r.Total
-	if perApp {
+	if scope == capacityPerApp {
 		capDecisions = r.PerApp
+	} else if scope == capacityMixed {
+		// UDP and TCP share the per-app flow cap. An app holding UDP may
+		// legitimately fill 8,192 combined slots before the total fills.
+		capDecisions += r.PerApp
 	}
 	if protocol == "udp" {
 		r = after.RefusedUDP.Sub(before.RefusedUDP)
 		forward = after.Counters["udpRejected"] - before.Counters["udpRejected"]
 		capDecisions = r.UDP
-		if perApp {
+		if scope == capacityPerApp {
 			capDecisions = r.UDPPerApp
 		}
 	} else {
@@ -45,6 +57,13 @@ func (e *Env) capacityAccounting(label, protocol string, before, after engine.St
 			"%s: no outbound TCP dial failed (%d)", label, after.Counters["tcpDialFailed"]-before.Counters["tcpDialFailed"])
 	}
 	floor, classified := unknownRefusalFloor(refused, r, capDecisions)
+	occupied := (r.Total == 0 || after.PeakFlows == tcpFlowsTotal) &&
+		(r.UDP == 0 || after.PeakUDP == udpSessionsTotal) &&
+		(r.PerApp == 0 || after.PeakPerApp == tcpFlowsPerApp) &&
+		(r.UDPPerApp == 0 || after.PeakUDPPerApp == udpSessionsPerApp) &&
+		(r.Unknown == 0 || after.PeakUnknown == 2048) &&
+		(r.UnknownUDP == 0 || after.PeakUnknownUDP == 512)
+	e.T.Check(occupied, "%s: every reported cap refusal has an independently observed full pool", label)
 	// The UDP fixture sends exactly one datagram from each fresh socket.
 	// Unlike SYNs it has no transport retransmission that can repeat a decision.
 	if protocol == "udp" {
@@ -70,7 +89,7 @@ func (e *Env) capacityAccounting(label, protocol string, before, after engine.St
 		"%s: held memory stays within 512 MiB (%d bytes)", label, after.Counters["runtimeBytes"])
 	e.T.Logf("CAP ACCOUNTING %s: offered=%d held=%d client-refused=%d decisions=%+v unknown-refusal-floor=%d lookup-misses=%d unknown-admitted=%d owner-details=%s",
 		label, offered, held, refused, r, floor, misses, unknownAdmitted, after.OwnerLookup)
-	if !classified || forward != r.Count() || offered != held+refused || after.Admitted-before.Admitted != uint64(held) ||
+	if !classified || !occupied || forward != r.Count() || offered != held+refused || after.Admitted-before.Admitted != uint64(held) ||
 		misses != unknownAdmitted+r.Unknown+r.UnknownUDP {
 		return 0
 	}

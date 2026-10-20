@@ -31,6 +31,8 @@ func TestCapacityShortfallNeedsCompleteRefusalEvidence(t *testing.T) {
 		{"lost admitted flow", func(s *engine.Stats, _ *int) { s.Admitted++ }, true},
 		{"client timeout", func(_ *engine.Stats, refused *int) { *refused = *refused - 1 }, true},
 		{"missing forwarding decision", func(s *engine.Stats, _ *int) { s.Counters["tcpRejected"]++ }, true},
+		{"no observed total cap", func(s *engine.Stats, _ *int) { s.PeakFlows-- }, true},
+		{"no observed unknown cap", func(s *engine.Stats, _ *int) { s.PeakUnknown-- }, true},
 		{"unclassified lookup miss", func(s *engine.Stats, _ *int) { s.LookupMisses++ }, true},
 		{"memory exceeded", func(s *engine.Stats, _ *int) { s.Counters["runtimeBytes"] = 513 << 20 }, true},
 		{"memory missing", func(s *engine.Stats, _ *int) { delete(s.Counters, "runtimeBytes") }, true},
@@ -41,6 +43,7 @@ func TestCapacityShortfallNeedsCompleteRefusalEvidence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			s := engine.Stats{
 				Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{Total: 50, Unknown: 10},
+				PeakFlows: tcpFlowsTotal, PeakUnknown: 2048,
 				Counters: map[string]uint64{"tcpRejected": 60, "runtimeBytes": 400 << 20},
 			}
 			refused := 60
@@ -48,7 +51,7 @@ func TestCapacityShortfallNeedsCompleteRefusalEvidence(t *testing.T) {
 			c := &harness.Case{ID: "capacity.mixed-caps", Title: "classified capacity", Label: harness.Requires10, ReleaseBlocker: loadAttributionBlocker("capacity.mixed-caps")}
 			c.Run = func(check *harness.T) {
 				e := &Env{T: check, deferAttribution: true}
-				credit := e.capacityAccounting("test", "tcp", engine.Stats{}, s, 150, 90, refused, false)
+				credit := e.capacityAccounting("test", "tcp", engine.Stats{}, s, 150, 90, refused, capacityTotal)
 				e.exactCapacity("test", 90, 100, credit)
 			}
 			report := harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
@@ -59,5 +62,27 @@ func TestCapacityShortfallNeedsCompleteRefusalEvidence(t *testing.T) {
 				t.Fatalf("short occupancy was called a release pass: %+v", report)
 			}
 		})
+	}
+}
+
+func TestMixedCapacityAcceptsOnlyAnActuallyFullCombinedAppPool(t *testing.T) {
+	for _, scope := range []capacityScope{capacityTotal, capacityMixed} {
+		for _, peak := range []int{8191, 8192} {
+			c := &harness.Case{ID: "capacity.mixed-caps", Title: "combined app cap", Label: harness.Requires10, ReleaseBlocker: loadAttributionBlocker("capacity.mixed-caps")}
+			c.Run = func(check *harness.T) {
+				e := &Env{T: check, deferAttribution: true}
+				s := engine.Stats{
+					Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{PerApp: 50, Unknown: 10},
+					PeakPerApp: peak, PeakUnknown: 2048,
+					Counters: map[string]uint64{"tcpRejected": 60, "runtimeBytes": 400 << 20},
+				}
+				credit := e.capacityAccounting("mixed", "tcp", engine.Stats{}, s, 150, 90, 60, scope)
+				e.exactCapacity("mixed", 90, 100, credit)
+			}
+			report := harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
+			if report.JobFailed != (scope != capacityMixed || peak != 8192) {
+				t.Fatalf("scope %d peak %d: %+v", scope, peak, report)
+			}
+		}
 	}
 }
