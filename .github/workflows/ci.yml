@@ -159,7 +159,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/udpreject.exe ./tests/windows/udpreject
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Measure cold Windows owner lookups with 2000 existing TCP rows
+      - name: Measure cold owner latency at 1950–2100 actual TCP rows
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
+        env:
+          NETSWITCH_LOOKUP_GATE: '1'
+        run: |
+          go test -count=1 -v -run '^TestOwnerSteadyColdTiming$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Attribute at least 995 of 1000 cold burst sockets
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
         env:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
