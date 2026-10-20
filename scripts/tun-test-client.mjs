@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 
 if (!process.send) throw new Error('Run this client through e2e-tun.mjs');
 const held = new Map();
+const publicRecords = new Map();
 let next = 0;
 async function requestOn(item) {
   const nonce = randomBytes(16).toString('hex');
@@ -40,7 +41,7 @@ async function requestOn(item) {
               `${res.statusCode >= 500 && res.statusCode < 600 ? 'public target unavailable' : 'public HTTPS response failed'}: HTTP ${res.statusCode}`);
             assert(/(?:^|\n)ip=[^\r\n]+\r?\n/.test(body), 'Public HTTPS trace has no ip= result');
             item.port = port;
-            resolve({ id: item.id, port, bytes: body.length, verified, publicTrace: true });
+            resolve({ id: item.id, port, bytes: body.length, verified, publicTrace: true, engine: item.engine });
             return;
           }
           assert.equal(res.statusCode, 200, `${label} HTTP ${res.statusCode}: ${body.slice(0, 100)}`);
@@ -69,6 +70,15 @@ async function requestOn(item) {
       socket.once('secureConnect', () => {
         item.secureConnectAt = new Date().toISOString();
         event('secureConnect', { authorized: socket.authorized });
+        if (item.target.publicTrace) {
+          publicRecords.set(item.id, ({ record, error }) => {
+            publicRecords.delete(item.id);
+            if (error) { req.destroy(new Error(error)); return; }
+            item.engine = record;
+            req.end();
+          });
+          process.send({ id: item.id, publicSocket: { port: socket.localPort } });
+        }
       });
       socket.on('end', () => event('peer FIN'));
       socket.on('error', (error) => event('error', { code: error.code, message: error.message }));
@@ -79,7 +89,9 @@ async function requestOn(item) {
       const phase = cause.code === 'ECONNRESET' ? 'transport reset (origin unproven)' : 'request failed';
       reject(new Error(`${label} ${phase}, ${item.target.host}:${item.target.port}, connection ${item.id}: ${cause.message}`, { cause }));
     });
-    req.end();
+    // Creating the request connects TLS. Delay HTTP only for the single public
+    // request, within the same 20-second deadline and without a second socket.
+    if (!item.target.publicTrace) req.end();
   });
 }
 async function open(count, target) {
@@ -175,7 +187,8 @@ async function udp(size, target, localAddress) {
     });
   } finally { socket.close(); }
 }
-process.on('message', async ({ id, command, count, ids, size, target, localAddress }) => {
+process.on('message', async ({ id, command, count, ids, size, target, localAddress, record, error }) => {
+  if (command === 'public-recorded') { publicRecords.get(id)?.({ record, error }); return; }
   try {
     let result;
     if (command === 'open') result = await open(count, target);

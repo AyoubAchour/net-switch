@@ -5,12 +5,12 @@ import { Agent as HTTPAgent, request as httpRequest } from 'node:http';
 import { Agent as HTTPSAgent, request as httpsRequest } from 'node:https';
 import { connect, createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
+import { publicFailure } from './public-https.mjs';
 
 if (!process.send) throw new Error('Use the Windows acceptance runner');
 const held = new Map();
 const requests = [];
 let serial = 0;
-const publicTarget = { host: '1.0.0.1', port: 443, path: '/cdn-cgi/trace', tls: true };
 let heartbeatPrevious = performance.now(), heartbeatTicks = 0, heartbeatMaxMs = 0;
 const heartbeatGaps = [];
 setInterval(() => {
@@ -61,14 +61,17 @@ async function requestOn(item) {
       settled = true;
       Object.assign(detail, { elapsedMs: performance.now() - started, code: cause.code, error: cause.message,
         socketBytesRead: req.socket?.bytesRead, socketBytesWritten: req.socket?.bytesWritten });
-      reject(new Error(`HTTP request failed: ${JSON.stringify(detail)}`, { cause }));
+      const label = target.publicTrace ? publicFailure({ endpoint: `${target.host}:${target.port}`, phase: detail.phase,
+        status: detail.statusCode, verified: detail.verified, code: cause.code, message: cause.message }) : 'HTTP request failed';
+      reject(new Error(`${label}: ${JSON.stringify(detail)}`, { cause }));
     };
     const request = target.tls ? httpsRequest : httpRequest;
     const req = request({ host: target.host, port: target.port ?? target.http, path: target.path ?? `/echo?nonce=${nonce}`,
       localAddress: target.source,
-      servername: target.tls ? 'one.one.one.one' : undefined, agent: item.agent, signal: AbortSignal.timeout(8000) }, (res) => {
+      servername: target.servername, ca: target.ca, agent: item.agent, signal: AbortSignal.timeout(8000) }, (res) => {
       phase('response');
       detail.statusCode = res.statusCode;
+      detail.verified = res.socket.authorized === true;
       const port = res.socket.localPort;
       item.socket = res.socket;
       let body = '';
@@ -77,12 +80,22 @@ async function requestOn(item) {
         if (settled) return;
         try {
           assert.equal(res.statusCode, 200, body);
-          if (target.tls) assert.match(body, /(?:^|\n)ip=/); else assert.equal(JSON.parse(body).nonce, nonce);
+          if (target.publicTrace) { assert(detail.verified, 'Public TLS identity not verified'); assert.match(body, /(?:^|\n)ip=/); }
+          else {
+            const reply = JSON.parse(body);
+            assert.equal(reply.nonce, nonce);
+            if (target.tls) {
+              assert(detail.verified, 'Local TLS identity not verified');
+              assert(Number.isInteger(reply.connection), 'Missing responder socket identity');
+              if (item.connection) assert.equal(reply.connection, item.connection, 'Responder socket replaced');
+              item.connection = reply.connection;
+            }
+          }
           if (item.port) assert(req.reusedSocket && item.port === port, `Held connection ${item.id} was replaced`);
           item.port = port;
           phase('complete');
           settled = true;
-          resolve({ id: item.id, port, body, reused: req.reusedSocket });
+          resolve({ id: item.id, port, body, reused: req.reusedSocket, connection: item.connection });
         } catch (error) { fail(error); }
       });
     });
@@ -102,7 +115,8 @@ async function requestOn(item) {
   });
 }
 
-async function open({ count = 1, target = publicTarget }) {
+async function open({ count = 1, target }) {
+  assert(target?.host, 'An explicit traffic target is required');
   const results = [];
   for (let n = 0; n < count; n += 10) {
     results.push(...await Promise.all(Array.from({ length: Math.min(10, count - n) }, async () => {

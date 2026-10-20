@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -178,7 +179,9 @@ func serve(args []string) error {
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		log.Printf("control request peer=%s method=%s path=%s", r.RemoteAddr, r.Method, r.URL.Path)
-		defer func() { log.Printf("control response peer=%s path=%s elapsed=%s", r.RemoteAddr, r.URL.Path, time.Since(started)) }()
+		defer func() {
+			log.Printf("control response peer=%s path=%s elapsed=%s", r.RemoteAddr, r.URL.Path, time.Since(started))
+		}()
 		if r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "unauthorized", 401)
 			return
@@ -218,11 +221,13 @@ func writeJSON(file string, value any) error {
 	return os.WriteFile(file, append(b, '\n'), 0600)
 }
 
-func probe(args []string) error {
+func probe(args []string) (probeErr error) {
 	f := flag.NewFlagSet("probe", flag.ContinueOnError)
 	index := f.Int("interface", 0, "explicit interface index")
 	source := f.String("source", "", "explicit source IPv4")
 	url := f.String("url", "https://1.1.1.1/cdn-cgi/trace", "target")
+	caFile := f.String("ca", "", "local responder CA PEM (test only)")
+	serverName := f.String("servername", "", "local responder certificate name")
 	timeout := f.Duration("timeout", 5*time.Second, "total deadline")
 	if err := f.Parse(args); err != nil {
 		return err
@@ -234,7 +239,24 @@ func probe(args []string) error {
 	if *index != 0 {
 		dialer = boundDialer(*index, net.ParseIP(*source))
 	}
-	transport := &http.Transport{DialContext: dialer.DialContext, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DisableKeepAlives: true, Proxy: nil}
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: *serverName}
+	if *caFile != "" {
+		pem, err := os.ReadFile(*caFile)
+		if err != nil {
+			return err
+		}
+		tlsConfig.RootCAs = x509.NewCertPool()
+		if !tlsConfig.RootCAs.AppendCertsFromPEM(pem) {
+			return errors.New("local responder certificate is not PEM")
+		}
+	}
+	phase, status, verified := "request", 0, false
+	defer func() {
+		if probeErr != nil && *caFile == "" {
+			probeErr = publicProbeFailure(*url, phase, status, verified, probeErr)
+		}
+	}()
+	transport := &http.Transport{DialContext: dialer.DialContext, TLSClientConfig: tlsConfig, DisableKeepAlives: true, Proxy: nil}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: *timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	start := time.Now()
@@ -243,6 +265,8 @@ func probe(args []string) error {
 		return err
 	}
 	defer response.Body.Close()
+	phase, status = "response body", response.StatusCode
+	verified = response.TLS != nil && len(response.TLS.VerifiedChains) > 0
 	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		return err
@@ -251,5 +275,5 @@ func probe(args []string) error {
 		return fmt.Errorf("HTTP %d: %s", response.StatusCode, body)
 	}
 	hash := sha256.Sum256(body)
-	return json.NewEncoder(os.Stdout).Encode(map[string]any{"interface": *index, "source": *source, "status": response.StatusCode, "bytes": len(body), "sha256": hex.EncodeToString(hash[:]), "body": string(body), "elapsedMs": time.Since(start).Milliseconds()})
+	return json.NewEncoder(os.Stdout).Encode(map[string]any{"endpoint": *url, "verified": verified, "interface": *index, "source": *source, "status": response.StatusCode, "bytes": len(body), "sha256": hex.EncodeToString(hash[:]), "body": string(body), "elapsedMs": time.Since(start).Milliseconds()})
 }

@@ -1,13 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createWriteStream } from 'node:fs';
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, writeFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { launchOptions, recordLaunch, startServer, verifyEngineProcess } from './launch.mjs';
 import { BaselineDefect, Report } from './report.mjs';
 import { targets } from './targets.mjs';
 import { hostedOnly, identity, run, startHarness, until } from './testisp/harness.mjs';
+import { localTraffic, proveDefaultRoute } from './local-traffic.mjs';
+import { httpsRoute } from '../../scripts/tun-test-https.mjs';
+import { httpsMarker } from '../../scripts/control-test-https.mjs';
 
 hostedOnly();
 const options = launchOptions();
@@ -19,12 +22,13 @@ const report = new Report(options.profile);
 const output = createWriteStream(path.join(dir, 'server-output.log'));
 const clientExe = path.join(dir, 'acceptance-app.exe');
 await copyFile(process.execPath, clientExe);
-let harness, responder, server, worker, dnsAdapter, quicServer, quic, restoreDNS = false;
+let harness, responder, tlsResponder, server, worker, dnsAdapter, quicServer, quic, restoreDNS = false;
 const quicExe = path.resolve('dist/windows-test/quicprobe.exe');
 const mtuExe = path.resolve('dist/windows-test/mtuprobe.exe');
 const udpRejectExe = path.resolve('dist/windows-test/udpreject.exe');
 const rejections = new Set(['ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EACCES']);
 const publicDestination = '1.0.0.1:443';
+const publicTarget = { host: '1.0.0.1', port: 443, path: '/cdn-cgi/trace', tls: true, publicTrace: true, servername: 'one.one.one.one' };
 const appDeviceIDs = new Set();
 const destinationCount = (stats, destination) => stats.destinations?.[destination] ?? 0;
 
@@ -147,16 +151,37 @@ async function engineConnections() {
     connections: (await response.json()).connections };
 }
 
-async function newPublicOn(line, count = 3) {
+async function newTrafficOn(line, target = tlsResponder.target, count = 3) {
   await pin(line.id);
   const before = await harness.control('stats');
-  const opened = await client('open', { count });
+  const opened = await client('open', { count, target });
   const byLine = await counts(count);
   assert.equal(byLine[line.id], count, JSON.stringify(byLine));
   assert.equal(Object.values(byLine).reduce((sum, n) => sum+n, 0), count, 'Old sockets still counted');
   const after = await harness.control('stats');
-  exactTraffic(before, after, line.id === second.id ? count : 0);
-  return { opened, byLine, before, after };
+  exactTraffic(before, after, line.id === second.id ? count : 0, target.publicTrace ? publicDestination : tlsResponder.destination);
+  const engine = target.publicTrace ? undefined : await selectedSockets(opened, line.id);
+  return { opened, byLine, before, after, engine };
+}
+
+async function selectedSockets(opened, line) {
+  const snapshot = await engineConnections();
+  for (const item of opened) assert(snapshot.connections.some((c) =>
+    Number(c.metadata.sourcePort) === item.port && c.metadata.processPath?.toLowerCase() === clientExe.toLowerCase()
+    && c.metadata.type === 'tun/tun-in' && c.chains.includes(`line-${line}`)), `Missing engine socket on ${line}: ${JSON.stringify({ item, snapshot })}`);
+  return snapshot;
+}
+
+async function healthUntil(check, label, timeout) {
+  try { return await until(check, label, timeout); }
+  catch (cause) {
+    // These are independent diagnostics, never a retry of a failed health vote.
+    const baselines = await Promise.all([harness.uplink, harness.testisp].map(async (line) => ({
+      line: line.alias, endpoint: 'https://1.1.1.1/cdn-cgi/trace', at: new Date().toISOString(),
+      result: await harness.probe(line).catch((error) => ({ error: error.message })),
+    })));
+    throw new Error(`${cause.message}; health-vote origin unproven. Independent public baseline evidence: ${JSON.stringify(baselines)}. Other product endpoints were not independently measured.`, { cause });
+  }
 }
 
 async function publicBaseline() { return { direct: await harness.probe(harness.uplink), virtual: await harness.probe(harness.testisp) }; }
@@ -201,6 +226,14 @@ async function quicProbe(host, source, index) {
 async function start() {
   server = await startServer(options, dataDir, (chunk) => output.write(chunk));
   const state = await server.on();
+  const marker = await readFile(path.join(dataDir, httpsMarker), 'utf8').catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
+  if (marker) {
+    const product = JSON.parse(await readFile(path.join(dataDir, 'traffic-product-config.json'), 'utf8'));
+    const actual = JSON.parse(await readFile(path.join(dataDir, 'engine-config.json'), 'utf8'));
+    assert.deepEqual(actual.route.rules.shift(), JSON.parse(marker));
+    assert.equal(actual.log.level, 'info'); actual.log.level = product.log.level;
+    assert.deepEqual(actual, product, 'Only the local TLS rewrite and diagnostic log level may change');
+  }
   await verifyEngineProcess(options, dataDir);
   rememberAppDevices(await pnpDevices());
   return state;
@@ -222,6 +255,7 @@ try {
   await report.test('clean before start', 'harness-baseline', clean);
   dnsAdapter = await network('inspect');
   harness = await startHarness(path.join(dir, 'testisp'));
+  tlsResponder = await localTraffic(harness, dir);
   responder = await targets(harness.uplink.address);
   await targetFirewall('allow');
   await targetFirewall('ipv6');
@@ -243,6 +277,7 @@ try {
   });
   worker.on('exit', (code) => { for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(new Error(`Client exited ${code}`)); } pending.clear(); });
   await report.test('both public egress baselines', 'harness-baseline', publicBaseline);
+  await report.test('local TLS requires the TestISP default route', 'harness-baseline', () => proveDefaultRoute(harness, tlsResponder));
   await report.test('real QUIC v1 baseline on both line addresses', 'harness-baseline', async () => ({
     direct: await quicProbe(harness.uplink.address, harness.uplink.address, harness.uplink.index),
     virtual: await quicProbe(responder.virtual.host, harness.testisp.address, harness.testisp.index),
@@ -345,6 +380,7 @@ try {
     });
   }
   await writeFile(path.join(dataDir, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
+  await writeFile(path.join(dataDir, httpsMarker), JSON.stringify(httpsRoute(tlsResponder)));
   await targetFirewall('capture');
   await report.test('IPv6 probes cannot bypass the stopped engine', 'harness-baseline', async () => {
     await assert.rejects(client('udp', { target: ipv6Target }));
@@ -360,26 +396,32 @@ try {
   const state = await server.on();
   second = state.lines.find((line) => line.alias === 'TestISP');
   assert(second && state.lines.length === 2, JSON.stringify(state.lines));
-  await report.test('pins cross two actual interfaces', 'parity', async () => ({ direct: await newPublicOn(main), virtual: await newPublicOn(second) }));
+  await report.test('pins select both interfaces; secondary traffic crosses TestISP', 'parity', async () => ({ direct: await newTrafficOn(main), virtual: await newTrafficOn(second) }));
   await report.test('new pin leaves old connections alive', 'parity', async () => {
-    const original = await client('open', { count: 3 });
+    const original = await client('open', { count: 3, target: tlsResponder.target });
     await pinApp(clientExe, main.id);
-    const next = await client('open', { count: 3 });
+    const next = await client('open', { count: 3, target: tlsResponder.target });
     await client('refresh', { ids: original.map((item) => item.id) });
     const byLine = await counts(9);
     assert(byLine[second.id] >= 6 && byLine[main.id] === 3, JSON.stringify(byLine));
+    await selectedSockets(original, second.id); await selectedSockets(next, main.id);
     return { original, next, byLine };
   });
   await pin(null);
-  await report.test('combining distributes real traffic over both interfaces', 'parity', async () => {
+  await report.test('combining selects both interfaces and forwards the secondary share through TestISP', 'parity', async () => {
     await pin(null);
     await combine(true);
     const before = await harness.control('stats');
-    await client('open', { count: 40 });
+    const opened = await client('open', { count: 40, target: tlsResponder.target });
     const byLine = await counts(40);
     assert(byLine[main.id] >= 10 && byLine[second.id] >= 10, JSON.stringify(byLine));
     const after = await harness.control('stats');
-    exactTraffic(before, after, byLine[second.id]);
+    exactTraffic(before, after, byLine[second.id], tlsResponder.destination);
+    const snapshot = await engineConnections();
+    for (const line of [main, second]) {
+      const items = opened.filter(({ port }) => snapshot.connections.some((c) => Number(c.metadata.sourcePort) === port && c.chains.includes(`line-${line.id}`)));
+      assert.equal(items.length, byLine[line.id]); await selectedSockets(items, line.id);
+    }
     await client('close');
     await combine(false);
     return { byLine, before, after };
@@ -389,30 +431,32 @@ try {
     if (fault === 'withdraw') await harness.network('withdraw');
     else await harness.control('mode', { mode: 'drop' });
     try {
-      const failedOver = await until(async () => {
+      const failedOver = await healthUntil(async () => {
         const state = await server.api('state');
         return state.lines.find((line) => line.id === second.id)?.target === main.id && state.lines;
       }, 'TestISP failover', 60_000);
       const routes = await harness.network('state');
       assert.equal(routes.defaultRoute, fault === 'drop', 'Fault injection changed the wrong failure domain');
       const before = await harness.control('stats');
-      await client('open', { count: 3 });
+      await client('open', { count: 3, target: publicTarget });
       const byLine = await counts(3); assert.equal(byLine[main.id], 3);
       const after = await harness.control('stats');
       exactTraffic(before, after, 0);
       if (fault === 'withdraw') await harness.network('restore');
       else await harness.control('mode', { mode: 'running' });
-      const failedBack = await until(async () => {
+      const failedBack = await healthUntil(async () => {
         const state = await server.api('state');
         return state.lines.find((line) => line.id === second.id)?.target === second.id && state.lines;
       }, 'TestISP failback', 90_000);
-      return { fault, routes, failedOver, byLine, before, after, failedBack, traffic: await newPublicOn(second) };
+      return { fault, routes, failedOver, byLine, before, after, failedBack, traffic: await newTrafficOn(second) };
     } finally {
       if (fault === 'drop') await harness.control('mode', { mode: 'running' });
       // restore is idempotent when a route is already present.
       else await harness.network('restore');
     }
   });
+  // Later restarts and all lifecycle cycles use the ordinary product config.
+  await unlink(path.join(dataDir, httpsMarker));
   await pin(second.id);
   await report.test('controlled HTTP crosses the app TUN and TestISP', 'parity', async () => {
     const before = await harness.control('stats');
@@ -572,7 +616,7 @@ try {
       }
     };
     await prepare('pinning the client to the main line', () => pin(main.id));
-    const mainHeld = await prepare('opening the main-line HTTPS flows', () => client('open', { count: 2 }));
+    const mainHeld = await prepare('opening the main-line HTTPS flows', () => client('open', { count: 2, target: publicTarget }));
     await prepare('pinning the client to the secondary line', () => pinApp(clientExe, second.id));
     const secondHeld = await prepare('opening the controlled secondary-line HTTP flows',
       () => client('open', { count: 2, target: responder.virtual }));
@@ -637,7 +681,7 @@ try {
       assert(!udp.some((item) => item.outcome === 'reply'), 'Capped UDP escaped the block');
       assert([...samples, ...udp].every((item) => item.outcome === 'timeout' || rejections.has(item.outcome)), `Unexpected probe failure: ${JSON.stringify({ samples, udp })}`);
       assert.equal(blocked.find((line) => line.id === main.id).blocked, false, 'Main line exception was removed');
-      const mainException = await newPublicOn(main);
+      const mainException = await newTrafficOn(main, publicTarget);
       await server.api('lines/update', { id: main.id, cap: null });
       await server.api('lines/update', { id: second.id, cap: null });
       await until(async () => !(await server.api('state')).lines.some((line) => line.exhausted || line.blocked), 'caps cleared before recovery probes');
@@ -741,6 +785,7 @@ try {
   if (harness) try { await harness.close(); } catch (error) { console.error(error); process.exitCode = 1; }
   try { await targetFirewall('clean'); } catch (error) { console.error(error); process.exitCode = 1; }
   if (responder) { await writeFile(path.join(dir, 'target-observations.json'), JSON.stringify(responder.seen, null, 2)); await responder.close(); }
+  if (tlsResponder) { await writeFile(path.join(dir, 'tls-observations.json'), JSON.stringify(tlsResponder.seen, null, 2)); await tlsResponder.close(); }
   output.end();
   await report.save(path.join(dir, 'report.json'));
   if (options.profile === 'v1' && report.results.some((result) => ['deferred', 'blocked', 'pending-shared-hook'].includes(result.status))) {

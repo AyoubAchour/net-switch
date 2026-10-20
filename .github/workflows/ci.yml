@@ -8,6 +8,11 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      local_traffic:
+        description: Temporary local traffic verification (removed after evidence is collected)
+        type: choice
+        default: off
+        options: [off, proof, repeat, diagnostics]
       control_security:
         description: Run only the focused Windows control security regressions
         type: boolean
@@ -28,6 +33,96 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  local-traffic:
+    name: Local traffic / ${{ matrix.arch }} / ${{ matrix.repeat }}
+    if: github.event_name == 'workflow_dispatch' && inputs.local_traffic != 'off' && inputs.local_traffic != ''
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        repeat: ${{ fromJSON(inputs.local_traffic == 'repeat' && '[1,2,3,4,5]' || '[1]') }}
+        arch: ${{ fromJSON(inputs.local_traffic == 'diagnostics' && '["x64"]' || '["x64","ARM64"]') }}
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: ARM64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - name: Build test programs
+        run: |
+          go test -v ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
+      - name: Prove the local target and fault paths
+        if: inputs.local_traffic != 'diagnostics'
+        run: |
+          node tests/windows/testisp/proof.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: ./.github/actions/cache-pinned-archive
+        if: inputs.local_traffic != 'proof'
+        with:
+          artifact: go
+      - name: Build helper and fetch engine
+        if: inputs.local_traffic != 'proof'
+        env:
+          GOFLAGS: -mod=readonly -p=2
+        run: |
+          ./scripts/build-helper.ps1
+          ./scripts/fetch-engine.ps1
+      - name: Repeat complete acceptance
+        if: inputs.local_traffic == 'repeat'
+        run: |
+          go build -o dist/windows-test/quicprobe.exe ./tests/windows/quicprobe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/mtuprobe.exe ./tests/windows/mtuprobe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/udpreject.exe ./tests/windows/udpreject
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node tests/windows/acceptance.mjs --server-entry scripts/server-under-test-node.mjs --profile baseline
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise final diagnostics with a suspended engine
+        if: inputs.local_traffic == 'diagnostics'
+        env:
+          NETSWITCH_INJECT_DIAGNOSTICS: '1'
+        run: |
+          node scripts/e2e-tun.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: local-traffic-${{ matrix.arch }}-${{ matrix.repeat }}
+          path: |
+            dist/testisp-proof/
+            dist/windows-acceptance/
+            dist/tun-test/
+
   control-security:
     name: Control security / Windows x64
     if: github.event_name == 'workflow_dispatch' && inputs.control_security
@@ -53,7 +148,7 @@ jobs:
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.control_security
+    if: github.event_name == 'workflow_dispatch' && !inputs.control_security && (inputs.local_traffic == 'off' || inputs.local_traffic == '')
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -172,7 +267,7 @@ jobs:
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Run acceptance against today's Node server and sing-box
         run: |
-          node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry server.mjs --engine-exe engine/sing-box.exe --profile baseline
+          node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry scripts/server-under-test-node.mjs --engine-exe engine/sing-box.exe --profile baseline
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep report, executable identities and traffic evidence
         if: always()

@@ -16,10 +16,16 @@ accepted as evidence.
 
 ## What counts as evidence
 
-- Real internet routing uses a small HTTPS response from `1.0.0.1`. Both bound
-  paths must work before app tests start. The response and TestISP's packet,
-  byte, connection and destination counters distinguish the two paths. Acceptance
-  traffic uses `1.0.0.1:443`, separate from the app's `1.1.1.1` health checks.
+- Both public egress baselines use verified `1.1.1.1` HTTPS before app tests.
+  Physical failover and main-line cap exceptions retain `1.0.0.1:443`.
+  Pin changes, combining and TestISP failback use local TLS through a single
+  non-final destination rewrite, retaining process rules and interface binding.
+  The native bound probe must reach that exact endpoint, fail when TestISP's
+  default route is withdrawn without reaching the responder, and recover after
+  restoration. No route to the TLS target is added. Physical selection in the
+  local cases proves engine binding and TestISP +0, not physical egress; the
+  retained public cases cover that. The response and TestISP's packet,
+  byte, connection and destination counters distinguish the two paths.
   Its TestISP destination count must change by exactly the expected number:
   all pinned TestISP flows, zero main/failover flows, and the secondary share
   reported while combining.
@@ -90,13 +96,20 @@ Before cleanup after a failure, Control TUN records fresh Control state,
 independent 2.5-second engine API probes, two CPU/memory/thread samples of the
 PID in `engine.pid`, Windows TCP rows and NetSwitch adapter counters. Client
 request/connect/secureConnect timestamps and responder FIN/error/close events
-join source ports to responder connection IDs. The traffic engine's info log
+join source ports to responder connection IDs. On bb, engine TCP rows show
+TestISP relay ports, not the responder's `sourcePort`; join them using the
+connection ID echoed in each reply. The traffic engine's info log
 is printed on failure and saved with the artifacts; ordinary lifecycle runs
 restore the product's warn log level.
 
 ## Classification
 
 Pre-engine checks are `harness-baseline`, separate from engine `parity` passes.
+Only a verified public TLS response with HTTP 5xx is `public target unavailable`.
+Reset and early-close messages retain an unproven origin, endpoint and phase;
+all still fail without retry. A health-vote deadline collects independent public
+baseline evidence on both lines and explicitly leaves unmeasured endpoints
+unattributed. Product health probes remain public and unchanged.
 Engine cases are `parity` or `baseline-defect`. The latter needs a recognized
 failure with a successful baseline and records its measured evidence. The
 `baseline` profile reports such defects without failing the job; `v1` makes

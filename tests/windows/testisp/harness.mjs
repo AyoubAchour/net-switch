@@ -184,16 +184,22 @@ export async function startHarness(directory) {
     }, 'TestISP ready');
     await network('configure');
     await writeFile(path.join(dir, 'network.json'), JSON.stringify({ uplink, testisp: state }, null, 2));
-    const probe = async (line, failure = false) => {
+    const probe = async (line, failure = false, target) => {
+      const nonce = randomBytes(16).toString('hex');
+      const targetArgs = target ? ['--url', `https://${target.address}:${target.port}/?nonce=${nonce}`,
+        '--ca', target.caFile, '--servername', 'netswitch.invalid'] : [];
       console.log(`TestISP probe start ${JSON.stringify({ at: new Date().toISOString(), line, failure })}`);
-      const result = await run(probeExe, ['probe', ...(line ? ['--interface', String(line.index), '--source', line.address] : [])], { failure, timeout: 10_000 });
+      const result = await run(probeExe, ['probe', ...targetArgs, ...(line ? ['--interface', String(line.index), '--source', line.address] : [])], { failure, timeout: 10_000 });
       console.log(`TestISP probe end ${JSON.stringify(result)}`);
       if (!failure) {
         const response = JSON.parse(result.stdout);
-        assert.match(response.body, /(?:^|\n)ip=/, 'Real HTTPS trace body missing');
+        assert.equal(response.verified, true, 'HTTPS peer identity was not verified');
+        if (target) assert.equal(JSON.parse(response.body).nonce, nonce, 'Local TLS nonce missing');
+        else assert.match(response.body, /(?:^|\n)ip=/, 'Real HTTPS trace body missing');
         return response;
       }
       assert.notEqual(result.code, 0, 'Failure injection did not stop the selected path');
+      assert(!/HTTP [45]\d\d|certificate|x509:/i.test(result.stderr), 'Negative path check got an HTTP response or TLS setup failure');
       return result;
     };
     return { uplink, testisp: state, control, diagnosticClient: { url: state.control, token }, network, probe, close };

@@ -207,6 +207,7 @@ function Start-InstalledApp {
     Wait-Until {
       $state = Invoke-RestMethod -Uri "http://127.0.0.1:$($script:runningServer.port)/api/state" -Headers @{ 'X-Token' = $script:runningServer.token } -TimeoutSec 5
       $script:routingState = $state.routing
+      if ($state.updateChecks -ne $false) { throw 'Smoke setup did not isolate the background release check.' }
       return $state.routing.status -eq 'on'
     } 'Installed routing engine did not turn on.'
   } catch {
@@ -235,6 +236,7 @@ function Wait-Routing($Server) {
       try {
         $state = Invoke-RestMethod -Uri "http://127.0.0.1:$($Server.port)/api/state" -Headers @{ 'X-Token' = $Server.token } -TimeoutSec 5
         $script:lastRouting = $state.routing
+        if ($state.updateChecks -ne $false) { throw 'Background release check was enabled after restart.' }
         return $state.routing.status -eq 'on'
       } catch { return $false }
     } 'Routing did not turn on.' 90
@@ -325,6 +327,11 @@ $trayProgram = Join-Path $app 'tray\NetSwitchTray.exe'
 try {
 Invoke-Setup 'install'
 Assert-Installed
+
+# Test setup only: the updater reads this existing preference before its timer
+# fires. Keep the installed payload, shortcut, helper modes and tasks intact.
+New-Item -ItemType Directory -Force -Path $userData | Out-Null
+[IO.File]::WriteAllText((Join-Path $userData 'settings.json'), '{"checkForUpdates":false}')
 
 $version = & $node --version
 Write-Host "Bundled Node.js $version"

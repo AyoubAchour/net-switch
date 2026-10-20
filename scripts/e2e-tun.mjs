@@ -13,7 +13,7 @@ import { ControlUnderTest } from './tun-control-adapter.mjs';
 import { lineOutbound } from '../lib/apps.mjs';
 import { launchSpec } from './server-under-test.mjs';
 import { recordLaunch } from '../tests/windows/launch.mjs';
-import { startHarness } from '../tests/windows/testisp/harness.mjs';
+import { startHarness, run } from '../tests/windows/testisp/harness.mjs';
 import { targets } from '../tests/windows/targets.mjs';
 import { localHttps, startTrafficEngine } from './tun-test-https.mjs';
 import { diagnoseControl } from './tun-test-diagnostics.mjs';
@@ -66,7 +66,17 @@ const worker = spawn(clientExe, [path.resolve('scripts/tun-test-client.mjs')], {
 });
 let serial = 0;
 const pending = new Map();
-worker.on('message', ({ id, result, error }) => {
+worker.on('message', async ({ id, result, error, publicSocket }) => {
+  if (publicSocket) {
+    // The client has completed TLS but has not sent HTTP yet. Capture the
+    // strict engine row before the public server can close after its reply.
+    try {
+      const all = await routed([publicSocket], 'aa');
+      const record = all.find((c) => Number(c.metadata.sourcePort) === publicSocket.port);
+      worker.send({ command: 'public-recorded', id, record });
+    } catch (cause) { worker.send({ command: 'public-recorded', id, error: cause.message }); }
+    return;
+  }
   const entry = pending.get(id);
   if (!entry) return;
   pending.delete(id); clearTimeout(entry.timer);
@@ -124,6 +134,13 @@ async function clean(label, firstReadTimeout = 45_000) {
 let adapter;
 let harness, responder, httpsResponder;
 let restoreDns = false;
+let suspendedEnginePid;
+async function injectSuspension(action) {
+  const result = await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    path.resolve('scripts/tun-test-inject.ps1'), '-EnginePid', String(suspendedEnginePid), '-Action', action],
+  { env: { PSModulePath: undefined } });
+  log(result.stdout);
+}
 try {
   const pins = JSON.parse(await readFile('packaging/versions.json', 'utf8'));
   log(`Engine ${pins.singBox.version}, Windows ${process.arch}, Node ${process.version}`);
@@ -162,6 +179,13 @@ try {
   const connections = await routed(first, 'bb');
   assert.equal(await tlsCount() - beforeFirst, 3, 'The three bb TLS sockets must cross TestISP');
   log(`ok - pinned app received local HTTPS responses through TUN: ${JSON.stringify(connections.find((c) => Number(c.metadata.sourcePort) === first[0].port))}`);
+  if (process.env.NETSWITCH_INJECT_DIAGNOSTICS === '1') {
+    assert(!engineAdapter, 'The diagnostic proof requires Control');
+    suspendedEnginePid = Number(await readFile(path.join(dir, 'engine.pid'), 'utf8'));
+    await injectSuspension('suspend');
+    await client('open', { count: 1 });
+    assert.fail('Injected suspended engine unexpectedly served a new HTTPS request');
+  }
 
   await engine.setAppLines({ [clientExe]: 'aa' });
   // Local rule sets are watched asynchronously; wait for the new mapping while
@@ -177,8 +201,8 @@ try {
     // Exactly one public request, with verified TLS and no retry. It uses the
     // copied app through the TUN, on aa before that lane is pointed at bb.
     const publicTrace = await client('public');
-    const publicConnections = await routed([publicTrace], 'aa');
-    const record = publicConnections.find((c) => Number(c.metadata.sourcePort) === publicTrace.port);
+    const record = publicTrace.engine;
+    assert.equal(Number(record.metadata.sourcePort), publicTrace.port);
     log(`ok - one public HTTPS trace through TUN on physical line aa: ${JSON.stringify({ ...publicTrace, engine: record })}`);
   }
   await client('refresh', { ids: first.map(({ id }) => id) });
@@ -268,6 +292,7 @@ try {
   log(`TLS sockets at failure: ${JSON.stringify(sockets)}`);
   await writeFile(path.join(dir, 'https-client-failure.json'), JSON.stringify(sockets, null, 2));
   if (engineAdapter) {
+    log(`PID file at failure: ${await readFile(engine.pidPath, 'utf8').catch(() => 'unavailable')}`);
     log(`Engine adapter at failure: ${JSON.stringify({ status: engine.status, error: engine.error,
       childPid: engine.child?.pid ?? null, exitCode: engine.child?.exitCode ?? null })}`);
   }
@@ -280,6 +305,7 @@ try {
   log(`Control output:\n${engine.output}`);
   process.exitCode = 1;
 } finally {
+  if (suspendedEnginePid) await injectSuspension('resume');
   if (restoreDns) {
     try { log(`DNS restored in cleanup: ${JSON.stringify(await network('dns-restore', adapter))}`); }
     catch (error) { log(`DNS RESTORE FAILED: ${error.stack}`); process.exitCode = 1; }
