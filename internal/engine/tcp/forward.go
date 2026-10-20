@@ -353,8 +353,8 @@ type onceCloseConn struct {
 	*gonet.TCPConn
 	close           func()
 	afterCloseWrite func()
-	ep    tcpip.Endpoint
-	wq    *waiter.Queue
+	ep              tcpip.Endpoint
+	wq              *waiter.Queue
 }
 
 func (c *onceCloseConn) Close() error { c.close(); return nil }
