@@ -38,6 +38,7 @@ func (r *Runtime) Stats() any {
 	if trace := r.routes.trace.snapshot(); trace != nil {
 		stats["packetTrace"] = trace
 		stats["nativeSocketState"] = nativeSocketState()
+		stats["nativeUDPState"] = nativeUDPState()
 		stats["nativeReadiness"] = r.dialer.pool.stats()
 	}
 	if memory, err := processMemory(); err == nil {

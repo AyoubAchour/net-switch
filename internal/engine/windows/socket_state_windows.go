@@ -87,3 +87,59 @@ func nativeSocketState() map[string]any {
 	}
 	return result
 }
+
+// UDP has no TIME_WAIT rows. Count live native bindings by process/source so a
+// failed bind can be compared with the same runner's actual port occupancy.
+func nativeUDPState() map[string]any {
+	type key struct {
+		source netip.Addr
+		pid    uint32
+	}
+	type group struct {
+		Source string   `json:"source"`
+		PID    uint32   `json:"pid"`
+		Ports  []uint16 `json:"ports"`
+	}
+	grouped := map[key][]uint16{}
+	used := map[uint16]bool{}
+	var count [2]int
+	for family, af := range []uint32{windows.AF_INET, windows.AF_INET6} {
+		raw, err := readOwnerTable(context.Background(), udpTable, af, 1) // UDP_TABLE_OWNER_PID.
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		stride := 12
+		if family == 1 {
+			stride = 28
+		}
+		rows, err := ownerRows(raw, 4, stride)
+		if err != nil {
+			return map[string]any{"error": err.Error()}
+		}
+		count[family] = len(rows)
+		for _, row := range rows {
+			var value key
+			var port uint16
+			if family == 0 {
+				value.source = netip.AddrFrom4([4]byte(row[:4]))
+				port, value.pid = binary.BigEndian.Uint16(row[4:]), binary.LittleEndian.Uint32(row[8:])
+			} else {
+				value.source = netip.AddrFrom16([16]byte(row[:16]))
+				port, value.pid = binary.BigEndian.Uint16(row[20:]), binary.LittleEndian.Uint32(row[24:])
+			}
+			grouped[value] = append(grouped[value], port)
+			used[port] = true
+		}
+	}
+	var groups []group
+	for value, ports := range grouped {
+		slices.Sort(ports)
+		groups = append(groups, group{value.source.String(), value.pid, ports})
+	}
+	ports := make([]uint16, 0, len(used))
+	for port := range used {
+		ports = append(ports, port)
+	}
+	slices.Sort(ports)
+	return map[string]any{"rowsByFamily": count, "groups": groups, "usedLocalPorts": ports, "uniquePorts": len(ports)}
+}

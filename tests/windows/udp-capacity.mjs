@@ -80,6 +80,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     evidence.floor = Math.ceil(evidence.layoutCapacity * 0.95);
     evidence.before = await engineStats();
     for (let i = 1; i <= 8; i++) clients.push(await client(server, directory, line, i));
+    evidence.clientPIDs = clients.map((app) => ({ pid: app.child.pid, executable: app.exe }));
     let held = 0;
     const failed = [], attempts = [];
     while (!failed.length && held < 16384) {

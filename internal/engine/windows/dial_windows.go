@@ -137,7 +137,7 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 			second := time.Now().Unix()
 			old := d.udpLastLog.Load()
 			if old != second && d.udpLastLog.CompareAndSwap(old, second) {
-				log.Printf("Windows UDP port pool exhausted; refused=%d; bound socket failed: %v", total, err)
+				log.Printf("Windows UDP socket allocation failed; refused=%d; bound socket failed: %v", total, err)
 			}
 		}
 		return nil, err
