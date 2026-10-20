@@ -60,27 +60,29 @@ type LookupHistogram struct {
 	Misses    uint64 `json:"misses"`
 	Ambiguous uint64 `json:"ambiguous"`
 	// Non-cumulative buckets, upper bounds in microseconds, last = infinity.
-	UpperUS            []uint64 `json:"upperUS"`
-	Buckets            []uint64 `json:"buckets"`
-	MaxUS              uint64   `json:"maxUS"`
-	TCPRefreshes       uint64   `json:"tcpRefreshes"`
-	TCPReadNanos       uint64   `json:"tcpReadNanos"`
-	TCPIndexNanos      uint64   `json:"tcpIndexNanos"`
-	CacheMissRefreshes uint64   `json:"cacheMissRefreshes"`
-	TCPRetries         uint64   `json:"tcpRetries"`
-	SnapshotBuckets    []uint64 `json:"snapshotBuckets"`
-	ProcessBuckets     []uint64 `json:"processBuckets"`
-	RefreshBuckets     []uint64 `json:"refreshBuckets"`
-	TCPRawRows         uint64   `json:"tcpRawRows"`
-	TCPPeakRows        uint64   `json:"tcpPeakRows"`
+	UpperUS            []uint64  `json:"upperUS"`
+	Buckets            []uint64  `json:"buckets"`
+	MaxUS              uint64    `json:"maxUS"`
+	TCPRefreshes       uint64    `json:"tcpRefreshes"`
+	TCPReadNanos       uint64    `json:"tcpReadNanos"`
+	TCPIndexNanos      uint64    `json:"tcpIndexNanos"`
+	CacheMissRefreshes uint64    `json:"cacheMissRefreshes"`
+	TCPRetries         uint64    `json:"tcpRetries"`
+	SnapshotBuckets    []uint64  `json:"snapshotBuckets"`
+	ProcessBuckets     []uint64  `json:"processBuckets"`
+	RefreshBuckets     []uint64  `json:"refreshBuckets"`
+	TCPRawRows         uint64    `json:"tcpRawRows"`
+	TCPPeakRows        uint64    `json:"tcpPeakRows"`
+	TCPRowsByFamily    [2]uint64 `json:"tcpRowsByFamily"`
+	TCPFamiliesSampled [2]bool   `json:"tcpFamiliesSampled"`
 }
 
 var lookupBounds = [...]uint64{100, 250, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, ^uint64(0)}
 
 type Owners struct {
 	mu                                                            sync.Mutex
-	snapshot                                                      atomic.Pointer[ownerSnapshot]
-	refresh                                                       atomic.Pointer[tcpRefresh]
+	snapshot                                                      [2]atomic.Pointer[ownerSnapshot]
+	refresh                                                       [2]atomic.Pointer[tcpRefresh]
 	paths                                                         map[processKey]platform.Owner
 	tcpBuffers                                                    [2][]byte
 	hist                                                          [len(lookupBounds)]atomic.Uint64
@@ -132,8 +134,12 @@ func (o *Owners) Stats() LookupHistogram {
 		TCPRetries: o.tcpRetries.Load(), SnapshotBuckets: make([]uint64, len(lookupBounds)), ProcessBuckets: make([]uint64, len(lookupBounds)), RefreshBuckets: make([]uint64, len(lookupBounds))}
 	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
 	h.TCPPeakRows = o.tcpPeakRows.Load()
-	if snapshot := o.snapshot.Load(); snapshot != nil {
-		h.TCPRawRows = snapshot.rawRows
+	for family := range o.snapshot {
+		if snapshot := o.snapshot[family].Load(); snapshot != nil {
+			h.TCPRowsByFamily[family] = snapshot.rawRows
+			h.TCPFamiliesSampled[family] = true
+			h.TCPRawRows += snapshot.rawRows
+		}
 	}
 	for i := range h.Buckets {
 		h.Buckets[i] = o.hist[i].Load()
@@ -232,33 +238,34 @@ func parseTCP(b []byte, v6 bool, rows map[platform.Tuple]tcpCandidates) error {
 	return nil
 }
 
-// One refresh is shared by all callers. Waiting for it remains cancellable;
-// process image queries never hold the snapshot mutex.
-func (o *Owners) tcpSnapshot(ctx context.Context, after time.Time) (ownerSnapshot, error) {
+// GetExtendedTcpTable accepts one family per call. A five-millisecond snapshot
+// and one in-flight refresh are shared by all SYNs of that family. A lookup
+// never waits for the unrelated family's dump. Both waits remain cancellable.
+func (o *Owners) tcpSnapshot(ctx context.Context, after time.Time, family int) (ownerSnapshot, error) {
 	start := time.Now()
 	defer measureStage(&o.snapshotHist, start)
 	for {
 		if err := ctx.Err(); err != nil {
 			return ownerSnapshot{}, err
 		}
-		if s := o.snapshot.Load(); s != nil && s.at.After(after) && time.Since(s.at) < 5*time.Millisecond {
+		if s := o.snapshot[family].Load(); s != nil && s.at.After(after) && time.Since(s.at) < 5*time.Millisecond {
 			return *s, s.err
 		}
-		pending := o.refresh.Load()
+		pending := o.refresh[family].Load()
 		if pending == nil {
 			pending = &tcpRefresh{done: make(chan struct{})}
-			if !o.refresh.CompareAndSwap(nil, pending) {
+			if !o.refresh[family].CompareAndSwap(nil, pending) {
 				continue
 			}
 			// A different refresh may have published between our two loads.
 			// Reuse it rather than starting another dump after winning the slot.
-			if s := o.snapshot.Load(); s != nil && s.at.After(after) && time.Since(s.at) < 5*time.Millisecond {
+			if s := o.snapshot[family].Load(); s != nil && s.at.After(after) && time.Since(s.at) < 5*time.Millisecond {
 				pending.result = s
-				o.refresh.Store(nil)
+				o.refresh[family].Store(nil)
 				close(pending.done)
 				return *s, s.err
 			}
-			go o.refreshTCP(pending)
+			go o.refreshTCP(pending, family)
 		}
 		select {
 		case <-ctx.Done():
@@ -273,54 +280,47 @@ func (o *Owners) tcpSnapshot(ctx context.Context, after time.Time) (ownerSnapsho
 	}
 }
 
-func (o *Owners) refreshTCP(pending *tcpRefresh) {
+func (o *Owners) refreshTCP(pending *tcpRefresh, family int) {
 	// The IP Helper call is synchronous and cannot be cancelled. Keep at
-	// most one snapshot in flight, while every lookup can still leave at
+	// most one snapshot per family in flight, while every lookup can leave at
 	// its own 50 ms deadline. One caller's cancellation cannot poison peers.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	s := ownerSnapshot{at: time.Now()}
 	o.tcpRefreshes.Add(1)
-	// Both families belong to one snapshot. Their native reads are independent;
-	// query them together rather than charging two serial IP Helper latencies
-	// to every waiting SYN. At most these two calls are in flight.
-	var tables [2][]byte
-	var failures [2]error
-	var reads sync.WaitGroup
-	for i, family := range []uint32{windows.AF_INET, windows.AF_INET6} {
-		reads.Go(func() {
-			readStart := time.Now()
-			tables[i], failures[i] = readOwnerTableInto(ctx, tcpTable, family, tcpOwnerPIDAll, &o.tcpBuffers[i])
-			o.tcpReadNanos.Add(uint64(time.Since(readStart)))
-		})
+	af, stride := uint32(windows.AF_INET), 24
+	if family == 1 {
+		af, stride = windows.AF_INET6, 56
 	}
-	reads.Wait()
-	s.err = errors.Join(failures[:]...)
+	readStart := time.Now()
+	b, err := readOwnerTableInto(ctx, tcpTable, af, tcpOwnerPIDAll, &o.tcpBuffers[family])
+	o.tcpReadNanos.Add(uint64(time.Since(readStart)))
+	s.err = err
 	if s.err == nil {
 		indexStart := time.Now()
-		capacity := len(tables[0])/24 + len(tables[1])/56
 		// One scalar value per tuple avoids allocating a slice for every row.
-		s.rows = make(map[platform.Tuple]tcpCandidates, capacity)
-		for i, b := range tables {
-			if err := parseTCP(b, i == 1, s.rows); err != nil {
-				s.err = err
-				break
-			}
-			s.rawRows += uint64(binary.LittleEndian.Uint32(b))
+		s.rows = make(map[platform.Tuple]tcpCandidates, len(b)/stride)
+		s.err = parseTCP(b, family == 1, s.rows)
+		if s.err == nil {
+			s.rawRows = uint64(binary.LittleEndian.Uint32(b))
 		}
 		o.tcpIndexNanos.Add(uint64(time.Since(indexStart)))
 	}
 	measureStage(&o.refreshHist, s.at)
-	for old := o.tcpPeakRows.Load(); s.rawRows > old; old = o.tcpPeakRows.Load() {
-		if o.tcpPeakRows.CompareAndSwap(old, s.rawRows) {
+	rows := s.rawRows
+	if other := o.snapshot[1-family].Load(); other != nil {
+		rows += other.rawRows
+	}
+	for old := o.tcpPeakRows.Load(); rows > old; old = o.tcpPeakRows.Load() {
+		if o.tcpPeakRows.CompareAndSwap(old, rows) {
 			break
 		}
 	}
 	// The map and result never change after publication. Wake-up readers
 	// need no shared mutex, including the burst immediately after a dump.
 	pending.result = &s
-	o.snapshot.Store(&s)
-	o.refresh.Store(nil)
+	o.snapshot[family].Store(&s)
+	o.refresh[family].Store(nil)
 	close(pending.done)
 }
 
@@ -369,7 +369,11 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 	defer func() { o.measure(start, err) }()
 	ctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
-	var after time.Time
+	var after [2]time.Time
+	primary := 0
+	if tuple.Source.Addr().Is6() {
+		primary = 1
+	}
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt != 0 {
 			o.tcpRetries.Add(1)
@@ -379,31 +383,40 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 				return owner, ctx.Err()
 			}
 		}
-		s, e := o.tcpSnapshot(ctx, after)
-		if e != nil {
-			return owner, e
-		}
-		candidates := s.rows[tuple]
-		// A cached snapshot may predate this socket. Its absence is not an
-		// OS lookup miss and must not burn two backoff intervals while the
-		// same old table remains inside its five-millisecond cache window.
-		if candidates.count == 0 && s.at.Before(start) {
-			o.cacheMissRefreshes.Add(1)
-			s, e = o.tcpSnapshot(ctx, s.at)
+		// Mapped IPv4 sockets may appear in the IPv6 table. Fall back there
+		// after an IPv4 miss; an IPv6 tuple needs only the IPv6 table.
+		for family := primary; family < 2; family++ {
+			s, e := o.tcpSnapshot(ctx, after[family], family)
 			if e != nil {
-				return owner, e
+				if family == primary || ctx.Err() != nil {
+					return owner, e
+				}
+				continue
 			}
-			candidates = s.rows[tuple]
+			candidates := s.rows[tuple]
+			// Cached absence predating this socket is not a native lookup
+			// miss. Refresh before spending one of the retry delays.
+			if candidates.count == 0 && s.at.Before(start) {
+				o.cacheMissRefreshes.Add(1)
+				s, e = o.tcpSnapshot(ctx, s.at, family)
+				if e != nil {
+					if family == primary || ctx.Err() != nil {
+						return owner, e
+					}
+					continue
+				}
+				candidates = s.rows[tuple]
+			}
+			if candidates.count > 1 {
+				return owner, platform.ErrAmbiguous
+			}
+			if candidates.count == 1 {
+				start := time.Now()
+				defer measureStage(&o.processHist, start)
+				return o.process(candidates.pid)
+			}
+			after[family] = s.at
 		}
-		if candidates.count > 1 {
-			return owner, platform.ErrAmbiguous
-		}
-		if candidates.count == 1 {
-			start := time.Now()
-			defer measureStage(&o.processHist, start)
-			return o.process(candidates.pid)
-		}
-		after = s.at
 	}
 	return owner, errOwnerMissing
 }

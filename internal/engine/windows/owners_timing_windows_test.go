@@ -20,23 +20,30 @@ import (
 func nativeTCPRowCounts(t *testing.T) (total, timeWait int) {
 	t.Helper()
 	for _, family := range []uint32{windows.AF_INET, windows.AF_INET6} {
-		b, err := readOwnerTable(context.Background(), tcpTable, family, tcpOwnerPIDAll)
-		if err != nil {
-			t.Fatal(err)
-		}
-		stride, state := 24, 0
-		if family == windows.AF_INET6 {
-			stride, state = 56, 48
-		}
-		rows, err := ownerRows(b, 4, stride)
-		if err != nil {
-			t.Fatal(err)
-		}
-		total += len(rows)
-		for _, row := range rows {
-			if binary.LittleEndian.Uint32(row[state:]) == 11 { // MIB_TCP_STATE_TIME_WAIT.
-				timeWait++
-			}
+		count, waiting := nativeTCPFamilyRowCounts(t, family)
+		total, timeWait = total+count, timeWait+waiting
+	}
+	return
+}
+
+func nativeTCPFamilyRowCounts(t *testing.T, family uint32) (total, timeWait int) {
+	t.Helper()
+	b, err := readOwnerTable(context.Background(), tcpTable, family, tcpOwnerPIDAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stride, state := 24, 0
+	if family == windows.AF_INET6 {
+		stride, state = 56, 48
+	}
+	rows, err := ownerRows(b, 4, stride)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total = len(rows)
+	for _, row := range rows {
+		if binary.LittleEndian.Uint32(row[state:]) == 11 { // MIB_TCP_STATE_TIME_WAIT.
+			timeWait++
 		}
 	}
 	return
@@ -103,16 +110,21 @@ func TestOwnerSteadyColdTiming(t *testing.T) {
 		// Even if Windows immediately reuses a reset tuple, no sample can
 		// become a warm tuple-cache hit. Process metadata and native buffer
 		// reuse are production behavior and remain enabled.
-		owners.snapshot.Store(nil)
+		owners.snapshot[0].Store(nil)
 		started := time.Now()
 		owner, err := owners.TCP(ctx, tuple)
 		elapsed := time.Since(started)
-		snapshot := owners.snapshot.Load()
-		closePair(client, server)
+		snapshot := owners.snapshot[0].Load()
 		if err != nil || owner.PID != uint32(os.Getpid()) || snapshot == nil {
+			closePair(client, server)
 			t.Fatalf("cold lookup did not identify the new socket: %+v %v", owner, err)
 		}
-		rows := snapshot.rawRows
+		// Count the unrelated family after stopping the lookup clock, while
+		// the measured socket is still held. IPv4's count comes from the
+		// exact snapshot that served the timed call; TIME_WAIT is included.
+		other, _ := nativeTCPFamilyRowCounts(t, windows.AF_INET6)
+		rows := snapshot.rawRows + uint64(other)
+		closePair(client, server)
 		if rows < 1950 || rows > 2100 {
 			t.Fatalf("latency sample had %d actual TCP rows, outside 1950–2100; baseline=%d TIME_WAIT=%d", rows, baseline, timeWait)
 		}
