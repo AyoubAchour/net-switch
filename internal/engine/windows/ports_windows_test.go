@@ -4,6 +4,7 @@ package winengine
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"net"
 	"os"
@@ -36,7 +37,11 @@ func TestNativeBoundPortCapacity(t *testing.T) {
 	if index == 0 {
 		t.Fatal("no loopback interface")
 	}
-	for _, reuse := range []bool{false, true} {
+	variants := []bool{false, true}
+	if os.Getenv("NETSWITCH_PORT_BASELINE") == "production" {
+		variants = []bool{true}
+	}
+	for _, reuse := range variants {
 		func() {
 			var mu sync.Mutex
 			var peers, clients []*net.TCPConn
@@ -47,9 +52,36 @@ func TestNativeBoundPortCapacity(t *testing.T) {
 					listener.Close()
 				}
 				acceptors.Wait()
+				ports := map[uint16]bool{}
+				for _, socket := range clients {
+					ports[uint16(socket.LocalAddr().(*net.TCPAddr).Port)] = true
+				}
 				for _, socket := range append(clients, peers...) {
-					socket.SetLinger(0)
+					socket.CloseWrite()
+				}
+				for _, socket := range append(clients, peers...) {
 					socket.Close()
+				}
+				// Do not manufacture free capacity with abortive closes.
+				// The next phase starts only after the native table shows that
+				// these normally closed tuples, including TIME_WAIT, are gone.
+				started := time.Now()
+				for {
+					states := nativeReleasedStates(t, ports)
+					total := 0
+					for _, count := range states {
+						total += count
+					}
+					evidence, _ := json.Marshal(map[string]any{"reuseUnicastPort": reuse, "elapsedMS": time.Since(started).Milliseconds(),
+						"released": len(ports), "remaining": total, "states": states})
+					t.Logf("WINDOWS NATIVE PORT RELEASE %s", evidence)
+					if total == 0 {
+						break
+					}
+					if time.Since(started) > 5*time.Minute {
+						t.Fatal("native closed ports did not leave the TCP table within five minutes")
+					}
+					time.Sleep(time.Second)
 				}
 			}()
 			for range 8 {
@@ -135,4 +167,24 @@ func TestNativeBoundPortCapacity(t *testing.T) {
 			}
 		}()
 	}
+}
+
+func nativeReleasedStates(t *testing.T, ports map[uint16]bool) map[uint32]int {
+	t.Helper()
+	b, err := readOwnerTable(context.Background(), tcpTable, windows.AF_INET, tcpOwnerPIDAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := ownerRows(b, 4, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	states := map[uint32]int{}
+	for _, row := range rows {
+		if [4]byte(row[4:8]) == [4]byte{127, 0, 0, 1} && [4]byte(row[12:16]) == [4]byte{127, 0, 0, 2} &&
+			ports[binary.BigEndian.Uint16(row[8:])] {
+			states[binary.LittleEndian.Uint32(row)]++
+		}
+	}
+	return states
 }

@@ -51,6 +51,7 @@ func (c *capacityResponder) open(s *stack.Stack) error {
 				c.connections = append(c.connections, conn)
 				c.mu.Unlock()
 				c.workers.Go(func() {
+					defer conn.Close()
 					var value [1]byte
 					first := true
 					for {
