@@ -1285,7 +1285,7 @@ func descriptorTail(f *procDescriptors, pid uint32, expired func() bool) (int64,
 		if _, err := f.Seek(mid+2, 0); err != nil {
 			return 0, err
 		}
-		n, err := readKernelDirectory(f.fd, f.direct, data[:])
+		n, err := unix.ReadDirent(f.fd, data[:])
 		if err != nil {
 			return 0, err
 		}

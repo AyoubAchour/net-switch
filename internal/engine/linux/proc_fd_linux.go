@@ -63,7 +63,9 @@ func (d *procDescriptors) Visit(limit int, consume func([]byte) bool) (int, erro
 			// window must not make procfs instantiate hundreds of additional
 			// entries that the following seek would immediately discard.
 			size := min(len(d.buffer), (min(limit-count, 512)+2)*32)
-			n, err := readKernelDirectory(d.fd, d.direct, d.buffer[:size])
+			// procfs temporarily references each target file. Dropping its
+			// last reference can invoke a blocking close, including SO_LINGER.
+			n, err := unix.ReadDirent(d.fd, d.buffer[:size])
 			if err == unix.EINTR {
 				continue
 			}

@@ -33,7 +33,7 @@ func TestKernelMetadataFastPathsStayOutsideProcessRoots(t *testing.T) {
 	if err := regularKernelFile(fd, 4096, direct); err != nil {
 		t.Fatal(err)
 	}
-	data, err := readBoundedWith(fd, make([]byte, 4096), readKernelData)
+	data, err := readBounded(fd, make([]byte, 4096))
 	if err != nil {
 		t.Fatal(err)
 	}

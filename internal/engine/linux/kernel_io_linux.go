@@ -97,20 +97,6 @@ func readKernelData(fd int, b []byte) (int, error) {
 	return int(n), nil
 }
 
-func readKernelDirectory(fd int, direct bool, b []byte) (int, error) {
-	if !direct {
-		return unix.ReadDirent(fd, b)
-	}
-	if len(b) == 0 {
-		return 0, unix.EINVAL
-	}
-	n, _, errno := syscall.RawSyscall(unix.SYS_GETDENTS64, uintptr(fd), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
-	if errno != 0 {
-		return 0, errno
-	}
-	return int(n), nil
-}
-
 func readKernelLink(path string, b []byte) (int, error) {
 	leaf := procLeaf(path)
 	fd, descriptor := strings.CutPrefix(leaf, "fd/")
@@ -123,7 +109,10 @@ func readKernelLink(path string, b []byte) (int, error) {
 	var name [64]byte
 	copy(name[:], path)
 	dir := unix.AT_FDCWD
-	n, _, errno := syscall.RawSyscall6(unix.SYS_READLINKAT, uintptr(dir), uintptr(unsafe.Pointer(&name[0])), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0)
+	// Keep stack-backed path storage, but release the Go processor. procfs
+	// drops a temporary file reference before returning; a concurrent target
+	// close can make it the last reference and run socket linger here.
+	n, _, errno := syscall.Syscall6(unix.SYS_READLINKAT, uintptr(dir), uintptr(unsafe.Pointer(&name[0])), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0)
 	if errno != 0 {
 		return 0, errno
 	}
