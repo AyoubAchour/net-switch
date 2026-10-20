@@ -1,4 +1,4 @@
-> The owner accepted initiator/sender attribution on 20 October 2026. PR #36 retains the scanner as fallback; the eBPF implementation is a separate follow-up. This study records the research behind that decision, not measured eBPF results.
+> SYSTEM-DESIGN §5.6 records the initiator/sender attribution design decision dated 20 October 2026. PR #36 retains the scanner as fallback; the eBPF implementation is a separate follow-up. This study records the research behind that decision, not measured eBPF results.
 
 # Net Switch 1.0: Linux flow ownership with eBPF
 
