@@ -63,14 +63,25 @@ func qpcDuration(start, end int64) time.Duration {
 }
 
 type pauseMonitor struct {
-	stop     chan struct{}
-	done     sync.WaitGroup
-	once     sync.Once
-	gaps     [2][]pauseGap // Each sampler owns its slice until both have joined.
-	errors   [2]error
-	samples  [2]int
-	inflight atomic.Int64
-	states   []tripObservation // Owned by the native sampler; read only after join.
+	stop       chan struct{}
+	done       sync.WaitGroup
+	once       sync.Once
+	gaps       [2][]pauseGap // Each sampler owns its slice until both have joined.
+	errors     [2]error
+	samples    [2]int
+	timestamps [2][]int64 // Retain ordinary samples too: a missing gap is not proof of progress.
+	inflight   atomic.Int64
+	states     []tripObservation // Owned by the native sampler; read only after join.
+}
+
+const pauseSamplePeriod = time.Millisecond
+
+// A gap longer than two periods missed at least one expected sample. The old
+// 5 ms storage cutoff discarded short missed samples before the classifier
+// could intersect them with the other sampler. This is independent of the
+// classifier's unchanged 5 ms total unexplained-time allowance.
+func missedPauseSample(start, end int64) bool {
+	return qpcDuration(start, end) > 2*pauseSamplePeriod
 }
 
 type tripObservation struct {
@@ -96,6 +107,9 @@ func startPauseMonitor(t *testing.T, s *Session) *pauseMonitor {
 		t.Fatalf("create heartbeat timer: %v", err)
 	}
 	m := &pauseMonitor{stop: make(chan struct{})}
+	for id := range 2 {
+		m.timestamps[id] = make([]int64, 0, 65536)
+	}
 	ready := make(chan struct{}, 2)
 	for id := range 2 {
 		m.done.Add(1)
@@ -107,6 +121,7 @@ func startPauseMonitor(t *testing.T, s *Session) *pauseMonitor {
 				defer windows.CloseHandle(windows.Handle(h))
 			}
 			previous := ticks()
+			m.timestamps[id] = append(m.timestamps[id], previous)
 			before := observeSession(s)
 			ready <- struct{}{}
 			for {
@@ -123,7 +138,7 @@ func startPauseMonitor(t *testing.T, s *Session) *pauseMonitor {
 						return
 					}
 				} else {
-					time.Sleep(time.Millisecond)
+					time.Sleep(pauseSamplePeriod)
 				}
 				now := ticks()
 				inflight := m.inflight.Load()
@@ -134,7 +149,8 @@ func startPauseMonitor(t *testing.T, s *Session) *pauseMonitor {
 					m.states = append(m.states, tripObservation{inflight, now, after})
 				}
 				m.samples[id]++
-				if qpcDuration(previous, now) > 5*time.Millisecond {
+				m.timestamps[id] = append(m.timestamps[id], now)
+				if missedPauseSample(previous, now) {
 					m.gaps[id] = append(m.gaps[id], pauseGap{previous, now, before, after})
 				}
 				previous, before = now, after
@@ -150,6 +166,20 @@ func startPauseMonitor(t *testing.T, s *Session) *pauseMonitor {
 	<-ready
 	t.Cleanup(func() { m.finish(t) })
 	return m
+}
+
+// Include the samples bracketing the trip. Together with every sample inside
+// it, these reconstruct all intervals, including those below the gap cutoff.
+func overlappingSamples(samples []int64, start, end int64) []int64 {
+	left := sort.Search(len(samples), func(i int) bool { return samples[i] >= start })
+	right := sort.Search(len(samples), func(i int) bool { return samples[i] >= end })
+	if left > 0 {
+		left--
+	}
+	if right < len(samples) {
+		right++
+	}
+	return samples[left:right]
 }
 
 func (m *pauseMonitor) finish(t *testing.T) {
@@ -264,6 +294,166 @@ func TestPauseClassification(t *testing.T) {
 			t.Fatalf("recorded pause burst: %s, covered %s", classification, covered)
 		}
 	})
+}
+
+func TestPauseClassificationBorderlineTrace(t *testing.T) {
+	// Job 118761509687, sequence 174468. These are all the logged endpoints;
+	// no samples were retained inside the 4.6227 ms hole.
+	qpc := func(recorded int64) int64 {
+		return (recorded - 3786075803) * performanceFrequency() / 10000000
+	}
+	start, end := qpc(3786091692), qpc(3786734914)
+	heartbeat := []pauseGap{{Start: qpc(3786075803), End: qpc(3786730140)}}
+	scheduler := []pauseGap{
+		{Start: qpc(3786075928), End: qpc(3786320714)},
+		{Start: qpc(3786366941), End: qpc(3786733534)},
+	}
+	classification, covered := classifyPause(start, end, false, heartbeat, scheduler)
+	if classification != "session_stall" || covered < 59221*time.Microsecond || covered > 59223*time.Microsecond {
+		t.Fatalf("incomplete recorded trace: %s, covered %s", classification, covered)
+	}
+	// Both completions below could have produced exactly that old log. Only a
+	// recorded missed sample may fill the hole; never merge nearby gaps blindly.
+	for _, tc := range []struct {
+		name    string
+		samples []int64
+		want    string
+	}{
+		{"one missed sample", []int64{3786320714, 3786366941}, "environment_pause"},
+		{"four ordinary samples", []int64{3786320714, 3786332271, 3786343828, 3786355385, 3786366941}, "session_stall"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gaps := append([]pauseGap(nil), scheduler...)
+			for i := 1; i < len(tc.samples); i++ {
+				a, b := qpc(tc.samples[i-1]), qpc(tc.samples[i])
+				if missedPauseSample(a, b) {
+					gaps = append(gaps, pauseGap{Start: a, End: b})
+				}
+			}
+			got, coverage := classifyPause(start, end, false, heartbeat, gaps)
+			if got != tc.want {
+				t.Fatalf("got %s, want %s; covered %s", got, tc.want, coverage)
+			}
+			if tc.want == "environment_pause" && (coverage < 63844*time.Microsecond || coverage > 63846*time.Microsecond) {
+				t.Fatalf("missed sample coverage: %s", coverage)
+			}
+			t.Logf("completion=%s classification=%s covered=%s unexplained=%s", tc.name, got, coverage, qpcDuration(start, end)-coverage)
+		})
+	}
+}
+
+func TestPauseClassificationSampling(t *testing.T) {
+	ms := performanceFrequency() / 1000
+	var regular, missed []pauseGap
+	for i := int64(0); i < 60; i++ {
+		a, b := i*ms, (i+1)*ms
+		if missedPauseSample(a, b) {
+			regular = append(regular, pauseGap{Start: a, End: b})
+		}
+	}
+	for i := int64(0); i < 60; i += 3 {
+		a, b := i*ms, (i+3)*ms
+		if missedPauseSample(a, b) {
+			missed = append(missed, pauseGap{Start: a, End: b})
+		}
+	}
+	whole := []pauseGap{{Start: 0, End: 60 * ms}}
+	for _, tc := range []struct {
+		name string
+		a, b []pauseGap
+		want string
+	}{
+		{"regular samples are not pauses", regular, regular, "session_stall"},
+		{"one sampler alone misses samples", whole, regular, "session_stall"},
+		{"short shared missed samples are retained", whole, missed, "environment_pause"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _ := classifyPause(0, 60*ms, false, tc.a, tc.b)
+			if got != tc.want {
+				t.Fatalf("got %s, want %s", got, tc.want)
+			}
+		})
+	}
+	samples := []int64{0, 10, 20, 30, 40}
+	for _, tc := range []struct {
+		start, end int64
+		want       string
+	}{
+		{12, 28, "[10 20 30]"},
+		{10, 30, "[0 10 20 30]"},
+		{-10, 50, "[0 10 20 30 40]"},
+		{50, 60, "[40]"},
+	} {
+		if got := fmt.Sprint(overlappingSamples(samples, tc.start, tc.end)); got != tc.want {
+			t.Fatalf("samples for %d..%d: %s, want %s", tc.start, tc.end, got, tc.want)
+		}
+	}
+}
+
+// Hold the real session's reader lock while a real packet is queued. Only that
+// reader is blocked: both pause samplers must continue to run. No production
+// hooks, retries or classifier exemptions are involved.
+func TestWintunSessionDelay(t *testing.T) {
+	requireRunner(t)
+	f := newFixture(t, "ours", 0)
+	s := f.io.(*Session)
+	f.stopEcho()
+	s.readMu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			s.readMu.Unlock()
+		}
+	}()
+	f.startEcho(t)
+	monitor := startPauseMonitor(t, s)
+	c := udpSocket(t)
+	defer c.Close()
+	must(t, c.SetDeadline(time.Now().Add(2*time.Second)))
+	payload := []byte("deliberately blocked session reader")
+	start := ticks()
+	monitor.inflight.Store(start)
+	_, err := c.Write(payload)
+	must(t, err)
+	for {
+		state := observeSession(s)
+		if state.RingsAvailable && state.SendTail != state.SendHead {
+			break
+		}
+		if elapsed(start) > time.Second {
+			t.Fatal("injection precondition failed: no packet queued behind reader lock")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	queued := ticks()
+	for elapsed(queued) < 80*time.Millisecond {
+		time.Sleep(time.Millisecond)
+	}
+	before := observeSession(s)
+	if !before.RingsAvailable || before.SendTail == before.SendHead {
+		t.Fatal("injection lost its queued packet before releasing the lock")
+	}
+	s.readMu.Unlock()
+	locked = false
+	reply := make([]byte, 128)
+	n, err := c.Read(reply)
+	must(t, err)
+	end := ticks()
+	monitor.inflight.Store(0)
+	if string(reply[:n]) != string(payload) {
+		t.Fatal("injected trip payload mismatch")
+	}
+	monitor.finish(t)
+	classification, covered := classifyPause(start, end, false, monitor.gaps[0], monitor.gaps[1])
+	for id, count := range monitor.samples {
+		if count < 20 {
+			t.Fatalf("sampler %d did not make progress during injection: %d", id, count)
+		}
+	}
+	report(t, map[string]any{"test": "session_delay_proof", "arch": runtime.GOARCH, "classification": classification, "ms": qpcDuration(start, end).Seconds() * 1000, "common_pause_ms": covered.Seconds() * 1000, "samples": monitor.samples, "queued_before_release": before, "state_at_reply": observeSession(s)})
+	if classification != "session_stall" {
+		t.Fatalf("real blocked session was exempted: %s", classification)
+	}
 }
 
 func TestPerformanceMedian(t *testing.T) {

@@ -487,7 +487,7 @@ jobs:
       - name: Fetch the unchanged signed Wintun DLL beside the executable
         run: ./scripts/prepare-wintun-tests.ps1
       - name: Ring ABI, parser, cancellation, corruption recovery and parallel UDP
-        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.run=TestPauseClassification|TestPerformanceMedian|TestRing|TestPinnedDLL|TestWintun(PauseMonitor|ParallelUDP|RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|BatchCost)$'
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.run=TestPauseClassification|TestPerformanceMedian|TestRing|TestPinnedDLL|TestWintun(PauseMonitor|SessionDelay|ParallelUDP|RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|BatchCost)$'
       - name: Single-packet ping-pong, 200000 round trips per implementation
         if: ${{ !cancelled() }}
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPingPong$'
