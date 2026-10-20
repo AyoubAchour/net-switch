@@ -7,7 +7,7 @@ import (
 
 func TestReleaseBlockerRetainsBothPassingAndFailingMeasurements(t *testing.T) {
 	for _, measured := range []bool{false, true} {
-		c := &Case{ID: "storm", Title: "storm", Label: Parity, ReleaseBlocker: "owner-approved eBPF follow-up", Run: func(t *T) {
+		c := &Case{ID: "storm", Title: "storm", Label: Parity, ReleaseBlocker: "eBPF follow-up recorded in the spec", Run: func(t *T) {
 			t.Check(true, "capacity still holds")
 			t.ReleaseCheck(measured, "the unchanged attribution threshold: %t", measured)
 		}}

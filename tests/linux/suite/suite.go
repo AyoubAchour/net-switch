@@ -95,7 +95,7 @@ type registry struct {
 	cases []*harness.Case
 }
 
-// The owner decision in SYSTEM-DESIGN 5.6 (2026-10-20) defers only these
+// The design decision in SYSTEM-DESIGN 5.6 (2026-10-20) defers only these
 // attribution assertions until eBPF lands. Capacity, survival and every other
 // assertion in the same workloads remain mandatory PR checks.
 func stormAttributionBlocker(id string) string {

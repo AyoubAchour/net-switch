@@ -1,8 +1,9 @@
 # Linux 1.0 release blockers
 
 PR #36 delivers the Linux platform and the fallback owner scanner. It does not
-qualify the engine for the 1.0 release. On 20 October 2026, the owner decided that
-Linux attribution will use eBPF initiation/send records, with the scanner as a
+qualify the engine for the 1.0 release. The design decision recorded in
+SYSTEM-DESIGN §5.6 on 20 October 2026 moves Linux attribution to eBPF
+initiation/send records, with the scanner as a
 fallback. See the [source-backed study](linux-owner-ebpf-study.md).
 
 Only the ownership-success assertion in these three loads is deferred:
