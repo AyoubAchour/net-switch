@@ -2,7 +2,7 @@ name: Windows engine focus
 
 on:
   push:
-    branches: [engine/windows-platform-ci, engine/windows-platform-ci-x64]
+    branches: [engine/windows-platform-ci, engine/windows-platform-ci-x64, engine/windows-platform-native]
   workflow_dispatch:
     inputs:
       arch:
@@ -52,6 +52,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build engine and native fixtures
         id: build
+        if: ${{ !endsWith(github.ref, '-native') }}
         run: |
           go build -o dist/windows-test/netswitch-engine.exe ./cmd/netswitch-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -70,7 +71,11 @@ jobs:
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Native and shared engine regressions
         run: |
-          go test -count=1 -v ./internal/engine/... ./internal/journal ./tests/windows/testisp
+          if ('${{ github.ref }}'.EndsWith('-native')) {
+            go test -count=1 -v ./internal/engine/windows
+          } else {
+            go test -count=1 -v ./internal/engine/... ./internal/journal ./tests/windows/testisp
+          }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Windows race checks
         if: ${{ !cancelled() && (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && steps.build.outcome == 'success' }}
@@ -78,7 +83,7 @@ jobs:
           go test -race -count=1 -v ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Cold owner attribution and timing
-        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && (steps.build.outcome == 'success' || endsWith(github.ref, '-native')) }}
         env:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
@@ -90,7 +95,7 @@ jobs:
           node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep every observed result
-        if: always()
+        if: ${{ always() && !endsWith(github.ref, '-native') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-engine-focus-${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'x64' || 'ARM64' }}
