@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -185,5 +186,91 @@ func TestEpollReadinessPartialDataEOFAndDetach(t *testing.T) {
 	socket.Close()
 	if err := w.Arm(true, true); err != nil {
 		t.Fatalf("detached registration rearmed: %v", err)
+	}
+}
+
+func TestEpollInterestOnOneSocketDoesNotBlockAnother(t *testing.T) {
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	makeWatch := func() (*tcpSocket, *socketWatch, *net.TCPConn, chan struct{}) {
+		client, err := net.DialTCP("tcp4", nil, listener.Addr().(*net.TCPAddr))
+		if err != nil {
+			t.Fatal(err)
+		}
+		server, err := listener.AcceptTCP()
+		if err != nil {
+			client.Close()
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { server.Close() })
+		raw, err := client.SyscallConn()
+		if err != nil {
+			client.Close()
+			t.Fatal(err)
+		}
+		socket := &tcpSocket{TCPConn: client, raw: raw}
+		t.Cleanup(func() { socket.Close() })
+		ready := make(chan struct{}, 1)
+		watch, err := socket.Watch(func() {
+			select {
+			case ready <- struct{}{}:
+			default:
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(watch.Detach)
+		return socket, watch.(*socketWatch), server, ready
+	}
+	first, watch1, _, _ := makeWatch()
+	_, watch2, server2, ready2 := makeWatch()
+	first.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			first.mu.Unlock()
+		}
+	}()
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- watch1.Arm(true, false) }()
+	deadline := time.Now().Add(time.Second)
+	for watch1.mu.TryLock() {
+		watch1.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("first interest update did not enter its socket operation")
+		}
+		runtime.Gosched()
+	}
+	select {
+	case err := <-firstDone:
+		t.Fatalf("first socket was not held: %v", err)
+	default:
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- watch2.Arm(true, false) }()
+	select {
+	case err := <-secondDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unrelated interest update waited for the first socket")
+	}
+	if _, err := server2.Write([]byte{1}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ready2:
+	case <-time.After(time.Second):
+		t.Fatal("epoll delivery waited for the first socket")
+	}
+	first.mu.Unlock()
+	locked = false
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
 	}
 }

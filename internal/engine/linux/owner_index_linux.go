@@ -6,6 +6,7 @@ import (
 	"hash/maphash"
 	"slices"
 	"sync"
+	"sync/atomic"
 )
 
 const ownerIndexShards = 64
@@ -21,31 +22,61 @@ func (o *Owners) indexFor(inode uint32) *ownerIndex {
 	return &o.index[maphash.Comparable(o.indexSeed, inode)%ownerIndexShards]
 }
 
-// Most bursts keep matching the same process. Do not allocate and replace a
-// 32-entry hint slice on every such match, or serialize those readers behind
-// unrelated scanner state. Published slices remain immutable.
-func (o *Owners) rememberPID(uid, pid uint32) {
+type pidHints struct {
+	values [32]uint32
+	count  int
+}
+
+type recentOwners struct{ hints atomic.Pointer[pidHints] }
+
+// The map lock only creates a UID slot. Matching another flow never needs
+// its write side, so a burst of hint updates cannot stop lookup readers.
+func (o *Owners) recentFor(uid uint32) *recentOwners {
 	o.recentMu.RLock()
-	previous := o.recent[uid]
-	current := len(previous) != 0 && previous[0] == pid
+	state := o.recent[uid]
 	o.recentMu.RUnlock()
-	if current {
-		return
+	if state != nil {
+		return state
 	}
-	next := make([]uint32, 1, 32)
-	next[0] = pid
+	candidate := new(recentOwners)
 	o.recentMu.Lock()
 	defer o.recentMu.Unlock()
-	previous = o.recent[uid]
-	if len(previous) != 0 && previous[0] == pid {
+	state = o.recent[uid]
+	if state == nil {
+		state = candidate
+		o.recent[uid] = state
+	}
+	return state
+}
+
+func (o *Owners) recentPIDs(uid uint32) []uint32 {
+	hints := o.recentFor(uid).hints.Load()
+	if hints == nil {
+		return nil
+	}
+	return hints.values[:hints.count]
+}
+
+// Hints are optional and every positive match is revalidated. A concurrent
+// update may supersede this one; never wait or retry while a lookup's budget
+// runs out. Immutable snapshots keep readers independent of these updates.
+func (o *Owners) rememberPID(uid, pid uint32) {
+	state := o.recentFor(uid)
+	previous := state.hints.Load()
+	if previous != nil && previous.values[0] == pid {
 		return
 	}
-	for _, candidate := range previous {
-		if candidate != pid && len(next) < cap(next) {
-			next = append(next, candidate)
+	next := &pidHints{count: 1}
+	next.values[0] = pid
+	if previous != nil {
+		for _, candidate := range previous.values[:previous.count] {
+			if candidate != pid && next.count < len(next.values) {
+				next.values[next.count] = candidate
+				next.count++
+			}
 		}
 	}
-	o.recent[uid] = next
+	state.hints.CompareAndSwap(previous, next)
 }
 
 // The common one-holder entry lives directly in the map. Publishing a batch

@@ -98,32 +98,41 @@ func (pool *outputBuffers) close() {
 // Link owns its output buffers. A slot is reserved before copying a packet;
 // neither stack writers nor the UDP reply path wait for the TUN consumer.
 type Link struct {
-	ingress      sync.Mutex
-	mu           sync.Mutex
-	dispatcher   gv.NetworkDispatcher
-	observer     func(*gv.PacketBuffer)
+	ingress     sync.Mutex
+	mu          sync.Mutex
+	dispatcher  gv.NetworkDispatcher
+	observer    func(*gv.PacketBuffer)
 	afterInbound func()
-	queue        [QueuePackets]OutputPacket
-	buffers      outputBuffers
-	head, count  int
-	peak         int
-	mtu          uint32
-	closed       bool
-	onClose      func()
-	ready        chan struct{}
-	done         chan struct{}
-	Dropped      atomic.Uint64
+	delivery    atomic.Pointer[linkDelivery]
+	queue       [QueuePackets]OutputPacket
+	buffers     outputBuffers
+	head, count int
+	peak        int
+	mtu         atomic.Uint32
+	closed      bool
+	onClose     func()
+	ready       chan struct{}
+	done        chan struct{}
+	Dropped     atomic.Uint64
+}
+
+type linkDelivery struct {
+	dispatcher gv.NetworkDispatcher
+	observer   func(*gv.PacketBuffer)
+	afterInbound func()
 }
 
 var _ gv.LinkEndpoint = (*Link)(nil)
 
 func NewLink() *Link {
-	return &Link{mtu: MTU, ready: make(chan struct{}, 1), done: make(chan struct{})}
+	l := &Link{ready: make(chan struct{}, 1), done: make(chan struct{})}
+	l.mtu.Store(MTU)
+	return l
 }
 
 func (l *Link) enqueue(size int, copyInto func([]byte)) bool {
 	l.mu.Lock()
-	if l.closed || size > int(l.mtu) || size <= 0 || l.count == QueuePackets {
+	if l.closed || size > int(l.mtu.Load()) || size <= 0 || l.count == QueuePackets {
 		l.Dropped.Add(1)
 		l.mu.Unlock()
 		return false
@@ -206,10 +215,19 @@ func (l *Link) Read(ctx context.Context) []byte {
 // in FIFO order. It never waits to fill a batch. The TUN writer can publish one
 // batch with one driver wake-up without delaying a lone packet.
 func (l *Link) ReadBatch(ctx context.Context, packets [][]byte) int {
-	return l.readBatch(ctx, len(packets), func(i int, p OutputPacket) {
-		packets[i] = append([]byte(nil), p.Bytes...)
-		p.Release()
-	})
+	var local [64]OutputPacket
+	owned := local[:min(len(packets), len(local))]
+	if len(packets) > len(local) {
+		owned = make([]OutputPacket, min(len(packets), QueuePackets))
+	}
+	n := l.ReadOwnedBatch(ctx, owned)
+	// Compatibility callers receive independent bytes. Allocate/copy after
+	// releasing the queue lock, so a GC assist cannot block every producer.
+	for i := range n {
+		packets[i] = append([]byte(nil), owned[i].Bytes...)
+		owned[i].Release()
+	}
+	return n
 }
 
 func (l *Link) ReadOwnedBatch(ctx context.Context, packets []OutputPacket) int {
@@ -265,19 +283,14 @@ func (l *Link) InjectBatch(protocol tcpip.NetworkProtocolNumber, packets []*gv.P
 }
 
 func (l *Link) deliver(protocol tcpip.NetworkProtocolNumber, p *gv.PacketBuffer) {
-	l.mu.Lock()
-	d := l.dispatcher
-	observe := l.observer
-	after := l.afterInbound
-	closed := l.closed
-	l.mu.Unlock()
-	if !closed && d != nil {
-		if observe != nil {
-			observe(p)
+	view := l.delivery.Load()
+	if view != nil && view.dispatcher != nil {
+		if view.observer != nil {
+			view.observer(p)
 		}
-		d.DeliverNetworkPacket(protocol, p)
-		if after != nil {
-			after()
+		view.dispatcher.DeliverNetworkPacket(protocol, p)
+		if view.afterInbound != nil {
+			view.afterInbound()
 		}
 	}
 }
@@ -287,12 +300,18 @@ func (l *Link) deliver(protocol tcpip.NetworkProtocolNumber, p *gv.PacketBuffer)
 func (l *Link) SetAfterInbound(after func()) {
 	l.mu.Lock()
 	l.afterInbound = after
+	if !l.closed {
+		l.delivery.Store(&linkDelivery{l.dispatcher, l.observer, after})
+	}
 	l.mu.Unlock()
 }
 
 func (l *Link) SetObserver(observe func(*gv.PacketBuffer)) {
 	l.mu.Lock()
 	l.observer = observe
+	if !l.closed {
+		l.delivery.Store(&linkDelivery{l.dispatcher, observe, l.afterInbound})
+	}
 	l.mu.Unlock()
 }
 
@@ -307,6 +326,7 @@ func (l *Link) Close() {
 	}
 	l.closed = true
 	l.dispatcher = nil
+	l.delivery.Store(nil)
 	for i := range l.queue {
 		l.queue[i].Release()
 	}
@@ -320,10 +340,17 @@ func (l *Link) Close() {
 	}
 }
 
-func (l *Link) Attach(d gv.NetworkDispatcher)           { l.mu.Lock(); l.dispatcher = d; l.mu.Unlock() }
-func (l *Link) IsAttached() bool                        { l.mu.Lock(); defer l.mu.Unlock(); return l.dispatcher != nil }
-func (l *Link) MTU() uint32                             { l.mu.Lock(); defer l.mu.Unlock(); return l.mtu }
-func (l *Link) SetMTU(n uint32)                         { l.mu.Lock(); l.mtu = n; l.mu.Unlock() }
+func (l *Link) Attach(d gv.NetworkDispatcher) {
+	l.mu.Lock()
+	l.dispatcher = d
+	if !l.closed {
+		l.delivery.Store(&linkDelivery{d, l.observer, l.afterInbound})
+	}
+	l.mu.Unlock()
+}
+func (l *Link) IsAttached() bool                        { v := l.delivery.Load(); return v != nil && v.dispatcher != nil }
+func (l *Link) MTU() uint32                             { return l.mtu.Load() }
+func (l *Link) SetMTU(n uint32)                         { l.mtu.Store(n) }
 func (l *Link) SetOnCloseAction(f func())               { l.mu.Lock(); l.onClose = f; l.mu.Unlock() }
 func (*Link) MaxHeaderLength() uint16                   { return 0 }
 func (*Link) LinkAddress() tcpip.LinkAddress            { return "" }

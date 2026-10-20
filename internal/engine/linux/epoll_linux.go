@@ -21,11 +21,12 @@ type socketPoller struct {
 	entries map[uint64]*socketWatch
 }
 type socketWatch struct {
+	mu         sync.Mutex
 	p          *socketPoller
 	s          *tcpSocket
 	id         uint64
 	wake       func()
-	attached   bool // protected by p.mu
+	attached   bool // protected by mu
 	registered bool
 }
 
@@ -79,8 +80,8 @@ func (s *tcpSocket) Watch(wake func()) (platform.Readiness, error) {
 }
 
 func (w *socketWatch) Arm(read, write bool) error {
-	w.p.mu.Lock()
-	defer w.p.mu.Unlock()
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if !w.attached {
 		return nil
 	}
@@ -115,13 +116,15 @@ func (w *socketWatch) Arm(read, write bool) error {
 }
 
 func (w *socketWatch) Detach() {
-	w.p.mu.Lock()
-	defer w.p.mu.Unlock()
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if !w.attached {
 		return
 	}
 	w.attached = false
+	w.p.mu.Lock()
 	delete(w.p.entries, w.id)
+	w.p.mu.Unlock()
 	if w.registered {
 		_ = w.s.control(func(fd uintptr) { _ = unix.EpollCtl(w.p.fd, unix.EPOLL_CTL_DEL, int(fd), nil) })
 	}
