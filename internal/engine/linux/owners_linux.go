@@ -80,6 +80,8 @@ type Owners struct {
 }
 
 type lookupStats struct {
+	// This remains explicit while the eBPF initiator/sender backend is pending.
+	Backend                                                                              string
 	Timeout, Missing, Ambiguous, Other                                                   uint64
 	CgroupHints, CgroupResolved, CgroupPopulated                                         uint64
 	LastError                                                                            string
@@ -100,7 +102,7 @@ type lookupStats struct {
 }
 
 func (o *Owners) Stats() any {
-	s := lookupStats{Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
+	s := lookupStats{Backend: "proc-fallback", Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
 	s.CgroupHints, s.CgroupResolved, s.CgroupPopulated = o.cgroupStats[0].Load(), o.cgroupStats[1].Load(), o.cgroupStats[2].Load()
 	s.MetadataRejected = rejectedMetadata.Load()
 	s.SharedScans = o.sharedScans.Load()

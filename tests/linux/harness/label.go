@@ -3,14 +3,16 @@
 // cases, and this package records what each one checked and what it means for
 // the job.
 //
-// A case makes two kinds of assertion:
+// A case makes three kinds of assertion:
 //
 //   - Check and Require: mandatory, on every engine. Prerequisites ("the
 //     stream was up before the address changed"), invariants ("nothing got
 //     past the cap") and every other behaviour the case relies on.
 //   - Expect: the one named defect assertion of a baseline-defect case. It's
-//     the only assertion that may fail without failing the job, and only on
-//     the baseline.
+//     allowed to fail without failing a baseline run.
+//   - ReleaseCheck: an explicitly declared release blocker. Its actual result
+//     is recorded without failing PR CI; the separate release gate refuses
+//     every declared blocker, even when one measurement happens to pass.
 //
 // Every case carries one label:
 //
@@ -82,6 +84,8 @@ const (
 	GateMissing Outcome = "gate-missing"
 	// Error: the harness couldn't run the case, or the case broke the rules.
 	Error Outcome = "error"
+	// ReleaseBlocked is not a release pass, even though PR CI can continue.
+	ReleaseBlocked Outcome = "release-blocker"
 )
 
 // FailsJob reports whether this outcome makes the run fail.
@@ -91,8 +95,9 @@ func (o Outcome) FailsJob() bool {
 
 // Tally counts a case's assertions.
 type Tally struct {
-	Checks, Failed        int // mandatory
-	Expects, ExpectFailed int // the defect assertion
+	Checks, Failed               int // mandatory
+	Expects, ExpectFailed        int // the defect assertion
+	ReleaseChecks, ReleaseFailed int // explicitly declared release requirements
 }
 
 // Decide turns what happened in a case into its outcome; for Error it also
@@ -115,7 +120,7 @@ func Decide(label Label, kind EngineKind, harnessErr bool, t Tally) (Outcome, st
 		return Error, fmt.Sprintf("a baseline-defect case makes exactly one defect assertion (Expect); this one made %d", t.Expects)
 	case label != BaselineDefect && t.Expects > 0:
 		return Error, "only a baseline-defect case may make a defect assertion (Expect)"
-	case t.Checks+t.Expects == 0:
+	case t.Checks+t.Expects+t.ReleaseChecks == 0:
 		return Error, "the case made no checks"
 	case label == BaselineDefect && kind == Baseline && t.ExpectFailed > 0:
 		return KnownDefect, ""
@@ -123,6 +128,8 @@ func Decide(label Label, kind EngineKind, harnessErr bool, t Tally) (Outcome, st
 		return NotReproduced, ""
 	case t.ExpectFailed > 0:
 		return Fail, ""
+	case t.ReleaseChecks > 0:
+		return ReleaseBlocked, ""
 	}
 	return Pass, ""
 }
@@ -146,6 +153,8 @@ func Explain(o Outcome) string {
 		return "FAILED: a required gate is still pending, so 1.0 can't claim full acceptance"
 	case Error:
 		return "FAILED: the harness could not run this case"
+	case ReleaseBlocked:
+		return "release blocker: measured, but not qualified for the 1.0 release"
 	}
 	return fmt.Sprintf("unknown outcome %q", string(o))
 }

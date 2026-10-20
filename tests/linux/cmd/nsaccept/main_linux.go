@@ -5,6 +5,7 @@
 //
 //	nsaccept run             build the namespace network and run the cases (root)
 //	nsaccept list            print the cases and their labels
+//	nsaccept release-gate    refuse a release with deferred or pending gates
 //	nsaccept serve           the fake internet's servers (started by run)
 //	nsaccept app <mode>      the test app; run copies it to /opt/nsapps/<name>/nsapp
 //	nsaccept exec            start a program as an app on the fake PC (used by run)
@@ -53,6 +54,12 @@ func main() {
 		os.Exit(runMain(os.Args[2:]))
 	case "list":
 		err = listMain()
+	case "release-gate":
+		if len(os.Args) != 2 {
+			err = errors.New("release-gate checks the complete catalogue and accepts no filters")
+		} else {
+			err = harness.CheckRelease(suite.Cases(suite.Config{}))
+		}
 	case "serve":
 		err = inet.Main(os.Args[2:])
 	case "app":
@@ -71,7 +78,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: nsaccept run|list|serve|app|exec|fetch-sing-box [flags]")
+	fmt.Fprintln(os.Stderr, "usage: nsaccept run|list|release-gate|serve|app|exec|fetch-sing-box [flags]")
 	os.Exit(2)
 }
 
@@ -87,6 +94,9 @@ func listMain() error {
 		}
 		if c.Waits != "" {
 			fmt.Printf("%-48s waits for: %s\n", "", c.Waits)
+		}
+		if c.ReleaseBlocker != "" {
+			fmt.Printf("%-48s release-blocker (attribution): %s\n", "", c.ReleaseBlocker)
 		}
 	}
 	return nil
