@@ -384,10 +384,21 @@ func duplicateBorrowedSocket(raw syscall.RawConn, source winhandle.Owner) (winha
 }
 
 func socketIO(h winhandle.Owner, name string, b []byte) (int, error) {
+	return socketIOFlags(h, name, b, 0)
+}
+
+func socketIOFlags(h winhandle.Owner, name string, b []byte, flags uint32) (int, error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
-	n, _, err := winsock.NewProc(name).Call(uintptr(h.Handle("TCP "+name)), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0)
+	site := "TCP send"
+	if name == "recv" {
+		site = "TCP receive"
+		if flags != 0 {
+			site = "TCP peek"
+		}
+	}
+	n, _, err := winsock.NewProc(name).Call(uintptr(h.Handle(site)), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(flags))
 	runtime.KeepAlive(b)
 	if int32(n) == -1 {
 		if errors.Is(err, windows.WSAEWOULDBLOCK) {
@@ -401,12 +412,28 @@ func socketIO(h winhandle.Owner, name string, b []byte) (int, error) {
 	return int(n), nil
 }
 func (c *readySocket) TryRead(b []byte) (int, error) {
+	return c.tryReceive(b, 0)
+}
+
+func (c *readySocket) TryPeek(b []byte) (int, error) {
+	// recv is synchronous here, with FIONBIO set. This is the documented
+	// non-overlapped MSG_PEEK path; no receive buffer outlives the syscall.
+	return c.tryReceive(b, 2) // MSG_PEEK.
+}
+
+func (c *readySocket) TryDiscard(scratch []byte) (int, error) {
+	// The shared relay is the exclusive reader and supplies only the prefix
+	// already accepted by the destination. Never consume past that length.
+	return c.tryReceive(scratch, 0)
+}
+
+func (c *readySocket) tryReceive(b []byte, flags uint32) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed || c.watch == nil {
 		return 0, net.ErrClosed
 	}
-	return socketIO(c.handle, "recv", b)
+	return socketIOFlags(c.handle, "recv", b, flags)
 }
 func (c *readySocket) TryWrite(b []byte) (int, error) {
 	c.mu.Lock()
