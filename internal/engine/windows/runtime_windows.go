@@ -17,7 +17,6 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
-	"github.com/AyoubAchour/net-switch/internal/journal"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
 )
 
@@ -25,11 +24,13 @@ type Runtime struct {
 	*engine.Engine
 	routes *Routes
 	owners *Owners
+	dialer *Dialer
 }
 
 func (r *Runtime) Stats() any {
 	stats := r.Engine.Stats().(map[string]any)
 	stats["ownerLookup"] = r.owners.Stats()
+	stats["socketResources"] = r.dialer.ports.stats()
 	stats["bindings"] = r.routes.Bindings()
 	stats["wintun"] = r.routes.TunStats()
 	stats["lifecyclePhases"] = r.routes.timings.snapshot()
@@ -65,7 +66,7 @@ func recoverRoutes(dir string) (*Routes, error) {
 	if _, err := rand.Read(id[:]); err != nil {
 		return nil, err
 	}
-	return NewRoutes(&journal.FileStore{Path: filepath.Join(dir, "engine-journal.json"), SyncParent: SyncParent}, OwnershipLock{}, hex.EncodeToString(id[:]))
+	return NewRoutes(newDiskJournal(filepath.Join(dir, "engine-journal.json")), OwnershipLock{}, hex.EncodeToString(id[:]))
 }
 
 func Recover(dir string) error {
@@ -114,7 +115,7 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 	defer func() { err = errors.Join(err, dialer.Close()) }()
 	e := engine.New(ctx, engine.Dependencies{OpenTun: routes.OpenTun, Routes: routes, Dialer: dialer, Owners: owners, Identities: owners},
 		flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncParent})
-	runtime := &Runtime{Engine: e, routes: routes, owners: owners}
+	runtime := &Runtime{Engine: e, routes: routes, owners: owners, dialer: dialer}
 	server := protocol.New(runtime, e.Table, dialer)
 	// The ownership records and command fence identify this same engine.
 	// NewRoutes receives the instance before any OS object can be created.

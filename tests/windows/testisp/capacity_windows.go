@@ -16,9 +16,8 @@ import (
 )
 
 // A real TCP responder on TestISP's stack, only enabled for the capacity case.
-// After echoing a byte it holds the accepted socket without a relay goroutine.
-// This avoids measuring 65,536 copies of the gateway's ordinary two-hop relay
-// buffers while the engine itself still uses real bound Windows TCP sockets.
+// Each peer echoes single bytes for liveness checks without ordinary two-hop
+// relay buffers. The engine itself still uses real bound Windows TCP sockets.
 type capacityResponder struct {
 	mu               sync.Mutex
 	listeners        []net.Listener
@@ -53,15 +52,21 @@ func (c *capacityResponder) open(s *stack.Stack) error {
 				c.mu.Unlock()
 				c.workers.Go(func() {
 					var value [1]byte
-					if _, err := io.ReadFull(conn, value[:]); err != nil {
-						return
+					first := true
+					for {
+						if _, err := io.ReadFull(conn, value[:]); err != nil {
+							return
+						}
+						if _, err := conn.Write(value[:]); err != nil {
+							return
+						}
+						if first {
+							c.mu.Lock()
+							c.echoed++
+							c.mu.Unlock()
+							first = false
+						}
 					}
-					if _, err := conn.Write(value[:]); err != nil {
-						return
-					}
-					c.mu.Lock()
-					c.echoed++
-					c.mu.Unlock()
 				})
 			}
 		})

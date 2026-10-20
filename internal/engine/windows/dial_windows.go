@@ -21,6 +21,7 @@ import (
 type Dialer struct {
 	Routes *Routes
 	pool   *readiness
+	ports  *portDiagnostics
 }
 
 func NewDialer(routes *Routes) (*Dialer, error) {
@@ -28,10 +29,13 @@ func NewDialer(routes *Routes) (*Dialer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Dialer{Routes: routes, pool: pool}, nil
+	return &Dialer{Routes: routes, pool: pool, ports: newPortDiagnostics()}, nil
 }
 
 func (d *Dialer) Close() error {
+	if d.ports != nil {
+		d.ports.close()
+	}
 	if d.pool != nil {
 		return d.pool.close()
 	}
@@ -78,6 +82,7 @@ func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort
 		Control: bindSocket(a, remote.Addr().Is6()), KeepAlive: 30 * time.Second}
 	c, err := dial.DialContext(ctx, network, remote.String())
 	if err != nil {
+		d.ports.observe(err)
 		return nil, err
 	}
 	return &readySocket{blocking: c.(*net.TCPConn), pool: d.pool, local: c.LocalAddr(), remote: c.RemoteAddr()}, nil

@@ -800,7 +800,7 @@ try {
     return { exited, state, direct, response };
   });
   if (options.profile === 'v1') {
-    await report.test('65536 held flows fit the 512 MiB runtime budget', 'parity', async () => {
+    await report.test('OS port limit refuses cleanly, preserves flows and recovers within the 512 MiB budget', 'parity', async () => {
       await client('close');
       const { capacity } = await import('./capacity.mjs');
       return capacity({ server, harness, directory: dir, line: second.id });
