@@ -31,6 +31,11 @@ on:
         description: 'Analyse an existing trace artifact only (no new engine workload)'
         required: false
         default: ''
+      shared_tests:
+        description: 'Also run shared TCP and Linux lookup race regressions in this focused job'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -140,6 +145,20 @@ jobs:
         run: |
           sudo unshare --net -- env NETSWITCH_ISOLATED_NETNS=1 "$RUNNER_TEMP/linux-platform.test" -test.v
           sudo unshare --net -- "$RUNNER_TEMP/linux-platform.test" -test.run '^TestConcurrentColdHoldersShareDescriptorScans$' -test.count 20 -test.v
+      - name: Check shared TCP setup and lookup races
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && !cancelled() && steps.harness.outcome == 'success' }}
+        env:
+          CGO_ENABLED: '1'
+          GOMAXPROCS: '4'
+          GOFLAGS: -mod=vendor -p=2
+        run: go test -race -v -count=1 ./internal/engine/tcp ./internal/engine/linux
+      - name: Check repeated Wait and close admission at capacity
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && !cancelled() && steps.harness.outcome == 'success' }}
+        env:
+          NETSWITCH_TIMEWAIT_GATE: '1'
+          GOMAXPROCS: '4'
+          GOFLAGS: -mod=vendor -p=2
+        run: go test -v -count=1 -run '^TestCloseAtCapUnderLoad$' ./internal/engine/stack
       # The QUIC fixture is its own module at a pinned quic-go, so QUIC never
       # enters Net Switch's go.mod or vendor/.
       - name: Check and build the QUIC fixture
