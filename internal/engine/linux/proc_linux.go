@@ -188,15 +188,24 @@ func readKernelFile(path string, limit int) ([]byte, error) {
 // exe and fd entries are read as link text, never opened. The kernel limits
 // their targets to PATH_MAX; reject truncation instead of growing indefinitely.
 func readProcLink(path string) (string, error) {
-	var b [4096]byte
+	var b [128]byte
 	n, err := unix.Readlink(path, b[:])
 	if err != nil {
 		return "", err
 	}
-	if n == len(b) {
+	if n < len(b) {
+		return string(b[:n]), nil
+	}
+	storage := processBuffers.Get().(*[16 << 10]byte)
+	defer processBuffers.Put(storage)
+	n, err = unix.Readlink(path, storage[:4096])
+	if err != nil {
+		return "", err
+	}
+	if n == 4096 {
 		return "", errKernelFileLimit
 	}
-	return string(b[:n]), nil
+	return string(storage[:n]), nil
 }
 
 // Descriptor links need only the kernel's short socket:[inode] form. Reading

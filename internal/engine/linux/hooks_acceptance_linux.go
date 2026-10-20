@@ -71,7 +71,7 @@ func (p *Platform) InstallAcceptanceHooks(e *engine.Engine, s *protocol.Server) 
 		return nil
 	}
 	p.WrapTun = func(t platform.TunDevice) platform.TunDevice {
-		return &stalledTun{TunDevice: t, gate: func() <-chan struct{} { gates.Lock(); defer gates.Unlock(); return writeGate }}
+		return &stalledTun{TunDevice: t, ctx: p.ctx, gate: func() <-chan struct{} { gates.Lock(); defer gates.Unlock(); return writeGate }}
 	}
 	var mode atomic.Int32
 	var delay atomic.Int64
@@ -199,12 +199,33 @@ func (p *Platform) InstallAcceptanceHooks(e *engine.Engine, s *protocol.Server) 
 type stalledTun struct {
 	platform.TunDevice
 	gate func() <-chan struct{}
+	ctx  context.Context
 }
 
 func (t *stalledTun) BindIOContext(ctx context.Context) {
+	t.ctx = ctx
 	if device, ok := t.TunDevice.(platform.TunIOContext); ok {
 		device.BindIOContext(ctx)
 	}
+}
+
+func (t *stalledTun) WriteBatch(packets [][]byte) (int, error) {
+	if gate := t.gate(); gate != nil {
+		select {
+		case <-gate:
+		case <-t.ctx.Done():
+			return 0, t.ctx.Err()
+		}
+	}
+	if batch, ok := t.TunDevice.(platform.BatchWriter); ok {
+		return batch.WriteBatch(packets)
+	}
+	for i, p := range packets {
+		if err := t.TunDevice.WritePacket(t.ctx, p); err != nil {
+			return i, err
+		}
+	}
+	return len(packets), nil
 }
 
 func (t *stalledTun) Stats() any {

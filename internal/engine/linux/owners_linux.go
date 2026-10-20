@@ -305,8 +305,8 @@ func processOwner(pid uint32) (platform.Owner, error) {
 	return processOwnerAt(pid, start)
 }
 
-// The caller has already read this incarnation's start time. Verify it again
-// after reading executable metadata, without a redundant third stat read.
+// The caller supplies the incarnation from its descriptor scan or cache hint.
+// Verify it after reading metadata and before returning any usable identity.
 func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 	root := fmt.Sprintf("/proc/%d/", pid)
 	exe, err := readProcLink(root + "exe")
@@ -318,8 +318,15 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 	storage := processBuffers.Get().(*[16 << 10]byte)
 	// Flatpak's mount namespace metadata identifies apps that have identical
 	// /app/bin executable paths. It belongs to the holder, never to the socket.
-	flatpak := flatpakBuffers.Get().(*[64 << 10]byte)
-	info, infoErr := readFlatpakInfo(root+"root", flatpak[:])
+	// Native apps have no metadata file. Do not borrow 64 KiB for every
+	// concurrent lookup just to receive ENOENT; the small scratch also covers
+	// normal Flatpak headers. Only a header beyond it needs the larger bound.
+	info, infoErr := readFlatpakInfo(root+"root", storage[:])
+	var flatpak *[64 << 10]byte
+	if errors.Is(infoErr, errKernelFileLimit) {
+		flatpak = flatpakBuffers.Get().(*[64 << 10]byte)
+		info, infoErr = readFlatpakInfo(root+"root", flatpak[:])
+	}
 	if infoErr != nil && !errors.Is(infoErr, unix.ENOENT) && !errors.Is(infoErr, unix.ESRCH) {
 		rejectedMetadata.Add(1)
 		message := fmt.Sprintf("pid %d Flatpak metadata rejected: %v", pid, infoErr)
@@ -359,7 +366,9 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 			}
 		}
 	}
-	flatpakBuffers.Put(flatpak)
+	if flatpak != nil {
+		flatpakBuffers.Put(flatpak)
+	}
 	processBuffers.Put(storage)
 	end, err := processStart(pid)
 	if err != nil || end != start {
@@ -369,7 +378,7 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 }
 
 func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
-	if id == 0 {
+	if id == 0 || ctx.Err() != nil {
 		return nil
 	}
 	o.cgroupStats[0].Add(1)
@@ -449,6 +458,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	requested := time.Now()
 	deadline, timed := ctx.Deadline()
 	expired := func() bool { return ctx.Err() != nil || (timed && !time.Now().Before(deadline)) }
+	if expired() {
+		return platform.Owner{}, context.DeadlineExceeded
+	}
 	var result platform.Owner
 	var found []holder
 	var scanWait time.Duration
@@ -466,15 +478,14 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				return nil
 			}
 		}
-		start, err := processStart(h.pid)
-		if err != nil || start != h.start {
-			return nil
-		}
 		got, ok := socketInodeAt(unix.AT_FDCWD, fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd))
 		if !ok || got != r.inode {
 			return nil
 		}
-		live, err := processOwnerAt(h.pid, start)
+		// processOwnerAt checks this incarnation's start time after all
+		// metadata reads, before returning an identity. Another stat here is
+		// redundant: a recycled PID is still rejected by that final check.
+		live, err := processOwnerAt(h.pid, h.start)
 		if err != nil || live.StartTime != h.start {
 			return nil
 		}
@@ -905,6 +916,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	// Search each tier for actual holders, then fall back only if it found
 	// none. A matching scope never supplies identity by itself.
 	groups := o.cgroupPIDs(ctx, r.cgroup)
+	if expired() {
+		return finish()
+	}
 	ordered := make([]uint32, 0, len(groups))
 	for _, pid := range recent {
 		if slices.Contains(groups, pid) {
@@ -952,6 +966,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		if result.AppID != "" {
 			return finish()
 		}
+	}
+	// An expired lookup must not do a full /proc enumeration on its way
+	// out. Under a burst, those discarded walks took CPU from the lookups
+	// whose deadlines had not expired yet and amplified the initial misses.
+	if expired() {
+		return finish()
 	}
 
 	entries, _ := os.ReadDir("/proc")

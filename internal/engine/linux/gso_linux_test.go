@@ -88,6 +88,11 @@ func TestKernelTCPMaxseg88KeepsTunAlive(t *testing.T) {
 			return
 		}
 		result <- hash.Sum(nil)
+		// Exercise kernel receive/GRO as well as ingress GSO. The response
+		// begins only after the app's half-close and is checked end to end.
+		if _, err := c.Write(bytes.Repeat([]byte("bounded GSO segments\n"), 100000)); err != nil {
+			failures <- err
+		}
 	})
 	stack.SetTransportProtocolHandler(gtcp.ProtocolNumber, forwarder.HandlePacket)
 	pumps.Go(func() {
@@ -113,12 +118,13 @@ func TestKernelTCPMaxseg88KeepsTunAlive(t *testing.T) {
 		}
 	})
 	pumps.Go(func() {
+		packets := make([][]byte, 64)
 		for {
-			packet := link.Read(ctx)
-			if packet == nil {
+			n := link.ReadBatch(ctx, packets)
+			if n == 0 {
 				return
 			}
-			if err := device.WritePacket(ctx, packet); err != nil {
+			if _, err := p.objects.tun.WriteBatch(packets[:n]); err != nil {
 				if ctx.Err() == nil {
 					failures <- err
 				}
@@ -157,6 +163,11 @@ func TestKernelTCPMaxseg88KeepsTunAlive(t *testing.T) {
 			t.Fatal(err)
 		case <-ctx.Done():
 			t.Fatal(ctx.Err())
+		}
+		reply := sha256.New()
+		if n, err := io.Copy(reply, conn); err != nil || n != int64(len(data)) || !bytes.Equal(reply.Sum(nil), want[:]) {
+			conn.Close()
+			t.Fatalf("batched TUN response: %d bytes, %v", n, err)
 		}
 		conn.Close()
 	}

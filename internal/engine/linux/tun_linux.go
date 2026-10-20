@@ -32,6 +32,19 @@ type Tun struct {
 	closedRead       error
 	ioDone           <-chan struct{}
 	ioStop           func() bool
+	writeBatch       [][]byte
+	writeStorage     []byte
+}
+
+const tunWriteBatch = 64
+const tunWriteStride = 65535 + 10
+
+func (t *Tun) prepareBatchStorage() {
+	if t.writeStorage != nil {
+		return
+	}
+	t.writeStorage = make([]byte, tunWriteBatch*tunWriteStride)
+	t.writeBatch = make([][]byte, tunWriteBatch)
 }
 
 func openTun(v tunObject) (*Tun, error) {
@@ -97,6 +110,7 @@ func openTun(v tunObject) (*Tun, error) {
 	for i := range t.bufs {
 		t.bufs[i] = make([]byte, 65535)
 	}
+	t.prepareBatchStorage()
 	ok = true
 	return t, nil
 }
@@ -197,4 +211,88 @@ func (t *Tun) WritePacket(ctx context.Context, packet []byte) error {
 		return fmt.Errorf("TUN wrote %d of %d bytes: %w", n, len(b), io.ErrShortWrite)
 	}
 	return err
+}
+
+// TCP control packets end a coalescing run. Even if sequence/ACK numbers happen
+// to line up across tuple reuse, no data may be merged across a SYN/FIN/RST.
+// Unknown headers, extensions and fragments use the conservative single write.
+func tunWriteBoundary(p []byte) bool {
+	if len(p) < 20 {
+		return true
+	}
+	offset := 0
+	switch p[0] >> 4 {
+	case 4:
+		if p[9] != unix.IPPROTO_TCP || p[6]&0x3f != 0 || p[7] != 0 {
+			return true
+		}
+		offset = int(p[0]&15) * 4
+		if offset < 20 {
+			return true
+		}
+	case 6:
+		if len(p) < 40 || p[6] != unix.IPPROTO_TCP {
+			return true
+		}
+		offset = 40
+	default:
+		return true
+	}
+	return len(p) < offset+20 || p[offset+13]&^byte(0x18) != 0 // ACK and PSH only
+}
+
+func (t *Tun) WriteBatch(packets [][]byte) (int, error) {
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	t.prepareBatchStorage()
+	written := 0
+	for len(packets) > 0 {
+		select {
+		case <-t.ioDone:
+			return written, context.Canceled
+		default:
+		}
+		n := min(len(packets), tunWriteBatch)
+		for i, p := range packets[:n] {
+			if len(p) == 0 || len(p) > 9000 {
+				return written, io.ErrShortBuffer
+			}
+			start := i * tunWriteStride
+			b := t.writeStorage[start : start+10+len(p) : start+tunWriteStride]
+			clear(b[:10])
+			copy(b[10:], p)
+			t.writeBatch[i] = b
+		}
+		flush := func(first, end int) error {
+			if first == end {
+				return nil
+			}
+			// The library reports bytes after GRO, not original packet count.
+			// A successful write consumed this complete run. On error, count
+			// only earlier successful runs; the engine handles the device error.
+			if _, err := t.device.Write(t.writeBatch[first:end], 10); err != nil {
+				return err
+			}
+			written += end - first
+			return nil
+		}
+		first := 0
+		for i, p := range packets[:n] {
+			if !tunWriteBoundary(p) {
+				continue
+			}
+			if err := flush(first, i); err != nil {
+				return written, err
+			}
+			if err := flush(i, i+1); err != nil {
+				return written, err
+			}
+			first = i + 1
+		}
+		if err := flush(first, n); err != nil {
+			return written, err
+		}
+		packets = packets[n:]
+	}
+	return written, nil
 }
