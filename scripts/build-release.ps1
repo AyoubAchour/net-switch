@@ -109,6 +109,7 @@ foreach ($file in $inputs) {
 # The installer needs handle-based cleanup even while the installed control
 # remains Node. Build only this offline utility with the already verified Go.
 $cleanupEnv = @{
+  GOROOT = (Join-Path $cache "go-$($pins.go.version)\$($pins.go.archiveRoot)")
   GOTOOLCHAIN = 'local'; GOWORK = 'off'; CGO_ENABLED = '0'; GOOS = 'windows'
   GOARCH = $(if ($Arch -eq 'arm64') { 'arm64' } else { 'amd64' })
   GOFLAGS = '-mod=vendor -p=2'; GOMAXPROCS = '2'

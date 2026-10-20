@@ -3,12 +3,13 @@
 // expected value. Temporary settings and connections are restored in finally.
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, realpath, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, readdir, realpath, symlink, link } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createServer, connect } from 'node:net';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import { windows } from '../lib/platform/windows.mjs';
 import { nativeArchitecture } from '../lib/architecture.mjs';
 import { enableAutostart, disableAutostart } from '../lib/autostart.mjs';
@@ -217,6 +218,63 @@ ConvertTo-Json -InputObject @($result) -Compress`);
       assert.equal((await readdir(folder)).filter((name) => name.startsWith(`${path.basename(root)}.untrusted-`)).length, 1);
     }
     assert.equal(await acl(), before);
+  });
+  await check('Control serves its API after quarantining planted root and staging names', async () => {
+    const target = path.join(folder, 'startup-link-target');
+    await mkdir(target);
+    const record = path.join(target, 'record');
+    await writeFile(record, 'outside startup recovery');
+    const acl = () => runPowerShellJson(`ConvertTo-Json -InputObject @((Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'record')).Sddl) -Compress`, { args: { DIR: target } });
+    const before = await acl();
+    for (const location of ['root', 'stage']) {
+      for (const kind of ['junction', 'hardlink', 'children']) {
+        const machine = path.join(folder, `startup-${location}-${kind}`);
+        const user = `${machine}-user`;
+        const occupant = location === 'stage' ? `${machine}.migrating` : machine;
+        await mkdir(user);
+        if (kind === 'junction') await symlink(target, occupant, 'junction');
+        else if (kind === 'hardlink') await link(record, occupant);
+        else {
+          await mkdir(occupant);
+          await symlink(target, path.join(occupant, 'junction'), 'junction');
+          await link(record, path.join(occupant, 'hardlink'));
+        }
+        const child = spawn(executable, ['--user-data', user, '--machine-data', machine], { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+        let stderr = '';
+        child.stderr.on('data', (b) => { stderr = (stderr + b).slice(-8192); });
+        const exited = once(child, 'exit');
+        try {
+          let session;
+          const deadline = Date.now() + 60_000;
+          while (!session && Date.now() < deadline && child.exitCode === null) {
+            try { session = JSON.parse(await readFile(path.join(user, 'server.json'), 'utf8')); }
+            catch (error) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
+            if (!session) await delay(100);
+          }
+          assert(session, `${location}/${kind}: Control never published its session; ${stderr}`);
+          assert.equal(session.pid, child.pid);
+          const api = (route, body) => fetch(`http://127.0.0.1:${session.port}/api/${route}`, {
+            method: body ? 'POST' : 'GET',
+            headers: { 'X-Token': session.token, 'Content-Type': 'application/json' },
+            body: body ? JSON.stringify(body) : undefined,
+            signal: AbortSignal.timeout(15_000),
+          });
+          assert.equal((await api('state')).status, 200, `${location}/${kind}: live API unavailable`);
+          assert.equal((await api('quit', {})).status, 200);
+          await Promise.race([exited, delay(15_000, undefined, { ref: false }).then(() => { throw new Error('Control did not quit'); })]);
+          assert.equal(child.exitCode, 0);
+          const quarantines = (await readdir(folder)).filter((name) => name.startsWith(`${path.basename(occupant)}.untrusted-`));
+          assert.equal(quarantines.length, 1, `${location}/${kind}: missing quarantine`);
+          assert((await readFile(path.join(user, 'server.log'), 'utf8')).includes(quarantines[0]), 'quarantine missing from Control log');
+          console.log(`Control startup ${location}/${kind}: API 200, clean quit, quarantine logged`);
+        } finally {
+          if (child.exitCode === null) child.kill();
+          await exited;
+        }
+      }
+    }
+    assert.deepEqual(await acl(), before);
+    assert.equal(await readFile(record, 'utf8'), 'outside startup recovery');
   });
   await check('process identity is checked before stopping a child', async () => {
     const image = await realpath(process.execPath);

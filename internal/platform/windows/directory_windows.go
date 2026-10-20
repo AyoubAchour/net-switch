@@ -405,6 +405,7 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			return err
 		}
 		saved := map[string][]byte{}
+		undoUncertain := unreadable || !root.directory
 		closeChildren(tree)
 		if !unreadable && root.directory {
 			// Inspect can stop at an unrelated hostile child. Read each
@@ -412,12 +413,17 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			for _, name := range []string{"windows-undo.json", "windows-undo.json.bak", "engine.pid"} {
 				item, err := open(filepath.Join(path, name), windows.FILE_READ_DATA, windows.FILE_SHARE_READ)
 				if err != nil {
+					if name != "engine.pid" && !errors.Is(err, os.ErrNotExist) {
+						undoUncertain = true
+					}
 					continue
 				}
 				b, err := read(item)
 				item.file.Close()
 				if err == nil && validMigratedFile(name, b) {
 					saved[name] = b
+				} else if name != "engine.pid" {
+					undoUncertain = true
 				}
 			}
 		}
@@ -427,8 +433,10 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			notes = append(notes, "restored the validated Windows Undo backup into the fresh machine folder")
 		} else if saved["windows-undo.json"] != nil {
 			notes = append(notes, "restored the validated Windows Undo record into the fresh machine folder")
-		} else {
+		} else if undoUncertain {
 			notes = append(notes, "WARNING: no valid readable Windows Undo record could be restored; Undo cannot recover those settings; original data remains at "+oldName)
+		} else {
+			notes = append(notes, "no Windows Undo record existed in the original machine folder")
 		}
 		if saved["engine.pid"] != nil {
 			notes = append(notes, "preserved the engine PID for executable-identity-checked orphan cleanup")

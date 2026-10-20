@@ -82,6 +82,19 @@ func TestUninstallRecoversPendingUndoAndRetainsUncertainty(t *testing.T) {
 	}
 }
 
+func TestUninstallAllowsLegacyFolderWithoutUndo(t *testing.T) {
+	hostedSecurity(t)
+	root := filepath.Join(t.TempDir(), "machine")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := PrepareMachineUninstall(root, func(s string) { t.Log(s) }); err != nil {
+			t.Fatal("a never-configured installation was mistaken for damaged Undo", err)
+		}
+	}
+}
+
 func TestMachineCleanupUnlinksOnlyAdminOwnedEntries(t *testing.T) {
 	hostedSecurity(t)
 	base := t.TempDir()

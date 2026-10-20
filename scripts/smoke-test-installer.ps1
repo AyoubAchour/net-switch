@@ -435,7 +435,9 @@ $userMarker = Join-Path $userData 'installer-smoke-retain.txt'
 # Exercise cleanup on real installer leftovers, including links outside them.
 # All fixtures belong to this disposable runner; establish their ACLs before
 # planting links so fixture setup itself never rewrites a linked target.
-$cleanupOutside = Join-Path $logs 'cleanup-outside'
+# RUNNER_TEMP can be on D: while ProgramData is on C:. A hard link must
+# reference the same volume; this sibling is outside every cleanup pattern.
+$cleanupOutside = Join-Path $env:ProgramData ('netswitch-cleanup-outside-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $cleanupOutside | Out-Null
 $cleanupRecord = Join-Path $cleanupOutside 'record'
 [IO.File]::WriteAllText($cleanupRecord, 'outside uninstall cleanup')
