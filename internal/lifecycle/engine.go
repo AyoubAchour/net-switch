@@ -12,6 +12,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/engine/singbox"
+	"github.com/AyoubAchour/net-switch/internal/faultpoint"
 	"github.com/AyoubAchour/net-switch/internal/journal"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
@@ -194,6 +195,7 @@ running:
 	if err := store.Append(record); err != nil {
 		return errors.Join(result, err)
 	}
+	faultpoint.Hit(c.Data, "engine-after-stop-cleanup")
 	return result
 }
 

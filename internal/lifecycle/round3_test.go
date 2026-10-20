@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,10 +109,59 @@ func TestHealthProbeAcrossStandbyCannotConsumeFailureWindow(t *testing.T) {
 }
 
 func TestSessionQueryFailurePreservesRouting(t *testing.T) {
-	stops := 0
-	handleSessionEvent(service.Event{Logoff: true}, "owner", func(string, uint32) (bool, error) { return false, errors.New("WTS unavailable") }, func() error { stops++; return nil }, func(string) {})
-	if stops != 0 {
-		t.Fatal("lookup error was treated as a logoff")
+	ctx, cancel := context.WithCancel(context.Background())
+	ready, done, stopped := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	defer func() { cancel(); <-done }()
+	var phase, queries, stops atomic.Int32
+	logged := make(chan struct{}, 1)
+	log := func(string) {
+		select {
+		case logged <- struct{}{}:
+		default:
+		}
+	}
+	events := make(chan service.Event)
+	query := func(owner string, excluded uint32) (bool, error) {
+		state := phase.Load()
+		if queries.Add(1) == 1 {
+			close(ready)
+		}
+		if owner != "owner" || excluded != ^uint32(0) {
+			t.Error("callback session data was used as authority")
+		}
+		if state == 1 {
+			return false, errors.New("WTS unavailable")
+		}
+		return state == 0, nil
+	}
+	go func() {
+		defer close(done)
+		runSessionEvents(ctx, events, "owner", NewRemote(ctx, log), func() error {
+			if stops.Add(1) == 1 {
+				close(stopped)
+			}
+			return nil
+		}, log, query)
+	}()
+	<-ready
+	phase.Store(1)
+	events <- service.Event{Logoff: true, Session: 7}
+	select {
+	case <-logged:
+	case <-time.After(3 * time.Second):
+		t.Fatal("production session loop did not retry WTS")
+	}
+	if stops.Load() != 0 {
+		t.Fatal("lookup error was treated as logoff")
+	}
+	phase.Store(2)
+	select {
+	case <-stopped:
+	case <-time.After(3 * time.Second):
+		t.Fatal("confirmed last-owner departure did not stop routing")
+	}
+	if stops.Load() != 1 || queries.Load() < 3 {
+		t.Fatal("session state was not retried", stops.Load(), queries.Load())
 	}
 }
 

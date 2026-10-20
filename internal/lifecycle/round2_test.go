@@ -191,22 +191,66 @@ func TestForgetLaneDoesNotPerformIPC(t *testing.T) {
 }
 
 func TestOwnerLogoffAndHybridResumeWaitForSignIn(t *testing.T) {
-	for _, event := range []service.Event{{Logoff: true, Session: 7}, {Resume: true}} {
-		stops := 0
-		handleSessionEvent(event, "owner", func(owner string, exclude uint32) (bool, error) {
-			if owner != "owner" || exclude != ^uint32(0) {
-				t.Fatal("wrong OS session checked")
+	for _, test := range []struct {
+		event   service.Event
+		present bool
+	}{
+		{service.Event{Logoff: true, Session: 7}, false},
+		{service.Event{Resume: true}, false},
+		{service.Event{Resume: true}, true},
+	} {
+		ctx, cancel := context.WithCancel(context.Background())
+		events := make(chan service.Event)
+		ready, done, stopped := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		var queries, stops atomic.Int32
+		r := NewRemote(ctx, func(string) {})
+		query := func(owner string, excluded uint32) (bool, error) {
+			if owner != "owner" || excluded != ^uint32(0) {
+				t.Error("callback session ID was used as authority")
 			}
-			return false, nil
-		}, func() error { stops++; return nil }, func(string) {})
-		if stops != 1 {
-			t.Fatal("routing survived the last owner sign-out/hybrid resume")
+			if queries.Add(1) == 1 {
+				close(ready)
+			}
+			return test.present, nil
 		}
-	}
-	stops := 0
-	handleSessionEvent(service.Event{Resume: true}, "owner", func(string, uint32) (bool, error) { return true, nil }, func() error { stops++; return nil }, func(string) {})
-	if stops != 0 {
-		t.Fatal("ordinary resume tore down routing")
+		go func() {
+			defer close(done)
+			runSessionEvents(ctx, events, "owner", r, func() error {
+				if stops.Add(1) == 1 {
+					close(stopped)
+				}
+				return nil
+			}, func(string) {}, query)
+		}()
+		<-ready
+		events <- test.event
+		if test.present {
+			deadline := time.Now().Add(3 * time.Second)
+			for queries.Load() < 2 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+		} else {
+			select {
+			case <-stopped:
+			case <-time.After(3 * time.Second):
+				cancel()
+				<-done
+				t.Fatal("production session loop did not stop routing")
+			}
+		}
+		cancel()
+		<-done
+		if queries.Load() < 2 || test.present && stops.Load() != 0 || !test.present && stops.Load() != 1 {
+			t.Fatal("wrong session transition", queries.Load(), stops.Load())
+		}
+		if test.event.Resume {
+			r.mu.Lock()
+			grace := r.wakeGrace
+			r.mu.Unlock()
+			if !grace.After(time.Now()) {
+				t.Fatal("Control resume did not reach Remote.Wake")
+			}
+		}
 	}
 }
 

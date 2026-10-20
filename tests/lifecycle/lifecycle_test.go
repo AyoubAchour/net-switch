@@ -1076,7 +1076,44 @@ func TestRealServices(t *testing.T) {
 		}
 		wait(t, "clean engine exit", 10*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
 	})
-	t.Run("control-start-limit-fails-open", func(t *testing.T) { controlStartLimit(t, ctx, owner, echo) })
+	t.Run("acknowledged-stop-forces-stuck-service-exit", func(t *testing.T) {
+		if err := service.Start(ctx, service.Control); err != nil {
+			t.Fatal(err)
+		}
+		c := openClient(t, owner, false)
+		defer c.input.Close()
+		c.must(t, "routing", map[string]any{"on": true}, nil)
+		wait(t, "routing before bounded stop", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+		arm(t, data, "engine-after-stop-cleanup")
+		started := time.Now()
+		finished := make(chan error, 1)
+		go func() { _, err := c.call(t, "routing", map[string]any{"on": false}); finished <- err }()
+		pid := barrier(t, data, "engine-after-stop-cleanup")
+		if state, err := service.Query(service.Engine); err != nil || !state.Running || state.PID != pid {
+			t.Fatal("acknowledged but still-running service precondition", state, err)
+		}
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(35 * time.Second):
+			t.Fatal("accepted stop wedged Control")
+		}
+		elapsed := time.Since(started)
+		if elapsed < 18*time.Second || elapsed > 32*time.Second {
+			t.Fatal("forced-stop bound was not exercised", elapsed)
+		}
+		if state, err := service.Query(service.Engine); err != nil || !state.Stopped {
+			t.Fatal("forced stop left the engine alive", state, err)
+		}
+		directEcho(t, echo)
+		if err := service.Stop(ctx, service.Control); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("FORCED_STOP acknowledged engine held at barrier, service terminated after %s", elapsed)
+	})
+	t.Run("control-crash-storm-keeps-socket-and-recovers", func(t *testing.T) { controlCrashStorm(t, ctx, owner, echo) })
 	t.Run("enrollment-restarts-do-not-backoff", func(t *testing.T) { enrollmentRestarts(t, ctx, owner, echo) })
 	t.Run("CLI-activates-stopped-Control", func(t *testing.T) { cliActivation(t, owner) })
 	t.Run("real-tun-fail-open", func(t *testing.T) { tunServices(t, config, owner) })
@@ -1088,8 +1125,8 @@ func binary(name string) string {
 	return name
 }
 func kill(t *testing.T, pid uint32) {
-	// Independent fault cases must not consume one another's SCM rate window.
-	// The separate start-limit case uses killUnreset to test a crash storm.
+	// Independent fault cases reset Control's automatic-restart delay.
+	// The crash-storm case deliberately uses killUnreset throughout.
 	if s, err := service.Query(service.Control); err == nil && s.PID == pid {
 		resetControlRecoveryWindow(t)
 	}

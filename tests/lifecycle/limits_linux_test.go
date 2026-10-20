@@ -57,7 +57,7 @@ func resetControlRecoveryWindow(t *testing.T) {
 	}
 	t.Log("isolated fault case: reset Control restart delay; start limiting is disabled")
 }
-func controlStartLimit(t *testing.T, ctx context.Context, owner actor, echo string) {
+func controlCrashStorm(t *testing.T, ctx context.Context, owner actor, echo string) {
 	t.Helper()
 	resetControlRecoveryWindow(t)
 	defer resetControlRecoveryWindow(t)
