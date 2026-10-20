@@ -11,16 +11,18 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"runtime/trace"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // Opt-in diagnostics use the production binary and add no hooks to lookup or
 // packet I/O. A signal takes the snapshot while callers still hold their flows.
-func startProfiles(dir string, cpu bool) (func(), error) {
+func startProfiles(dir string, cpu, execution bool) (func(), error) {
 	if dir == "" {
-		if cpu {
-			return nil, errors.New("CPU profiling requires --profile-dir")
+		if cpu || execution {
+			return nil, errors.New("profiling requires --profile-dir")
 		}
 		return func() {}, nil
 	}
@@ -46,6 +48,30 @@ func startProfiles(dir string, cpu bool) (func(), error) {
 		runtime.SetBlockProfileRate(1000000)
 		previousMutexRate = runtime.SetMutexProfileFraction(100)
 	}
+	stopTrace := func() {}
+	if execution {
+		file, traceErr := os.OpenFile(filepath.Join(dir, "runtime.trace"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if traceErr == nil {
+			traceErr = trace.Start(file)
+			if traceErr != nil {
+				file.Close()
+			}
+		}
+		if traceErr != nil {
+			if cpuFile != nil {
+				pprof.StopCPUProfile()
+				cpuFile.Close()
+				runtime.SetBlockProfileRate(0)
+				runtime.SetMutexProfileFraction(previousMutexRate)
+			}
+			return nil, traceErr
+		}
+		// Enough to capture the admission burst without an unbounded trace
+		// when a diagnostic service is left running. Disabled by default.
+		finish := sync.OnceFunc(func() { trace.Stop(); file.Close() })
+		timer := time.AfterFunc(5*time.Second, finish)
+		stopTrace = func() { timer.Stop(); finish() }
+	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGUSR1)
 	done := make(chan struct{})
@@ -66,6 +92,7 @@ func startProfiles(dir string, cpu bool) (func(), error) {
 		signal.Stop(signals)
 		close(done)
 		worker.Wait()
+		stopTrace()
 		if cpuFile != nil {
 			pprof.StopCPUProfile()
 			cpuFile.Close()

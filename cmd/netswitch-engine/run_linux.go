@@ -24,6 +24,7 @@ func run(args []string) error {
 	state := f.String("state-dir", "/var/lib/netswitch", "private ownership/state directory")
 	profiles := f.String("profile-dir", "", "private diagnostics directory; SIGUSR1 captures heap and goroutine profiles")
 	cpuProfile := f.Bool("cpu-profile", false, "record CPU and sampled contention profiles in the diagnostics directory")
+	traceProfile := f.Bool("trace-profile", false, "record the first five seconds of runtime scheduling in the diagnostics directory")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -47,7 +48,7 @@ func run(args []string) error {
 	if err := configureScheduling(); err != nil {
 		log.Printf("routing CPU scheduling remains inherited: %v", err)
 	}
-	stopProfiles, err := startProfiles(*profiles, *cpuProfile)
+	stopProfiles, err := startProfiles(*profiles, *cpuProfile, *traceProfile)
 	if err != nil {
 		return err
 	}

@@ -63,7 +63,7 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 	p.cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+filepath.Join(filepath.Dir(env.WorkDir), "inet", "probe-ca.pem"))
 	p.cmd.Args = append(p.cmd.Args, "--profile-dir", p.profiles)
 	if os.Getenv("NSACCEPT_PROFILE") == "true" {
-		p.cmd.Args = append(p.cmd.Args, "--cpu-profile")
+		p.cmd.Args = append(p.cmd.Args, "--cpu-profile", "--trace-profile")
 	}
 	p.cmd.Stdout = f
 	p.cmd.Stderr = f

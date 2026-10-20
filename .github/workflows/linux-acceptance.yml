@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: 'Record CPU profiles for the selected cases'
+        description: 'Record CPU profiles and a bounded scheduling trace for selected cases'
         type: boolean
         required: false
         default: false
@@ -168,6 +168,11 @@ jobs:
           if test -d "$RUNNER_TEMP/acceptance"; then
             find "$RUNNER_TEMP/acceptance" -name 'cpu.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodecount=35 "$RUNNER_TEMP/netswitch-engine" {} \;
             find "$RUNNER_TEMP/acceptance" \( -name 'block*.pprof' -o -name 'mutex*.pprof' \) -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodefraction=0 -focus='Owners' -nodecount=20 "$RUNNER_TEMP/netswitch-engine" {} \;
+            find "$RUNNER_TEMP/acceptance" -name 'runtime.trace' -print0 | while IFS= read -r -d '' trace; do
+              for kind in sched syscall; do
+                sudo "$(command -v go)" tool trace -pprof="$kind" "$trace" | go tool pprof -top -cum -nodecount=40 /dev/stdin
+              done
+            done
           fi
       - name: Make root-produced evidence readable by the artifact uploader
         if: ${{ always() }}

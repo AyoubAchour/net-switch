@@ -96,7 +96,7 @@ type lookupStats struct {
 	ReusedBatches, StaleBatchRetries, ConflictBatchRequests                              uint64
 	InlineBatches                                                                        uint64
 	BatchCompletionNanos, BatchResumeNanos, BatchMaxCompletionNanos, BatchMaxResumeNanos uint64
-	BatchLockNanos, BatchUnlockNanos, BatchMaxLockNanos, BatchMaxUnlockNanos uint64
+	BatchLockNanos, BatchUnlockNanos, BatchMaxLockNanos, BatchMaxUnlockNanos             uint64
 }
 
 func (o *Owners) Stats() any {
