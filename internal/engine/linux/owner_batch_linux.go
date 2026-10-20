@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"golang.org/x/sys/unix"
 )
 
@@ -39,17 +40,21 @@ type descriptorBatchResult struct {
 }
 
 type descriptorBatch struct {
-	key        descriptorBatchKey
-	queued     time.Time
-	deadline   time.Time
-	caller     context.Context // non-nil only for caller-owned conflict scans
-	inline     bool
-	registered bool // this job owns a live-map entry until completion/replacement
-	done       chan struct{}
-	completed  time.Time
-	result     descriptorBatchResult // immutable after done closes
-	stage      atomic.Uint32
-	visited    atomic.Int64
+	key                                                   descriptorBatchKey
+	queued                                                time.Time
+	deadline                                              time.Time
+	caller                                                context.Context // non-nil only for caller-owned conflict scans
+	inline                                                bool
+	registered                                            bool // this job owns a live-map entry until completion/replacement
+	done                                                  chan struct{}
+	completed                                             time.Time
+	result                                                descriptorBatchResult // immutable after done closes
+	stage                                                 atomic.Uint32
+	visited                                               atomic.Int64
+	trace                                                 descriptorTrace
+	queueAtEnqueue, inFlightAtEnqueue                     int64
+	startedNS, completedNS, queueAtStart, inFlightAtStart atomic.Int64
+	openedFDPlusOne                                       atomic.Int64
 }
 
 type descriptorBatches struct {
@@ -69,6 +74,9 @@ type descriptorBatches struct {
 	completionNanos, resumeNanos, maxCompletion, maxResume atomic.Uint64
 	lockNanos, unlockNanos, maxLock, maxUnlock             atomic.Uint64
 	lastWait                                               atomic.Pointer[string]
+	active                                                 atomic.Int64
+	failureSequence                                        atomic.Uint64
+	failures                                               [8]atomic.Pointer[descriptorFailure]
 }
 
 type descriptorQueueBusy struct{ ready <-chan struct{} }
@@ -115,6 +123,7 @@ func (o *Owners) descriptorBatch(ctx context.Context, key descriptorBatchKey, re
 	// and independent conflict reads do not need that exclusive lock at all.
 	queued := time.Now()
 	job := &descriptorBatch{key: key, queued: queued, deadline: queued.Add(8 * time.Millisecond), done: make(chan struct{}), inline: inline}
+	job.queueAtEnqueue, job.inFlightAtEnqueue = int64(len(b.jobs)), b.active.Load()
 	if inline {
 		job.caller = ctx
 		if deadline, ok := ctx.Deadline(); ok && deadline.Before(job.deadline) {
@@ -211,6 +220,10 @@ func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
 	b := &o.batches
 	job.stage.Store(1)
 	started := time.Now()
+	job.startedNS.Store(started.UnixNano())
+	job.queueAtStart.Store(int64(len(b.jobs)))
+	job.inFlightAtStart.Store(b.active.Add(1))
+	defer b.active.Add(-1)
 	queued := uint64(started.Sub(job.queued))
 	b.queueNanos.Add(queued)
 	recordLookupMaximum(&b.maxQueue, queued)
@@ -249,6 +262,7 @@ func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
 		recordLookupMaximum(&b.maxUnlock, unlocked)
 	}
 	job.completed = time.Now()
+	job.completedNS.Store(job.completed.UnixNano())
 	completion := uint64(job.completed.Sub(serviced))
 	b.completionNanos.Add(completion)
 	recordLookupMaximum(&b.maxCompletion, completion)
@@ -269,11 +283,16 @@ func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
 	}
 }
 
-func (o *Owners) recordBatchWait(job *descriptorBatch) {
+func (o *Owners) recordBatchWait(ctx context.Context, job *descriptorBatch, row socketRow, requested time.Time) {
 	stage := job.stage.Load()
-	names := []string{"queued", "starting", "opening-proc", "reading-descriptors", "publishing-index", "completing", "done"}
-	message := fmt.Sprintf("stage=%s pid=%d offset=%d limit=%d visited=%d age=%s expired=%t queued=%d inline=%t", names[stage], job.key.pid, job.key.offset, job.key.limit, job.visited.Load(), time.Since(job.queued), time.Now().After(job.deadline), len(o.batches.jobs), job.inline)
+	message := fmt.Sprintf("stage=%s pid=%d offset=%d limit=%d visited=%d age=%s expired=%t queued=%d inline=%t", descriptorStage(stage), job.key.pid, job.key.offset, job.key.limit, job.visited.Load(), time.Since(job.queued), time.Now().After(job.deadline), len(o.batches.jobs), job.inline)
 	o.batches.lastWait.Store(&message)
+	failure := &descriptorFailure{job: job, target: platform.Tuple{Source: row.local, Destination: row.remote}, requested: requested.UnixNano(), failed: time.Now().UnixNano(), stage: stage}
+	if deadline, ok := ctx.Deadline(); ok {
+		failure.lookupDeadline = deadline.UnixNano()
+	}
+	sequence := o.batches.failureSequence.Add(1)
+	o.batches.failures[(sequence-1)%uint64(len(o.batches.failures))].Store(failure)
 }
 
 func (b *descriptorBatches) resumed(job *descriptorBatch, waiting time.Time) {
@@ -295,14 +314,23 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		return out
 	}
 	job.stage.Store(2)
+	read := job.trace.begin(-3)
 	f, err := openProcDescriptors(fmt.Sprintf("/proc/%d/fd", k.pid))
+	job.trace.end(read)
+	if err == nil {
+		job.openedFDPlusOne.Store(int64(f.fd) + 1)
+	}
 	if err != nil {
 		out.err = err
 		return out
 	}
-	defer f.Close()
+	defer func() { job.stage.Store(8); f.Close() }()
+	f.trace = &job.trace
 	var metadata unix.Stat_t
-	if err := statKernelFile(f.fd, f.direct, &metadata); err != nil {
+	read = job.trace.begin(-4)
+	err = statKernelFile(f.fd, f.direct, &metadata)
+	job.trace.end(read)
+	if err != nil {
 		out.err = err
 		return out
 	}
@@ -310,7 +338,10 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		out.err = unix.ESTALE
 		return out
 	}
-	if _, err := f.Seek(k.offset, 0); err != nil {
+	read = job.trace.begin(-5)
+	_, err = f.Seek(k.offset, 0)
+	job.trace.end(read)
+	if err != nil {
 		out.err = err
 		return out
 	}
@@ -325,7 +356,9 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 			return true
 		}
 		out.lastFD = max(out.lastFD, int64(fd))
+		read := job.trace.begin(int64(fd))
 		inode, ok := socketInodeAt(f.fd, string(name))
+		job.trace.end(read)
 		if !ok {
 			return true
 		}
@@ -348,6 +381,7 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 	}
 	o.batches.fds.Add(uint64(out.count))
 	o.batches.sockets.Add(uint64(len(out.sockets)))
+	job.stage.Store(7)
 	o.mu.Lock()
 	if current := o.windows[k.pid]; current.directory == k.directory && current.start == k.start {
 		current.extent = max(current.extent, out.lastFD)

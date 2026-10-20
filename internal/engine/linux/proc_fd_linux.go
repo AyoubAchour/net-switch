@@ -19,6 +19,7 @@ type procDescriptors struct {
 	direct        bool
 	buffer        *[16 << 10]byte
 	position, end int
+	trace         *descriptorTrace
 }
 
 func openProcDescriptors(path string) (procDescriptors, error) {
@@ -54,7 +55,14 @@ func (d *procDescriptors) Visit(limit int, consume func([]byte) bool) (int, erro
 		return 0, unix.EBADF
 	}
 	if d.buffer == nil && limit > 0 {
+		read := -1
+		if d.trace != nil {
+			read = d.trace.begin(-2)
+		}
 		d.buffer = processBuffers.Get()
+		if d.trace != nil {
+			d.trace.end(read)
+		}
 	}
 	count := 0
 	for count < limit {
@@ -65,7 +73,14 @@ func (d *procDescriptors) Visit(limit int, consume func([]byte) bool) (int, erro
 			size := min(len(d.buffer), (min(limit-count, 512)+2)*32)
 			// procfs temporarily references each target file. Dropping its
 			// last reference can invoke a blocking close, including SO_LINGER.
+			read := -1
+			if d.trace != nil {
+				read = d.trace.begin(-1)
+			}
 			n, err := unix.ReadDirent(d.fd, d.buffer[:size])
+			if d.trace != nil {
+				d.trace.end(read)
+			}
 			if err == unix.EINTR {
 				continue
 			}

@@ -56,7 +56,7 @@ func (e *Env) checkLoadIdentity(ok bool, format string, args ...any) bool {
 // inspect the production flow snapshot. Their count, connection deadline,
 // sequential admission and required server responses stay unchanged. There is
 // no retry or inferred identity based on the line that happened to answer.
-func (e *Env) expectLoadTCP(label, name string, user User, want engine.LineID, dst netip.Addr, n int) app.TCPResult {
+func (e *Env) expectLoadTCP(label, name string, user User, want engine.LineID, dst netip.Addr, n int, burstEnd ...int64) app.TCPResult {
 	release := e.NewRelease(fmt.Sprintf("tcp-probe-%d", e.ports(n)))
 	bg := e.Start(Run{App: name, User: user, Args: append([]string{"tcphold", "--to", To(dst, wire.PortStream), "--count", strconv.Itoa(n), "--concurrency", "1", "--timeout", "5000", "--probe", "--tuples"}, release.Arg()...)})
 	var held app.HeldList
@@ -81,6 +81,16 @@ func (e *Env) expectLoadTCP(label, name string, user User, want engine.LineID, d
 	for i, c := range held.Conns {
 		f, present := byTuple[c.Local+" "+c.Remote]
 		line, identified, err := loadFlowLine(f, AppPath(name), bg.Pid(), want)
+		index := c.Index
+		if index == 0 {
+			index = i + 1
+		}
+		afterBurst := int64(-1)
+		if len(burstEnd) == 1 {
+			afterBurst = c.StartedNS - burstEnd[0]
+			e.T.Check(c.StartedNS > 0 && c.ConnectedNS >= c.StartedNS, "%s probe %d has client start/connection timestamps", label, index)
+		}
+		e.T.Logf("PROBE %s index=%d local=%s remote=%s identified=%t started-ns=%d connected-ns=%d after-burst-ns=%d", label, index, c.Local, c.Remote, identified, c.StartedNS, c.ConnectedNS, afterBurst)
 		if !present || err != nil || topo.LineOfText(c.Seen) != line {
 			invalid++
 			e.T.Logf("%s probe %s: listed=%t identity/route=%v server=%s required=%s", label, c.Local, present, err, c.Seen, line)
@@ -94,6 +104,12 @@ func (e *Env) expectLoadTCP(label, name string, user User, want engine.LineID, d
 	}
 	e.T.Check(invalid == 0, "%s: every identified probe uses %s and every explicit unknown uses main, verified against its own server reply (%d invalid)", label, want, invalid)
 	e.checkLoadIdentity(known == n, "%s: all %d probe owners are identified (%d identified, %d unknown); original all-on-%s check would pass: %t", label, n, known, len(held.Conns)-known, want, held.Established == n && Lines(seen)[want] == n)
+	if known != n {
+		if v1, ok := e.Eng.(engine.V1); ok {
+			st := stats(e, v1.Session())
+			e.T.Logf("PROBE SCAN DETAILS %s: %s", label, st.OwnerLookup)
+		}
+	}
 	release.Open(e)
 	var result app.HoldResult
 	bg.WaitJSON(e, time.Minute, &result)
@@ -113,9 +129,9 @@ func (e *Env) withSteadyAttribution(check func()) {
 	check()
 }
 
-func (e *Env) expectSteadyTCP(label, name string, want engine.LineID, dst netip.Addr, count int) {
+func (e *Env) expectSteadyTCP(label, name string, want engine.LineID, dst netip.Addr, count int, burstEnd ...int64) {
 	e.withSteadyAttribution(func() {
-		e.expectLoadTCP(label, name, AsUser, want, dst, count)
+		e.expectLoadTCP(label, name, AsUser, want, dst, count, burstEnd...)
 	})
 }
 

@@ -863,6 +863,9 @@ func timeWaitCap(e *Env) {
 	e.T.Require(err == nil, "stats (%v)", err)
 	peak = max(peak, after.TimeWait)
 	e.T.Check(r.OK == n, "all %d connections succeeded: TIME_WAIT never refuses a new one (%d, errors %v)", n, r.OK, r.Errors)
+	e.T.Require(r.CompletedNS > 0, "burst completion timestamp comes from the client")
+	e.T.Logf("TIMEWAIT BURST completed-ns=%d", r.CompletedNS)
+	e.T.Logf("TIMEWAIT BEFORE PROBES owner-state=%s", after.OwnerLookup)
 	e.T.Check(peak <= timeWaitLimit && peak >= timeWaitLimit*95/100, "TIME_WAIT filled its own cap of %d and never went over it (most %d)", timeWaitLimit, peak)
 	skipped := after.TimeWaitSkipped - before.TimeWaitSkipped
 	e.T.Check(skipped >= uint64(n-timeWaitLimit)*9/10, "closings past the cap skipped TIME_WAIT, counted (%d skipped)", skipped)
@@ -880,6 +883,6 @@ func timeWaitCap(e *Env) {
 		cancel()
 		e.T.Require(err == nil, "start optional post-burst scheduler trace (%v)", err)
 	}
-	e.expectSteadyTCP("alpha's new connections with TIME_WAIT full", "alpha", "a", topo.Server4, 50)
-	e.expectSteadyTCP("bravo's new connections with TIME_WAIT full", "bravo", "b", topo.Server4, 10)
+	e.expectSteadyTCP("alpha's new connections with TIME_WAIT full", "alpha", "a", topo.Server4, 50, r.CompletedNS)
+	e.expectSteadyTCP("bravo's new connections with TIME_WAIT full", "bravo", "b", topo.Server4, 10, r.CompletedNS)
 }

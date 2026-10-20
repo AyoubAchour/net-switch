@@ -35,6 +35,10 @@ func requireFailure(t *testing.T, report *harness.Report, message string) {
 func TestCapacityShortfallNeedsCompleteRefusalEvidence(t *testing.T) {
 	for _, protocol := range []string{"tcp", "udp"} {
 		for _, scope := range []capacityScope{capacityTotal, capacityPerApp} {
+			outboundFailure := "no outbound TCP dial failed"
+			if protocol == "udp" {
+				outboundFailure = "no native UDP open failed"
+			}
 			for _, test := range []struct {
 				name, failure string
 				edit          func(*engine.Stats, *flows.Refusals, *int)
@@ -58,6 +62,13 @@ func TestCapacityShortfallNeedsCompleteRefusalEvidence(t *testing.T) {
 				{"handshake refusal", "every refusal decision", func(_ *engine.Stats, r *flows.Refusals, _ *int) { r.Handshakes++ }},
 				{"unexplained refusal", "every refusal decision", func(_ *engine.Stats, r *flows.Refusals, _ *int) { r.Unexplained++ }},
 				{"lost admitted flow", "every admitted flow", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.Admitted++ }},
+				{"outbound failure", outboundFailure, func(s *engine.Stats, _ *flows.Refusals, _ *int) {
+					if protocol == "udp" {
+						s.Counters["udpOpenFailed"] = 1
+					} else {
+						s.Counters["tcpDialFailed"] = 1
+					}
+				}},
 				{"phantom flow", "engine flow delta", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.Flows++ }},
 				{"lost client attempt", "every offered attempt", func(_ *engine.Stats, _ *flows.Refusals, r *int) { *r-- }},
 				{"missing forwarding decision", "every refusal decision", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.Counters[protocol+"Rejected"]++ }},
@@ -68,10 +79,13 @@ func TestCapacityShortfallNeedsCompleteRefusalEvidence(t *testing.T) {
 					s.PeakUDPPerApp = 0
 				}},
 				{"unclassified miss", "every missed lookup", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.LookupMisses++ }},
+				{"no observed unknown cap", "matching engine peak", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.PeakUnknown = 0; s.PeakUnknownUDP = 0 }},
 				{"heap exceeded", "forced-GC live heap", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.Counters["forcedGCHeapBytes"] = liveHeapLimit + 1 }},
 				{"heap missing", "forced-GC live heap", func(s *engine.Stats, _ *flows.Refusals, _ *int) { delete(s.Counters, "forcedGCHeapBytes") }},
 				{"managed above old limit", "", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.Counters["runtimeBytes"] = 600 << 20 }},
 				{"pool exceeded", "never exceed their caps", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.PeakUnknown = 2049 }},
+				{"per-app cap exceeded", "never exceed their caps", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.PeakPerApp = 8193 }},
+				{"total cap exceeded", "never exceed their caps", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.PeakFlows = 65537 }},
 			} {
 				t.Run(protocol+"/"+string(rune('0'+scope))+"/"+test.name, func(t *testing.T) {
 					s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, PeakFlows: tcpFlowsTotal, PeakUDP: udpSessionsTotal, PeakPerApp: tcpFlowsPerApp, PeakUDPPerApp: udpSessionsPerApp, PeakUnknown: 2048, PeakUnknownUDP: 512, Counters: map[string]uint64{protocol + "Rejected": 60, "forcedGCHeapBytes": 400 << 20, "runtimeBytes": 400 << 20}}

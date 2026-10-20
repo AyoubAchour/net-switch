@@ -41,16 +41,17 @@ type Attempt struct {
 
 // TCPResult is the tcp mode's answer.
 type TCPResult struct {
-	Count     int            `json:"count"`
-	OK        int            `json:"ok"`
-	Errors    map[string]int `json:"errors"`
-	Seen      map[string]int `json:"seen"`
-	Connect   Stats          `json:"connectMs"`
-	Total     Stats          `json:"totalMs"`
-	FailedMS  Stats          `json:"failedMs"`
-	WallMS    float64        `json:"wallMs"`
-	Attempts  []Attempt      `json:"attempts"`
-	StartedAt int64          `json:"startedAt"`
+	Count       int            `json:"count"`
+	OK          int            `json:"ok"`
+	Errors      map[string]int `json:"errors"`
+	Seen        map[string]int `json:"seen"`
+	Connect     Stats          `json:"connectMs"`
+	Total       Stats          `json:"totalMs"`
+	FailedMS    Stats          `json:"failedMs"`
+	WallMS      float64        `json:"wallMs"`
+	Attempts    []Attempt      `json:"attempts"`
+	StartedAt   int64          `json:"startedAt"`
+	CompletedNS int64          `json:"completedNs,omitempty"`
 }
 
 func whoamiOnce(i int, to netip.AddrPort, local netip.AddrPort, dev string, timeout time.Duration) Attempt {
@@ -172,7 +173,10 @@ func runTCP(args []string) (any, error) {
 		}()
 	}
 	wg.Wait()
-	return summariseAttempts(attempts, time.Since(started), started.UnixMilli()), nil
+	completed := time.Now()
+	result := summariseAttempts(attempts, completed.Sub(started), started.UnixMilli())
+	result.CompletedNS = completed.UnixNano()
+	return result, nil
 }
 
 // HoldResult is the tcphold mode's answer.
@@ -194,9 +198,12 @@ type HoldResult struct {
 
 // Held is one held connection as the app sees it.
 type Held struct {
-	Local  string `json:"local"`
-	Remote string `json:"remote"`
-	Seen   string `json:"seen,omitempty"` // stream server's source observation, with --probe
+	Local       string `json:"local"`
+	Remote      string `json:"remote"`
+	Seen        string `json:"seen,omitempty"`  // stream server's source observation, with --probe
+	Index       int    `json:"index,omitempty"` // one-based original offer index
+	StartedNS   int64  `json:"startedNs,omitempty"`
+	ConnectedNS int64  `json:"connectedNs,omitempty"`
 }
 
 // HeldList is tcphold's "held {...}" line, with --tuples.
@@ -232,9 +239,9 @@ func runTCPHold(args []string) (any, error) {
 	r := HoldResult{Count: *count, Errors: map[string]int{}, WindowMS: *window}
 	var mu sync.Mutex
 	var conns []net.Conn
-	var observed map[net.Conn]string
-	if *probe {
-		observed = map[net.Conn]string{}
+	var observed map[net.Conn]Held
+	if *probe || *tuples {
+		observed = map[net.Conn]Held{}
 	}
 	var connect, failed []float64
 	var next atomic.Int64
@@ -250,6 +257,7 @@ func runTCPHold(args []string) (any, error) {
 				}
 				start := time.Now()
 				conn, err := net.DialTimeout("tcp", list[i%len(list)].String(), time.Duration(*timeout)*time.Millisecond)
+				connected := time.Now()
 				ms := msSince(start)
 				seen := ""
 				if err == nil && *probe {
@@ -278,8 +286,8 @@ func runTCPHold(args []string) (any, error) {
 					failed = append(failed, msSince(start))
 				} else {
 					conns = append(conns, conn)
-					if *probe {
-						observed[conn] = seen
+					if *probe || *tuples {
+						observed[conn] = Held{Local: addrString(conn.LocalAddr()), Remote: addrString(conn.RemoteAddr()), Seen: seen, Index: i + 1, StartedNS: start.UnixNano(), ConnectedNS: connected.UnixNano()}
 					}
 					connect = append(connect, ms)
 				}
@@ -302,7 +310,7 @@ func runTCPHold(args []string) (any, error) {
 	if *tuples {
 		list := HeldList{Established: len(conns), Conns: make([]Held, 0, len(conns)), Errors: r.Errors, FailedMS: r.FailedMS}
 		for _, conn := range conns {
-			list.Conns = append(list.Conns, Held{Local: addrString(conn.LocalAddr()), Remote: addrString(conn.RemoteAddr()), Seen: observed[conn]})
+			list.Conns = append(list.Conns, observed[conn])
 		}
 		line, err := json.Marshal(list)
 		if err != nil {

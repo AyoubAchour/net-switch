@@ -90,6 +90,9 @@ func TestFailedUDPSetupRetiresBeforeRefusalAndBoundsNegativeCache(t *testing.T) 
 	if n.OpenFailed.Load() != RejectCacheEntries*2 {
 		t.Fatal("fixture did not execute every native open failure")
 	}
+	if c.Stats().RefusedUDP.Unexplained != RejectCacheEntries*2 || n.Rejected.Load() != RejectCacheEntries*2 {
+		t.Fatal("native setup refusals were missing or mislabeled as cap refusals")
+	}
 	if got := runtime.NumGoroutine(); got > baseline+8 {
 		t.Fatalf("parked failure goroutines: baseline=%d now=%d", baseline, got)
 	}

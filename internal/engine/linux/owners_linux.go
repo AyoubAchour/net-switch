@@ -86,6 +86,9 @@ type lookupStats struct {
 	CgroupHints, CgroupResolved, CgroupPopulated                                         uint64
 	LastError                                                                            string
 	LastBatchWait                                                                        string
+	FailedScans                                                                          []descriptorScanSnapshot
+	FDTableSize                                                                          int
+	FDTableSizeError                                                                     string
 	MetadataRejected                                                                     uint64
 	LastMetadataError                                                                    string
 	SharedScans                                                                          uint64
@@ -104,6 +107,11 @@ type lookupStats struct {
 
 func (o *Owners) Stats() any {
 	s := lookupStats{Backend: "proc-fallback", Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
+	if size, err := descriptorTableSize(); err == nil {
+		s.FDTableSize = size
+	} else {
+		s.FDTableSizeError = err.Error()
+	}
 	s.CgroupHints, s.CgroupResolved, s.CgroupPopulated = o.cgroupStats[0].Load(), o.cgroupStats[1].Load(), o.cgroupStats[2].Load()
 	s.MetadataRejected = rejectedMetadata.Load()
 	s.SharedScans = o.sharedScans.Load()
@@ -138,6 +146,11 @@ func (o *Owners) Stats() any {
 	}
 	if p := o.batches.lastWait.Load(); p != nil {
 		s.LastBatchWait = *p
+	}
+	for i := range o.batches.failures {
+		if f := o.batches.failures[i].Load(); f != nil {
+			s.FailedScans = append(s.FailedScans, f.snapshot())
+		}
 	}
 	return s
 }
@@ -956,6 +969,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 							}
 						}
 						if !matched && (errors.Is(out.err, context.DeadlineExceeded) || errors.Is(out.err, context.Canceled)) {
+							o.recordBatchWait(ctx, job, r, requested)
 							continue acquire
 						}
 						// A window begun before this request can supply a live
@@ -970,7 +984,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 						}
 						return out.count, out.err
 					case <-ctx.Done():
-						o.recordBatchWait(job)
+						o.recordBatchWait(ctx, job, r, requested)
 						select {
 						case <-job.done:
 							o.batches.resumed(job, waiting)

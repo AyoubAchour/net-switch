@@ -226,6 +226,7 @@ type ticket struct {
 	cancel                                             context.CancelFunc
 	accountClosed, retired, timeWait, timeWaitReserved bool
 	closingOverflow, resolved, closed, handshake       bool
+	setupRefused                                       bool
 }
 
 // Wire snapshots carry counters and a time.Time, but live tickets already

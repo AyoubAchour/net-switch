@@ -261,6 +261,7 @@ jobs:
             find "$RUNNER_TEMP/acceptance" -name 'cpu.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodecount=35 "$RUNNER_TEMP/netswitch-engine" {} \;
             find "$RUNNER_TEMP/acceptance" \( -name 'block*.pprof' -o -name 'mutex*.pprof' \) -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodefraction=0 -focus='Owners' -nodecount=20 "$RUNNER_TEMP/netswitch-engine" {} \;
             find "$RUNNER_TEMP/acceptance" -name 'runtime*.trace' -print0 | while IFS= read -r -d '' trace; do
+              echo "trace window: $trace"
               for kind in sched syscall; do
                 sudo "$(command -v go)" tool trace -pprof="$kind" "$trace" | node scripts/profile-summary.mjs "$kind"
               done

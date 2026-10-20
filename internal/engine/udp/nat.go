@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -87,6 +88,7 @@ type NAT struct {
 	Invalid, Dropped, Rejected, IdentityErrors, Oversize, ReadErrors atomic.Uint64
 	PeakQueuePackets, PeakQueueBytes                                 atomic.Uint64
 	OpenFailed                                                       atomic.Uint64
+	GenerationMissing                                                atomic.Uint64
 }
 
 func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.DatagramOutput, mtu int) *NAT {
@@ -385,7 +387,11 @@ func (s *session) run() {
 	// No generation means we cannot prove this socket is still the same one.
 	if owner.Generation == "" {
 		n.IdentityErrors.Add(1)
-		s.rejectPending(owner.AppID)
+		n.GenerationMissing.Add(1)
+		if reporter, ok := n.control.(interface{ Emit(flowapi.Event) }); ok {
+			reporter.Emit(flowapi.Event{Type: "log", Message: fmt.Sprintf("UDP setup has no socket generation: source=%s lookup=%v", s.source, err)})
+		}
+		s.refuseSetup(owner.AppID)
 		return
 	}
 	decision, err := s.ticket.Resolve(owner)
@@ -414,7 +420,7 @@ func (s *session) run() {
 		if observer, ok := n.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil {
 			observer.LineError(decision.Line, err)
 		}
-		s.rejectPending(owner.AppID)
+		s.refuseSetup(owner.AppID)
 		return
 	}
 	s.mu.Lock()
@@ -527,6 +533,14 @@ func (s *session) rejectPending(app string) {
 	s.n.control.ReleasePending(s.bytes)
 	s.bytes = 0
 	s.queue = nil
+}
+
+func (s *session) refuseSetup(app string) {
+	s.n.Rejected.Add(1)
+	if ticket, ok := s.ticket.(interface{ RefuseSetup() }); ok {
+		ticket.RefuseSetup()
+	}
+	s.rejectPending(app)
 }
 
 func (s *session) read(ctx context.Context) {
