@@ -7,26 +7,33 @@ export async function startEngineDriver(options, dataDir, output) {
   const child = spawn(options.server, [options.entry, options.engine, dataDir], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
-  child.stdout.on('data', output); child.stderr.on('data', output);
-  let serial = 0, ready = false, spawnError;
+  let tail = '';
+  const capture = (chunk) => { tail = (tail + chunk.toString()).slice(-8192); output(chunk); };
+  child.stdout.on('data', capture); child.stderr.on('data', capture);
+  let serial = 0, resolveReady, rejectReady;
+  const started = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const exited = () => new Error(`Harness controller exited ${child.exitCode ?? child.signalCode}\n${tail}`);
+  const startupTimer = setTimeout(() => rejectReady(new Error(`Authenticated engine/controller startup deadline\n${tail}`)), 90_000);
   const pending = new Map();
-  child.on('error', (error) => { spawnError = error; });
+  child.on('error', rejectReady);
   child.on('message', (message) => {
-    if (message.ready) { ready = true; return; }
+    if (message.ready) { resolveReady(); return; }
     const item = pending.get(message.id);
     if (!item) return;
     pending.delete(message.id); clearTimeout(item.timer);
     if (message.error) item.reject(new Error(message.error)); else item.resolve(message.result);
   });
   child.on('exit', () => {
-    for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error('Harness controller exited')); }
+    rejectReady(exited());
+    for (const item of pending.values()) { clearTimeout(item.timer); item.reject(exited()); }
     pending.clear();
   });
-  await until(() => {
-    if (spawnError) throw spawnError;
-    assert(child.exitCode === null && child.signalCode === null, `Harness controller exited ${child.exitCode ?? child.signalCode}`);
-    return ready;
-  }, 'authenticated real engine and harness controller', 90_000);
+  // A dead controller cannot become ready. Preserve its native error and stop
+  // immediately instead of letting the generic transient-condition poller
+  // swallow the exit for another 90 seconds.
+  try { await started; }
+  catch (error) { child.kill(); throw error; }
+  finally { clearTimeout(startupTimer); }
   const api = (route, body) => new Promise((resolve, reject) => {
     const id = ++serial;
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Harness action timed out: ${route}`)); }, 90_000);
