@@ -97,6 +97,7 @@ jobs:
           go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
           go build -trimpath -o "$RUNNER_TEMP/netswitch-engine" ./cmd/netswitch-engine
           go build -trimpath -tags acceptance -o "$RUNNER_TEMP/netswitch-engine-faults" ./cmd/netswitch-engine
+          node scripts/engine-notices.mjs "$RUNNER_TEMP/netswitch-engine" --check
           go test -c -o "$RUNNER_TEMP/linux-platform.test" ./internal/engine/linux
       - name: Test Linux kernel interfaces and crash recovery in a private namespace
         run: sudo unshare --net -- env NETSWITCH_ISOLATED_NETNS=1 "$RUNNER_TEMP/linux-platform.test" -test.v

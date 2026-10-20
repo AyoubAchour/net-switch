@@ -88,3 +88,24 @@ func TestKernelReadsRejectSpecialFiles(t *testing.T) {
 		}
 	}
 }
+
+func TestLargeFlatpakEnvironmentKeepsCompleteIdentity(t *testing.T) {
+	root := t.TempDir()
+	identity := []byte("[Application]\nname=org.example.LargeEnvironment\n")
+	data := append(bytes.Clone(identity), []byte("[Environment]\nPAD="+string(bytes.Repeat([]byte{'x'}, 70000)))...)
+	if err := os.WriteFile(filepath.Join(root, ".flatpak-info"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readFlatpakInfo(root, make([]byte, 64<<10))
+	if err != nil || !bytes.Equal(got, identity) {
+		t.Fatalf("bounded identity: %q %v", got, err)
+	}
+	// A name beginning before the boundary but ending after it is not proof.
+	data = append([]byte("[Application]\nname="), bytes.Repeat([]byte{'x'}, 70000)...)
+	if err := os.WriteFile(filepath.Join(root, ".flatpak-info"), data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := readFlatpakInfo(root, make([]byte, 64<<10)); !errors.Is(err, errKernelFileLimit) || len(got) != 0 {
+		t.Fatalf("truncated identity accepted: %d %v", len(got), err)
+	}
+}

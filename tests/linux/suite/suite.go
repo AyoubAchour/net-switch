@@ -70,9 +70,11 @@ type Env struct {
 	cfg    Config
 	engCfg engine.Config
 	// Before is the PC's routing state before the engine first started.
-	Before    topo.Snapshot
-	sharedDir string // SharedDir, once made
-	nextPort  int    // the next source port ports hands out
+	Before                          topo.Snapshot
+	sharedDir                       string // SharedDir, once made
+	nextPort                        int    // the next source port ports hands out
+	ownerFaultStart                 *engine.Stats
+	injectedLookups, injectedMisses uint64
 }
 
 type caseFunc func(e *Env)
@@ -99,11 +101,13 @@ func (r *registry) add(id, title string, label harness.Label, spec string, timeo
 		Run: func(t *harness.T) {
 			e := r.setup(t)
 			fn(e)
-			if strings.HasPrefix(id, "overload.") && id != "overload.unknown-owner-limits" && id != "overload.udp-pending-bytes" {
+			if strings.HasPrefix(id, "overload.") {
 				if v, ok := e.Eng.(engine.V1); ok && v.Session() != nil {
 					st, err := v.Session().Stats(e.Ctx())
 					t.Require(err == nil, "read this overload case's lookup window (%v)", err)
-					t.Check(st.LookupCount > 0 && st.LookupMisses*200 <= st.LookupCount, "this overload window identifies at least 99.5%% of lookups (%d misses of %d)", st.LookupMisses, st.LookupCount)
+					t.Require(e.ownerFaultStart == nil && st.LookupCount >= e.injectedLookups && st.LookupMisses >= e.injectedMisses, "every injected owner-fault window ended and its counters are accounted for")
+					count, misses := st.LookupCount-e.injectedLookups, st.LookupMisses-e.injectedMisses
+					t.Check(count > 0 && misses*200 <= count, "this overload window identifies at least 99.5%% of non-injected lookups (%d misses of %d; deliberately injected %d misses of %d reported separately)", misses, count, e.injectedMisses, e.injectedLookups)
 				}
 			}
 		},

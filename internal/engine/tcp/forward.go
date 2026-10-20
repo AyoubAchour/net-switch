@@ -308,11 +308,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	if ready, ok := remote.(platform.ReadyTCP); ok {
 		stopRemote()
 		stopApp()
-		if err := f.startReadyRelay(ctx, c, &wq, ready, closeEndpoint, cancel); err != nil {
+		if err := f.startReadyRelay(ctx, c, &wq, ready, closeEndpoint); err != nil {
 			abort()
 			close(c.done)
 			return
 		}
+		cancel() // readiness now owns closure; release the setup context tree
 		handedOff = true
 		return
 	}

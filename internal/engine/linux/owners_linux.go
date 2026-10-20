@@ -68,11 +68,17 @@ type lookupStats struct {
 	Timeout, Missing, Ambiguous, Other           uint64
 	CgroupHints, CgroupResolved, CgroupPopulated uint64
 	LastError                                    string
+	MetadataRejected                             uint64
+	LastMetadataError                            string
 }
 
 func (o *Owners) Stats() any {
 	s := lookupStats{Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
 	s.CgroupHints, s.CgroupResolved, s.CgroupPopulated = o.cgroupStats[0].Load(), o.cgroupStats[1].Load(), o.cgroupStats[2].Load()
+	s.MetadataRejected = rejectedMetadata.Load()
+	if p := lastRejectedMetadata.Load(); p != nil {
+		s.LastMetadataError = *p
+	}
 	if p := o.lastLookupError.Load(); p != nil {
 		s.LastError = *p
 	}
@@ -308,6 +314,11 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 	// /app/bin executable paths. It belongs to the holder, never to the socket.
 	flatpak := flatpakBuffers.Get().(*[64 << 10]byte)
 	info, infoErr := readFlatpakInfo(root+"root", flatpak[:])
+	if infoErr != nil && !errors.Is(infoErr, unix.ENOENT) && !errors.Is(infoErr, unix.ESRCH) {
+		rejectedMetadata.Add(1)
+		message := fmt.Sprintf("pid %d Flatpak metadata rejected: %v", pid, infoErr)
+		lastRejectedMetadata.Store(&message)
+	}
 	if b, err := info, infoErr; err == nil {
 		section := ""
 		for _, line := range strings.Split(string(b), "\n") {

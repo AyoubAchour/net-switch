@@ -3,8 +3,11 @@
 package linux
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
@@ -13,6 +16,8 @@ var errKernelFileLimit = errors.New("kernel file exceeds read limit")
 var errNotRegular = errors.New("identity metadata is not a regular file")
 var processBuffers = sync.Pool{New: func() any { return new([16 << 10]byte) }}
 var flatpakBuffers = sync.Pool{New: func() any { return new([64 << 10]byte) }}
+var rejectedMetadata atomic.Uint64
+var lastRejectedMetadata atomic.Pointer[string]
 
 // The process root is deliberately followed once. Nothing below that pinned
 // directory may resolve a symlink, including a procfs magic link. Flatpak bind
@@ -24,14 +29,49 @@ func readFlatpakInfo(root string, b []byte) ([]byte, error) {
 	}
 	defer unix.Close(dir)
 	fd, err := unix.Openat2(dir, ".flatpak-info", &unix.OpenHow{
-		Flags:   unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NONBLOCK | unix.O_NOFOLLOW,
+		Flags:   unix.O_PATH | unix.O_CLOEXEC | unix.O_NOFOLLOW,
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
 	})
 	if err != nil {
 		return nil, err
 	}
 	defer unix.Close(fd)
-	return readRegularInto(fd, b)
+	// O_RDONLY would invoke a bind-mounted device's open handler before
+	// fstat could reject it. O_PATH pins the inode without opening the device.
+	if err := regularFile(fd, -1); err != nil {
+		return nil, err
+	}
+	// This sole intentional magic-link reopen belongs to this engine, not
+	// the target process. fd remains open, so rename/mount races cannot swap
+	// its inode. NONBLOCK applies here; NOFOLLOW would reject our own fd link.
+	readFD, err := unix.Open(fmt.Sprintf("/proc/self/fd/%d", fd), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(readFD)
+	data, err := readBounded(readFD, b)
+	if errors.Is(err, errKernelFileLimit) {
+		// Flatpak serializes environment overrides and arguments after its
+		// identity. A complete name line within the bound is sufficient;
+		// never interpret a line cut off at the cap as an application ID.
+		section, offset := false, 0
+		for offset < len(data) {
+			end := bytes.IndexByte(data[offset:], '\n')
+			if end < 0 {
+				break
+			}
+			line := bytes.TrimSpace(data[offset : offset+end])
+			offset += end + 1
+			if bytes.HasPrefix(line, []byte("[")) {
+				section = bytes.Equal(line, []byte("[Application]"))
+			}
+			if section && bytes.HasPrefix(line, []byte("name=")) && len(line) > 5 {
+				return data[:offset], nil
+			}
+		}
+		return nil, err
+	}
+	return data, err
 }
 
 func regularFile(fd int, limit int) error {
@@ -42,7 +82,7 @@ func regularFile(fd int, limit int) error {
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return errNotRegular
 	}
-	if st.Size > int64(limit) {
+	if limit >= 0 && st.Size > int64(limit) {
 		return errKernelFileLimit
 	}
 	return nil
@@ -63,6 +103,10 @@ func readRegularInto(fd int, b []byte) ([]byte, error) {
 	if err := regularFile(fd, len(b)); err != nil {
 		return nil, err
 	}
+	return readBounded(fd, b)
+}
+
+func readBounded(fd int, b []byte) ([]byte, error) {
 	n := 0
 	for n < len(b) {
 		got, err := unix.Read(fd, b[n:])
@@ -89,7 +133,7 @@ func readRegularInto(fd int, b []byte) ([]byte, error) {
 		if got == 0 {
 			return b[:n], nil
 		}
-		return nil, errKernelFileLimit
+		return b[:n], errKernelFileLimit
 	}
 }
 

@@ -36,6 +36,7 @@ type readyRelay struct {
 	next                           *readyRelay
 	initializing, scheduled, again bool // workers.mu
 	closed                         atomic.Bool
+	cancelled                      atomic.Bool
 	ctx                            context.Context
 	c                              *connection
 	remote                         platform.ReadyTCP
@@ -43,7 +44,6 @@ type readyRelay struct {
 	wq                             *waiter.Queue
 	entry                          waiter.Entry
 	up, down                       relayDirection
-	stopCancel                     func() bool
 	finish                         func()
 }
 
@@ -121,8 +121,9 @@ func (w *relayWorkers) run() {
 
 func (w *relayWorkers) close() { close(w.stop); w.wg.Wait() }
 
-func (f *Forwarder) startReadyRelay(ctx context.Context, c *connection, wq *waiter.Queue, remote platform.ReadyTCP, closeApp func(), cancel context.CancelFunc) error {
-	r := &readyRelay{workers: f.relays, initializing: true, ctx: ctx, c: c, remote: remote, wq: wq}
+func (f *Forwarder) startReadyRelay(ctx context.Context, c *connection, wq *waiter.Queue, remote platform.ReadyTCP, closeApp func()) error {
+	r := &readyRelay{workers: f.relays, initializing: true, ctx: f.ctx, c: c, remote: remote, wq: wq}
+	r.cancelled.Store(ctx.Err() != nil)
 	watch, err := remote.Watch(r.notify)
 	if err != nil {
 		return err
@@ -135,11 +136,14 @@ func (f *Forwarder) startReadyRelay(ctx context.Context, c *connection, wq *wait
 		remote.Close()
 		closeApp()
 		c.releaseAdmission()
-		cancel()
 		close(c.done)
 		f.wg.Done()
 	}
-	r.stopCancel = context.AfterFunc(ctx, r.notify)
+	// Once setup is finished, closure is an atomic flag and a work item.
+	// Keep no per-flow cancellation context or AfterFunc: cancelling 65,536
+	// children must not create 65,536 temporary cleanup goroutines either.
+	c.ticket.SetCancel(r.cancel)
+	c.ready.Store(r)
 	f.relays.mu.Lock()
 	r.initializing = false
 	f.relays.mu.Unlock()
@@ -147,11 +151,12 @@ func (f *Forwarder) startReadyRelay(ctx context.Context, c *connection, wq *wait
 	return nil
 }
 
+func (r *readyRelay) cancel() { r.cancelled.Store(true); r.notify() }
+
 func (r *readyRelay) close(abort bool) {
 	if r.closed.Swap(true) {
 		return
 	}
-	r.stopCancel()
 	r.watch.Detach()
 	r.wq.EventUnregister(&r.entry)
 	if abort {
@@ -274,7 +279,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool) (bool, error) {
 }
 
 func (r *readyRelay) step() {
-	if r.ctx.Err() != nil {
+	if r.cancelled.Load() || r.ctx.Err() != nil {
 		r.close(true)
 		return
 	}
