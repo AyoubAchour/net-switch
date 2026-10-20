@@ -23,7 +23,10 @@ type Diagnostic struct {
 	Retransmits, FastRetransmits, RTOs                    uint64
 	ReceiveBufferDrops, SegmentQueueDrops, ChecksumErrors uint64
 	MalformedPackets, ClosedReceiver, ZeroReceiveWindow   uint64
-	SendFailures, NoRoute, ReadErrors, WriteErrors        uint64
+	SendFailures, NoRoute, ReadErrors                     uint64
+	// gVisor's WriteClosed counter includes ErrWouldBlock: these rejected
+	// attempts are normal backpressure too, not evidence of dropped bytes.
+	WriteAttemptsRejected, WriteInvalidState, WriteInvalidArgs uint64
 }
 
 // Diagnostics takes a bounded snapshot without holding the admission lock
@@ -59,10 +62,11 @@ func (f *Forwarder) Diagnostics(limit int) ([]Diagnostic, int) {
 			ReceiveBufferDrops: s.ReceiveErrors.ReceiveBufferOverflow.Value(), SegmentQueueDrops: s.ReceiveErrors.SegmentQueueDropped.Value(),
 			ChecksumErrors: s.ReceiveErrors.ChecksumErrors.Value(), MalformedPackets: s.ReceiveErrors.MalformedPacketsReceived.Value(),
 			ClosedReceiver: s.ReceiveErrors.ClosedReceiver.Value(), ZeroReceiveWindow: s.ReceiveErrors.ZeroRcvWindowState.Value(),
-			SendFailures: s.SendErrors.SendToNetworkFailed.Value() + s.SendErrors.SegmentSendToNetworkFailed.Value() + s.SendErrors.SynSendToNetworkFailed.Value(),
-			NoRoute:      s.SendErrors.NoRoute.Value(),
-			ReadErrors:   s.ReadErrors.ReadClosed.Value() + s.ReadErrors.InvalidEndpointState.Value() + s.ReadErrors.NotConnected.Value(),
-			WriteErrors:  s.WriteErrors.WriteClosed.Value() + s.WriteErrors.InvalidEndpointState.Value() + s.WriteErrors.InvalidArgs.Value(),
+			SendFailures:          s.SendErrors.SendToNetworkFailed.Value() + s.SendErrors.SegmentSendToNetworkFailed.Value() + s.SendErrors.SynSendToNetworkFailed.Value(),
+			NoRoute:               s.SendErrors.NoRoute.Value(),
+			ReadErrors:            s.ReadErrors.ReadClosed.Value() + s.ReadErrors.InvalidEndpointState.Value() + s.ReadErrors.NotConnected.Value(),
+			WriteAttemptsRejected: s.WriteErrors.WriteClosed.Value(),
+			WriteInvalidState:     s.WriteErrors.InvalidEndpointState.Value(), WriteInvalidArgs: s.WriteErrors.InvalidArgs.Value(),
 		}
 		d.ReceiveGrant, d.SendGrant = c.ticket.Buffers()
 		if ep, ok := c.ep.(interface{ BufferUsage() (int, int) }); ok {

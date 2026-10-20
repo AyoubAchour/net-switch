@@ -36,6 +36,9 @@ Both buffer cases write `tcp-loss.jsonl` alongside their case log:
   buffer usage and grants, RTT/RTO and congestion state. Snapshots add no
   persistent per-flow memory or idle workers. Above 128 endpoints the stats
   response reports an omitted count instead of walking the full flow cap.
+  `WriteAttemptsRejected` includes ordinary would-block backpressure: gVisor
+  increments its `WriteClosed` counter for any failed writability check. It is
+  not a packet-drop counter; invalid-state/argument counters remain separate.
 - The app tuple and native socket's local address join the app result, the
   engine endpoint and the kernel socket records. All 64 held downloads must
   have an engine snapshot; missing topology observations are hard failures.
