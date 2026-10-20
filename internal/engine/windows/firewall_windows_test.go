@@ -3,10 +3,51 @@
 package winengine
 
 import (
+	"errors"
 	"maps"
 	"testing"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
+
+func TestWFPStatusUsesDocumentedDWORD(t *testing.T) {
+	for _, code := range []windows.Handle{windows.FWP_E_FILTER_NOT_FOUND, windows.FWP_E_SUBLAYER_NOT_FOUND} {
+		for _, raw := range []uintptr{uintptr(code), uintptr(code) | 0xffffffff00000000} {
+			err := wfpStatus("test", raw)
+			if !wfpMissing(err) || !errors.Is(err, windows.Errno(code)) {
+				t.Fatalf("native status 0x%x did not preserve the missing-object code: %v", raw, err)
+			}
+		}
+	}
+	if wfpStatus("test", 0) != nil {
+		t.Fatal("success returned an error")
+	}
+	if wfpMissing(wfpStatus("test", uintptr(windows.ERROR_ACCESS_DENIED))) {
+		t.Fatal("access denial was mistaken for an absent filter")
+	}
+}
+
+func TestWFPNativeMissingObjects(t *testing.T) {
+	hosted(t)
+	h, err := openWFP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wfpCall("FwpmEngineClose0", uintptr(h))
+	key, err := windows.GenerateGUID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []string{"FwpmSubLayerGetByKey0", "FwpmFilterGetByKey0"} {
+		var row unsafe.Pointer
+		err := wfpCall(operation, uintptr(h), uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(&row)))
+		if !wfpMissing(err) || row != nil {
+			t.Fatalf("%s: expected an absent random GUID without an object: %p %v", operation, row, err)
+		}
+		t.Logf("native absent-object status: %v", err)
+	}
+}
 
 func TestWFPDocumentedLayouts(t *testing.T) {
 	if unsafe.Sizeof(wfpValue{}) != 16 || unsafe.Sizeof(wfpCondition{}) != 40 ||
