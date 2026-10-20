@@ -8,10 +8,12 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"golang.org/x/sys/unix"
 )
 
 func TestCompletedSmallScanDoesNotHideLaterSocket(t *testing.T) {
@@ -91,5 +93,46 @@ func TestOwnerIndexPublicationDoesNotWaitForUnrelatedShard(t *testing.T) {
 	}
 	if got := o.indexed(second); got.first != want {
 		t.Fatalf("published holder: %+v, want %+v", got.first, want)
+	}
+}
+
+func TestRelativeSocketInodeUsesTheLiveProcDescriptor(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fd int
+	var st unix.Stat_t
+	var statErr error
+	if err := raw.Control(func(value uintptr) { fd = int(value); statErr = unix.Fstat(fd, &st) }); err != nil || statErr != nil {
+		t.Fatalf("read socket inode: %v %v", err, statErr)
+	}
+	dir, err := os.Open("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	name := strconv.Itoa(fd)
+	for _, location := range []struct {
+		dir  int
+		name string
+	}{{int(dir.Fd()), name}, {unix.AT_FDCWD, "/proc/self/fd/" + name}} {
+		if inode, ok := socketInodeAt(location.dir, location.name); !ok || uint64(inode) != st.Ino {
+			t.Fatalf("live descriptor lookup: %d %t, want %d", inode, ok, st.Ino)
+		}
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := socketInodeAt(int(dir.Fd()), name); ok {
+		t.Fatal("closed descriptor remained a socket hint")
+	}
+	if _, ok := socketInodeAt(int(dir.Fd()), "../exe"); ok {
+		t.Fatal("relative scan accepted a non-numeric entry")
 	}
 }
