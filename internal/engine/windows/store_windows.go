@@ -70,14 +70,18 @@ func quarantineState(path string) error {
 	if err != nil {
 		return err
 	}
-	target = target[:len(target)-1]
 	// FILE_RENAME_INFO: BOOLEAN at 0, HANDLE at 8, DWORD at 16, WCHARs at 20.
+	// The count excludes NUL, but Win32's DOS-path conversion still reads
+	// that terminator. Keep it inside the allocation, not allocator padding.
 	info := make([]byte, 20+2*len(target))
-	binary.LittleEndian.PutUint32(info[16:], uint32(2*len(target)))
+	binary.LittleEndian.PutUint32(info[16:], uint32(2*(len(target)-1)))
 	for i, c := range target {
 		binary.LittleEndian.PutUint16(info[20+i*2:], c)
 	}
-	return windows.SetFileInformationByHandle(h, windows.FileRenameInfo, &info[0], uint32(len(info)))
+	if err := windows.SetFileInformationByHandle(h, windows.FileRenameInfo, &info[0], uint32(len(info))); err != nil {
+		return fmt.Errorf("rename untrusted engine state directory without following it: %w", err)
+	}
+	return nil
 }
 
 func openStateDirectory(path string) (*os.File, error) {
