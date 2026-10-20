@@ -550,12 +550,13 @@ func exerciseTCPBufferBudget(e *Env, s engine.Controller) {
 	// A download's send buffer toward the app grows from the 64 KiB floor to
 	// at most 6 MiB, doubling only in a 250 ms tick in which the flow moved at
 	// least its current buffer, and the grant stays while bytes keep moving
-	// (internal/engine/tcp/buffers.go). So each flow gets 3.5 s at full speed,
+	// (internal/engine/tcp/buffers.go). So each flow gets 5 s at full speed,
 	// four flows at a time, then a byte every 100 ms: 64 flows that each earn
 	// the full 5.94 MiB of growth want 380 MiB at once, half again the 256 MiB
 	// budget (5.9), and keep wanting it. Only the budget can refuse them.
-	const flows, perWave, burstMS = 64, 4, 3500
+	const flows, perWave, burstMS = 64, 4, 5000
 	const maxGrowth = int64(6<<20 - 64<<10)
+	diagnostics := newTCPDiagnostics(e)
 	release := e.NewRelease("buffers")
 	var bgs []*Bg
 	for i := range flows {
@@ -567,10 +568,12 @@ func exerciseTCPBufferBudget(e *Env, s engine.Controller) {
 	most, samples := int64(0), 0
 	var held []int64
 	var previousDrops, previousRTO, previousRecovery uint64
-	for start := time.Now(); time.Since(start) < ramp+3*time.Second && e.Ctx().Err() == nil; {
+	start := time.Now()
+	for time.Since(start) < ramp+3*time.Second && e.Ctx().Err() == nil {
 		st, err := s.Stats(e.Ctx())
 		e.T.Require(err == nil, "stats while the downloads run (%v)", err)
 		most = max(most, st.TCPBytes)
+		diagnostics.sample(e, st, time.Since(start), burstMS, false)
 		if drops, rto, recovery := st.Counters["tunDropped"], st.Counters["tcpRTOs"], st.Counters["tcpSACKRecoveries"]; drops != previousDrops || rto != previousRTO || recovery != previousRecovery {
 			e.T.Logf("TCP loss at %.3f s: outputDrops=%d transportDrops=%d retransmits=%d RTO=%d SACK=%d heap=%d GC=%d", time.Since(start).Seconds(), drops, st.Counters["transportDropped"], st.Counters["tcpRetransmits"], rto, recovery, st.Counters["heapBytes"], st.Counters["gcCycles"])
 			previousDrops, previousRTO, previousRecovery = drops, rto, recovery
@@ -581,9 +584,10 @@ func exerciseTCPBufferBudget(e *Env, s engine.Controller) {
 		}
 		e.Sleep(100 * time.Millisecond)
 	}
-	release.Open(e)
-	intact, open, earned := 0, 0, 0
+	intact, open, earned, originalEarned := 0, 0, 0, 0
 	endStats := stats(e, s)
+	diagnostics.sample(e, endStats, time.Since(start), burstMS, true)
+	release.Open(e)
 	e.T.Logf("TCP growth workload: lookups=%d misses=%d owners=%s counters=%v", endStats.LookupCount, endStats.LookupMisses, endStats.OwnerLookup, endStats.Counters)
 	for i, bg := range bgs {
 		var r app.BulkHoldResult
@@ -595,6 +599,14 @@ func exerciseTCPBufferBudget(e *Env, s engine.Controller) {
 			open++
 		}
 		steady := steadyMS(r.Bins, r.BinMS, earnWindowBins, earnPerWindow)
+		originalSteady := 0
+		if r.BinMS > 0 {
+			originalSteady = steadyMS(r.Bins[:min(len(r.Bins), 3500/r.BinMS)], r.BinMS, earnWindowBins, earnPerWindow)
+		}
+		if originalSteady >= earnSteadyMS {
+			originalEarned++
+		}
+		e.T.Logf("download %d %s -> %s: steady first 3.5 s=%d ms, full 5 s=%d ms", i, r.Local, r.Remote, originalSteady, steady)
 		if steady >= earnSteadyMS {
 			earned++
 		} else {
@@ -606,6 +618,7 @@ func exerciseTCPBufferBudget(e *Env, s engine.Controller) {
 		least = min(least, b)
 	}
 	e.T.Check(intact == flows && open == flows, "all %d downloads arrived intact, every byte checked, and were open until released (%d intact, %d open)", flows, intact, open)
+	e.T.Note("Demand precondition: original 3.5 s verdict=%t (%d/%d); offered 5 s verdict=%t (%d/%d). Both require 5 MiB per 200 ms for 2 continuous seconds; no retries.", originalEarned == flows, originalEarned, flows, earned == flows, earned, flows)
 	// A prerequisite: without the demand, a budget that's never reached
 	// proves nothing about the budget.
 	e.T.Require(earned == flows, "every download kept up 5 MiB in every 200 ms for 2 s of its burst, enough to earn the full 6 MiB buffer, so together they wanted %.0f MiB (%d of %d did)",

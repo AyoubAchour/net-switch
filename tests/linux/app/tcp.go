@@ -331,9 +331,10 @@ func runTCPHold(args []string) (any, error) {
 
 // BulkHoldResult is the bulkhold mode's answer.
 type BulkHoldResult struct {
-	Bytes      int64   `json:"bytes"`      // everything received
-	BurstBytes int64   `json:"burstBytes"` // received during the full-speed part
-	BurstMS    float64 `json:"burstMs"`
+	Local, Remote string  // correlate this download with both TCP legs' diagnostics
+	Bytes         int64   `json:"bytes"`      // everything received
+	BurstBytes    int64   `json:"burstBytes"` // received during the full-speed part
+	BurstMS       float64 `json:"burstMs"`
 	// Bins are the bytes received in each BinMS of the full-speed part, from
 	// the request on: how steady the demand was, not just its average.
 	BinMS  int     `json:"binMs"`
@@ -373,6 +374,7 @@ func runBulkHold(args []string) (any, error) {
 		return r, nil
 	}
 	defer conn.Close()
+	r.Local, r.Remote = addrString(conn.LocalAddr()), addrString(conn.RemoteAddr())
 	start := time.Now()
 	burstEnd := start.Add(time.Duration(*floodMS) * time.Millisecond)
 	if _, err := fmt.Fprintf(conn, "FLOOD %d\n", *floodMS); err != nil {

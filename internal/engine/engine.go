@@ -331,6 +331,7 @@ func (e *Engine) Stats() any {
 		s["tcpRejected"] = e.tcp.Rejected.Load()
 		s["tcpInvalid"] = e.tcp.Invalid.Load()
 		s["tcpDialFailed"] = e.tcp.DialFailed.Load()
+		s["tcpFlows"], s["tcpFlowsOmitted"] = e.tcp.Diagnostics(128)
 	}
 	if e.stack != nil {
 		stats := e.stack.Stats()

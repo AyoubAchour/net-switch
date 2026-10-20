@@ -26,4 +26,16 @@ func TestSteadyMS(t *testing.T) {
 	if got := steadyMS(nil, 50, earnWindowBins, earnPerWindow); got != 0 {
 		t.Errorf("no bins read %d ms", got)
 	}
+	// A 200 ms recovery in the middle of the old 3.5 s offer leaves neither
+	// side with 2 s of steady demand. A longer offer can meet the very same
+	// precondition, while the first-3.5-second verdict must still say failure.
+	longer := make([]int64, 100)
+	for i := range longer {
+		if i < 32 || i >= 36 {
+			longer[i] = 2 * mib
+		}
+	}
+	if old, offered := steadyMS(longer[:70], 50, 4, earnPerWindow), steadyMS(longer, 50, 4, earnPerWindow); old >= earnSteadyMS || offered < earnSteadyMS {
+		t.Fatalf("old and offered demand verdicts collapsed: %d / %d ms", old, offered)
+	}
 }

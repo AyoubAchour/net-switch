@@ -359,6 +359,10 @@ func TestStatsShapes(t *testing.T) {
 	if err != nil || bare.Flows != 2 || bare.UDP != 1 {
 		t.Errorf("a bare table's stats: %+v, %v", bare, err)
 	}
+	diagnostic, err := decodeStats([]byte(`{"engine":{"flows":{"Flows":1},"tcpFlows":[{"Source":"198.18.0.2:1234","RTOs":1}],"tcpFlowsOmitted":0}}`))
+	if err != nil || string(diagnostic.TCPFlows) != `[{"Source":"198.18.0.2:1234","RTOs":1}]` {
+		t.Fatalf("per-flow TCP diagnostics were discarded: %s, %v", diagnostic.TCPFlows, err)
+	}
 }
 
 func TestUnconnectedDriverRefusesCommands(t *testing.T) {
