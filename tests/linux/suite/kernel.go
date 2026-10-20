@@ -377,7 +377,11 @@ func (e *Env) retryLine(label, name string, want engine.LineID, within time.Dura
 		}
 		e.Sleep(250 * time.Millisecond)
 	}
-	e.ExpectTCP(label, name, AsUser, want, topo.Server4, 3)
+	if _, v1 := e.Eng.(engine.V1); v1 {
+		e.expectSteadyTCP(label, name, want, topo.Server4, 3)
+	} else {
+		e.ExpectTCP(label, name, AsUser, want, topo.Server4, 3)
+	}
 }
 
 var newAddrB = netip.MustParsePrefix("192.168.2.3/24")

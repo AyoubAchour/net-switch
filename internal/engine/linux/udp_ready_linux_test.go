@@ -51,7 +51,7 @@ func TestEpollUDPRepliesAndErrorsKeepOneMapping(t *testing.T) {
 	if _, _, err := s.TryReadFrom(data[:]); !errors.Is(err, platform.ErrWouldBlock) {
 		t.Fatalf("idle UDP read blocked or failed: %v", err)
 	}
-	for _, message := range []string{"first", "second"} {
+	for _, message := range []string{"", "first", "second"} {
 		if err := w.Arm(true, false); err != nil {
 			t.Fatal(err)
 		}

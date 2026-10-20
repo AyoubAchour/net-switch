@@ -3,10 +3,30 @@
 package suite
 
 import (
+	"context"
+	"io"
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
+	"github.com/AyoubAchour/net-switch/tests/linux/harness"
 )
+
+func TestPostFaultAttributionFailsInsideADeclaredLoadCase(t *testing.T) {
+	c := &harness.Case{ID: "overload.unknown-owner-limits", Title: "recovery", Label: harness.Requires10, ReleaseBlocker: loadAttributionBlocker("overload.unknown-owner-limits")}
+	c.Run = func(test *harness.T) {
+		e := &Env{T: test, deferAttribution: true}
+		e.withSteadyAttribution(func() { e.checkLoadIdentity(false, "post-fault owner is still unknown") })
+		e.checkLoadIdentity(true, "the separate under-load measurement remains declared")
+	}
+	report := harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
+	if !report.JobFailed || len(report.Cases) != 1 || report.Cases[0].Outcome != harness.Fail {
+		t.Fatalf("unknown recovery owner passed PR CI: %+v", report)
+	}
+	checks := report.Cases[0].Checks
+	if len(checks) != 2 || checks[0].ReleaseBlocker || !checks[1].ReleaseBlocker {
+		t.Fatalf("recovery escaped its hard scope or swallowed the load declaration: %+v", checks)
+	}
+}
 
 func TestLoadAttributionNeverWaivesIdentityOrRoutingErrors(t *testing.T) {
 	path := AppPath("bravo")

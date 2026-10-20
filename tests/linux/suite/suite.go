@@ -108,7 +108,7 @@ func loadAttributionBlocker(id string) string {
 		"overload.tcp-buffer-budget", "overload.rejection-notices-per-app", "overload.rejection-notices-total",
 		"overload.timewait-cap", "overload.udp-pending-bytes", "overload.unknown-owner-limits",
 		"overload.tun-write-queue", "overload.memory-at-limit":
-		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: at least 99.5% natural lookups; identified probe and stream owners"
+		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: at least 99.5% natural lookups; identified under-load probe and stream owners; post-fault recovery stays hard"
 	case "protocol.flows-pagination":
 		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: at least 299 of 300 rows identify the app path, app id and PID"
 	default:

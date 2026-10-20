@@ -44,7 +44,7 @@ func addOverload(r *registry) {
 		noLimits, "5.9", 4*time.Minute, tcpStorm)
 	r.defect("overload.tcp-handshakes-in-flight", "Three apps start 3,000 connections each to a host that never answers: at most 8,192 handshakes are in flight, the rest refused at once",
 		noLimits, "5.9", 3*time.Minute, tcpHandshakesCase)
-	r.defect("overload.tcp-flows-total", "Ten apps offer 8,000 connections each, all under their own limit: together at most 65,536 flows are admitted and the rest refused",
+	r.defect("overload.tcp-flows-total", "Ten apps offer 8,000 connections each plus a fixed 100-attempt tail: together at most 65,536 flows are admitted and the rest refused",
 		noLimits, "5.9", 6*time.Minute, tcpFlowsTotalCase)
 	r.add("overload.tcp-buffer-budget", "64 downloads that each earn the 6 MiB send buffer and keep it: growth fills the 256 MiB budget, is refused beyond it, and every byte arrives intact",
 		harness.Requires10, "5.9", 4*time.Minute, tcpBufferBudgetCase)
@@ -485,6 +485,10 @@ func tcpFlowsTotalCase(e *Env) {
 		held[name] = list
 		established += list.Established
 	}
+	_, v10 := e.Eng.(engine.V1)
+	if v10 {
+		established += e.capacityTail(release, bgs, held)
+	}
 	// The servers' own count of what got out, while everything is held.
 	isHold := func(r inet.Record) bool {
 		return r.Kind == "tcp" && r.T >= from && strings.HasSuffix(r.Dst, ":"+strconv.Itoa(wire.PortHold))
@@ -493,7 +497,7 @@ func tcpFlowsTotalCase(e *Env) {
 	accepted := Select(recs, isHold)
 	unknown := 0
 	if v1, ok := e.Eng.(engine.V1); ok {
-		e.checkHeldTCP(held, bgs)
+		e.checkHeldTCP(held, bgs, capacityTailKey)
 		if profiler, ok := e.Eng.(interface{ CaptureProfiles(context.Context) error }); ok {
 			ctx, cancel := context.WithTimeout(e.Ctx(), 15*time.Second)
 			err := profiler.CaptureProfiles(ctx)
@@ -525,9 +529,9 @@ func tcpFlowsTotalCase(e *Env) {
 	release.Open(e)
 	refused, stillOpen := 0, 0
 	var parts []string
-	for _, name := range names {
+	for name, bg := range bgs {
 		var r app.HoldResult
-		bgs[name].WaitJSON(e, 2*time.Minute, &r)
+		bg.WaitJSON(e, 2*time.Minute, &r)
 		refused += r.Errors["ECONNREFUSED"] + r.Errors["ECONNRESET"]
 		stillOpen += r.StillOpen
 		parts = append(parts, fmt.Sprintf("%s %d", name, r.Established))
@@ -538,6 +542,9 @@ func tcpFlowsTotalCase(e *Env) {
 	e.keptOpen("charlie's stream, one of the flows,", s, "c")
 	e.T.Check(e.Eng.Running(), "the engine is still running")
 	asked := perApp * len(names)
+	if v10 {
+		asked += capacityTailAttempts
+	}
 	// charlie's stream is a flow too.
 	room := tcpFlowsTotal - 1
 	e.T.Expect(established <= room && refused >= (asked-room)*9/10 && responsive(s),
