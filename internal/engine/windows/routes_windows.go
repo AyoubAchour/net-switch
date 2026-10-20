@@ -7,10 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"maps"
 	"net/netip"
-	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -27,18 +25,7 @@ import (
 type bindingTable map[string]Adapter
 
 func (r *Routes) StopPhase(name string) func() {
-	finish := r.timings.begin("engine.stop." + name)
-	if r.trace == nil || (name != "tcp-join" && name != "stack-join") {
-		return finish
-	}
-	// Hosted-only evidence for a slow join; never enabled on a user's machine.
-	timer := time.AfterFunc(10*time.Millisecond, func() {
-		b := make([]byte, 256<<10)
-		n := runtime.Stack(b, true)
-		record, _ := json.Marshal(map[string]any{"instance": r.Instance, "operation": "stop-wait", "phase": name, "stacks": string(b[:n])})
-		log.Printf("WINDOWS LIFECYCLE %s", record)
-	})
-	return func() { timer.Stop(); finish() }
+	return r.timings.begin("engine.stop." + name)
 }
 
 type Routes struct {
@@ -61,7 +48,8 @@ type Routes struct {
 }
 
 func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Routes, error) {
-	timings := &phaseTimings{values: map[string]phaseTiming{}}
+	trace := newPacketTrace()
+	timings := &phaseTimings{values: map[string]phaseTiming{}, trace: trace != nil}
 	defer timings.begin("recovery.total")()
 	o := &objects{recovering: true, timings: timings}
 	measured := measuredJournalStore{Store: store, timings: timings, beforeRemoved: o.commitFirewallBatch}
@@ -90,7 +78,7 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 		return nil, fmt.Errorf("engine crash recovery: %w", errors.Join(err, o.closeFirewall()))
 	}
 	o.recovering = false
-	r := &Routes{Instance: instance, session: s, objects: o, timings: timings, trace: newPacketTrace()}
+	r := &Routes{Instance: instance, session: s, objects: o, timings: timings, trace: trace}
 	b := bindingTable{}
 	r.bindings.Store(&b)
 	return r, nil
