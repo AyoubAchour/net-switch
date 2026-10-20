@@ -52,11 +52,15 @@ async function requestOn(item) {
       phase: 'waiting for socket', previousPort: item.port, bytesReceived: 0, timings: {} };
     requests.push(detail);
     if (requests.length > 64) requests.shift();
-    const phase = (name) => { detail.phase = name; detail.timings[name] = performance.now() - started; };
+    const phase = (name) => {
+      if (settled) return;
+      detail.phase = name; detail.timings[name] = performance.now() - started;
+    };
     const fail = (cause) => {
       if (settled) return;
       settled = true;
-      Object.assign(detail, { elapsedMs: performance.now() - started, code: cause.code, error: cause.message });
+      Object.assign(detail, { elapsedMs: performance.now() - started, code: cause.code, error: cause.message,
+        socketBytesRead: req.socket?.bytesRead, socketBytesWritten: req.socket?.bytesWritten });
       reject(new Error(`HTTP request failed: ${JSON.stringify(detail)}`, { cause }));
     };
     const request = target.tls ? httpsRequest : httpRequest;
@@ -70,13 +74,14 @@ async function requestOn(item) {
       let body = '';
       res.setEncoding('utf8'); res.on('data', (chunk) => { body += chunk; detail.bytesReceived += Buffer.byteLength(chunk); }); res.on('error', fail);
       res.on('end', () => {
+        if (settled) return;
         try {
           assert.equal(res.statusCode, 200, body);
           if (target.tls) assert.match(body, /(?:^|\n)ip=/); else assert.equal(JSON.parse(body).nonce, nonce);
           if (item.port) assert(req.reusedSocket && item.port === port, `Held connection ${item.id} was replaced`);
           item.port = port;
-          settled = true;
           phase('complete');
+          settled = true;
           resolve({ id: item.id, port, body, reused: req.reusedSocket });
         } catch (error) { fail(error); }
       });
@@ -92,6 +97,7 @@ async function requestOn(item) {
       if (socket.connecting) socket.once('connect', () => { address(); phase('tcp-connected'); });
       if (target.tls && !socket.authorized) socket.once('secureConnect', () => { phase('tls-connected'); });
     });
+    req.once('finish', () => { detail.timings.requestSent = performance.now() - started; });
     req.on('error', fail); req.end();
   });
 }

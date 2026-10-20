@@ -60,6 +60,9 @@ test('a timed-out parallel HTTP request retains its own tuple and response phase
   assert.equal(failed.phase, 'response');
   assert.equal(failed.statusCode, 200);
   assert.equal(failed.bytesReceived, 1);
+  assert(failed.socketBytesRead > 1);
+  assert(failed.socketBytesWritten > 0);
+  assert(Number.isFinite(failed.timings.requestSent));
   assert(failed.elapsedMs >= 7900, 'The unchanged eight-second request deadline must actually expire');
   assert(failed.timings.response >= failed.timings['tcp-connected']);
   assert.equal(failed.localPort, observed.find((entry) => entry.nonce === failed.nonce).port);

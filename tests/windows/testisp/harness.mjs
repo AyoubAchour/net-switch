@@ -109,6 +109,12 @@ export async function startHarness(directory) {
         code: cause.cause?.code ?? cause.code, cause: cause.cause?.message ?? cause.message,
         httpEvents: [...httpEvents],
         log: await readFile(path.join(dir, 'testisp.log'), 'utf8').then((value) => value.split('\n').slice(-40).join('\n')).catch(String) };
+      // This is a separate read-only diagnostic request, never a retry of the
+      // failed operation. Preserve the original error even if it succeeds.
+      if (!['diagnostics', 'stop'].includes(endpoint) && processHandle.exitCode === null) {
+        evidence.gateway = await control('diagnostics').then(({ at, heartbeat, gc, ring, session, windowsTCP }) =>
+          ({ at, heartbeat, gc, ring, session, windowsTCP })).catch((error) => ({ error: error.message }));
+      }
       console.error(`TestISP control failure ${JSON.stringify(evidence)}`);
       throw new Error(`TestISP ${endpoint}: ${JSON.stringify(evidence)}`, { cause });
     }

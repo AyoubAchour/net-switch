@@ -8,15 +8,6 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      windows_flakes:
-        description: Temporarily repeat the two Windows failures with diagnostics
-        type: boolean
-        default: false
-      flake_suites:
-        description: Full suites or cold control clients only
-        type: choice
-        options: [both, cold, cap]
-        default: both
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -33,98 +24,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  windows-flakes:
-    if: github.event_name == 'workflow_dispatch' && inputs.windows_flakes
-    name: Windows flake repeat / ${{ matrix.arch }} / ${{ matrix.suite }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        arch: [x64, ARM64]
-        suite: ${{ fromJSON(inputs.flake_suites == 'cold' && '["cold"]' || inputs.flake_suites == 'cap' && '["cap"]' || '["proof","acceptance"]') }}
-        include:
-          - arch: x64
-            runner: windows-latest
-          - arch: ARM64
-            runner: windows-11-arm
-    env:
-      GOTOOLCHAIN: local
-      GOMAXPROCS: '2'
-      GOFLAGS: -mod=vendor -p=2
-    defaults:
-      run:
-        shell: powershell
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
-        with:
-          node-version: '24.21.0'
-          package-manager-cache: false
-      - name: Build test programs
-        run: |
-          foreach ($name in @('testisp', 'quicprobe', 'mtuprobe', 'udpreject')) {
-            go build -o "dist/windows-test/$name.exe" "./tests/windows/$name"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
-      - name: Build helper and fetch engine
-        if: matrix.suite == 'acceptance' || matrix.suite == 'cap'
-        env:
-          GOFLAGS: -mod=readonly -p=2
-        run: |
-          ./scripts/build-helper.ps1
-          ./scripts/fetch-engine.ps1
-      - name: Repeat without hiding failed rounds
-        env:
-          FLAKE_SUITE: ${{ matrix.suite }}
-          FLAKE_CAP_SETUP_ROUNDS: ${{ matrix.suite == 'cap' && '100' || '1' }}
-        run: |
-          $failures = 0
-          $rounds = if ($env:FLAKE_SUITE -eq 'proof') { 6 } else { 1 }
-          for ($i = 1; $i -le $rounds; $i++) {
-            Write-Host "FLAKE ROUND $i START $env:FLAKE_SUITE"
-            if ($env:FLAKE_SUITE -eq 'cold') {
-              node tests/windows/testisp/cold-control.mjs
-            } elseif ($env:FLAKE_SUITE -eq 'proof') {
-              node tests/windows/testisp/proof.mjs
-            } else {
-              node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry server.mjs --engine-exe engine/sing-box.exe --profile baseline
-            }
-            $code = $LASTEXITCODE
-            Write-Host "FLAKE ROUND $i EXIT $code"
-            if ($code -ne 0) { $failures++; break }
-          }
-          Write-Host "FLAKE FAILURES $failures"
-          if ($failures) { exit 1 }
-      - name: Verify parallel request failure diagnostics
-        run: |
-          node --test test/windows-client.test.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: flakes-${{ matrix.arch }}-${{ matrix.suite }}
-          path: |
-            dist/testisp-proof/
-            dist/testisp-cold/
-            dist/windows-acceptance/*.json
-            dist/windows-acceptance/testisp/*.json
-            dist/windows-acceptance/**/*.log*
-          retention-days: 14
-
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.windows_flakes
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:

@@ -135,6 +135,18 @@ async function counts(total) {
   }, `${total} real test-app flows in app state`, 25_000);
 }
 
+async function engineConnections() {
+  const config = JSON.parse(await readFile(path.join(dataDir, 'engine-config.json'), 'utf8'));
+  const { external_controller: controller, secret } = config.experimental.clash_api;
+  assert(/^127\.0\.0\.1:\d+$/.test(controller), 'Expected the owned engine loopback API');
+  const response = await fetch(`http://${controller}/connections`, {
+    headers: { Authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(5000),
+  });
+  assert(response.ok, `Engine connections: HTTP ${response.status}`);
+  return { pid: (await readFile(path.join(dataDir, 'engine.pid'), 'utf8')).trim(),
+    connections: (await response.json()).connections };
+}
+
 async function newPublicOn(line, count = 3) {
   await pin(line.id);
   const before = await harness.control('stats');
@@ -543,6 +555,7 @@ try {
         // app's state API is the component that has stopped responding.
         Object.assign(error.evidence, Object.fromEntries(await Promise.all(Object.entries({
           state: server.api('state'),
+          engineConnections: engineConnections(),
           gateway: harness.control('stats'),
           diagnostics: harness.control('diagnostics'),
           heartbeat: client('heartbeat', {}, 5000),
@@ -558,18 +571,12 @@ try {
         throw error;
       }
     };
-    let mainHeld, secondHeld;
-    const setupRounds = Number(process.env.FLAKE_CAP_SETUP_ROUNDS ?? 1);
-    assert(Number.isInteger(setupRounds) && setupRounds >= 1 && setupRounds <= 100);
-    for (let round = 1; round <= setupRounds; round++) {
-      await pin(main.id);
-      mainHeld = await prepare(`round ${round}: opening the main-line HTTPS flows`, () => client('open', { count: 2 }));
-      await pinApp(clientExe, second.id);
-      secondHeld = await prepare(`round ${round}: opening the controlled secondary-line HTTP flows`,
-        () => client('open', { count: 2, target: responder.virtual }));
-      await counts(4);
-      console.log(`CAP SETUP ROUND ${round} ${JSON.stringify({ mainHeld, secondHeld })}`);
-    }
+    await prepare('pinning the client to the main line', () => pin(main.id));
+    const mainHeld = await prepare('opening the main-line HTTPS flows', () => client('open', { count: 2 }));
+    await prepare('pinning the client to the secondary line', () => pinApp(clientExe, second.id));
+    const secondHeld = await prepare('opening the controlled secondary-line HTTP flows',
+      () => client('open', { count: 2, target: responder.virtual }));
+    await prepare('waiting for all four setup flows in app state', () => counts(4));
     try {
       // Main has no stand-in, so its exception must preserve these sockets.
       await applied('lines/update', { id: second.id, strict: true }, (state) => state.lines.find((line) => line.id === second.id)?.strict);

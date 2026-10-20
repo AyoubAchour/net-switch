@@ -27,7 +27,7 @@ import (
 )
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.LUTC)
 	if len(os.Args) == 2 && os.Args[1] == "version" {
 		fmt.Printf("TestISP 1 (%s %s/%s)\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		return
