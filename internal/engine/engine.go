@@ -276,10 +276,14 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	}
 	finish()
 	finish = phase("tun-signal")
+	beginTun := func() {}
 	joinTun := func() error { return nil }
 	if e.tun != nil {
 		if starter, ok := e.tun.(platform.TunCloseStarter); ok {
-			starter.BeginClose()
+			// The cancelled I/O context wakes the pumps. Complete socket
+			// cancellation before native device teardown; device close still
+			// overlaps the journal's fingerprint checks and route cleanup.
+			beginTun = starter.BeginClose
 			joinTun = e.tun.Close
 		} else {
 			e.tun.Close()
@@ -298,6 +302,9 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	if e.tcp != nil {
 		e.tcp.Wait()
 	}
+	finish()
+	finish = phase("tun-begin")
+	beginTun()
 	finish()
 	finish = phase("link-close")
 	if e.link != nil {
