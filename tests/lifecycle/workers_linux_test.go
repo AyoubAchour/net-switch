@@ -1,6 +1,7 @@
 package lifecycle_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,16 +13,31 @@ import (
 )
 
 type linuxWorker struct {
-	pid uint32
-	fd  int
+	pid  uint32
+	fd   int
+	mode string
+	t    *testing.T
 }
 
-func (w *linuxWorker) id() uint32 { return w.pid }
-func (w *linuxWorker) close()     { unix.Close(w.fd) }
+func (w *linuxWorker) id() uint32   { return w.pid }
+func (w *linuxWorker) kind() string { return w.mode }
+func (w *linuxWorker) close()       { unix.Close(w.fd) }
 func (w *linuxWorker) alive() bool {
 	fds := []unix.PollFd{{Fd: int32(w.fd), Events: unix.POLLIN}}
-	n, err := unix.Poll(fds, 0)
-	return err == nil && n == 0
+	for {
+		n, err := unix.Poll(fds, 0)
+		if errors.Is(err, unix.EINTR) {
+			w.t.Logf("pidfd poll interrupted for %s/%d; reading process state again", w.mode, w.pid)
+			continue
+		}
+		if err != nil {
+			w.t.Fatalf("pidfd poll %s/%d fd=%d: %v", w.mode, w.pid, w.fd, err)
+		}
+		if n > 0 && fds[0].Revents&(unix.POLLIN|unix.POLLHUP) == 0 {
+			w.t.Fatalf("unexpected pidfd events %s/%d: %#x", w.mode, w.pid, fds[0].Revents)
+		}
+		return n == 0
+	}
 }
 func (w *linuxWorker) suspend() error { return unix.PidfdSendSignal(w.fd, unix.SIGSTOP, nil, 0) }
 func findWorkers(t *testing.T, parent uint32, directory string) []workerRef {
@@ -53,11 +69,19 @@ func findWorkers(t *testing.T, parent uint32, directory string) []workerRef {
 		if err != nil || exe != filepath.Join(directory, "netswitch-engine") {
 			continue
 		}
+		command, err := os.ReadFile(filepath.Join(path, "cmdline"))
+		if err != nil {
+			continue
+		}
+		args := strings.Split(strings.TrimRight(string(command), "\x00"), "\x00")
+		if len(args) != 3 || args[1] != "worker" || (args[2] != "network" && args[2] != "meters") {
+			continue
+		}
 		fd, err := unix.PidfdOpen(int(pid), 0)
 		if err != nil {
 			continue
 		}
-		refs = append(refs, &linuxWorker{pid: uint32(pid), fd: fd})
+		refs = append(refs, &linuxWorker{pid: uint32(pid), fd: fd, mode: args[2], t: t})
 	}
 	return refs
 }

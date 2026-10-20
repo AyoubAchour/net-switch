@@ -7,6 +7,7 @@ import (
 
 type workerRef interface {
 	id() uint32
+	kind() string
 	alive() bool
 	suspend() error
 	close()
@@ -20,12 +21,17 @@ func runningWorkers(t *testing.T, parent uint32, directory string) []workerRef {
 			ref.close()
 		}
 		refs = findWorkers(t, parent, directory)
-		return len(refs) >= 2
+		modes := map[string]bool{}
+		for _, ref := range refs {
+			modes[ref.kind()] = true
+		}
+		return modes["network"] && modes["meters"]
 	})
 	for _, ref := range refs {
 		if !ref.alive() {
 			t.Fatal("worker exited before fault injection")
 		}
+		t.Logf("live worker stream mode=%s pid=%d", ref.kind(), ref.id())
 		t.Cleanup(ref.close)
 	}
 	return refs

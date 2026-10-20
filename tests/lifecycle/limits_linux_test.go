@@ -43,11 +43,25 @@ func controlStartLimit(t *testing.T, ctx context.Context, owner actor, echo stri
 			checkEcho(t, stream)
 		}
 	}
-	wait(t, "Control reaches installed start limit", 10*time.Second, func() bool {
-		b, err := exec.Command("systemctl", "show", "--property=Result", "--value", "netswitch.service").Output()
-		return err == nil && strings.TrimSpace(string(b)) == "start-limit-hit"
+	// systemd 255 retains Result=signal when a restart is rate-limited. Prove
+	// the behavior instead: no sixth process while the lease drains, and
+	// exactly five automatic restart attempts.
+	wait(t, "Control stops after fifth crash", 10*time.Second, func() bool {
+		s, err := service.Query(service.Control)
+		return err == nil && s.Stopped
 	})
-	wait(t, "lease fails open after Control hits restart limit", 40*time.Second, func() bool { s, e := service.Query(service.Engine); return e == nil && s.Stopped })
+	wait(t, "lease fails open after Control hits restart limit", 40*time.Second, func() bool {
+		c, err := service.Query(service.Control)
+		if err != nil || !c.Stopped {
+			t.Fatal("Control restarted beyond the installed limit", c, err)
+		}
+		s, e := service.Query(service.Engine)
+		return e == nil && s.Stopped
+	})
+	b, err := exec.Command("systemctl", "show", "--property=NRestarts", "--value", "netswitch.service").Output()
+	if err != nil || strings.TrimSpace(string(b)) != "5" {
+		t.Fatal("unexpected restart count", string(b), err)
+	}
 	directEcho(t, echo)
 	t.Log("five Control starts exhausted the installed rate limit; engine lease cleaned up without an infinite restart loop")
 }

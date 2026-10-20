@@ -326,6 +326,7 @@ func TestRealServices(t *testing.T) {
 	t.Cleanup(owner.close)
 	t.Cleanup(other.close)
 	adapter := fixture(t, dir)
+	t.Run("installation-rejects-writable-images-and-parents", func(t *testing.T) { installationTrust(t, dir) })
 	config := lifecycle.Config{Directory: dir, Data: data, Adapter: adapter, Mode: "proxy"}
 	if err := lifecycle.Save(filepath.Join(data, "service-config.json"), config); err != nil {
 		t.Fatal(err)
@@ -375,6 +376,7 @@ func TestRealServices(t *testing.T) {
 	if err := service.SetOwner(owner.id()); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("desktop-retries-unavailable-control-at-signin", func(t *testing.T) { desktopStartupRetry(t, config, owner) })
 	if err := service.Start(ctx, service.Control); err != nil {
 		t.Fatal(err)
 	}

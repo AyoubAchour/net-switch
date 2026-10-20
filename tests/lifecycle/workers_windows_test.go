@@ -3,6 +3,7 @@ package lifecycle_test
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"unsafe"
@@ -13,13 +14,19 @@ import (
 type windowsWorker struct {
 	pid    uint32
 	handle windows.Handle
+	mode   string
+	t      *testing.T
 }
 
-func (w *windowsWorker) id() uint32 { return w.pid }
-func (w *windowsWorker) close()     { windows.CloseHandle(w.handle) }
+func (w *windowsWorker) id() uint32   { return w.pid }
+func (w *windowsWorker) kind() string { return w.mode }
+func (w *windowsWorker) close()       { windows.CloseHandle(w.handle) }
 func (w *windowsWorker) alive() bool {
 	var code uint32
-	return windows.GetExitCodeProcess(w.handle, &code) == nil && code == 259
+	if err := windows.GetExitCodeProcess(w.handle, &code); err != nil {
+		w.t.Fatalf("read worker state %s/%d: %v", w.mode, w.pid, err)
+	}
+	return code == 259
 }
 func (w *windowsWorker) suspend() error {
 	result, _, _ := windows.NewLazySystemDLL("ntdll.dll").NewProc("NtSuspendProcess").Call(uintptr(w.handle))
@@ -52,7 +59,22 @@ func findWorkers(t *testing.T, parent uint32, directory string) []workerRef {
 			windows.CloseHandle(h)
 			continue
 		}
-		refs = append(refs, &windowsWorker{pid: entry.ProcessID, handle: h})
+		command := make([]byte, 65536)
+		var needed uint32
+		err = windows.NtQueryInformationProcess(h, windows.ProcessCommandLineInformation, unsafe.Pointer(&command[0]), uint32(len(command)), &needed)
+		if err != nil {
+			windows.CloseHandle(h)
+			t.Logf("worker command line %d unavailable: %v", entry.ProcessID, err)
+			continue
+		}
+		text := (*windows.NTUnicodeString)(unsafe.Pointer(&command[0])).String()
+		args, err := windows.DecomposeCommandLine(text)
+		runtime.KeepAlive(command)
+		if err != nil || len(args) != 3 || args[1] != "worker" || (args[2] != "network" && args[2] != "meters" && args[2] != "outside") {
+			windows.CloseHandle(h)
+			continue
+		}
+		refs = append(refs, &windowsWorker{pid: entry.ProcessID, handle: h, mode: args[2], t: t})
 	}
 	if err != windows.ERROR_NO_MORE_FILES {
 		t.Fatal(err)
