@@ -1060,10 +1060,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 				return platform.Owner{}, err
 			}
 		}
+		// Finding one holder does not authorize skipping the remaining
+		// conflict checks. Metadata validation itself can cross the deadline,
+		// so guard the final result after visiting all available hints too.
+		if expired() {
+			return platform.Owner{}, fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d lastPID=%d fdUID=%d indexed=%t frontier=%d indexWait=%s validation=%s scope=%s)", context.DeadlineExceeded, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, lastPID, lastUID, lastIndexed, lastPosition, initialIndexTime, validationTime, scopeTime)
+		}
 		if result.AppID == "" {
-			if expired() {
-				return result, fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d lastPID=%d fdUID=%d indexed=%t frontier=%d indexWait=%s validation=%s scope=%s)", context.DeadlineExceeded, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, lastPID, lastUID, lastIndexed, lastPosition, initialIndexTime, validationTime, scopeTime)
-			}
 			return result, os.ErrNotExist
 		}
 		result.Generation = r.generation()
