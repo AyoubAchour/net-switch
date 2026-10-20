@@ -56,7 +56,7 @@ func EngineService(ctx context.Context, ready func(), c Config, log func(string)
 		return err
 	}
 	base := nativePlatform(c, log)
-	runtime.adapter = singbox.New(singbox.Options{Executable: c.Adapter, DataDir: instanceDir, Mode: c.Mode, Platform: base, Log: log, StartProcess: startAdapter})
+	runtime.adapter = singbox.New(singbox.Options{Executable: c.Adapter, DataDir: instanceDir, Mode: c.Mode, Platform: base, Log: log, StartProcess: startAdapter, NormalizeProcessPath: normalizeAdapterPath})
 	record := journal.Record{ID: randomID(), Boot: boot, Instance: server.Instance, Kind: "adapter-service-scope", Fingerprint: journal.Fingerprint{"service": service.Engine, "executable": c.Adapter, "directory": instanceDir, "lifetime": "kernel-guard"}, Phase: "intent"}
 	if err = store.Append(record); err != nil {
 		return err

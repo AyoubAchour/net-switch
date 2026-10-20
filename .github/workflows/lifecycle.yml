@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('lifecycle-pr-{0}', github.ref) || format('lifecycle-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   services:
     name: Lifecycle / ${{ matrix.os }} ${{ matrix.arch }}

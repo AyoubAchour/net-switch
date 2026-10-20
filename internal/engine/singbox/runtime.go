@@ -47,6 +47,7 @@ type Options struct {
 	ListFiles                 func(string) ([]string, error)
 	Verify                    func() error
 	StartProcess              func(string, string, string) (Child, error)
+	NormalizeProcessPath      func(string) string
 	Crash                     *crashnet.Net
 }
 type Child interface {
@@ -276,8 +277,8 @@ func (a *Adapter) Connections(ctx context.Context) ([]engine.Connection, error) 
 		if err := json.Unmarshal(raw, &c); err != nil {
 			return nil, err
 		}
-		if runtime.GOOS == "linux" {
-			c.Metadata.ProcessPath = LinuxProcessPath(c.Metadata.ProcessPath)
+		if a.o.NormalizeProcessPath != nil {
+			c.Metadata.ProcessPath = a.o.NormalizeProcessPath(c.Metadata.ProcessPath)
 		}
 		var meta struct {
 			Metadata struct {

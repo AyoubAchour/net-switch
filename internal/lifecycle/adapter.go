@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -30,6 +31,14 @@ type engineState struct {
 	Epoch    uint64              `json:"epoch"`
 	Applied  *ce.Acknowledgement `json:"appliedRevision"`
 }
+
+func normalizeAdapterPath(path string) string {
+	if runtime.GOOS == "linux" {
+		return singbox.LinuxProcessPath(path)
+	}
+	return path
+}
+
 type adapterRuntime struct {
 	mu              sync.Mutex
 	adapter         *singbox.Adapter
