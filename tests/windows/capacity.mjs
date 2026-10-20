@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { copyFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -11,6 +12,15 @@ export async function capacity({ server, harness, directory, line }) {
   const children = [];
   const engineStats = async () => (await server.api('engine-command', { method: 'stats' })).engine;
   try {
+    // Earlier UDP cases and Windows' adapter-connectivity probes can leave
+    // legitimate idle flows. Close that measured setup explicitly through the
+    // real protocol; waiting 30 seconds cannot expire a five-minute UDP NAT.
+    const preparation = { before: await engineStats(), closed: [] };
+    for (const source of ['198.18.0.1', 'fdfe:dcba:9876::1']) {
+      preparation.closed.push(await server.api('engine-command', { method: 'closeFlows',
+        fields: { opId: randomUUID(), selector: { source } } }));
+    }
+    console.log(`WINDOWS CAPACITY PREPARATION ${JSON.stringify(preparation)}`);
     const before = await until(async () => {
       const stats = await engineStats();
       return stats.flows.Flows === 0 && stats;
@@ -66,7 +76,7 @@ export async function capacity({ server, harness, directory, line }) {
       await delay(1000);
     }
     const last = samples.at(-1);
-    const evidence = { before, samples, observed,
+    const evidence = { preparation, before, samples, observed,
       heapPerFlow: last.heapBytes / 65536, stackPerFlow: last.stackBytes / 65536,
       privatePerFlow: last.processMemory.privateBytes / 65536,
       workingSetPerFlow: last.processMemory.workingSetBytes / 65536,
