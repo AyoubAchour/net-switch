@@ -147,6 +147,13 @@ func (s *measuredTun) WriteBatch(packets [][]byte) (int, error) {
 
 func (s *measuredTun) Close() error {
 	err := s.Session.Close()
-	s.timings.record("tun.session.close", time.Duration(s.Session.Stats().CloseNanos))
+	stats := s.Session.Stats()
+	s.timings.record("tun.session.close", time.Duration(stats.CloseNanos))
+	for name, nanos := range map[string]uint64{"queued": stats.CloseDetails.QueueNanos,
+		"read-lock": stats.CloseDetails.ReadLockNanos, "state-lock": stats.CloseDetails.StateLockNanos,
+		"device": stats.CloseDetails.DeviceNanos, "driver-wait": stats.CloseDetails.DriverWaitNanos,
+		"events": stats.CloseDetails.EventsNanos, "memory": stats.CloseDetails.MemoryNanos} {
+		s.timings.record("tun.close."+name, time.Duration(nanos))
+	}
 	return err
 }

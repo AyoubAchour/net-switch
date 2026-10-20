@@ -43,6 +43,7 @@ type Stats struct {
 	Placeholders     uint64
 	OversizedPackets uint64
 	CloseNanos       uint64
+	CloseDetails     CloseDetails
 }
 
 // Events are advisory and bounded. Stats remain authoritative if a caller
@@ -73,6 +74,7 @@ type Session struct {
 	placeholders, oversized           atomic.Uint64
 	closeStarted                      atomic.Int64
 	closeNanos                        atomic.Uint64
+	closeDetails                      atomic.Pointer[CloseDetails]
 }
 
 func (a *Adapter) StartSession() (*Session, error) {
@@ -134,7 +136,11 @@ func (*Session) RXChecksumVerified(p []byte) bool {
 	return false
 }
 func (s *Session) Stats() Stats {
-	return Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), ReadWaits: s.readWaits.Load(), ReadWakes: s.readWakes.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load(), CloseNanos: s.closeNanos.Load()}
+	result := Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), ReadWaits: s.readWaits.Load(), ReadWakes: s.readWakes.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load(), CloseNanos: s.closeNanos.Load()}
+	if details := s.closeDetails.Load(); details != nil {
+		result.CloseDetails = *details
+	}
+	return result
 }
 
 // fail is called with mu held. Recovery runs elsewhere so neither a full ring
@@ -171,13 +177,24 @@ func (s *Session) maintain() {
 		case <-s.stop:
 			// The read mutex also covers cancellation callback completion.
 			// Close has already signalled wake, so an active native wait exits.
+			started := winclock.Now()
+			queued := uint64(started - time.Duration(s.closeStarted.Load()))
 			s.readMu.Lock()
+			readLock := uint64(winclock.Since(started))
+			started = winclock.Now()
 			s.mu.Lock()
+			stateLock := uint64(winclock.Since(started))
+			var profile CloseDetails
 			if s.rings != nil {
 				s.closeErr = s.rings.close()
+				profile = s.rings.closeProfile
 				s.rings = nil
 			}
+			started = winclock.Now()
 			s.closeErr = errors.Join(s.closeErr, windows.CloseHandle(s.wake), windows.CloseHandle(s.cancelEvent))
+			profile.EventsNanos += uint64(winclock.Since(started))
+			profile.QueueNanos, profile.ReadLockNanos, profile.StateLockNanos = queued, readLock, stateLock
+			s.closeDetails.Store(&profile)
 			close(s.changed)
 			s.mu.Unlock()
 			s.readMu.Unlock()

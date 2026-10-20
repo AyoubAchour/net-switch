@@ -83,6 +83,12 @@ type rings struct {
 	device, readEvent, writeEvent windows.Handle
 	head, tail                    uint32
 	placeholders, oversized       uint64 // protected by the session's read lock
+	closeProfile                  CloseDetails
+}
+
+type CloseDetails struct {
+	QueueNanos, ReadLockNanos, StateLockNanos              uint64
+	DeviceNanos, DriverWaitNanos, EventsNanos, MemoryNanos uint64
 }
 
 type ringRegistration struct {
@@ -178,11 +184,17 @@ func (r *rings) closeWith(closeHandle func(windows.Handle) error) error {
 		// PnP closes the handle BEFORE Receive.Head, then publishes Send.Tail.
 		// Wait for that second marker. If it never comes, ownership is ambiguous:
 		// retain the allocation instead of closing a possibly recycled number.
+		started := winclock.Now()
 		released = r.awaitRelease()
+		r.closeProfile.DriverWaitNanos += uint64(winclock.Since(started))
 	} else if h != 0 && (!r.registered || !released) {
+		started := winclock.Now()
 		err = closeHandle(h)
+		r.closeProfile.DeviceNanos = uint64(winclock.Since(started))
 		if r.registered {
+			started = winclock.Now()
 			released = r.awaitRelease()
+			r.closeProfile.DriverWaitNanos += uint64(winclock.Since(started))
 			if released && errors.Is(err, windows.ERROR_INVALID_HANDLE) {
 				err = nil // PnP completed our close and published its final marker.
 			}
@@ -191,14 +203,18 @@ func (r *rings) closeWith(closeHandle func(windows.Handle) error) error {
 	if !released {
 		err = errors.Join(err, errRingsRetained)
 	}
+	started := winclock.Now()
 	for _, h := range []*windows.Handle{&r.readEvent, &r.writeEvent} {
 		if *h != 0 {
 			err = errors.Join(err, closeHandle(*h))
 			*h = 0
 		}
 	}
+	r.closeProfile.EventsNanos = uint64(winclock.Since(started))
 	if released && r.allocation != 0 {
+		started = winclock.Now()
 		err = errors.Join(err, windows.VirtualFree(r.allocation, 0, windows.MEM_RELEASE))
+		r.closeProfile.MemoryNanos = uint64(winclock.Since(started))
 	}
 	r.allocation = 0 // Unreleased native pages intentionally live until exit.
 	r.send.bytes, r.receive.bytes = nil, nil
