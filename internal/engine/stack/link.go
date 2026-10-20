@@ -2,6 +2,7 @@ package stack
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"sync/atomic"
 
@@ -122,9 +123,9 @@ func NewLink() *Link {
 
 func (l *Link) enqueue(size int, copyInto func([]byte)) bool {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if l.closed || size > int(l.mtu) || size <= 0 || l.count == QueuePackets {
 		l.Dropped.Add(1)
+		l.mu.Unlock()
 		return false
 	}
 	p := l.buffers.packet(size)
@@ -135,6 +136,15 @@ func (l *Link) enqueue(size int, copyInto func([]byte)) bool {
 	select {
 	case l.ready <- struct{}{}:
 	default:
+	}
+	depth := l.count
+	l.mu.Unlock()
+	// A TCP processor can emit its entire congestion window without
+	// blocking. Give the already-runnable writer a turn before that burst
+	// exhausts the queue. This never waits for queue space: a stalled writer
+	// still reaches the same cap and excess packets are still dropped.
+	if depth >= QueuePackets/2 && depth%64 == 0 {
+		runtime.Gosched()
 	}
 	return true
 }
