@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -35,6 +36,8 @@ func TestReturnedPortsBindWithoutReuse(t *testing.T) {
 		t.Fatal(err)
 	}
 	var handles []windows.Handle
+	var occupied []tcpStateGroup
+	bound, checked := 0, 0
 	defer func() {
 		for _, h := range handles {
 			// These sockets never connected or carried data. Closing a bare
@@ -46,6 +49,15 @@ func TestReturnedPortsBindWithoutReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var snapshot []tcpStateGroup
+	refresh := func() {
+		state := nativeSocketState()
+		if err := state["error"]; err != nil {
+			t.Fatalf("native state before returned-port bind: %v", err)
+		}
+		snapshot = state["groups"].([]tcpStateGroup)
+	}
+	refresh()
 	for _, group := range groups {
 		source, err := netip.ParseAddr(group.Source)
 		if err != nil || !source.Is4() || !netip.MustParsePrefix("198.18.0.0/15").Contains(source) {
@@ -68,6 +80,28 @@ func TestReturnedPortsBindWithoutReuse(t *testing.T) {
 			t.Fatalf("source interface missing: %s", source)
 		}
 		for _, port := range group.Ports {
+			checked++
+			// TIME_WAIT disappearance releases our old tuple. Another process
+			// can then claim that port before this probe runs. Record its native
+			// row; only an unoccupied port is an available bind opportunity.
+			otherOwner := func() bool {
+				for _, row := range snapshot {
+					if !slices.Contains(row.Ports, port) {
+						continue
+					}
+					if row.Source == group.Source && row.Destination == "198.19.128.2" &&
+						row.RemotePort >= 25000 && row.RemotePort <= 25007 {
+						t.Fatalf("released fixture tuple still exists: %+v", row)
+					}
+					row.Ports = []uint16{port}
+					occupied = append(occupied, row)
+					return true
+				}
+				return false
+			}
+			if otherOwner() {
+				continue
+			}
 			h, err := windows.Socket(windows.AF_INET, windows.SOCK_STREAM, windows.IPPROTO_TCP)
 			if err != nil {
 				t.Fatal(err)
@@ -84,12 +118,20 @@ func TestReturnedPortsBindWithoutReuse(t *testing.T) {
 				t.Fatal(err)
 			}
 			if err := windows.Bind(h, &windows.SockaddrInet4{Addr: source.As4(), Port: int(port)}); err != nil {
+				refresh() // Observe a racing allocation; never retry this bind.
+				if (errors.Is(err, windows.WSAEADDRINUSE) || errors.Is(err, windows.WSAEACCES)) && otherOwner() {
+					continue
+				}
 				t.Fatalf("returned port %s:%d is not bindable: %v", source, port, err)
 			}
+			bound++
 		}
 	}
-	if len(handles) != 1024 {
-		t.Fatalf("expected all 512 app and 512 engine ports, got %d", len(handles))
+	if checked != 1024 || bound+len(occupied) != checked {
+		t.Fatalf("expected every one of 512 app and 512 engine ports accounted, checked=%d bound=%d occupied=%d", checked, bound, len(occupied))
 	}
-	t.Logf("all %d returned ports bound concurrently through their source interfaces, without connecting, retries or abortive close", len(handles))
+	evidence, _ := json.Marshal(map[string]any{"checked": checked, "bound": bound, "reoccupied": occupied,
+		"oldAll1024BindCheckWouldPass": bound == checked})
+	t.Logf("WINDOWS RETURNED PORT BIND %s", evidence)
+	t.Logf("all %d currently available ports bound concurrently through their source interfaces, without connecting, retries or abortive close", bound)
 }

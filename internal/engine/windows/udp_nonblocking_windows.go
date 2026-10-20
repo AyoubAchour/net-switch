@@ -3,6 +3,7 @@
 package winengine
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -75,7 +76,8 @@ func (s *udpSocket) TryReadFrom(b []byte) (int, netip.AddrPort, error) {
 		return int(received), netip.AddrPort{}, &platform.TooBig{MTU: s.mtu}
 	}
 	if err != nil {
-		return 0, netip.AddrPort{}, err
+		return 0, netip.AddrPort{}, fmt.Errorf("UDP receive local=%s buffer=%d received=%d flags=%d address-length=%d family=%d: %w",
+			s.local, len(b), received, flags, sourceLength, source.Addr.Family, err)
 	}
 	sa, err := source.Sockaddr()
 	if err != nil {
@@ -107,26 +109,35 @@ func (s *udpSocket) TryWriteTo(b []byte, destination netip.AddrPort, df bool) (i
 	if err := s.fragmentation(s.handle, df); err != nil {
 		return 0, err
 	}
-	var to windows.Sockaddr
+	// Use a full sockaddr allocation. x/sys's WSASendto convenience wrapper
+	// widens a 16-byte IPv4 allocation to RawSockaddrAny (116 bytes), which
+	// checkptr correctly rejects. The direct syscall accepts the exact length.
+	var to windows.RawSockaddrAny
+	var length int32
 	if destination.Addr().Is4() {
-		to = &windows.SockaddrInet4{Addr: destination.Addr().As4(), Port: int(destination.Port())}
+		a := (*windows.RawSockaddrInet4)(unsafe.Pointer(&to))
+		a.Family, a.Addr = windows.AF_INET, destination.Addr().As4()
+		binary.BigEndian.PutUint16(unsafe.Slice((*byte)(unsafe.Pointer(&a.Port)), 2), destination.Port())
+		length = int32(unsafe.Sizeof(*a))
 	} else {
-		a := &windows.SockaddrInet6{Addr: destination.Addr().As16(), Port: int(destination.Port())}
+		a := (*windows.RawSockaddrInet6)(unsafe.Pointer(&to))
+		a.Family, a.Addr = windows.AF_INET6, destination.Addr().As16()
+		binary.BigEndian.PutUint16(unsafe.Slice((*byte)(unsafe.Pointer(&a.Port)), 2), destination.Port())
+		length = int32(unsafe.Sizeof(*a))
 		if zone := destination.Addr().Zone(); zone != "" {
 			id, err := strconv.ParseUint(zone, 10, 32)
 			if err != nil {
 				return 0, fmt.Errorf("UDP destination requires a numeric scope: %w", err)
 			}
-			a.ZoneId = uint32(id)
+			a.Scope_id = uint32(id)
 		}
-		to = a
 	}
 	buf := windows.WSABuf{Len: uint32(len(b))}
 	if len(b) != 0 {
 		buf.Buf = &b[0]
 	}
 	var sent uint32
-	err := windows.WSASendto(s.handle, &buf, 1, &sent, 0, to, nil, nil)
+	err := windows.WSASendTo(s.handle, &buf, 1, &sent, 0, &to, length, nil, nil)
 	runtime.KeepAlive(b)
 	if errors.Is(err, windows.WSAEWOULDBLOCK) {
 		return 0, platform.ErrWouldBlock
