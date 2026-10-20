@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Branches get their checks from the pull request run. Running the push run
+  # as well doubled every job and left the shared runner queue hours long.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -12,6 +15,13 @@ on:
 
 permissions:
   contents: read
+
+# A newer commit on the same pull request replaces the older run. Runs on main
+# and manual runs get a group of their own, so they never queue behind or
+# cancel each other.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   testisp-reproduction:
