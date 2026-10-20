@@ -209,15 +209,15 @@ func TestUDPCacheReleasesUnreferencedLiveSockets(t *testing.T) {
 		keys = append(keys, key)
 		owners = append(owners, v)
 	}
-	if len(o.cache) != 2 {
-		t.Fatalf("expected both cache entries before reconciliation, got %d", len(o.cache))
+	if cookieCacheSize(o) != 2 {
+		t.Fatalf("expected both cache entries before reconciliation, got %d", cookieCacheSize(o))
 	}
-	if _, err := o.SnapshotAt(ctx, keys[:1], cutoff); err != nil || len(o.cache) != 2 {
-		t.Fatalf("lookup completed after enumeration but before dump must survive: %v entries=%d", err, len(o.cache))
+	if _, err := o.SnapshotAt(ctx, keys[:1], cutoff); err != nil || cookieCacheSize(o) != 2 {
+		t.Fatalf("lookup completed after enumeration but before dump must survive: %v entries=%d", err, cookieCacheSize(o))
 	}
 	got, err := o.Snapshot(ctx, keys[:1])
-	if err != nil || got[keys[0]] != owners[0] || len(o.cache) != 1 {
-		t.Fatalf("unreferenced cache wasn't released: %v %v entries=%d", got, err, len(o.cache))
+	if err != nil || got[keys[0]] != owners[0] || cookieCacheSize(o) != 1 {
+		t.Fatalf("unreferenced cache wasn't released: %v %v entries=%d", got, err, cookieCacheSize(o))
 	}
 	rows, err := o.query(ctx, unix.AF_INET, unix.IPPROTO_UDP, keys[1], destination)
 	if err != nil || len(rows) != 1 || rows[0].generation() != owners[1].Generation {
@@ -227,9 +227,20 @@ func TestUDPCacheReleasesUnreferencedLiveSockets(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err = o.Snapshot(ctx, keys)
-	if err != nil || got[keys[1]] != owners[1] || len(o.cache) != 2 {
-		t.Fatalf("referenced pending/active cache lost: %v %v entries=%d", got, err, len(o.cache))
+	if err != nil || got[keys[1]] != owners[1] || cookieCacheSize(o) != 2 {
+		t.Fatalf("referenced pending/active cache lost: %v %v entries=%d", got, err, cookieCacheSize(o))
 	}
+}
+
+func cookieCacheSize(o *Owners) int {
+	count := 0
+	for i := range o.index {
+		shard := &o.index[i]
+		shard.mu.Lock()
+		count += len(shard.cookies)
+		shard.mu.Unlock()
+	}
+	return count
 }
 
 func TestUDPErrorCallbackUsesTheRealICMPQuote(t *testing.T) {

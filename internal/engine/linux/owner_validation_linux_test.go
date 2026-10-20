@@ -7,6 +7,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 )
 
 func TestSharedMetadataMustBeginAfterTheDescriptorCheck(t *testing.T) {
@@ -38,16 +40,46 @@ func TestSharedMetadataMustBeginAfterTheDescriptorCheck(t *testing.T) {
 	}
 }
 
-func TestMetadataWaitHonorsTheOriginalLookupDeadline(t *testing.T) {
+func TestCancelledMetadataLookupDoesNoWork(t *testing.T) {
 	o := newTestOwners(t)
-	blocked := make(chan struct{})
-	v := &ownerValidation{running: blocked}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if owner, err := v.resolve(ctx, time.Now(), o); err != context.DeadlineExceeded || owner.AppID != "" {
+	v := &ownerValidation{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if owner, err := v.resolve(ctx, time.Now(), o); err != context.Canceled || owner.AppID != "" {
 		t.Fatalf("expired metadata wait: %+v %v", owner, err)
 	}
 	if o.metadataPasses.Load() != 0 {
 		t.Fatal("cancelled lookup started a metadata read")
+	}
+}
+
+func TestBusyMetadataCacheDoesNotBlockLiveValidation(t *testing.T) {
+	o := newTestOwners(t)
+	pid := uint32(os.Getpid())
+	start, err := processStart(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &ownerValidation{pid: pid, start: start}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	type result struct {
+		owner platform.Owner
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() { owner, err := v.resolve(ctx, time.Now(), o); done <- result{owner, err} }()
+	select {
+	case got := <-done:
+		if got.err != nil || got.owner.PID != pid || got.owner.StartTime != start {
+			t.Fatalf("live validation behind busy cache: %+v %v", got.owner, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("lookup waited for the metadata cache")
+	}
+	if o.metadataPasses.Load() != 1 || o.sharedMetadata.Load() != 0 {
+		t.Fatal("fixture did not perform a fresh real metadata read")
 	}
 }

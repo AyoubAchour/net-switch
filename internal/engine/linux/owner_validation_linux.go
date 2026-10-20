@@ -18,7 +18,6 @@ type ownerValidation struct {
 	pid      uint32
 	start    uint64
 	mu       sync.Mutex
-	running  chan struct{}
 	complete bool
 	began    time.Time
 	owner    platform.Owner
@@ -62,48 +61,28 @@ func (o *Owners) validationFor(h holder) *ownerValidation {
 }
 
 func (v *ownerValidation) resolve(ctx context.Context, checked time.Time, o *Owners) (platform.Owner, error) {
-	for {
-		if err := ctx.Err(); err != nil {
-			return platform.Owner{}, err
-		}
-		v.mu.Lock()
-		if err := ctx.Err(); err != nil {
-			v.mu.Unlock()
-			return platform.Owner{}, err
-		}
+	if err := ctx.Err(); err != nil {
+		return platform.Owner{}, err
+	}
+	// Metadata is a best-effort completed result, never a gate. A reader
+	// descheduled in procfs or while publishing cannot stop every follower.
+	if v.mu.TryLock() {
 		if v.complete && !v.began.Before(checked) {
 			owner, err := v.owner, v.err
 			v.mu.Unlock()
 			o.sharedMetadata.Add(1)
 			return owner, err
 		}
-		if done := v.running; done != nil {
-			v.mu.Unlock()
-			select {
-			case <-done:
-			case <-ctx.Done():
-				return platform.Owner{}, ctx.Err()
-			}
-			continue
-		}
-		done := make(chan struct{})
-		v.running = done
-		began := time.Now()
 		v.mu.Unlock()
-		if err := ctx.Err(); err != nil {
-			v.mu.Lock()
-			v.running = nil
-			close(done)
-			v.mu.Unlock()
-			return platform.Owner{}, err
-		}
-		o.metadataPasses.Add(1)
-		owner, err := processOwnerAt(v.pid, v.start)
-		v.mu.Lock()
-		v.began, v.owner, v.err, v.complete = began, owner, err, true
-		v.running = nil
-		close(done)
-		v.mu.Unlock()
-		return owner, err
 	}
+	began := time.Now()
+	o.metadataPasses.Add(1)
+	owner, err := processOwnerAt(v.pid, v.start)
+	if v.mu.TryLock() {
+		if !v.complete || v.began.Before(began) {
+			v.began, v.owner, v.err, v.complete = began, owner, err, true
+		}
+		v.mu.Unlock()
+	}
+	return owner, err
 }

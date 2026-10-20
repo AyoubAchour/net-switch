@@ -67,7 +67,6 @@ type Owners struct {
 	recentMu        sync.RWMutex
 	cgroups         map[uint64]string
 	recent          map[uint32]*recentOwners
-	cache           map[uint64]cachedHolders
 	index           [ownerIndexShards]ownerIndex
 	indexSeed       maphash.Seed
 	windows         map[uint32]fdWindow
@@ -159,10 +158,10 @@ func NewOwners() *Owners {
 	// Inode hints and their subscribers share a shard, not the process-state
 	// lock. Small workloads need not retain and scan tens of MiB of empty
 	// index space, and a growing shard cannot stall every other lookup.
-	o := &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32]*recentOwners, 64), cache: make(map[uint64]cachedHolders, 16384), windows: make(map[uint32]fdWindow, 4096), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
+	o := &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32]*recentOwners, 64), windows: make(map[uint32]fdWindow, 256), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
 	for i := range o.index {
-		o.index[i].inodes = make(map[uint32]inodeHolders, 128)
-		o.index[i].waiters = make(map[uint32]*inodeWaiter, 128)
+		o.index[i].inodes = make(map[uint32]inodeHolders, 16)
+		o.index[i].waiters = make(map[uint32]*inodeWaiter, 16)
 	}
 	return o
 }
@@ -553,9 +552,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	indexStarted := time.Now()
 	var cached []holder
 	if r.protocol == unix.IPPROTO_UDP {
-		o.mu.Lock()
-		cached = o.cache[r.cookie].holders
-		o.mu.Unlock()
+		cached = o.cachedHolders(r.cookie)
 	}
 	recent := o.recentPIDs(r.uid)
 	indexed := o.indexed(r.inode)
@@ -974,9 +971,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 		result.Generation = r.generation()
 		if r.protocol == unix.IPPROTO_UDP {
-			o.mu.Lock()
-			o.cache[r.cookie] = cachedHolders{found, time.Now()}
-			o.mu.Unlock()
+			o.cacheHolders(r.cookie, found)
 		}
 		o.rememberPID(r.uid, result.PID)
 		return result, nil
@@ -1241,9 +1236,7 @@ func (o *Owners) SnapshotAt(ctx context.Context, keys []netip.AddrPort, started 
 			continue
 		}
 		live[r.cookie] = true
-		o.mu.Lock()
-		cached := o.cache[r.cookie].holders
-		o.mu.Unlock()
+		cached := o.cachedHolders(r.cookie)
 		var owner platform.Owner
 		if len(cached) == 0 {
 			out[k] = platform.Owner{Generation: r.generation()}
@@ -1283,11 +1276,7 @@ func (o *Owners) SnapshotAt(ctx context.Context, keys []netip.AddrPort, started 
 			delete(o.ambiguousPorts, port)
 		}
 	}
-	for cookie, cached := range o.cache {
-		if !live[cookie] && cached.observed.Before(started) {
-			delete(o.cache, cookie)
-		}
-	}
 	o.mu.Unlock()
+	o.pruneCookies(live, started)
 	return out, nil
 }

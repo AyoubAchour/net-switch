@@ -547,10 +547,15 @@ func exerciseTCPBufferBudget(e *Env, s engine.Controller) {
 	ramp := time.Duration(flows/perWave*burstMS)*time.Millisecond + 3*time.Second
 	most, samples := int64(0), 0
 	var held []int64
+	var previousDrops, previousRTO, previousRecovery uint64
 	for start := time.Now(); time.Since(start) < ramp+3*time.Second && e.Ctx().Err() == nil; {
 		st, err := s.Stats(e.Ctx())
 		e.T.Require(err == nil, "stats while the downloads run (%v)", err)
 		most = max(most, st.TCPBytes)
+		if drops, rto, recovery := st.Counters["tunDropped"], st.Counters["tcpRTOs"], st.Counters["tcpSACKRecoveries"]; drops != previousDrops || rto != previousRTO || recovery != previousRecovery {
+			e.T.Logf("TCP loss at %.3f s: outputDrops=%d transportDrops=%d retransmits=%d RTO=%d SACK=%d heap=%d GC=%d", time.Since(start).Seconds(), drops, st.Counters["transportDropped"], st.Counters["tcpRetransmits"], rto, recovery, st.Counters["heapBytes"], st.Counters["gcCycles"])
+			previousDrops, previousRTO, previousRecovery = drops, rto, recovery
+		}
 		samples++
 		if time.Since(start) >= ramp {
 			held = append(held, st.TCPBytes)
