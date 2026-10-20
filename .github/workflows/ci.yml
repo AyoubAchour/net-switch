@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      download_probe:
+        description: Check rejected HTTP bodies in the Linux engine downloader
+        type: boolean
+        default: false
       handle_probe:
         description: Diagnose runtime thread handles during recovery
         type: boolean
@@ -32,6 +36,25 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  download-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.download_probe
+    name: Pinned download rejection proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go test -v -count=1 -run '^TestDownload' -timeout=2m ./tests/linux/engine/singbox
+
   recovery-handle-probe:
     if: github.event_name == 'workflow_dispatch' && inputs.handle_probe
     name: ARM64 recovery handle ownership
@@ -133,7 +156,7 @@ jobs:
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.latency_probe && !inputs.handle_probe
+    if: github.event_name == 'workflow_dispatch' && !inputs.latency_probe && !inputs.handle_probe && !inputs.download_probe
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
