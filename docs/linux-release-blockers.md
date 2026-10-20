@@ -60,6 +60,16 @@ The probe/stream owner-known condition is a release blocker. Each split check
 also reports whether its result would pass the original all-on-the-pinned-line
 assertion. No server observation is discarded or silently retried.
 
+The total TCP cap fixture now offers ten apps' 8,000 attempts, with the same
+100 concurrent attempts per app. Even the app with the survival stream stays
+below its 8,192 limit. No failed attempt is retried. In the x64 run
+[39441805445](https://github.com/AyoubAchour/net-switch/actions/runs/39441805445),
+the former 68,400 attempts produced 63,176 identified flows plus 2,048 unknown
+flows: only 65,224 live flows. That run correctly failed the unchanged exact
+65,536 cap/profile check. Increasing offered work lets the fixture exercise
+capacity despite the separately reported attribution defect; it does not waive
+the cap, resource, refusal or survival checks.
+
 The scanner remains a bounded fallback, reported as `proc-fallback` in owner
 stats. Recent process observations can defer unrelated candidate scans for 5 ms
 after a live owner is found. They never supply identity or prove absence, and
