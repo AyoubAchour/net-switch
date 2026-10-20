@@ -224,6 +224,7 @@ func (s *udpSocket) tooBig(dst netip.AddrPort) *platform.TooBig {
 // SO_ERROR. A second RawConn.Read would compete for Go's read lock and could
 // starve replies. ReadError consumes bounded messages from this channel.
 func (s *udpSocket) drainErrors() {
+	s.errorReady.Store(false)
 	s.errorMu.Lock()
 	handler := s.handler
 	var pending *platform.DatagramError

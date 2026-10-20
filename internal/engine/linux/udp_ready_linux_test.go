@@ -84,7 +84,7 @@ func TestEpollUDPRepliesAndErrorsKeepOneMapping(t *testing.T) {
 	}
 	// Do not read A's pending error first. Linux delivers that error to the
 	// next send even when it targets a healthy, different destination B.
-	healthy, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	healthy, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2)})
 	if err != nil {
 		t.Fatal(err)
 	}

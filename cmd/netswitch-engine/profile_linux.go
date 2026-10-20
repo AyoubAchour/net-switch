@@ -76,15 +76,47 @@ func startProfiles(dir string, cpu, execution bool) (func(), error) {
 	}
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGUSR1)
+	if execution {
+		signal.Notify(signals, syscall.SIGUSR2)
+	}
 	done := make(chan struct{})
 	var worker sync.WaitGroup
 	worker.Go(func() {
 		captures := 0
+		probeTraces := 0
 		for {
 			select {
 			case <-done:
 				return
-			case <-signals:
+			case sig := <-signals:
+				if sig == syscall.SIGUSR2 {
+					// The initial five-second trace misses post-load probes.
+					// An opt-in diagnostic request captures a fresh bounded window.
+					stopTrace()
+					probeTraces++
+					file, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("runtime-probe-%03d.trace", probeTraces)), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+					if err == nil {
+						err = trace.Start(file)
+						if err != nil {
+							file.Close()
+						}
+					}
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "capture probe trace:", err)
+						continue
+					}
+					finish := sync.OnceFunc(func() { trace.Stop(); file.Close() })
+					timer := time.AfterFunc(5*time.Second, finish)
+					stopTrace = func() { timer.Stop(); finish() }
+					ready, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("trace-ready-%03d", probeTraces)), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+					if err == nil {
+						err = ready.Close()
+					}
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "acknowledge probe trace:", err)
+					}
+					continue
+				}
 				captures++
 				target := dir
 				if captures > 1 {
@@ -143,28 +175,32 @@ func writeProfiles(dir string) error {
 	if err != nil {
 		return err
 	}
-	rss, socketBytes := profileOSMemory()
+	rss, socketBytes, rssValid, socketsValid := profileOSMemory()
 	return errors.Join(json.NewEncoder(f).Encode(struct {
 		runtime.MemStats
-		RSS, KernelSocketBytes uint64
-	}{stats, rss, socketBytes}), f.Close())
+		RSS, KernelSocketBytes      uint64
+		RSSValid, KernelSocketValid bool
+	}{stats, rss, socketBytes, rssValid, socketsValid}), f.Close())
 }
 
-func profileOSMemory() (rss, sockets uint64) {
+func profileOSMemory() (rss, sockets uint64, rssValid, socketsValid bool) {
 	if data, err := os.ReadFile("/proc/self/statm"); err == nil {
 		fields := strings.Fields(string(data))
 		if len(fields) > 1 {
-			pages, _ := strconv.ParseUint(fields[1], 10, 64)
+			pages, parseErr := strconv.ParseUint(fields[1], 10, 64)
 			rss = pages * uint64(os.Getpagesize())
+			rssValid = parseErr == nil
 		}
 	}
 	// sockstat's TCP/UDP mem fields are pages and include both families.
 	if data, err := os.ReadFile("/proc/net/sockstat"); err == nil {
+		socketsValid = true
 		for _, line := range strings.Split(string(data), "\n") {
 			fields := strings.Fields(line)
 			for i := 1; i+1 < len(fields); i += 2 {
 				if fields[i] == "mem" {
-					pages, _ := strconv.ParseUint(fields[i+1], 10, 64)
+					pages, parseErr := strconv.ParseUint(fields[i+1], 10, 64)
+					socketsValid = socketsValid && parseErr == nil
 					sockets += pages * uint64(os.Getpagesize())
 				}
 			}

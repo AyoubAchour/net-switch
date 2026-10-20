@@ -3,6 +3,7 @@
 package suite
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -873,6 +874,12 @@ func timeWaitCap(e *Env) {
 	}
 	e.T.Check(len(live) == 0 && after.Flows <= 2, "waiting endpoints aren't live flows: none of alpha's is listed and the engine counts %d flows beside %d waiting (%s)",
 		after.Flows, after.TimeWait, strings.Join(upTo(live, 3), "; "))
+	if profiler, ok := e.Eng.(interface{ CaptureProbeTrace(context.Context) error }); ok {
+		ctx, cancel := context.WithTimeout(e.Ctx(), time.Second)
+		err := profiler.CaptureProbeTrace(ctx)
+		cancel()
+		e.T.Require(err == nil, "start optional post-burst scheduler trace (%v)", err)
+	}
 	e.expectSteadyTCP("alpha's new connections with TIME_WAIT full", "alpha", "a", topo.Server4, 50)
 	e.expectSteadyTCP("bravo's new connections with TIME_WAIT full", "bravo", "b", topo.Server4, 10)
 }

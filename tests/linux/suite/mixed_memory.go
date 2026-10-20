@@ -45,9 +45,10 @@ const liveHeapLimit = uint64(512<<20) * 9 / 10
 func (e *Env) checkCapacityMemory(label string, st engine.Stats) {
 	heap := st.Counters["forcedGCHeapBytes"]
 	e.T.Check(heap > 0 && heap <= liveHeapLimit, "%s: forced-GC live heap is at most 460.8 MiB (%d bytes)", label, heap)
-	e.T.Logf("MEMORY %s: forced-GC-heap=%d limit=%d managed=%d RSS=%d kernel-socket=%d GC-CPU-ppm=%d old-managed-check=%t output-drops TCP-control=%d TCP-data=%d UDP=%d ICMP=%d",
-		label, heap, liveHeapLimit, st.Counters["forcedGCManagedBytes"], st.Counters["rssBytes"], st.Counters["kernelSocketBytes"], st.Counters["gcCPUppm"], st.Counters["forcedGCManagedBytes"] <= 512<<20,
+	e.T.Logf("MEMORY %s: forced-GC-heap=%d limit=%d managed-at-GC=%d managed-stats=%d RSS=%d kernel-socket=%d GC-CPU-ppm=%d old-managed-check=%t output-drops TCP-control=%d TCP-data=%d UDP=%d ICMP=%d",
+		label, heap, liveHeapLimit, st.Counters["forcedGCManagedBytes"], st.Counters["runtimeBytes"], st.Counters["rssBytes"], st.Counters["kernelSocketBytes"], st.Counters["gcCPUppm"], st.Counters["runtimeBytes"] > 0 && st.Counters["runtimeBytes"] <= 512<<20,
 		st.Counters["tunDropped.tcpControl"], st.Counters["tunDropped.tcpData"], st.Counters["tunDropped.udp"], st.Counters["tunDropped.icmp"])
+	e.T.Logf("MEMORY %s availability: RSS=%t kernel-socket=%t (unavailable readings are not zero-memory claims)", label, st.Counters["rssMeasured"] == 1, st.Counters["kernelSocketMeasured"] == 1)
 }
 
 func mixedCaps(e *Env) {

@@ -56,7 +56,8 @@ Wrong nonempty identities and wrong lines still fail; unknown flows must use the
 main lane. Stream identities are captured before the load, and every answer,
 survival and silence limit remains mandatory afterward.
 
-The probe/stream owner-known condition during load is a release blocker. Each split check
+The probe owner-known condition during load is a release blocker. Stream
+identity is checked before load and is a hard requirement. Each split check
 also reports whether its result would pass the original all-on-the-pinned-line
 assertion. No server observation is discarded or silently retried.
 
@@ -64,16 +65,20 @@ Post-fault recovery is different: the three sequential probes after pending
 overload, unknown-owner overload and a stalled TUN writer must all identify
 bravo and use line b. Their identity and per-connection server checks are hard
 PR failures, even though the enclosing overload case retains its declaration.
-The sequential probes after handshake overload are hard too, as are other
+The sequential probes after the TIME_WAIT burst and handshake overload are hard too, as are other
 route-recovery probes. A regression runs an unknown recovery result inside a
 declared load case and requires the actual harness to fail the job.
 The DNS-change survival precondition now also requires zero discarded streams;
 its original no-retry verdict is an assertion, not only a diagnostic line.
 
 The `capacity.mixed-caps` release target is 49,152 TCP flows and 16,384 UDP
-sessions, alongside 4,096 retained TIME_WAIT endpoints. It requires at most 512 MiB of Go-managed
-memory (`Sys - HeapReleased`) throughout the held plateau. This includes stacks,
-GC metadata and allocator slack, but excludes kernel socket memory. Bounds,
+sessions, alongside 4,096 retained TIME_WAIT endpoints. Every capacity fixture
+requires live heap immediately after forced GC to stay at most 460.8 MiB
+(90% of the 512 MiB `GOMEMLIMIT`). The capture precedes profile serialization.
+Go-managed memory (`Sys - HeapReleased`), process RSS, kernel socket memory
+and GC CPU share are reported, without gates. The previous managed-memory
+verdict is also logged. Kernel socket pages use the kernel's aggregate
+sockstat accounting, not an engine-only attribution. Bounds,
 survival and each held TCP tuple's identity/route/server correlation are hard.
 It reports baseline, UDP-only, UDP-plus-TIME_WAIT and mixed memory samples, so
 the incremental cost per session, per flow and per retained endpoint is visible.
@@ -94,14 +99,17 @@ policy, or unexplained. A known app's refusal below all limits is unexplained.
 No limits, timeouts, demand or scanner behavior change with this classification.
 
 The hard checks require all offered attempts to be held or explicitly refused;
-all admitted flows to remain held; no failed outbound TCP dial; every forwarding
+all admitted flows to remain held; engine flow counts to equal independent
+client/server counts; no failed outbound TCP dial or native UDP open; every forwarding
 refusal to have the expected cap or unknown-pool reason; and every lookup miss
 to be an unknown admission or counted unknown-pool overflow. Handshake, policy,
 unexplained or unrelated app-cap refusals cannot waive an occupancy shortfall.
 In the mixed case an app holding both protocols can legitimately reach its
 8,192 combined cap before the total fills; that reason is also allowed, and
 is subtracted from unknown-overflow credit. Each cap reason must have a matching
-full-pool peak as independent evidence. The TCP-only offer remains below every
+engine peak. Mixed per-app refusals additionally require a UDP-holding client
+app to hold exactly 8,192 combined TCP and UDP sockets. Engine peaks alone are
+not independent evidence. The TCP-only offer remains below every
 app's cap and therefore accepts no per-app refusal.
 
 Decision counters include repeated SYNs. Therefore the proof subtracts **all

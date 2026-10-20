@@ -7,6 +7,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	"net"
 	"net/netip"
 	"path/filepath"
 	"strings"
@@ -61,6 +62,11 @@ func TestKernelAmbiguousAddressDisablesOnlyItsLine(t *testing.T) {
 	}
 	if got, err := p.binding("b", false); err != nil || got.Index != b.Index {
 		t.Fatal("healthy line lost routing", err)
+	} else {
+		routes, err := netlink.RouteGetWithOptions(net.IPv4(203, 0, 113, 99), &netlink.RouteGetOptions{OifIndex: b.Index, Mark: got.Mark})
+		if err != nil || len(routes) == 0 || routes[0].LinkIndex != b.Index {
+			t.Fatalf("healthy line's real marked route was lost: %v %v", routes, err)
+		}
 	}
 	if err = netlink.AddrDel(b, duplicate); err != nil {
 		t.Fatal(err)

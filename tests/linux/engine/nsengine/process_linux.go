@@ -30,6 +30,7 @@ type engineProcess struct {
 	socket, temporary, state, netns, log string
 	profiles                             string
 	captures                             int
+	probeTraces                          int
 	memory                               map[string]uint64
 }
 
@@ -203,12 +204,19 @@ func (d *Driver) CaptureProfiles(ctx context.Context) error {
 		if data, err := os.ReadFile(path); err == nil && json.Valid(data) {
 			var sample struct {
 				goruntime.MemStats
-				RSS, KernelSocketBytes uint64
+				RSS, KernelSocketBytes      uint64
+				RSSValid, KernelSocketValid bool
 			}
 			if err := json.Unmarshal(data, &sample); err != nil {
 				return err
 			}
 			d.process.memory = map[string]uint64{"forcedGCHeapBytes": sample.HeapAlloc, "forcedGCManagedBytes": sample.Sys - sample.HeapReleased, "forcedGCStackBytes": sample.StackInuse, "rssBytes": sample.RSS, "kernelSocketBytes": sample.KernelSocketBytes}
+			if sample.RSSValid {
+				d.process.memory["rssMeasured"] = 1
+			}
+			if sample.KernelSocketValid {
+				d.process.memory["kernelSocketMeasured"] = 1
+			}
 			return nil
 		}
 		select {
@@ -232,6 +240,36 @@ func (d *Driver) CaptureMemory(ctx context.Context) (map[string]uint64, error) {
 		out[key] = value
 	}
 	return out, nil
+}
+
+func (d *Driver) CaptureProbeTrace(ctx context.Context) error {
+	if os.Getenv("NSACCEPT_PROFILE") != "true" {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.running() {
+		return errors.New("probe trace requires a running engine")
+	}
+	d.process.probeTraces++
+	path := filepath.Join(d.process.profiles, fmt.Sprintf("trace-ready-%03d", d.process.probeTraces))
+	if err := d.process.cmd.Process.Signal(syscall.SIGUSR2); err != nil {
+		return err
+	}
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-d.process.done:
+			return errors.New("engine exited before probe trace")
+		case <-tick.C:
+		}
+	}
 }
 
 func (d *Driver) ResolverContents() (string, error) {
