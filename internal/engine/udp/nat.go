@@ -55,6 +55,7 @@ type session struct {
 	wake            chan struct{}
 	done            chan struct{}
 	cancel          context.CancelFunc
+	ready           atomic.Pointer[readySession]
 }
 type shard struct {
 	sync.Mutex
@@ -76,6 +77,7 @@ type NAT struct {
 	wg                                                               sync.WaitGroup
 	reconcileMu                                                      sync.Mutex
 	refresh                                                          chan struct{}
+	io                                                               *udpWorkers
 	Invalid, Dropped, Rejected, IdentityErrors, Oversize, ReadErrors atomic.Uint64
 	PeakQueuePackets, PeakQueueBytes                                 atomic.Uint64
 }
@@ -83,6 +85,7 @@ type NAT struct {
 func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.DatagramOutput, mtu int) *NAT {
 	ctx, cancel := context.WithCancel(ctx)
 	n := &NAT{ctx: ctx, cancel: cancel, control: c, owners: o, identities: i, dialer: d, out: out, now: time.Now, mtu: mtu, refresh: make(chan struct{}, 1)}
+	n.io = newUDPWorkers()
 	var seed [4]byte
 	rand.Read(seed[:])
 	n.fragmentID.Store(binary.NativeEndian.Uint32(seed[:]))
@@ -241,6 +244,10 @@ func (n *NAT) receive(source, destination netip.AddrPort, ownedBytes int, copyPa
 	if created {
 		go s.run()
 	}
+	if r := s.ready.Load(); r != nil {
+		r.notify()
+		return
+	}
 	select {
 	case s.wake <- struct{}{}:
 	default:
@@ -262,7 +269,7 @@ func (s *session) close() {
 	}
 	s.closed = true
 	close(s.done)
-	socket, cancel := s.socket, s.cancel
+	socket, cancel, ready := s.socket, s.cancel, s.ready.Load()
 	bytes := s.bytes
 	s.bytes = 0
 	s.queue = nil
@@ -270,7 +277,9 @@ func (s *session) close() {
 	if cancel != nil {
 		cancel()
 	}
-	if socket != nil {
+	if ready != nil {
+		ready.notify()
+	} else if socket != nil {
 		socket.Close()
 	}
 	n.control.ReleasePending(bytes)
@@ -278,9 +287,16 @@ func (s *session) close() {
 
 func (s *session) run() {
 	n := s.n
-	defer n.wg.Done()
+	handedOff := false
 	// Socket completion counters must finish before the final totals fold.
-	defer func() { s.close(); s.workers.Wait(); s.ticket.Close() }()
+	defer func() {
+		if !handedOff {
+			s.close()
+			s.workers.Wait()
+			s.ticket.Close()
+			n.wg.Done()
+		}
+	}()
 	ctx, cancel := context.WithCancel(n.ctx)
 	defer cancel()
 	s.mu.Lock()
@@ -397,6 +413,10 @@ func (s *session) run() {
 	s.ticket.Established(socket.LocalAddr().Addr())
 	if q, ok := socket.(platform.UDPErrorHandler); ok {
 		q.SetErrorHandler(s.errorReply)
+	}
+	if socket, ok := socket.(platform.ReadyUDP); ok {
+		handedOff = s.startReady(socket)
+		return
 	}
 	s.workers.Go(func() { s.read(ctx) })
 	if q, ok := socket.(platform.UDPErrorQueue); ok {

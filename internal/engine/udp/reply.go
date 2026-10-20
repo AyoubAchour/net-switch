@@ -3,6 +3,7 @@ package udp
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"sync"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
@@ -54,12 +55,18 @@ func (s *session) readPacket(ctx context.Context) (udpReply, error) {
 	if err := s.socket.WaitReadable(ctx); err != nil {
 		return udpReply{}, err
 	}
+	return s.readAvailable(s.socket.ReadFrom)
+}
+
+func (s *session) readAvailable(read func([]byte) (int, netip.AddrPort, error)) (udpReply, error) {
 	control := s.n.control
-	if !control.ReservePending(flowapi.UDPReadBuffer) {
+	if !control.ReserveReply(flowapi.UDPReadBuffer) {
 		// Consume this datagram without allocating its payload. The mapping
 		// survives overload; a one-byte read may report truncation on Windows.
 		var discard [1]byte
-		s.socket.ReadFrom(discard[:])
+		if _, _, err := read(discard[:]); errors.Is(err, platform.ErrWouldBlock) {
+			return udpReply{}, err
+		}
 		return udpReply{}, errReplyBudget
 	}
 	account, _ := control.(interface{ ObserveUDPRead(int) })
@@ -72,9 +79,9 @@ func (s *session) readPacket(ctx context.Context) (udpReply, error) {
 		if account != nil {
 			account.ObserveUDPRead(-flowapi.UDPReadBuffer)
 		}
-		control.ReleasePending(flowapi.UDPReadBuffer)
+		control.ReleaseReply(flowapi.UDPReadBuffer)
 	}()
-	size, remote, err := s.socket.ReadFrom(buf[:])
+	size, remote, err := read(buf[:])
 	if err != nil {
 		return udpReply{}, err
 	}
@@ -85,12 +92,12 @@ func (s *session) readPacket(ctx context.Context) (udpReply, error) {
 	if bytes == 0 {
 		return udpReply{}, &platform.TooBig{}
 	}
-	if !control.ReservePending(bytes) {
+	if !control.ReserveReply(bytes) {
 		return udpReply{}, errReplyBudget
 	}
 	id := s.n.fragmentID.Add(1)
 	packets := packet.UDPReply(remote, s.source, buf[:size], s.n.mtu, id)
 	// SendBatch takes this lease, including on rejection. Closing the session
 	// must not release it while a fragment is still queued or held by a writer.
-	return udpReply{size: size, packets: packets, release: func() { control.ReleasePending(bytes) }}, nil
+	return udpReply{size: size, packets: packets, release: func() { control.ReleaseReply(bytes) }}, nil
 }
