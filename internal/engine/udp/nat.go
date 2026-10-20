@@ -27,6 +27,7 @@ const PendingBytes = 256 << 10
 const IdleTimeout = 5 * time.Minute
 const IdentityMaxAge = 2 * time.Second
 const RejectLifetime = time.Second
+const RejectCacheEntries = 4096
 const shards = 32
 
 type datagram struct {
@@ -59,7 +60,12 @@ type session struct {
 }
 type shard struct {
 	sync.Mutex
-	m map[netip.AddrPort]*session
+	m        map[netip.AddrPort]*session
+	negative map[netip.AddrPort]refusedSession
+}
+type refusedSession struct {
+	owner platform.Owner
+	at    time.Time
 }
 type NAT struct {
 	ctx                                                              context.Context
@@ -80,6 +86,7 @@ type NAT struct {
 	io                                                               *udpWorkers
 	Invalid, Dropped, Rejected, IdentityErrors, Oversize, ReadErrors atomic.Uint64
 	PeakQueuePackets, PeakQueueBytes                                 atomic.Uint64
+	OpenFailed                                                       atomic.Uint64
 }
 
 func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.DatagramOutput, mtu int) *NAT {
@@ -190,6 +197,19 @@ func (n *NAT) receive(source, destination netip.AddrPort, ownedBytes int, copyPa
 	s := b.m[source]
 	created := false
 	if s == nil {
+		if denied, ok := b.negative[source]; ok {
+			if n.now().Sub(denied.at) < RejectLifetime {
+				b.Unlock()
+				if n.control.AllowReject(denied.owner.AppID) {
+					_, raw, _ := copyPacket()
+					n.out.Send(packet.Unreachable(raw, 0))
+				} else {
+					n.Dropped.Add(1)
+				}
+				return
+			}
+			delete(b.negative, source)
+		}
 		t, err := n.control.Begin("udp", platform.Tuple{Source: source, Destination: destination})
 		if err != nil {
 			b.Unlock()
@@ -366,14 +386,12 @@ func (s *session) run() {
 	if owner.Generation == "" {
 		n.IdentityErrors.Add(1)
 		s.rejectPending(owner.AppID)
-		s.waitRejected(ctx)
 		return
 	}
 	decision, err := s.ticket.Resolve(owner)
 	if err != nil {
 		n.Rejected.Add(1)
 		s.rejectPending(owner.AppID)
-		s.waitRejected(ctx)
 		return
 	}
 	var socket platform.UDPConn
@@ -392,11 +410,11 @@ func (s *session) run() {
 		socket, err = n.dialer.OpenUDP(ctx, decision.Line, s.source.Addr().Is6())
 	}
 	if err != nil {
+		n.OpenFailed.Add(1)
 		if observer, ok := n.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil {
 			observer.LineError(decision.Line, err)
 		}
 		s.rejectPending(owner.AppID)
-		s.waitRejected(ctx)
 		return
 	}
 	s.mu.Lock()
@@ -451,6 +469,8 @@ func (s *session) run() {
 					s.mu.Lock()
 					s.last = n.now()
 					s.mu.Unlock()
+				} else if errors.Is(err, platform.ErrDatagramDropped) {
+					n.Dropped.Add(1)
 				} else if n.control.AllowReject(owner.AppID) {
 					var big *platform.TooBig
 					if errors.As(err, &big) {
@@ -468,7 +488,29 @@ func (s *session) run() {
 }
 
 func (s *session) rejectPending(app string) {
+	// Failed setups must disappear from counts and pagination before any
+	// refusal is observable. Suppression has its own bounded, timer-free cache.
+	s.ticket.Retire()
+	b := s.n.bucket(s.source)
+	b.Lock()
 	s.mu.Lock()
+	if !s.closed && b.m[s.source] == s {
+		if b.negative == nil {
+			b.negative = make(map[netip.AddrPort]refusedSession)
+		}
+		if len(b.negative) >= RejectCacheEntries/shards {
+			var oldest netip.AddrPort
+			var at time.Time
+			for key, entry := range b.negative {
+				if !oldest.IsValid() || entry.at.Before(at) {
+					oldest, at = key, entry.at
+				}
+			}
+			delete(b.negative, oldest)
+		}
+		b.negative[s.source] = refusedSession{owner: s.owner, at: s.n.now()}
+	}
+	b.Unlock()
 	defer s.mu.Unlock()
 	// A packet arriving after this flush must also receive a rejection, even
 	// if close has not yet removed the session from its shard.
@@ -485,16 +527,6 @@ func (s *session) rejectPending(app string) {
 	s.n.control.ReleasePending(s.bytes)
 	s.bytes = 0
 	s.queue = nil
-}
-
-func (s *session) waitRejected(ctx context.Context) {
-	timer := time.NewTimer(RejectLifetime)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-	case <-s.done:
-	case <-timer.C:
-	}
 }
 
 func (s *session) read(ctx context.Context) {

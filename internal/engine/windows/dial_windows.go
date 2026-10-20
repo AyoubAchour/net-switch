@@ -240,6 +240,9 @@ func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) 
 		return 0, errors.Join(err, optionErr)
 	}
 	n, err := s.conn.WriteToUDPAddrPort(b, dst)
+	if errors.Is(err, windows.WSAENOBUFS) {
+		return n, platform.ErrDatagramDropped
+	}
 	if platform.IsTooBig(err) {
 		err = &platform.TooBig{MTU: s.pathMTU(dst.Addr())}
 	}

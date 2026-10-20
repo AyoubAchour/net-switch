@@ -187,6 +187,8 @@ func (r *readySession) step() {
 				s.mu.Lock()
 				s.last = n.now()
 				s.mu.Unlock()
+			} else if errors.Is(err, platform.ErrDatagramDropped) {
+				n.Dropped.Add(1)
 			} else if n.control.AllowReject(app) {
 				var big *platform.TooBig
 				var mtu uint32

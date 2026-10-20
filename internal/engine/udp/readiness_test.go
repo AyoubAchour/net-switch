@@ -22,6 +22,24 @@ type readyDatagram struct {
 	blocked, detached bool
 }
 
+type droppedDatagram struct{ *readyDatagram }
+
+func (*droppedDatagram) TryWriteTo([]byte, netip.AddrPort, bool) (int, error) {
+	return 0, platform.ErrDatagramDropped
+}
+func TestLocalUDPSendDropIsCountedWithoutFalseUnreachable(t *testing.T) {
+	c := &testfake.Controller{}
+	socket := &droppedDatagram{&readyDatagram{socket: newSocket()}}
+	out := make(chan []byte, 4)
+	n := New(context.Background(), nil, c, &testfake.Owners{Value: owner}, nil, testfake.Dialer{UDPFunc: func(context.Context, string, bool) (platform.UDPConn, error) { return socket, nil }}, testfake.Output{Packets: out}, 9000)
+	defer n.Close()
+	send(n, dest, []byte("QUIC remains connected"))
+	waitReplyState(t, func() bool { return n.Dropped.Load() == 1 && c.Pending.Load() == 0 })
+	if len(out) != 0 || c.Up.Load() != 0 {
+		t.Fatal("local resource drop fabricated an unreachable or counted sent bytes")
+	}
+}
+
 func (s *readyDatagram) Watch(wake func()) (platform.Readiness, error) {
 	s.mu.Lock()
 	s.wake = wake

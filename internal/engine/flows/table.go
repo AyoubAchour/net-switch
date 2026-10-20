@@ -198,7 +198,7 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 		return nil, ErrBudget
 	}
 	t.nextID++
-	f := &ticket{table: t, record: Record{ID: t.nextID, Epoch: t.epoch, Start: t.now(), Protocol: protocol, Source: tuple.Source, Destination: tuple.Destination}}
+	f := &ticket{table: t, record: liveRecord{ID: t.nextID, Epoch: t.epoch, Start: t.now().UnixNano(), Protocol: protocol, Source: tuple.Source, Destination: tuple.Destination}}
 	t.gauges.Flows++
 	t.gauges.PeakFlows = max(t.gauges.PeakFlows, t.gauges.Flows)
 	if protocol == "udp" {
@@ -216,18 +216,35 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 }
 
 type ticket struct {
-	accountMu                           sync.RWMutex
-	accountClosed                       bool
-	up, down                            atomic.Uint64
-	retired, timeWait, timeWaitReserved bool
-	closingOverflow                     bool
-	lineAddresses                       []netip.Addr
-	table                               *Table
-	record                              Record
-	resolved, closed, handshake         bool
-	tcpBytes                            int64
-	receive, send                       int
-	cancel                              context.CancelFunc
+	accountMu                                          sync.RWMutex
+	up, down                                           atomic.Uint64
+	lineAddresses                                      []netip.Addr
+	table                                              *Table
+	record                                             liveRecord
+	tcpBytes                                           int64
+	receive, send                                      int
+	cancel                                             context.CancelFunc
+	accountClosed, retired, timeWait, timeWaitReserved bool
+	closingOverflow, resolved, closed, handshake       bool
+}
+
+// Wire snapshots carry counters and a time.Time, but live tickets already
+// own atomic counters and need only the start timestamp. Keep that duplication
+// out of all 65,536 live objects; materialize it only during pagination.
+type liveRecord struct {
+	ID, Epoch, Point    uint64
+	Start               int64
+	Owner               platform.Owner
+	Protocol            string
+	Source, Destination netip.AddrPort
+	PhysicalSource      netip.Addr
+	flowapi.Decision
+	Closing bool
+}
+
+func (f *ticket) snapshotRecord() Record {
+	r := f.record
+	return Record{ID: r.ID, Epoch: r.Epoch, Point: r.Point, Start: time.Unix(0, r.Start), Owner: r.Owner, Protocol: r.Protocol, Source: r.Source, Destination: r.Destination, PhysicalSource: r.PhysicalSource, Decision: r.Decision, Up: f.up.Load(), Down: f.down.Load(), Closing: r.Closing}
 }
 
 func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
