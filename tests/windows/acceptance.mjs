@@ -722,6 +722,8 @@ try {
       assert(before.some((device) => device.present && appDeviceIDs.has(device.instanceId)), 'Crash cleanup needs the live owned device first');
       server.child.kill('SIGKILL');
       await until(() => server.child.exitCode !== null || server.child.signalCode !== null, 'controller stopped before engine crash');
+      try { process.kill(engine.pid, 0); }
+      catch (error) { assert.fail(`Controller death killed the independent engine before its lease expired: ${error.message}`); }
       process.kill(engine.pid, 'SIGKILL');
       await until(() => {
         try { process.kill(engine.pid, 0); return false; }

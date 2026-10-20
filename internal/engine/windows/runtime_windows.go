@@ -32,6 +32,9 @@ func (r *Runtime) Stats() any {
 	stats["bindings"] = r.routes.Bindings()
 	stats["wintun"] = r.routes.TunStats()
 	stats["lifecyclePhases"] = r.routes.timings.snapshot()
+	if trace := r.routes.trace.snapshot(); trace != nil {
+		stats["packetTrace"] = trace
+	}
 	if memory, err := processMemory(); err == nil {
 		stats["processMemory"] = memory
 	} else {
