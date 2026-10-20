@@ -2,7 +2,7 @@ name: Windows engine focus
 
 on:
   push:
-    branches: [engine/windows-platform-ci, engine/windows-platform-ci-x64, engine/windows-platform-native, engine/windows-platform-native-x64, engine/windows-platform-lifecycle, engine/windows-platform-udp]
+    branches: [engine/windows-platform-ci, engine/windows-platform-ci-x64, engine/windows-platform-native, engine/windows-platform-native-x64, engine/windows-platform-lifecycle, engine/windows-platform-udp, engine/windows-platform-capacity]
   workflow_dispatch:
     inputs:
       arch:
@@ -84,21 +84,21 @@ jobs:
           go test -race -count=1 -v ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Cold owner latency at 1950–2100 actual TCP rows
-        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
         env:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
           go test -count=1 -v -run '^TestOwnerSteadyColdTiming$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Attribute at least 995 of 1000 cold burst sockets
-        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
         env:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
           go test -count=1 -v -run '^TestOwnerColdBurstTiming$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Real TUN 1.0 acceptance and flow-cap measurement
-        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
         env:
           NETSWITCH_ENGINE_TEST_TRACE: '1'
         run: |
@@ -110,6 +110,11 @@ jobs:
           NETSWITCH_ENGINE_TEST_TRACE: '1'
         run: |
           node tests/windows/udp-quote-profile.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Measure real held flows without waiting for unrelated cases
+        if: ${{ !cancelled() && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
+        run: |
+          node tests/windows/capacity-profile.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prepare the unchanged 0.3.x comparison
         if: ${{ !cancelled() && endsWith(github.ref, '-lifecycle') && steps.build.outcome == 'success' }}
@@ -140,6 +145,7 @@ jobs:
             dist/windows-acceptance/
             dist/windows-lifecycle/
             dist/windows-udp-quote/
+            dist/windows-capacity/
           retention-days: 14
       - name: Repeat native half-close and cancellation after the owner measurements
         if: ${{ !cancelled() && contains(github.ref, 'windows-platform-native') }}
