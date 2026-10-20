@@ -7,6 +7,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hostedOnly, run, until } from './testisp/harness.mjs';
+import { holdUDPCapacity, largeUDPReplies, nativeUDPCapacity } from './udp-capacity.mjs';
 
 async function nativeRefusalBaseline(host) {
   const listener = net.createServer();
@@ -46,7 +47,7 @@ function refusalPackets(stats, refusals) {
   });
 }
 
-async function waitForReturnedPorts({ engineStats, before, released, target, nativeExpiryMs, children, evidence }) {
+async function waitForReturnedPorts({ engineStats, before, released, target, nativeExpiryMs, children, evidence, udpHold }) {
   const started = performance.now(), appPorts = new Set(released.localPorts);
   const ownPID = before.nativeSocketState.pid;
   const egressGroups = before.nativeSocketState.groups.filter((g) => g.pid === ownPID && g.state === 5 &&
@@ -63,6 +64,7 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
   evidence.observations = [];
   for (;;) {
     const stats = await engineStats(), native = stats.nativeSocketState;
+    udpHold.checkStats(stats);
     assert(native && !native.error && !native.handleError, JSON.stringify(native));
     const rows = native.groups.filter((g) => g.destination === target.host && target.ports.includes(g.remotePort));
     const liveEgress = new Set(rows.filter((g) => g.pid === ownPID && g.state === 5).flatMap((g) => g.ports));
@@ -123,6 +125,7 @@ export async function capacity({ server, harness, directory, line }) {
   const target = await harness.control('capacity', {});
   const children = [];
   const progress = {};
+  let udpHold;
   const engineStats = async () => (await server.api('engine-command', { method: 'stats' })).engine;
   try {
     // Measure this runner's available native pool with routing stopped. No
@@ -147,6 +150,7 @@ export async function capacity({ server, harness, directory, line }) {
       .map((text) => JSON.parse(text.slice(text.indexOf(releaseMarker) + releaseMarker.length)));
     assert(nativeRelease.length && nativeRelease.at(-1).remaining === 0);
     Object.assign(progress, { nativeSamples, nativeRelease, refusalBaseline, refusalLimitMs, floor, layoutCapacity });
+    const nativeUDP = await nativeUDPCapacity();
     await server.api('routing', { on: true });
     await server.on();
     const engineBefore = await server.api('engine-command', { method: 'hello' });
@@ -177,6 +181,9 @@ export async function capacity({ server, harness, directory, line }) {
     // pressure; fetch's four-second idle eviction otherwise makes inspection
     // itself fail with ENOBUFS. No automatic reconnect is allowed.
     const controlReservation = await harness.reserveControl();
+    progress.largeUDP = await largeUDPReplies({ server, harness, directory, line });
+    progress.udp = {};
+    udpHold = await holdUDPCapacity({ server, harness, directory, line, native: nativeUDP, evidence: progress.udp });
     for (let i = 0; i < 8; i++) {
       const exe = path.join(directory, `capacity-app-${i}.exe`);
       await copyFile(process.execPath, exe);
@@ -218,6 +225,7 @@ export async function capacity({ server, harness, directory, line }) {
         if (result.failures.length) { firstLimit = result.failures; break; }
       }
       const stats = await engineStats();
+      udpHold.checkStats(stats);
       console.log(`WINDOWS CAPACITY ${JSON.stringify({ held, flows: stats.flows.Flows, heapBytes: stats.heapBytes, stackBytes: stats.stackBytes, runtimeBytes: stats.runtimeBytes, gcCPUppm: stats.gcCPUppm })}`);
       assert(stats.runtimeBytes <= 512 * 1024 * 1024, 'Runtime budget exceeded during admission');
     }
@@ -256,6 +264,7 @@ export async function capacity({ server, harness, directory, line }) {
     assert.equal(health.outcome, 'engineUnavailable', 'Local port exhaustion was treated as line failure');
     const portStats = await until(async () => {
       const stats = await engineStats();
+      udpHold.checkStats(stats);
       assert.notEqual(stats.socketResources.configurationStatus, 'error', JSON.stringify(stats.socketResources));
       return stats.socketResources.configurationStatus === 'ready' && stats.socketResources;
     }, 'OS port configuration visible in engine stats', 65_000);
@@ -273,6 +282,7 @@ export async function capacity({ server, harness, directory, line }) {
       assert(survival.live && !survival.error && survival.received >= survival.sent - 1 && survival.maxMs <= 1000,
         `Survival stream stalled: ${JSON.stringify(survival)}`);
       const stats = await engineStats();
+      udpHold.checkStats(stats);
       assert(stats.flows.Flows >= held, 'The engine lost a held flow');
       assert.equal(stats.flows.Handshakes, 0);
       assert(stats.processMemory?.privateBytes > 0 && stats.processMemory?.workingSetBytes > 0,
@@ -280,12 +290,13 @@ export async function capacity({ server, harness, directory, line }) {
       samples.push(stats);
       await delay(1000);
     }
+    progress.udp.mixedVerified = await udpHold.verify();
     const beforeRelease = await engineStats();
     const released = await children[0].call('release', { count: 512 });
     assert.equal(released.released, 512);
     const portReturn = progress.portReturn = { released, beforeHandles: beforeRelease.nativeSocketState.handles };
     await waitForReturnedPorts({ engineStats, before: beforeRelease, released, target,
-      nativeExpiryMs: nativeRelease.at(-1).elapsedMS, children, evidence: portReturn });
+      nativeExpiryMs: nativeRelease.at(-1).elapsedMS, children, evidence: portReturn, udpHold });
     const returnedPortProbe = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
       ['-test.v', '-test.run=^TestReturnedPortsBindWithoutReuse$', '-test.timeout=30s'],
       { env: { NETSWITCH_RETURNED_PORTS: JSON.stringify([
@@ -299,6 +310,7 @@ export async function capacity({ server, harness, directory, line }) {
     Object.assign(progress, { recovered, recoveryMs });
     assert.equal(recovered.opened, 256, 'Capacity did not return after ports were freed');
     assert.equal(recovered.failures.length, 0, JSON.stringify(recovered.failures));
+    await udpHold.recover();
     const verifiedAfter = await Promise.all(children.map((app) => app.call('verify')));
     assert(verifiedAfter.every((s) => s.held === s.live && s.lost === 0), JSON.stringify(verifiedAfter));
     assert.equal(verifiedAfter.reduce((total, s) => total + s.live, 1), held - 512 + 256);
@@ -306,15 +318,17 @@ export async function capacity({ server, harness, directory, line }) {
     assert.equal(engineAfter.engineInstanceId, engineBefore.engineInstanceId, 'The engine restarted under port pressure');
     const last = samples.at(-1);
     const evidence = { nativeSamples, layoutCapacity, floor, ordinaryHeld, held, firstLimit, extraAdmissions, refusals,
+      udp: progress.udp, largeUDP: progress.largeUDP,
       nativeRelease, refusalBaseline, refusalLimitMs, resetTimings, oldEchoBasedLimitMs, controlReservation, portReturn,
       oldImmediateRecoveryCheckWouldPass: portReturn.returnedAfterMs + recoveryMs <= refusalLimitMs,
       oldOneSecondCheckWouldPass: [...firstLimit, ...refusals].every((failure) => failure.ms <= 1000),
       oldEchoBasedCheckWouldPass: refusals.every((failure) => failure.ms <= oldEchoBasedLimitMs), portStats,
       portConfiguration, preparation, before, samples, observed, verifiedBefore, verifiedAfter, released, recovered, recoveryMs,
       old65536CheckWouldPass: held === 65536, internalTotalCeiling: 65536, internalPerAppCeiling: 8192,
-      heapPerFlow: last.heapBytes / held, stackPerFlow: last.stackBytes / held,
-      privatePerFlow: last.processMemory.privateBytes / held,
-      workingSetPerFlow: last.processMemory.workingSetBytes / held,
+      mixedHeld: held + progress.udp.held,
+      heapPerFlow: last.heapBytes / (held + progress.udp.held), stackPerFlow: last.stackBytes / (held + progress.udp.held),
+      privatePerFlow: last.processMemory.privateBytes / (held + progress.udp.held),
+      workingSetPerFlow: last.processMemory.workingSetBytes / (held + progress.udp.held),
       gcCPUppm: last.gcCPUppm,
       capWindowGCShare: (last.gcCPUNanos - samples[0].gcCPUNanos) / Math.max(1, last.totalCPUNanos - samples[0].totalCPUNanos) };
     console.log(`WINDOWS OS-LIMIT CAPACITY RESULT ${JSON.stringify(evidence)}`);
@@ -330,9 +344,12 @@ export async function capacity({ server, harness, directory, line }) {
     };
     throw error;
   } finally {
+    let udpCloseError;
+    if (udpHold) await udpHold.close().catch((error) => { udpCloseError = error; });
     for (const { child, call } of children) {
       if (child.connected) { await call('close').catch(() => {}); child.disconnect(); }
     }
     await harness.control('capacity-close', {});
+    if (udpCloseError) throw udpCloseError;
   }
 }

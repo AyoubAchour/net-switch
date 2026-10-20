@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"log"
 	"net"
 	"net/netip"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -19,10 +21,12 @@ import (
 )
 
 type Dialer struct {
-	Routes *Routes
-	pool   *readiness
-	udp    *udpReadiness
-	ports  *portDiagnostics
+	Routes         *Routes
+	pool           *readiness
+	udp            *udpReadiness
+	ports          *portDiagnostics
+	udpExhaustions atomic.Uint64
+	udpLastLog     atomic.Int64
 }
 
 func NewDialer(routes *Routes) (*Dialer, error) {
@@ -128,6 +132,14 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 	lc := net.ListenConfig{Control: bindSocket(a, v6)}
 	c, err := lc.ListenPacket(ctx, network, netip.AddrPortFrom(source, 0).String())
 	if err != nil {
+		if portLimit(err) {
+			total := d.udpExhaustions.Add(1)
+			second := time.Now().Unix()
+			old := d.udpLastLog.Load()
+			if old != second && d.udpLastLog.CompareAndSwap(old, second) {
+				log.Printf("Windows UDP port pool exhausted; refused=%d; bound socket failed: %v", total, err)
+			}
+		}
 		return nil, err
 	}
 	u := c.(*net.UDPConn)
