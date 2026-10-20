@@ -40,7 +40,7 @@ func addOverload(r *registry) {
 		noLimits, "5.9", 3*time.Minute, udpSessionsPerAppCase)
 	r.defect("overload.udp-sessions-total", "Five apps open 4,000 UDP sessions each, all under their own limit: together they get at most 16,384 and the rest are refused",
 		noLimits, "5.9", 3*time.Minute, udpSessionsTotalCase)
-	r.defect("overload.tcp-connection-storm", "A storm of 9,000 connections from one app, 300 at a time: at most 8,192 are admitted, the rest refused, while other apps carry on",
+	r.defect("overload.tcp-connection-storm", "A storm of 12,000 connections from one app, 300 at a time: exactly 8,192 identified flows, bounded unknowns, and all excess refused while other apps carry on",
 		noLimits, "5.9", 4*time.Minute, tcpStorm)
 	r.defect("overload.tcp-handshakes-in-flight", "Three apps start 3,000 connections each to a host that never answers: at most 8,192 handshakes are in flight, the rest refused at once",
 		noLimits, "5.9", 3*time.Minute, tcpHandshakesCase)
@@ -318,9 +318,12 @@ func tcpStorm(e *Env) {
 	stream := e.StartStream("charlie", AsUser, 3*time.Minute, release.Arg()...)
 	e.Sleep(time.Second)
 	// 300 at a time keeps the handshakes in flight far under their own
-	// limit, and 9,000 flows are far under the total: only the per-app
-	// limit can refuse.
-	const storm = 9000
+	// limit, and 12,000 attempts are far under the total. The offer must
+	// exceed both the 8,192 identified limit and the separate 2,048 unknown
+	// pool so a natural attribution miss cannot consume all refusal demand.
+	// Every attempt is new; no failed connection is retried.
+	const storm = 12000
+	e.T.Note("Storm offered %d fixed connection attempts, 300 at a time, with no retries; the identified cap remains %d.", storm, tcpFlowsPerApp)
 	from := e.Mark()
 	hold := e.Start(Run{App: "bravo", Args: append([]string{"tcphold", "--to", floodTargets(0, wire.PortHold), "--count", strconv.Itoa(storm),
 		"--concurrency", "300", "--timeout", "5000"}, release.Arg()...)})
