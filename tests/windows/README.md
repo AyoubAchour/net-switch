@@ -69,8 +69,19 @@ Its HTTPS peer is local, with a fresh certificate trusted only by the client.
 One non-final destination rewrite leaves the real pins, selectors and bound
 outbounds in charge. TestISP counters prove the bb path, and client port reuse
 plus the responder's socket identity prove the original connections survive.
-All 20 lifecycle cycles use the unchanged product config. This job has no public
-traffic target; the default control-service mode keeps its public trace probes.
+Control now uses that same local TLS peer and path assertions. The Node test
+launcher intercepts only its engine-config write; Go's `control_test_https`
+build uses the existing file-I/O seam. The normal Go binary contains no fixture
+reader. Both save the original config and assert that the one non-final rule
+is the entire difference. Startup and shutdown still belong to Control.
+The marker is removed before all 20 ordinary lifecycle cycles.
+
+Neither TUN mode has a public traffic target. The proxy-routing suite retains
+one independent public trace request to prove real internet egress; all its
+held sockets use local TLS. This is a count of explicit test requests, not
+the product's background line-health probes. See
+[the target inventory](control-https-inventory.md) for those and the separate
+acceptance/TestISP suites.
 
 ## Classification
 

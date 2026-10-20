@@ -125,7 +125,9 @@ function connectThroughProxy(proxyPort, target = localTarget) {
     tunnel.on('connect', (response, socket) => {
       sockets.push(socket);
       if (response.statusCode !== 200) {
-        fail(new Error(`the proxy answered ${response.statusCode}`));
+        const label = target.publicTrace && response.statusCode >= 500 && response.statusCode < 600
+          ? 'public target unavailable: ' : '';
+        fail(new Error(`${label}the proxy CONNECT answered ${response.statusCode}`));
         return;
       }
       const secure = tlsConnect({ socket, servername: target.servername, ca: target.ca }, () => {

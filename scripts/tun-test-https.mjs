@@ -14,7 +14,11 @@ export async function localHttps(address) {
   hostedOnly();
   const passphrase = randomBytes(24).toString('hex');
   const result = await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-    path.resolve('scripts/tun-test-certificate.ps1')], { env: { NETSWITCH_TEST_CERT_PASSWORD: passphrase } });
+    path.resolve('scripts/tun-test-certificate.ps1')], {
+    // Control runs under pwsh. Let Windows PowerShell build its own module path
+    // so its Security provider can mount Cert:, rather than inheriting PS7's.
+    env: { NETSWITCH_TEST_CERT_PASSWORD: passphrase, PSModulePath: undefined },
+  });
   const identity = JSON.parse(result.stdout);
   const ca = `-----BEGIN CERTIFICATE-----\n${identity.cert}\n-----END CERTIFICATE-----\n`;
   const seen = [];
