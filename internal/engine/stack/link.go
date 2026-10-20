@@ -29,9 +29,10 @@ type outputBuffers struct {
 // once after the synchronous device write, including error paths. The small
 // class keeps a SYN/ACK burst from reserving 9 KiB for every tiny packet.
 type OutputPacket struct {
-	Bytes   []byte
-	storage any
-	pool    *outputBuffers
+	Bytes     []byte
+	storage   any
+	pool      *outputBuffers
+	onRelease func()
 }
 
 func (pool *outputBuffers) packet(size int) OutputPacket {
@@ -46,7 +47,7 @@ func (pool *outputBuffers) packet(size int) OutputPacket {
 		if b == nil {
 			b = new([256]byte)
 		}
-		return OutputPacket{b[:size], b, pool}
+		return OutputPacket{Bytes: b[:size], storage: b, pool: pool}
 	}
 	if size <= MTU {
 		var b *[MTU]byte
@@ -59,12 +60,13 @@ func (pool *outputBuffers) packet(size int) OutputPacket {
 		if b == nil {
 			b = new([MTU]byte)
 		}
-		return OutputPacket{b[:size], b, pool}
+		return OutputPacket{Bytes: b[:size], storage: b, pool: pool}
 	}
 	return OutputPacket{Bytes: make([]byte, size)}
 }
 
 func (p *OutputPacket) Release() {
+	done := p.onRelease
 	if pool := p.pool; pool != nil {
 		pool.mu.Lock()
 		if !pool.closed {
@@ -84,6 +86,9 @@ func (p *OutputPacket) Release() {
 		pool.mu.Unlock()
 	}
 	*p = OutputPacket{}
+	if done != nil {
+		done()
+	}
 }
 
 func (pool *outputBuffers) close() {
@@ -160,6 +165,48 @@ func (l *Link) enqueue(size int, copyInto func([]byte)) bool {
 
 func (l *Link) Send(p []byte) bool {
 	return l.enqueue(len(p), func(dst []byte) { copy(dst, p) })
+}
+
+// SendBatch transfers all fragments together without another payload copy.
+// The byte lease remains live until the writer releases the last fragment.
+func (l *Link) SendBatch(packets [][]byte, release func()) bool {
+	l.mu.Lock()
+	valid := !l.closed && len(packets) > 0 && len(packets) <= QueuePackets-l.count
+	mtu := int(l.mtu.Load())
+	for _, p := range packets {
+		valid = valid && len(p) > 0 && len(p) <= mtu
+	}
+	if !valid {
+		l.Dropped.Add(uint64(len(packets)))
+		l.mu.Unlock()
+		if release != nil {
+			release()
+		}
+		return false
+	}
+	var remaining atomic.Int32
+	remaining.Store(int32(len(packets)))
+	done := func() {
+		if remaining.Add(-1) == 0 && release != nil {
+			release()
+		}
+	}
+	before := l.count
+	for _, p := range packets {
+		l.queue[(l.head+l.count)%QueuePackets] = OutputPacket{Bytes: p, onRelease: done}
+		l.count++
+	}
+	l.peak = max(l.peak, l.count)
+	depth := l.count
+	select {
+	case l.ready <- struct{}{}:
+	default:
+	}
+	l.mu.Unlock()
+	if depth >= QueuePackets/2 && depth/64 != before/64 {
+		runtime.Gosched()
+	}
+	return true
 }
 
 func (l *Link) WritePackets(pkts gv.PacketBufferList) (int, tcpip.Error) {
@@ -327,14 +374,22 @@ func (l *Link) Close() {
 	l.closed = true
 	l.dispatcher = nil
 	l.delivery.Store(nil)
-	for i := range l.queue {
-		l.queue[i].Release()
+	queued := make([]OutputPacket, l.count)
+	for i := range queued {
+		at := (l.head + i) % QueuePackets
+		queued[i] = l.queue[at]
+		l.queue[at] = OutputPacket{}
 	}
-	l.buffers.close()
 	l.count = 0
 	close(l.done)
 	f := l.onClose
 	l.mu.Unlock()
+	l.buffers.close()
+	// Release callbacks can update flow accounting; never invoke them under
+	// the queue lock, including the shutdown and rejected-batch paths.
+	for i := range queued {
+		queued[i].Release()
+	}
 	if f != nil {
 		f()
 	}

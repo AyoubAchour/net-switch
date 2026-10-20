@@ -321,6 +321,7 @@ type Stats struct {
 	// Byte budgets in use (5.9).
 	TCPBytes, PendingBytes, SnapshotBytes int64
 	UDPReadBytes                          int64
+	UDPAdapterBytes                       int64
 	PendingPeakBytes                      int64
 	// Counters since the engine started.
 	Admitted        uint64 // the combining counter k: flows admitted (5.4)

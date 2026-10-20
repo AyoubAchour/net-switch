@@ -57,6 +57,42 @@ func addKernel(r *registry) {
 		"sing-box sets DF on its own UDP sockets (udp_fragment is off by default), so an app's oversized datagram is silently dropped", "5.3, 5.8", 0, bigUDP)
 	r.defect("mtu.df-too-big-reported", "Datagrams that mustn't fragment get 'too big' back, and none of them gets out",
 		"no ICMP frag-needed or Packet Too Big ever reaches the app", "5.3, 5.8", 0, dfTooBig)
+	r.add("mtu.large-udp-replies", "12,000-byte and maximum-size UDP replies arrive intact through the real TUN, over IPv4 and IPv6", harness.Parity, "5.3", 0, largeUDPReplies)
+}
+
+func largeUDPReplies(e *Env) {
+	cfg := e.DefaultConfig()
+	cfg.Policy.IPv6 = true
+	e.StartEngine(cfg)
+	_, controller := e.v1()
+	before := stats(e, controller)
+	for _, family := range []struct {
+		server  netip.Addr
+		maximum int
+	}{{topo.Server4, 65507}, {topo.Server6, 65527}} {
+		for _, size := range []int{12000, family.maximum - 1, family.maximum} {
+			const count = 3
+			var result app.UDPReplyResult
+			e.RunJSON(Run{App: "charlie", Args: []string{"udpreply", "--to", To(family.server, wire.PortUDPReply), "--size", strconv.Itoa(size), "--count", strconv.Itoa(count)}}, &result)
+			e.T.Check(len(result.Replies) == count, "%s: all %d requests were attempted without retries", family.server, count)
+			for _, reply := range result.Replies {
+				e.T.Check(reply.OK && reply.Bytes == size && reply.Hash == reply.WantHash && reply.From == To(family.server, wire.PortUDPReply) && reply.Err == "",
+					"%s reply %d: %d bytes, SHA-256 %s (wanted %s), source %s, error %q", family.server, reply.Sequence, reply.Bytes, reply.Hash, reply.WantHash, reply.From, reply.Err)
+			}
+			records, complete := e.WaitRecords(2*time.Second, func(records []inet.Record) bool {
+				return len(Select(records, Tagged("udp-reply", result.Token))) == count
+			})
+			arrived := Select(records, Tagged("udp-reply", result.Token))
+			e.T.Check(complete && len(arrived) == count && RecordLines(arrived)["c"] == count, "%d-byte requests all reached the server on line c (%s)", size, Describe(RecordLines(arrived)))
+			for _, record := range arrived {
+				e.T.Check(record.ReplyBytes == size && record.Err == "", "server sent the full %d-byte reply (%d bytes, error %q)", size, record.ReplyBytes, record.Err)
+			}
+		}
+	}
+	after := stats(e, controller)
+	e.T.Check(after.Counters["udpOversize"] == before.Counters["udpOversize"], "no representable reply was counted as oversized")
+	e.T.Check(after.LookupMisses == before.LookupMisses, "every reply session had an identified owner (%d misses)", after.LookupMisses-before.LookupMisses)
+	e.T.Check(after.PendingBytes == 0 && after.UDPReadBytes == 0, "no reply storage remains after delivery (%d pending, %d reading)", after.PendingBytes, after.UDPReadBytes)
 }
 
 func rpFilterStrict(e *Env) {

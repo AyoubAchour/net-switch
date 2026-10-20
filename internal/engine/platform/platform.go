@@ -114,6 +114,9 @@ type Readiness interface {
 // recoverable. Close unblocks ReadFrom. The NAT keeps the same public port
 // across oversized or otherwise failed receives, until closure/cancellation.
 type UDPConn interface {
+	// WaitReadable must not consume a datagram. Close interrupts the wait.
+	// The NAT borrows receive storage only after this reports readiness.
+	WaitReadable(context.Context) error
 	ReadFrom([]byte) (int, netip.AddrPort, error)
 	WriteTo([]byte, netip.AddrPort, bool) (int, error)
 	LocalAddr() netip.AddrPort

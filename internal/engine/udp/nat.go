@@ -4,6 +4,8 @@ package udp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"net"
 	"net/netip"
@@ -64,7 +66,8 @@ type NAT struct {
 	owners                                                           platform.OwnerLookup
 	identities                                                       platform.UDPIdentity
 	dialer                                                           platform.LineDialer
-	out                                                              flowapi.Output
+	out                                                              flowapi.DatagramOutput
+	fragmentID                                                       atomic.Uint32
 	now                                                              func() time.Time
 	mtu                                                              int
 	table                                                            [shards]shard
@@ -76,9 +79,12 @@ type NAT struct {
 	PeakQueuePackets, PeakQueueBytes                                 atomic.Uint64
 }
 
-func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.Output, mtu int) *NAT {
+func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.DatagramOutput, mtu int) *NAT {
 	ctx, cancel := context.WithCancel(ctx)
 	n := &NAT{ctx: ctx, cancel: cancel, control: c, owners: o, identities: i, dialer: d, out: out, now: time.Now, mtu: mtu, refresh: make(chan struct{}, 1)}
+	var seed [4]byte
+	rand.Read(seed[:])
+	n.fragmentID.Store(binary.NativeEndian.Uint32(seed[:]))
 	for j := range n.table {
 		n.table[j].m = make(map[netip.AddrPort]*session)
 	}
@@ -458,19 +464,15 @@ func (s *session) waitRejected(ctx context.Context) {
 func (s *session) read(ctx context.Context) {
 	n := s.n
 	defer s.close()
-	// The worst-case read buffer is still reserved per session. Linux can
-	// wait for readiness before borrowing it, so idle mappings retain none.
-	var fixed []byte
-	if _, ok := s.socket.(interface{ WaitReadable(context.Context) error }); !ok {
-		fixed = make([]byte, flowapi.UDPReadBuffer)
-	}
 	for {
-		size, p, err := s.readPacket(ctx, fixed)
+		reply, err := s.readPacket(ctx)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
 			}
-			if platform.IsTooBig(err) {
+			if errors.Is(err, errReplyBudget) {
+				n.Dropped.Add(1)
+			} else if platform.IsTooBig(err) {
 				n.Oversize.Add(1)
 			} else {
 				n.ReadErrors.Add(1)
@@ -489,49 +491,22 @@ func (s *session) read(ctx context.Context) {
 		fresh := !s.closed && n.now().Sub(s.validated) < IdentityMaxAge
 		s.mu.Unlock()
 		if !fresh {
+			reply.release()
 			n.Dropped.Add(1)
 			continue
 		}
-		if len(p) > n.mtu || len(p) == 0 {
-			n.Oversize.Add(1)
-			continue
-		}
-		if n.out.Send(p) {
-			s.ticket.Add(0, uint64(size))
+		if n.out.SendBatch(reply.packets, reply.release) {
+			s.ticket.Add(0, uint64(reply.size))
 			s.mu.Lock()
 			s.last = n.now()
 			s.mu.Unlock()
+		} else {
+			n.Dropped.Add(1)
 		}
 		if ctx.Err() != nil {
 			return
 		}
 	}
-}
-
-var readBuffers = sync.Pool{New: func() any { b := make([]byte, flowapi.UDPReadBuffer); return &b }}
-
-func (s *session) readPacket(ctx context.Context, buf []byte) (int, []byte, error) {
-	if ready, ok := s.socket.(interface{ WaitReadable(context.Context) error }); ok {
-		if err := ready.WaitReadable(ctx); err != nil {
-			return 0, nil, err
-		}
-		borrowed := readBuffers.Get().(*[]byte)
-		defer readBuffers.Put(borrowed)
-		buf = *borrowed
-	}
-	size, remote, err := s.socket.ReadFrom(buf)
-	if err != nil {
-		return size, nil, err
-	}
-	headerSize := 48
-	if s.source.Addr().Is4() {
-		headerSize = 28
-	}
-	if size < 0 || size > len(buf) || size+headerSize > s.n.mtu {
-		return size, nil, nil
-	}
-	// packet.UDP owns its copy before the pool buffer is returned.
-	return size, packet.UDP(remote, s.source, buf[:size]), nil
 }
 
 func (s *session) readErrors(ctx context.Context, q platform.UDPErrorQueue) {

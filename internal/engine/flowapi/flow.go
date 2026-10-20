@@ -44,10 +44,20 @@ type Ticket interface {
 
 type Output interface{ Send([]byte) bool }
 
-const UDPReadBuffer = 9 << 10
+// DatagramOutput takes ownership of a complete datagram's packets. The batch
+// is accepted atomically or dropped. release runs exactly once after every
+// packet has been written or discarded, including rejection and shutdown.
+// It may run before SendBatch returns and must not call back into the output.
+type DatagramOutput interface {
+	Output
+	SendBatch(packets [][]byte, release func()) bool
+}
+
+const UDPReadBuffer = 64 << 10
 
 // Adapter scratch space, one queued ICMP quotation, and its bounded MTU cache
-// are reserved alongside the payload reader before opening a UDP socket.
+// are accounted per socket. Receive buffers are borrowed only when readable
+// and charged to the pending-byte budget for the duration of the borrow.
 const UDPAdapterBuffer = 8 << 10
 
 type Event struct {

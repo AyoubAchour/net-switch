@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -27,17 +28,37 @@ type socket struct {
 	out, in chan wire
 	done    chan struct{}
 	once    sync.Once
+	ready   *wire
 }
 
 func newSocket() *socket {
 	return &socket{out: make(chan wire, 256), in: make(chan wire, 256), done: make(chan struct{})}
 }
+func (s *socket) WaitReadable(ctx context.Context) error {
+	if s.ready != nil {
+		return nil
+	}
+	select {
+	case w := <-s.in:
+		s.ready = &w
+		return nil
+	case <-s.done:
+		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 func (s *socket) ReadFrom(b []byte) (int, netip.AddrPort, error) {
+	if s.ready != nil {
+		w := *s.ready
+		s.ready = nil
+		return copy(b, w.b), w.addr, nil
+	}
 	select {
 	case w := <-s.in:
 		return copy(b, w.b), w.addr, nil
 	case <-s.done:
-		return 0, netip.AddrPort{}, io.EOF
+		return 0, netip.AddrPort{}, net.ErrClosed
 	}
 }
 func (s *socket) WriteTo(b []byte, a netip.AddrPort, _ bool) (int, error) {
