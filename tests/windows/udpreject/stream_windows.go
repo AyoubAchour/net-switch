@@ -16,7 +16,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func streamProbe(peer *net.UDPAddr, port int, duration time.Duration, token string) error {
+func streamProbe(peer *net.UDPAddr, port int, duration time.Duration, token string, capture bool) error {
 	if port < 1024 || port > 65535 || duration < time.Second || duration > 10*time.Second {
 		return errors.New("invalid identity stream limits")
 	}
@@ -46,12 +46,22 @@ func streamProbe(peer *net.UDPAddr, port int, duration time.Duration, token stri
 		Outcome string `json:"outcome"`
 	}
 	result := struct {
-		StartedAt int64   `json:"startedAt"`
-		Source    string  `json:"source"`
-		Token     string  `json:"token"`
-		Sent      int     `json:"sent"`
-		Events    []event `json:"events"`
+		StartedAt int64          `json:"startedAt"`
+		Source    string         `json:"source"`
+		Token     string         `json:"token"`
+		Sent      int            `json:"sent"`
+		Events    []event        `json:"events"`
+		Capture   *captureResult `json:"capture,omitempty"`
 	}{StartedAt: time.Now().UnixMilli(), Source: conn.LocalAddr().String(), Token: token}
+	var observer *ipCapture
+	if capture {
+		observer, err = captureIP(conn.LocalAddr().(*net.UDPAddr).IP, peer.IP)
+		if err != nil {
+			result.Capture = &captureResult{Error: err.Error()}
+		} else {
+			defer observer.finish()
+		}
+	}
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 	deadline := time.Now().Add(duration)
@@ -83,6 +93,10 @@ func streamProbe(peer *net.UDPAddr, port int, duration time.Duration, token stri
 			}
 		}
 		<-tick.C
+	}
+	if observer != nil {
+		captured := observer.finish()
+		result.Capture = &captured
 	}
 	return json.NewEncoder(os.Stdout).Encode(result)
 }

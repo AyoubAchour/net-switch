@@ -41,6 +41,7 @@ func main() {
 	port := flag.Int("local-port", 0, "Source port for the identity stream")
 	duration := flag.Duration("duration", 3*time.Second, "Identity stream duration")
 	token := flag.String("token", "", "Identity stream token")
+	capture := flag.Bool("capture", false, "Observe bounded UDP/ICMP headers on the probe interface")
 	flag.Parse()
 	if *count < 1 || *count > 100 || *timeout <= 0 || *timeout > 5*time.Second {
 		fmt.Fprintln(os.Stderr, "count must be between 1 and 100, timeout between 0 and 5s")
@@ -52,7 +53,7 @@ func main() {
 		os.Exit(1)
 	}
 	if *stream {
-		if err := streamProbe(peer, *port, *duration, *token); err != nil {
+		if err := streamProbe(peer, *port, *duration, *token, *capture); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
