@@ -134,6 +134,10 @@ type Core struct {
 	events                                       []map[string]any
 	generation                                   uint64
 	wanted, quitting, elevated                   bool
+	powerSuspended                               bool
+	powerGeneration                              uint64
+	engineStarting                               bool
+	startPowerGeneration                         uint64
 	monitorFailures, scanFailures, retryAttempts int
 	retryAt, elevationAt, sharesAt               int64
 	ipv6Since                                    *int64
@@ -523,6 +527,14 @@ func (c *Core) resetLocked() {
 	}
 }
 func (c *Core) statusLocked(s engine.Snapshot) {
+	// Windows can throttle services during Modern Standby. Neither an
+	// observation while suspended nor a start spanning a power transition
+	// is evidence for the crash latch. Keep genuine prior failures intact.
+	if c.op.ServiceMode && (c.powerSuspended || c.engineStarting && c.startPowerGeneration != c.powerGeneration) && s.Status == "error" && s.FailureID != "" && s.FailureID != c.lastFailureID {
+		c.lastFailureID = s.FailureID
+		c.failureDirty = true
+		c.log("engine start or exit crossed a power transition; retaining the existing crash budget")
+	}
 	freshFailure := s.FailureID != "" && s.FailureID != c.lastFailureID
 	if s.Status == c.lastStatus && (!c.op.ServiceMode || !freshFailure) {
 		return
@@ -640,12 +652,25 @@ func (c *Core) CheckElevation(ctx context.Context) {
 		c.elevated = v == true
 	}
 }
+
+// SetPowerSuspended changes recovery scheduling, never the owner's intent or
+// existing failure budget. A resume also identifies attempts spanning a wake.
+func (c *Core) SetPowerSuspended(suspended bool) {
+	if !c.op.ServiceMode {
+		return
+	}
+	c.mu.Lock()
+	c.powerSuspended = suspended
+	c.powerGeneration++
+	c.mu.Unlock()
+}
+
 func (c *Core) Start(ctx context.Context) error {
 	ctx = c.ctx
 	return c.startQueue.Do(ctx, func() error {
 		if c.op.ServiceMode {
 			c.mu.Lock()
-			blocked := len(c.failureTimes) >= 5 || c.now() < c.retryAt
+			blocked := len(c.failureTimes) >= 5 || c.now() < c.retryAt || c.powerSuspended
 			c.mu.Unlock()
 			if blocked {
 				return nil
@@ -655,7 +680,7 @@ func (c *Core) Start(ctx context.Context) error {
 			}
 		}
 		c.mu.Lock()
-		if !c.wanted || c.quitting {
+		if !c.wanted || c.quitting || c.powerSuspended {
 			c.mu.Unlock()
 			return nil
 		}
@@ -674,10 +699,13 @@ func (c *Core) Start(ctx context.Context) error {
 		if len(p.Lines) > 0 && current.Status != "on" && current.Status != "starting" {
 			c.statusLocked(engine.Snapshot{Status: "starting"})
 		}
+		c.engineStarting = true
+		c.startPowerGeneration = c.powerGeneration
 		c.mu.Unlock()
 		if err := c.op.Engine.Start(ctx, p); err != nil {
 			c.mu.Lock()
 			c.statusLocked(c.op.Engine.Snapshot())
+			c.engineStarting = false
 			c.mu.Unlock()
 			if c.op.ServiceMode {
 				c.applyMu.Lock()
@@ -688,6 +716,7 @@ func (c *Core) Start(ctx context.Context) error {
 		}
 		c.mu.Lock()
 		c.statusLocked(c.op.Engine.Snapshot())
+		c.engineStarting = false
 		for _, lane := range c.lanes {
 			// Node's wanted() samples an uninitialised LaneSwitch, changing
 			// its generation and discarding the first selector acknowledgement.
@@ -932,7 +961,7 @@ func (c *Core) Supervise(ctx context.Context) error {
 		c.sampleLinesLocked(s)
 	}
 	c.statusLocked(s)
-	if c.quitting || !c.wanted {
+	if c.quitting || !c.wanted || c.powerSuspended {
 		c.mu.Unlock()
 		return nil
 	}

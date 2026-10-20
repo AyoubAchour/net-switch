@@ -215,7 +215,7 @@ func TestOwnerLogoffAndHybridResumeWaitForSignIn(t *testing.T) {
 		}
 		go func() {
 			defer close(done)
-			runSessionEvents(ctx, events, "owner", r, func() error {
+			runSessionEvents(ctx, events, "owner", r, func(bool) {}, func() error {
 				if stops.Add(1) == 1 {
 					close(stopped)
 				}

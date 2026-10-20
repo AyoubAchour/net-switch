@@ -50,6 +50,32 @@ type healthFunc func(context.Context) error
 
 func (f healthFunc) Health(ctx context.Context) error { return f(ctx) }
 
+func TestProductionSessionLoopDispatchesStandbyCycles(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	defer func() { cancel(); <-done }()
+	events := make(chan service.Event)
+	power := make(chan bool, 1)
+	r := NewRemote(ctx, func(string) {})
+	go func() {
+		defer close(done)
+		runSessionEvents(ctx, events, "owner", r, func(paused bool) { power <- paused }, func() error { t.Error("standby cleared routing intent"); return nil }, func(string) {}, func(string, uint32) (bool, error) { return true, nil })
+	}()
+	for cycle := range 7 {
+		for _, paused := range []bool{true, false} {
+			events <- service.Event{Suspend: paused, Resume: !paused}
+			select {
+			case got := <-power:
+				if got != paused {
+					t.Fatal(cycle, got, paused)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("power notification did not reach recovery scheduling")
+			}
+		}
+	}
+}
+
 type resumeCounter int
 
 func (r *resumeCounter) Resume() { *r++ }
@@ -136,7 +162,7 @@ func TestSessionQueryFailurePreservesRouting(t *testing.T) {
 	}
 	go func() {
 		defer close(done)
-		runSessionEvents(ctx, events, "owner", NewRemote(ctx, log), func() error {
+		runSessionEvents(ctx, events, "owner", NewRemote(ctx, log), func(bool) {}, func() error {
 			if stops.Add(1) == 1 {
 				close(stopped)
 			}
