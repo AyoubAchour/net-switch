@@ -164,6 +164,14 @@ func (o *Owners) indexed(inode uint32) inodeHolders {
 	s.mu.Unlock()
 	return h
 }
+
+func (o *Owners) hasInodeWaiter(inode uint32) bool {
+	s := o.indexFor(inode)
+	s.mu.Lock()
+	waiting := s.waiters[inode] != nil
+	s.mu.Unlock()
+	return waiting
+}
 func (o *Owners) subscribe(inode uint32) *inodeWaiter {
 	w := &inodeWaiter{ready: make(chan struct{})}
 	s := o.indexFor(inode)

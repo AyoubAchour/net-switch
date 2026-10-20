@@ -17,19 +17,25 @@ import (
 )
 
 type descriptorBatchKey struct {
-	pid, uid, onlyInode uint32
-	start, directory    uint64
-	offset              int64
-	limit               int
-	advance             bool
+	pid, uid         uint32
+	start, directory uint64
+	offset           int64
+	limit            int
+	advance          bool
+	cacheAll         bool
+}
+
+type descriptorSocket struct {
+	inode uint32
+	fd    int64
 }
 
 type descriptorBatchResult struct {
-	count  int
-	lastFD int64
-	inodes []uint32
-	began  time.Time
-	err    error
+	count   int
+	lastFD  int64
+	sockets []descriptorSocket
+	began   time.Time
+	err     error
 }
 
 type descriptorBatch struct {
@@ -168,11 +174,16 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		}
 		out.lastFD = max(out.lastFD, fd)
 		inode, ok := socketInodeAt(f.fd, string(name))
-		if !ok || (k.onlyInode != 0 && inode != k.onlyInode) {
+		if !ok {
 			return true
 		}
-		found[inode] = holder{pid: k.pid, start: k.start, fd: string(name)}
-		out.inodes = append(out.inodes, inode)
+		out.sockets = append(out.sockets, descriptorSocket{inode: inode, fd: fd})
+		// Foreign processes share the same bounded directory work too. Keep
+		// their compact results for callers, but retain only requested positive
+		// hints globally so the engine's own sockets do not double the index.
+		if k.cacheAll || o.hasInodeWaiter(inode) {
+			found[inode] = holder{pid: k.pid, start: k.start, fd: string(name)}
+		}
 		if len(found) == 32 {
 			o.publish(found)
 			clear(found)
@@ -184,7 +195,7 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		out.err = context.DeadlineExceeded
 	}
 	o.batches.fds.Add(uint64(out.count))
-	o.batches.sockets.Add(uint64(len(out.inodes)))
+	o.batches.sockets.Add(uint64(len(out.sockets)))
 	o.mu.Lock()
 	if current := o.windows[k.pid]; current.directory == k.directory && current.start == k.start {
 		current.extent = max(current.extent, out.lastFD)
@@ -192,7 +203,7 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 			current.high = max(current.high, out.lastFD)
 		}
 		current.observed = time.Now()
-		if k.offset == 0 && k.onlyInode == 0 && errors.Is(out.err, io.EOF) {
+		if k.offset == 0 && k.cacheAll && errors.Is(out.err, io.EOF) {
 			current.fullScan, current.fullUID = out.began, k.uid
 			current.fdCount = metadata.Size
 		}

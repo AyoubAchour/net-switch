@@ -35,8 +35,6 @@ func sharedBatchSocket(t *testing.T) (socketRow, holder, holder, descriptorBatch
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Exercise the legitimate UID fallback without a cgroup hint.
-	row.cgroup = 0
 	raw, err := c.SyscallConn()
 	if err != nil {
 		t.Fatal(err)
@@ -70,13 +68,13 @@ func sharedBatchSocket(t *testing.T) (socketRow, holder, holder, descriptorBatch
 	if err := unix.Stat(fmt.Sprintf("/proc/%d/fd", pid), &dir); err != nil {
 		t.Fatal(err)
 	}
-	key := descriptorBatchKey{pid: pid, uid: row.uid, start: start, directory: dir.Ino, limit: 64}
+	key := descriptorBatchKey{pid: pid, uid: row.uid, start: start, directory: dir.Ino, limit: 64, cacheAll: true}
 	reader := newTestOwners(t)
 	// Read the real child descriptors now; the test later delays publication
 	// of these exact positive hints, as a descheduled worker can do.
 	result := reader.readDescriptorBatch(&descriptorBatch{key: key, deadline: time.Now().Add(time.Second)})
 	b := reader.indexed(row.inode).first
-	if b.pid != pid || b.start != start || len(result.inodes) == 0 {
+	if b.pid != pid || b.start != start || len(result.sockets) == 0 {
 		t.Fatalf("child did not hold the real inherited socket: %+v, %v", b, result.err)
 	}
 	return row, a, b, key, result
@@ -84,6 +82,9 @@ func sharedBatchSocket(t *testing.T) (socketRow, holder, holder, descriptorBatch
 
 func TestOtherPIDNotificationCannotHideAConflictingHolder(t *testing.T) {
 	row, a, b, key, result := sharedBatchSocket(t)
+	// The UID fallback has one preferred candidate: the child whose batch
+	// is pending. Its parent's notification must not end that child's scan.
+	row.cgroup = 0
 	o := newTestOwners(t)
 	o.rememberPID(row.uid, b.pid)
 	pending := &descriptorBatch{key: key, done: make(chan struct{})}
@@ -126,6 +127,14 @@ func TestOtherPIDNotificationCannotHideAConflictingHolder(t *testing.T) {
 func TestFullBatchQueueCannotChooseOneConflictingHolder(t *testing.T) {
 	row, a, b, _, _ := sharedBatchSocket(t)
 	o := newTestOwners(t)
+	warm, finishWarm := context.WithTimeout(context.Background(), 5*time.Second)
+	defer finishWarm()
+	if err := o.Warm(warm); err != nil {
+		t.Fatal(err)
+	}
+	if row.cgroup == 0 {
+		t.Fatal("fixture needs the real socket cgroup to search both holders")
+	}
 	o.rememberPID(row.uid, b.pid)
 	o.publish(map[uint32]holder{row.inode: a})
 	// Hold a genuinely full queue with no consumer progress during the call.
