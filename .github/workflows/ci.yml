@@ -285,7 +285,7 @@ jobs:
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Test real TUN routing and report port reuse and DNS changes
         run: |
-          node scripts/e2e-tun.mjs
+          node scripts/e2e-tun.mjs --engine-adapter
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep TUN logs and probe results, including on failure
         if: always()
@@ -297,6 +297,7 @@ jobs:
             dist/tun-test/udp/*.log*
             dist/tun-test/report.txt
             dist/tun-test/executables.json
+            dist/tun-test/https-observations.json
             dist/tun-test/testisp/*.json
             dist/tun-test/testisp/*.log*
           retention-days: 14

@@ -1,30 +1,46 @@
 // NEVER run this on a developer's PC. It changes routes and briefly changes DNS.
-// The guard also excludes self-hosted runners. Engine uses the app's unchanged
-// config, auto_route, checksum verification, rule writes and start/stop lifecycle.
+// The guard also excludes self-hosted runners. The engine-config job explicitly
+// uses --engine-adapter with local TLS; the default still tests selected Control.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+import { Engine } from '../lib/engine.mjs';
 import { ControlUnderTest } from './tun-control-adapter.mjs';
 import { lineOutbound } from '../lib/apps.mjs';
 import { launchSpec } from './server-under-test.mjs';
 import { recordLaunch } from '../tests/windows/launch.mjs';
 import { startHarness } from '../tests/windows/testisp/harness.mjs';
 import { targets } from '../tests/windows/targets.mjs';
+import { localHttps, startTrafficEngine } from './tun-test-https.mjs';
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
   throw new Error('TUN tests may run only on disposable GitHub-hosted Windows runners.');
 }
 const dir = path.resolve('dist/tun-test');
 await mkdir(dir, { recursive: true });
-await recordLaunch(launchSpec, path.join(dir, 'executables.json'));
-console.log(`Launcher: the selected control service (${launchSpec.server}) owns the routing lifecycle.`);
+const engineAdapter = process.argv.includes('--engine-adapter');
+if (engineAdapter) {
+  assert.equal(launchSpec.server.toLowerCase(), process.execPath.toLowerCase(),
+    '--engine-adapter tests the Node Engine adapter; omit it to test another control executable');
+  await recordLaunch({ ...launchSpec, entry: fileURLToPath(import.meta.url) }, path.join(dir, 'executables.json'));
+  console.log('Launcher: direct Engine adapter with local TLS; no control server is launched.');
+} else {
+  await recordLaunch(launchSpec, path.join(dir, 'executables.json'));
+  console.log(`Launcher: the selected control service (${launchSpec.server}) owns the routing lifecycle.`);
+}
 // A distinct executable path exercises process discovery and app pinning.
 const clientExe = path.join(dir, 'test-app.exe');
 await copyFile(process.execPath, clientExe);
-const engine = new ControlUnderTest(dir);
+const engine = engineAdapter
+  ? new Engine({ singBoxPath: launchSpec.engine, dataDir: dir, mode: 'tun' })
+  : new ControlUnderTest(dir);
+// The separate control-service suite keeps its public trace probe. The engine
+// job never selects this target; its requests require the fixture certificate.
+const publicTarget = { host: '1.1.1.1', port: 443, servername: 'one.one.one.one', publicTrace: true };
 const report = [];
 function log(message) { console.log(message); report.push(message); }
 async function network(action, adapter, timeoutMs = 45_000) {
@@ -67,7 +83,8 @@ function client(command, args = {}) {
     const id = ++serial;
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Test app ${command} timed out`)); }, 60_000);
     pending.set(id, { resolve, reject, timer });
-    worker.send({ id, command, ...args });
+    const target = engineAdapter ? httpsResponder?.target : publicTarget;
+    worker.send({ id, command, ...(command === 'open' ? { target } : {}), ...args });
   });
 }
 function alive() { assert.equal(engine.status, 'on', engine.error ?? 'Engine crashed'); }
@@ -107,7 +124,7 @@ async function clean(label, firstReadTimeout = 45_000) {
   assert.fail(`${label}: leftovers ${JSON.stringify(state)}`);
 }
 let adapter;
-let harness, responder;
+let harness, responder, httpsResponder;
 let restoreDns = false;
 try {
   const pins = JSON.parse(await readFile('packaging/versions.json', 'utf8'));
@@ -119,17 +136,23 @@ try {
   adapter = await network('inspect');
   harness = await startHarness(path.join(dir, 'testisp'));
   responder = await targets(harness.uplink.address);
+  if (engineAdapter) {
+    httpsResponder = await localHttps(harness.uplink.address);
+    log(`Local HTTPS fixture: ${httpsResponder.target.host}:443 -> ${httpsResponder.address}:${httpsResponder.port}; certificate name netswitch.invalid`);
+  }
   await harness.control('targets', { ports: [responder.direct.http, ...responder.direct.udp] });
   const udpTarget = { host: responder.virtual.host, port: responder.virtual.udp[0] };
   log(`Physical adapter: ${JSON.stringify(adapter)}`);
-  log(`PORT-REUSE direct baseline: ${JSON.stringify(await client('reuse'))}`);
+  const reuseTarget = { host: responder.virtual.host, port: responder.virtual.http };
+  log(`PORT-REUSE direct baseline: ${JSON.stringify(await client('reuse', { target: reuseTarget, localAddress: harness.testisp.address }))}`);
   const udpSizes = [64, 1800];
   for (const size of udpSizes) {
     log(`UDP direct baseline: ${JSON.stringify(await client('udp', { size, target: udpTarget, localAddress: harness.testisp.address }))}`);
   }
   const lines = [{ id: 'aa', alias: adapter.alias }, { id: 'bb', alias: 'TestISP' }];
   await engine.setAppLines({ [clientExe]: 'bb' });
-  await engine.start({ lines });
+  if (engineAdapter) await startTrafficEngine(engine, lines, httpsResponder);
+  else await engine.start({ lines });
   alive();
   // The app's warn-level log can legitimately be empty. Keep a marked test
   // header so the artifact exists even when the engine emitted no warnings.
@@ -138,9 +161,13 @@ try {
   assert(state.adapters.some((item) => item.Name === 'NetSwitch' && item.Status === 'Up'), JSON.stringify(state));
   assert(state.routes.length > 0, 'No TUN routes installed');
   assert.equal(state.firewall.length, 0, 'gVisor must not add a firewall rule');
+  const tlsCount = async () => httpsResponder
+    ? ((await harness.control('stats')).destinations[`${httpsResponder.address}:${httpsResponder.port}`] ?? 0) : 0;
+  const beforeFirst = await tlsCount();
   const first = await client('open', { count: 3 });
   const connections = await routed(first, 'bb');
-  log(`ok - pinned app received public HTTPS responses through TUN: ${JSON.stringify(connections.find((c) => Number(c.metadata.sourcePort) === first[0].port))}`);
+  if (engineAdapter) assert.equal(await tlsCount() - beforeFirst, 3, 'The three bb TLS sockets must cross TestISP');
+  log(`ok - pinned app received ${engineAdapter ? 'local' : 'public'} HTTPS responses through TUN: ${JSON.stringify(connections.find((c) => Number(c.metadata.sourcePort) === first[0].port))}`);
 
   await engine.setAppLines({ [clientExe]: 'aa' });
   // Local rule sets are watched asynchronously; wait for the new mapping while
@@ -157,8 +184,10 @@ try {
   log('ok - rewritten rules route new connections to aa; old bb connections still carry traffic');
   await client('close');
 
+  const beforeMany = await tlsCount();
   const many = await client('open', { count: 100 });
   await routed(many, 'aa');
+  if (engineAdapter) assert.equal(await tlsCount(), beforeMany, 'The aa TLS sockets must use the physical line');
   const oldIds = new Set((await engine.connections()).filter((c) => many.some(({ port }) => port === Number(c.metadata.sourcePort))).map((c) => c.id));
   assert.equal(oldIds.size, 100);
   const started = performance.now();
@@ -169,8 +198,13 @@ try {
   assert([...oldIds].every((id) => after.some((c) => c.id === id)), 'Selector closed existing connections');
   await client('refresh', { ids: many.map(({ id }) => id) });
   await routed(many, 'aa');
+  const beforeNew = await tlsCount();
   const newer = await client('open', { count: 3 });
   await routed(newer, 'bb');
+  if (engineAdapter) {
+    assert.equal(await tlsCount() - beforeNew, 3, 'New TLS sockets must physically cross bb after the selector change');
+    log('ok - TLS path counters: initial bb +3, 100 aa sockets +0, new bb +3 through TestISP');
+  }
   log(`ok - selector PUT ${elapsed.toFixed(1)} ms with 100 open connections; all old sockets reused, new connections use bb`);
   await client('close');
 
@@ -179,7 +213,7 @@ try {
     await routed([result], 'bb');
     log(`ok - UDP through TUN: ${JSON.stringify(result)}`);
   }
-  const reuse = await client('reuse');
+  const reuse = await client('reuse', { target: reuseTarget });
   log(`PORT-REUSE TUN: ${JSON.stringify(reuse)}`);
   alive();
 
@@ -211,8 +245,9 @@ try {
   await engine.log.append('[test] Traffic probes finished; engine still running.');
   await writeFile(path.join(dir, 'traffic-engine.log'), await readFile(engine.logPath));
   await engine.stop();
-  await clean('cycle 1/20');
-  for (let cycle = 2; cycle <= 20; cycle += 1) {
+  await clean(engineAdapter ? 'traffic fixture' : 'cycle 1/20');
+  // All 20 lifecycle cycles still use the unmodified product configuration.
+  for (let cycle = engineAdapter ? 1 : 2; cycle <= 20; cycle += 1) {
     await engine.start({ lines });
     alive();
     await engine.stop();
@@ -240,12 +275,17 @@ try {
   if (worker.exitCode === null) worker.disconnect();
   try { await engine.stop(); await clean('final cleanup'); }
   catch (error) { log(`CLEANUP FAILED: ${error.stack}`); process.exitCode = 1; }
-  try { await engine.quit(); }
+  try { if (!engineAdapter) await engine.quit(); }
   catch (error) { log(`CONTROL QUIT FAILED: ${error.stack}`); process.exitCode = 1; }
   if (harness) {
     try { log(`TestISP counters: ${JSON.stringify(await harness.control('stats'))}`); await harness.close(); }
     catch (error) { log(`TESTISP CLEANUP FAILED: ${error.stack}`); process.exitCode = 1; }
   }
   if (responder) await responder.close();
+  if (httpsResponder) {
+    await writeFile(path.join(dir, 'https-observations.json'), JSON.stringify(httpsResponder.seen, null, 2));
+    log(`Local HTTPS responder: ${httpsResponder.seen.length} requests, ${new Set(httpsResponder.seen.map((item) => item.connection)).size} TLS sockets`);
+    await httpsResponder.close();
+  }
   await writeFile(path.join(dir, 'report.txt'), `${report.join('\n')}\n`);
 }

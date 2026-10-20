@@ -4,43 +4,67 @@ import { connect, createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import assert from 'node:assert/strict';
 import { createSocket } from 'node:dgram';
+import { randomBytes } from 'node:crypto';
 
 if (!process.send) throw new Error('Run this client through e2e-tun.mjs');
 const held = new Map();
 let next = 0;
 async function requestOn(item) {
+  const nonce = randomBytes(16).toString('hex');
+  const label = item.target.publicTrace ? 'Public HTTPS' : 'Local HTTPS';
   return new Promise((resolve, reject) => {
-    const req = request({ host: '1.1.1.1', port: 443, servername: 'one.one.one.one',
-      path: '/cdn-cgi/trace', agent: item.agent, signal: AbortSignal.timeout(10_000) }, (res) => {
+    const req = request({ ...item.target,
+      path: item.target.publicTrace ? '/cdn-cgi/trace' : `/?nonce=${nonce}`,
+      agent: item.agent, signal: AbortSignal.timeout(10_000) }, (res) => {
       const port = res.socket.localPort;
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (chunk) => { body += chunk; });
       res.on('error', reject);
       res.on('end', () => {
-        if (res.statusCode !== 200 || !body.includes('ip=')) return reject(new Error(`HTTP ${res.statusCode}: ${body.slice(0,100)}`));
-        if (item.port && (!req.reusedSocket || item.port !== port)) return reject(new Error(`Connection ${item.id} was replaced`));
-        item.port = port;
-        resolve({ id: item.id, port, bytes: body.length, reused: req.reusedSocket });
+        try {
+          if (item.target.publicTrace && res.statusCode >= 500 && res.statusCode < 600) {
+            throw new Error(`public target unavailable: ${item.target.host}:${item.target.port} HTTP ${res.statusCode}: ${body.slice(0, 100)}`);
+          }
+          assert.equal(res.statusCode, 200, `${label} HTTP ${res.statusCode}: ${body.slice(0, 100)}`);
+          let connection;
+          if (item.target.publicTrace) assert(body.includes('ip='), 'Public HTTPS trace body missing');
+          else {
+            const reply = JSON.parse(body);
+            assert.equal(reply.nonce, nonce, 'Local HTTPS response did not echo this request');
+            assert(Number.isInteger(reply.connection), 'Missing responder connection identity');
+            connection = reply.connection;
+          }
+          if (item.port) {
+            assert(req.reusedSocket && item.port === port && (item.target.publicTrace || item.connection === connection),
+              `Connection ${item.id} was replaced`);
+          }
+          item.port = port;
+          item.connection = connection;
+          resolve({ id: item.id, port, bytes: body.length, reused: req.reusedSocket, connection });
+        } catch (error) { reject(error); }
       });
     });
-    req.on('error', reject);
+    req.on('error', (cause) => reject(new Error(`${label} ${item.target.host}:${item.target.port}, connection ${item.id}: ${cause.message}`, { cause })));
     req.end();
   });
 }
-async function open(count) {
+async function open(count, target) {
+  assert(target?.publicTrace === true || (target?.ca && target.servername === 'netswitch.invalid'),
+    'An explicit public trace or a local TLS target with its certificate is required');
   const results = [];
-  // Ten at a time limits load on the public endpoint and runner.
+  // Keep the existing concurrency and request deadline.
   for (let n = 0; n < count; n += 10) {
     results.push(...await Promise.all(Array.from({ length: Math.min(10, count - n) }, async () => {
-      const item = { id: ++next, agent: new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 }) };
+      const item = { id: ++next, target, agent: new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 }) };
       held.set(item.id, item);
       return requestOn(item);
     })));
   }
   return results;
 }
-async function reuseProbe() {
+async function reuseProbe(target, localAddress) {
+  assert(target?.host && target.port, 'A local HTTP target is required');
   const port = await new Promise((resolve, reject) => {
     const server = createServer();
     server.on('error', reject);
@@ -54,7 +78,7 @@ async function reuseProbe() {
     attempts.push(await new Promise((resolve) => {
       const started = performance.now();
       let connected = false, remoteClosedFirst = false, response = '', source;
-      const socket = connect({ host: '1.1.1.1', port: 80, localPort: port, allowHalfOpen: true });
+      const socket = connect({ host: target.host, port: target.port, localAddress, localPort: port, allowHalfOpen: true });
       const timer = setTimeout(() => finish('timeout'), 5000);
       let done = false;
       function finish(outcome) {
@@ -68,7 +92,7 @@ async function reuseProbe() {
       socket.on('connect', () => {
         connected = true;
         source = socket.localAddress;
-        socket.write('GET /cdn-cgi/trace HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: close\r\n\r\n');
+        socket.write('GET /close HTTP/1.1\r\nHost: netswitch.invalid\r\nConnection: close\r\n\r\n');
       });
       socket.on('data', (data) => { response += data; });
       socket.on('end', () => { remoteClosedFirst = true; socket.end(); });
@@ -120,9 +144,9 @@ async function udp(size, target = { host: '1.1.1.1', port: 53 }, localAddress) {
 process.on('message', async ({ id, command, count, ids, size, target, localAddress }) => {
   try {
     let result;
-    if (command === 'open') result = await open(count);
+    if (command === 'open') result = await open(count, target);
     else if (command === 'refresh') result = await Promise.all(ids.map((key) => requestOn(held.get(key))));
-    else if (command === 'reuse') result = await reuseProbe();
+    else if (command === 'reuse') result = await reuseProbe(target, localAddress);
     else if (command === 'udp') result = await udp(size, target, localAddress);
     else if (command === 'close') { for (const item of held.values()) item.agent.destroy(); held.clear(); result = true; }
     else throw new Error(`Unknown command ${command}`);
