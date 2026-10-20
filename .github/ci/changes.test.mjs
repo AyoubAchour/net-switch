@@ -39,6 +39,10 @@ test('new files run everything, including familiar code and documentation paths'
   }
 });
 
+test('Markdown bundled in the installer is a product input', () => {
+  for (const path of ['THIRD_PARTY_NOTICES.md', 'docs/user-guide.md']) assert.equal(known([path]).full, true, path);
+});
+
 test('deleted files use their original area and mixed deletions stay conservative', () => {
   assert.deepEqual(enabled(known(['lib/tray.cs'])), [...areas.frozen].sort());
   assert.equal(known(['lib/tray.cs', 'old-unmapped-input']).full, true);
