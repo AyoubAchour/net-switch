@@ -68,4 +68,3 @@ func TestConnectedDispatchAfterTimeWait(t *testing.T) {
 		t.Fatalf("cleanup calls=%d, want 1", leaves)
 	}
 }
-

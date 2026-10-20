@@ -8,10 +8,6 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      timewait_repeat:
-        description: Repeat the TIME_WAIT cleanup barrier investigation
-        type: boolean
-        default: false
       control_security:
         description: Run only the focused Windows control security regressions
         type: boolean
@@ -32,31 +28,6 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  timewait-repeat:
-    if: github.event_name == 'workflow_dispatch' && inputs.timewait_repeat
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        race: ['', '-race']
-    env:
-      GOTOOLCHAIN: local
-      GOMAXPROCS: '2'
-      GOFLAGS: -mod=vendor -p=2
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version-file: go.mod
-          cache: false
-      - run: go test ${{ matrix.race }} -v -count=10000 -timeout=10m -run '^TestTimeWaitSYNBeforeRemoval$' ./internal/engine/stack
-      - if: always()
-        run: go test -mod=mod ${{ matrix.race }} -v -count=1000 -run '^TestConnectedDispatchAfterTimeWait$' gvisor.dev/gvisor/pkg/tcpip/transport/tcp
-
   control-security:
     name: Control security / Windows x64
     if: github.event_name == 'workflow_dispatch' && inputs.control_security
@@ -82,7 +53,7 @@ jobs:
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.control_security && !inputs.timewait_repeat
+    if: github.event_name == 'workflow_dispatch' && !inputs.control_security
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -386,7 +357,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: go vet ./internal/... ./cmd/... ./tests/...
       - name: Deterministic gVisor dispatch regression
-        run: go test -mod=mod -v -count=1 gvisor.dev/gvisor/pkg/tcpip/transport/tcp
+        run: go test -mod=mod ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1 gvisor.dev/gvisor/pkg/tcpip/transport/tcp
       - run: go test -v ./internal/... ./cmd/... ./tests/...
       - run: go build ./internal/... ./cmd/... ./tests/...
       - name: Install pinned govulncheck

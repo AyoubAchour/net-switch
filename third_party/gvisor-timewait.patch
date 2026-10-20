@@ -136,10 +136,10 @@ index d138e3b..fd89a21 100644
  	// segment queue is not empty.
 diff --git a/pkg/tcpip/transport/tcp/dispatcher_netswitch_test.go b/pkg/tcpip/transport/tcp/dispatcher_netswitch_test.go
 new file mode 100644
-index 0000000..a930053
+index 0000000..2101b3d
 --- /dev/null
 +++ b/pkg/tcpip/transport/tcp/dispatcher_netswitch_test.go
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,70 @@
 +package tcp
 +
 +import (
@@ -210,7 +210,6 @@ index 0000000..a930053
 +		t.Fatalf("cleanup calls=%d, want 1", leaves)
 +	}
 +}
-+
 diff --git a/pkg/tcpip/transport/tcp/endpoint.go b/pkg/tcpip/transport/tcp/endpoint.go
 index 788a2f2..f732204 100644
 --- a/pkg/tcpip/transport/tcp/endpoint.go
