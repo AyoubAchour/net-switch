@@ -1,0 +1,80 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { copyFile } from 'node:fs/promises';
+import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
+import { hostedOnly, until } from './testisp/harness.mjs';
+
+export async function capacity({ server, harness, directory, line }) {
+  hostedOnly();
+  const target = await harness.control('capacity', {});
+  const children = [];
+  const engineStats = async () => (await server.api('engine-command', { method: 'stats' })).engine;
+  try {
+    const before = await until(async () => {
+      const stats = await engineStats();
+      return stats.flows.Flows === 0 && stats;
+    }, 'no ordinary flows before capacity measurement', 30_000);
+    for (let i = 0; i < 8; i++) {
+      const exe = path.join(directory, `capacity-app-${i}.exe`);
+      await copyFile(process.execPath, exe);
+      await server.api('app-line', { path: exe, line });
+      const child = spawn(exe, [path.resolve('tests/windows/capacity-client.mjs')], { windowsHide: true, stdio: ['ignore','inherit','inherit','ipc'] });
+      let serial = 0;
+      const pending = new Map();
+      child.on('message', ({ id, result, error }) => {
+        const item = pending.get(id);
+        if (!item) return;
+        pending.delete(id); clearTimeout(item.timer);
+        if (error) item.reject(new Error(error)); else item.resolve(result);
+      });
+      child.on('exit', () => {
+        for (const item of pending.values()) { clearTimeout(item.timer); item.reject(new Error('Capacity client exited')); }
+        pending.clear();
+      });
+      const call = (command, args = {}) => new Promise((resolve, reject) => {
+        const id = ++serial;
+        const timer = setTimeout(() => { pending.delete(id); reject(new Error(`Capacity client ${i}: ${command} deadline`)); }, 60_000);
+        pending.set(id, { resolve, reject, timer });
+        child.send({ id, command, ...args });
+      });
+      children.push({ child, call, exe });
+    }
+    // One batch at a time across the eight app identities. Each process has
+    // its own executable path; no injected owner bypasses the per-app cap.
+    for (let held = 0; held < 65536;) {
+      for (const app of children) {
+        const result = await app.call('open', { ...target, count: 256 });
+        assert.equal(result.lost, 0, 'A previously admitted capacity socket was cut');
+        held += 256;
+      }
+      const stats = await engineStats();
+      console.log(`WINDOWS CAPACITY ${JSON.stringify({ held, flows: stats.flows.Flows, heapBytes: stats.heapBytes, stackBytes: stats.stackBytes, runtimeBytes: stats.runtimeBytes, gcCPUppm: stats.gcCPUppm })}`);
+    }
+    const observed = await harness.control('capacity');
+    assert.equal(observed.echoed, 65536, 'The controlled peer did not echo every admitted flow');
+    const samples = [];
+    for (let n = 0; n < 10; n++) {
+      const states = await Promise.all(children.map((app) => app.call('status')));
+      assert(states.every((s) => s.held === 8192 && s.live === 8192 && s.lost === 0), JSON.stringify(states));
+      const stats = await engineStats();
+      assert.equal(stats.flows.Flows, 65536, 'The engine did not retain the actual flow cap');
+      assert.equal(stats.flows.Handshakes, 0);
+      samples.push(stats);
+      await delay(1000);
+    }
+    const last = samples.at(-1);
+    const evidence = { before, samples, observed,
+      heapPerFlow: last.heapBytes / 65536, stackPerFlow: last.stackBytes / 65536,
+      gcCPUppm: last.gcCPUppm,
+      capWindowGCShare: (last.gcCPUNanos - samples[0].gcCPUNanos) / Math.max(1, last.totalCPUNanos - samples[0].totalCPUNanos) };
+    console.log(`WINDOWS CAPACITY RESULT ${JSON.stringify(evidence)}`);
+    assert(samples.every((s) => s.runtimeBytes <= 512 * 1024 * 1024), `512 MiB runtime budget exceeded: ${JSON.stringify(evidence)}`);
+    return evidence;
+  } finally {
+    for (const { child, call } of children) {
+      if (child.connected) { await call('close').catch(() => {}); child.disconnect(); }
+    }
+    await harness.control('capacity-close', {});
+  }
+}

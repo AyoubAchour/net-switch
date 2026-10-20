@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/netip"
 	"runtime"
@@ -111,6 +112,10 @@ func routeRow(fp journal.Fingerprint) windows.MibIpForwardRow2 {
 	r.DestinationPrefix = windows.IpAddressPrefix{Prefix: sockaddr(p.Addr()), PrefixLength: uint8(p.Bits())}
 	r.NextHop = sockaddr(netip.MustParseAddr(fp["nextHop"]))
 	r.Metric, r.Protocol = uint32(uintField(fp, "metric")), uint32(uintField(fp, "protocol"))
+	// InitializeIpForwardEntry enables these flags. Capture routes must not
+	// autoconfigure addresses, publish themselves, or become loopback routes.
+	r.Loopback, r.AutoconfigureAddress, r.Publish, r.Immortal = 0, 0, 0, 1
+	r.SitePrefixLength = 0
 	return r
 }
 
@@ -239,7 +244,7 @@ func (o object) Inspect(ctx context.Context, fp journal.Fingerprint) (journal.Fi
 		}
 		live["metric"], live["protocol"] = number(uint64(r.Metric)), number(uint64(r.Protocol))
 		if r.Publish != 0 || r.AutoconfigureAddress != 0 || r.Loopback != 0 {
-			live["foreignFlags"] = "1"
+			live["foreignFlags"] = fmt.Sprintf("publish=%d autoconfigure=%d loopback=%d", r.Publish, r.AutoconfigureAddress, r.Loopback)
 		}
 		return live, true, nil
 	case "address":

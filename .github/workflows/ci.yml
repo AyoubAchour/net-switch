@@ -110,7 +110,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     name: Windows acceptance / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -161,6 +161,12 @@ jobs:
         env:
           GOFLAGS: -mod=readonly -p=2
         run: ./scripts/build-helper.ps1
+      - name: Measure cold Windows owner lookups with 2000 existing TCP rows
+        env:
+          NETSWITCH_LOOKUP_GATE: '1'
+        run: |
+          go test -count=1 -v -run '^TestOwnerColdBurstTiming$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Fetch the verified engine and signed Wintun DLL
         run: |
           ./scripts/fetch-engine.ps1

@@ -4,6 +4,9 @@ package winengine
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -18,6 +21,8 @@ import (
 
 const privateSDDL = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
 
+var errUntrustedState = errors.New("untrusted engine state directory")
+
 func security(sddl string) (*windows.SecurityAttributes, error) {
 	sd, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
@@ -30,6 +35,53 @@ func security(sddl string) (*windows.SecurityAttributes, error) {
 // after someone may already have obtained a WRITE_DAC handle. It returns a
 // handle which prevents replacement while the engine is using its files.
 func StateDirectory(path string) (*os.File, error) {
+	f, err := openStateDirectory(path)
+	if !errors.Is(err, errUntrustedState) {
+		return f, err
+	}
+	// A standard user may have occupied this fixed name before installation.
+	// Do not trust or salvage any records from that directory, and do not
+	// merely tighten its ACL while old WRITE_DAC handles may still exist.
+	if err := quarantineState(path); err != nil {
+		return nil, err
+	}
+	return openStateDirectory(path)
+}
+
+func quarantineState(path string) error {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(p, windows.DELETE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return fmt.Errorf("move untrusted state aside without following it: %w", err)
+	}
+	defer windows.CloseHandle(h)
+	var nonce [12]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return err
+	}
+	target, err := windows.UTF16FromString(path + ".untrusted-" + hex.EncodeToString(nonce[:]))
+	if err != nil {
+		return err
+	}
+	target = target[:len(target)-1]
+	// FILE_RENAME_INFO: BOOLEAN at 0, HANDLE at 8, DWORD at 16, WCHARs at 20.
+	info := make([]byte, 20+2*len(target))
+	binary.LittleEndian.PutUint32(info[16:], uint32(2*len(target)))
+	for i, c := range target {
+		binary.LittleEndian.PutUint16(info[20+i*2:], c)
+	}
+	return windows.SetFileInformationByHandle(h, windows.FileRenameInfo, &info[0], uint32(len(info)))
+}
+
+func openStateDirectory(path string) (*os.File, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -78,7 +130,7 @@ func StateDirectory(path string) (*os.File, error) {
 		return nil, err
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-		return nil, errors.New("engine state must be a regular directory")
+		return nil, fmt.Errorf("%w: not a regular directory", errUntrustedState)
 	}
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
@@ -89,11 +141,11 @@ func StateDirectory(path string) (*os.File, error) {
 		return nil, err
 	}
 	if !owner.IsWellKnown(windows.WinBuiltinAdministratorsSid) && !owner.IsWellKnown(windows.WinLocalSystemSid) {
-		return nil, errors.New("engine state directory must be owned by Administrators or SYSTEM")
+		return nil, fmt.Errorf("%w: owner is neither Administrators nor SYSTEM", errUntrustedState)
 	}
 	acl, _, err := sd.DACL()
 	if err != nil || acl == nil {
-		return nil, errors.New("engine state has no private DACL")
+		return nil, fmt.Errorf("%w: missing private DACL", errUntrustedState)
 	}
 	for i := uint32(0); i < uint32(acl.AceCount); i++ {
 		var ace *windows.ACCESS_ALLOWED_ACE
@@ -101,11 +153,11 @@ func StateDirectory(path string) (*os.File, error) {
 			return nil, err
 		}
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
-			return nil, errors.New("unexpected state directory ACE")
+			return nil, fmt.Errorf("%w: unexpected ACE", errUntrustedState)
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if !sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) && !sid.IsWellKnown(windows.WinLocalSystemSid) {
-			return nil, errors.New("engine state is accessible to non-administrators")
+			return nil, fmt.Errorf("%w: non-administrator access", errUntrustedState)
 		}
 	}
 	for _, name := range []string{"engine-journal.json", "engine-state.json"} {
