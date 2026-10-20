@@ -27,7 +27,7 @@ const MinimumBuffer = 64 << 10
 type Forwarder struct {
 	ctx                           context.Context
 	cancel                        context.CancelFunc
-	mu                            sync.Mutex
+	mu                            sync.RWMutex
 	pending                       map[stack.TransportEndpointID]*pendingOpen
 	wg                            sync.WaitGroup
 	forwarder                     *gtcp.Forwarder
@@ -151,10 +151,13 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	defer f.wg.Done()
 	id := r.ID()
-	f.mu.Lock()
+	// Setup only reads the admission record. Serializing every new callback
+	// on an exclusive lock creates a mutex-handoff convoy during SYN bursts,
+	// starving the owner lookups that those callbacks are about to start.
+	f.mu.RLock()
 	pending := f.pending[id]
-	pending.request = r
-	f.mu.Unlock()
+	f.mu.RUnlock()
+	pending.request.Store(r)
 	ticket := pending.ticket
 	owned := true
 	defer func() {

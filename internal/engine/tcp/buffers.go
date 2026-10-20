@@ -61,8 +61,8 @@ func (f *Forwarder) startMaintenance() {
 }
 
 func (f *Forwarder) connectionSnapshot() []*connection {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	items := make([]*connection, 0, len(f.connections)+len(f.retired))
 	for _, c := range f.connections {
 		items = append(items, c)
