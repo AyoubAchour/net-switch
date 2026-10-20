@@ -27,6 +27,23 @@ func TestCompletedSmallScanDoesNotHideLaterSocket(t *testing.T) {
 	}
 	var previous string
 	for range 2 {
+		// Complete a negative pass before creating the socket. A successful
+		// targeted lookup may stop at its match without reaching directory EOF.
+		pid := uint32(os.Getpid())
+		o.rememberPID(uint32(os.Getuid()), pid)
+		began := time.Now()
+		prime, stop := context.WithTimeout(ctx, 100*time.Millisecond)
+		_, primeErr := o.holders(prime, socketRow{inode: 1, uid: uint32(os.Getuid())})
+		stop()
+		if !errors.Is(primeErr, os.ErrNotExist) && !errors.Is(primeErr, context.DeadlineExceeded) {
+			t.Fatalf("negative scan: %v", primeErr)
+		}
+		o.mu.Lock()
+		completed := o.windows[pid].fullScan
+		o.mu.Unlock()
+		if completed.Before(began) {
+			t.Fatal("fixture did not establish a completed small descriptor scan")
+		}
 		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 		if err != nil {
 			t.Fatal(err)
@@ -38,12 +55,65 @@ func TestCompletedSmallScanDoesNotHideLaterSocket(t *testing.T) {
 			t.Fatalf("fresh socket after completed scan: %+v %v", owner, err)
 		}
 		previous = owner.Generation
-		o.mu.Lock()
-		completed := o.windows[owner.PID].fullScan
-		o.mu.Unlock()
-		if completed.IsZero() {
-			t.Fatal("fixture did not establish a completed small descriptor scan")
+	}
+}
+
+func TestFoundHolderStopsBeforeUnrelatedDescriptors(t *testing.T) {
+	o := newTestOwners(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := o.Warm(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var rows []socketRow
+	var descriptors []int
+	for range 256 {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+		if err != nil {
+			t.Fatal(err)
 		}
+		defer conn.Close()
+		raw, err := conn.SyscallConn()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var st unix.Stat_t
+		var statErr error
+		var fd int
+		if err := raw.Control(func(value uintptr) { fd = int(value); statErr = unix.Fstat(fd, &st) }); err != nil || statErr != nil {
+			t.Fatalf("socket metadata: %v %v", err, statErr)
+		}
+		descriptors = append(descriptors, fd)
+		rows = append(rows, socketRow{inode: uint32(st.Ino), uid: st.Uid, protocol: unix.IPPROTO_UDP})
+	}
+	pid := uint32(os.Getpid())
+	start, err := processStart(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var directory unix.Stat_t
+	if err := unix.Stat("/proc/self/fd", &directory); err != nil {
+		t.Fatal(err)
+	}
+	if descriptors[255] < 128 || descriptors[1] <= descriptors[0] {
+		t.Fatal("fixture did not establish an ordered large descriptor set")
+	}
+	o.windows[pid] = fdWindow{start: start, directory: directory.Ino, lastFD: -1, extent: int64(descriptors[255])}
+	o.rememberPID(rows[0].uid, pid)
+	owner, err := o.holders(ctx, rows[0])
+	if err != nil || owner.PID != pid {
+		t.Fatalf("first live descriptor: %+v %v", owner, err)
+	}
+	if o.indexed(rows[1].inode).count() != 0 {
+		t.Fatal("scanner kept reading unrelated descriptors after finding its requested socket")
+	}
+	if !o.windows[pid].fullScan.IsZero() {
+		t.Fatal("a targeted stop was recorded as a complete directory scan")
+	}
+	// The skipped neighbour must still be discoverable by a later request.
+	owner, err = o.holders(ctx, rows[1])
+	if err != nil || owner.PID != pid {
+		t.Fatalf("later live descriptor: %+v %v", owner, err)
 	}
 }
 

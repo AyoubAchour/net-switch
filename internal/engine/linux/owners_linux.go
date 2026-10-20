@@ -776,7 +776,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 							o.publish(remember)
 							clear(remember)
 						}
-						return true
+						return !ok || inode != r.inode
 					})
 					if errors.Is(probeErr, io.EOF) {
 						o.mu.Lock()
@@ -887,6 +887,10 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 			if uint32(inode) == r.inode {
 				matched = true
+				// Publish and release this PID's scanner before validating the
+				// owner. Reading the rest of a large window after finding our
+				// socket can spend its remaining deadline on unrelated FDs.
+				return false
 			}
 			return true
 		}
@@ -929,9 +933,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			if window.extent < 128 || (window.lastFD >= 0 && window.lastFD < 128) {
 				if _, err := f.Seek(0, 0); err == nil {
 					advancing = true
-					names, readErr := f.Visit(128, visit)
+					_, readErr := f.Visit(128, visit)
 					advancing = false
-					whole = names < 128 && (readErr == nil || errors.Is(readErr, io.EOF)) && !expired()
+					whole = errors.Is(readErr, io.EOF) && !expired()
 					if whole {
 						return nil
 					}
@@ -1000,7 +1004,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 		for !expired() {
 			names, readErr := f.Visit(64, visit)
-			whole = position == 0 && names < 64 && (readErr == nil || errors.Is(readErr, io.EOF)) && !expired()
+			whole = position == 0 && errors.Is(readErr, io.EOF) && !expired()
 			if matched {
 				return nil
 			}
