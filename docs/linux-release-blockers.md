@@ -22,6 +22,13 @@ and byte budgets, independent server observations, stream survival, correct lane
 cleanup, steady lookup gates and identified pagination rows. An ordinary failure
 in a deferred case still fails the job. Fault cases keep their separate build.
 
+The scanner remains a bounded fallback, reported as `proc-fallback` in owner
+stats. Recent process observations can defer unrelated candidate scans for 5 ms
+after a live owner is found. They never supply identity or prove absence, and
+known positive hints always receive fresh validation. A previously unseen FD
+transfer to another process can remain undiscovered during that window; the
+fallback does not claim an exhaustive, simultaneous snapshot of all holders.
+
 The **Acceptance** workflow's manual `release_gate=true` mode runs the separate
 **Linux 1.0 release gate** check, with no engine workload:
 

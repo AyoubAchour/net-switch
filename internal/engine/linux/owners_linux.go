@@ -721,6 +721,19 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		}
 		seen[pid] = true
 		scannedPIDs++
+		if !complete && result.AppID != "" && !needsConfirmation(pid) {
+			// The fallback is a bounded search over candidate processes. Once
+			// a holder is validated, a recent observation can defer unrelated
+			// candidate work; it never proves absence or supplies an identity.
+			// Every known positive is revalidated, and any failed hint bypasses
+			// this scheduling hint through the mandatory confirmation path.
+			o.mu.Lock()
+			observed := o.windows[pid].observed
+			o.mu.Unlock()
+			if time.Since(observed) < 5*time.Millisecond {
+				return nil
+			}
+		}
 		scanFailure := func(err error) error {
 			if !needsConfirmation(pid) {
 				return nil
