@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -42,6 +43,9 @@ func run(args []string) error {
 			return err
 		}
 		return p.Close()
+	}
+	if err := configureScheduling(); err != nil {
+		log.Printf("routing CPU scheduling remains inherited: %v", err)
 	}
 	stopProfiles, err := startProfiles(*profiles, *cpuProfile)
 	if err != nil {
