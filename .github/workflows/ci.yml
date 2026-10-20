@@ -88,15 +88,30 @@ jobs:
 
   tcp-probe:
     if: github.event_name == 'workflow_dispatch' && inputs.tcp_probe
-    name: TCP8 evidence / ${{ matrix.ref }} / ${{ matrix.repeat }}
-    runs-on: windows-latest
+    name: TCP8 fixed / ${{ matrix.arch }} / ${{ matrix.ref }} / ${{ matrix.repeat }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        ref: [engine/wintun-tcp-before-sack, engine/wintun-tcp-platform-probe]
-        repeat: [1, 2]
+        include:
+          - ref: engine/wintun-tcp-platform-probe
+            arch: x64
+            runner: windows-latest
+            repeat: 1
+          - ref: engine/wintun-tcp-platform-probe
+            arch: x64
+            runner: windows-latest
+            repeat: 2
+          - ref: engine/wintun-recovery-hang
+            arch: ARM64
+            runner: windows-11-arm
+            repeat: 1
+          - ref: engine/wintun-tcp-platform-probe
+            arch: ARM64
+            runner: windows-11-arm
+            repeat: 1
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '4'
@@ -117,6 +132,8 @@ jobs:
           cache: false
       - run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
       - run: ./scripts/prepare-wintun-tests.ps1
+      - name: Repeat the deterministic TCP loss regression one hundred times
+        run: go test -v -count=100 -timeout=2m -run '^TestTCPRecoveryAfterLostWindow$' ./internal/engine/stack
       - name: Six full performance comparisons with TCP state
         run: |
           $failures = 0
