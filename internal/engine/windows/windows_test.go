@@ -195,11 +195,20 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 	if os.Getenv("NETSWITCH_LOOKUP_GATE") != "1" {
 		t.Skip("timing is measured once per architecture without race instrumentation")
 	}
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	// Winsock's SOMAXCONN backlog is only several hundred. A single listener
+	// refused new native sockets before the owner lookup even ran (457 created,
+	// 282 accepted on ARM). Eight peers keep each pending queue below 125 while
+	// retaining the same 1,000 cold sockets, 32 workers and attribution limit.
+	var listeners []net.Listener
+	for range 8 {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, listener)
+		defer listener.Close()
 	}
-	defer listener.Close()
+	listener := listeners[0]
 	var held []net.Conn
 	defer func() {
 		for _, c := range held {
@@ -227,6 +236,7 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 	var dialErrors []string
 	var acceptError error
 	accepted := 0
+	acceptedAll := make(chan struct{})
 	misses := 0
 	work := make(chan int, 1000)
 	for i := range 1000 {
@@ -237,25 +247,32 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 	defer cancel()
 	var workers sync.WaitGroup
 	var accepts sync.WaitGroup
-	accepts.Go(func() {
-		for range 1000 {
-			c, err := listener.Accept()
-			if err != nil {
+	for _, listener := range listeners {
+		accepts.Go(func() {
+			for {
+				c, err := listener.Accept()
+				if err != nil {
+					if !errors.Is(err, net.ErrClosed) {
+						mu.Lock()
+						acceptError = err
+						mu.Unlock()
+					}
+					return
+				}
 				mu.Lock()
-				acceptError = err
+				accepted++
+				held = append(held, c)
+				if accepted == 1000 {
+					close(acceptedAll)
+				}
 				mu.Unlock()
-				return
 			}
-			mu.Lock()
-			accepted++
-			held = append(held, c)
-			mu.Unlock()
-		}
-	})
+		})
+	}
 	for range 32 {
 		workers.Go(func() {
-			for range work {
-				c, err := (&net.Dialer{}).DialContext(ctx, "tcp4", listener.Addr().String())
+			for index := range work {
+				c, err := (&net.Dialer{}).DialContext(ctx, "tcp4", listeners[index%len(listeners)].Addr().String())
 				if err != nil {
 					mu.Lock()
 					misses++
@@ -282,7 +299,16 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 		})
 	}
 	workers.Wait()
-	listener.Close()
+	if len(durations) == 1000 {
+		select {
+		case <-acceptedAll:
+		case <-ctx.Done():
+			t.Error("native listener did not accept all established burst sockets")
+		}
+	}
+	for _, listener := range listeners {
+		listener.Close()
+	}
 	accepts.Wait()
 	slices.Sort(durations)
 	slices.Sort(oldDurations)
@@ -293,7 +319,7 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 	oldP95 := oldDurations[949]
 	rowsAfter, timeWaitAfter := nativeTCPRowCounts(t)
 	raw, _ := json.Marshal(o.Stats())
-	t.Logf("WINDOWS OWNER BURST cold=1000 found=%d p95_us=%d old_go_p95_us=%d raw_rows_before=%d raw_rows_after=%d timewait_before=%d timewait_after=%d processors=%d cpus=%d old_combined_gate_would_pass=%t histogram=%s", 1000-misses, p95.Microseconds(), oldP95.Microseconds(), rowsBefore, rowsAfter, timeWaitBefore, timeWaitAfter, runtime.GOMAXPROCS(0), runtime.NumCPU(), misses <= 5 && oldP95 < 5*time.Millisecond, raw)
+	t.Logf("WINDOWS OWNER BURST cold=1000 found=%d peers=%d accepted=%d p95_us=%d old_go_p95_us=%d raw_rows_before=%d raw_rows_after=%d timewait_before=%d timewait_after=%d processors=%d cpus=%d old_combined_gate_would_pass=%t histogram=%s", 1000-misses, len(listeners), accepted, p95.Microseconds(), oldP95.Microseconds(), rowsBefore, rowsAfter, timeWaitBefore, timeWaitAfter, runtime.GOMAXPROCS(0), runtime.NumCPU(), misses <= 5 && oldP95 < 5*time.Millisecond, raw)
 	if misses > 5 {
 		t.Fatalf("owner burst gate: found=%d/1000 (requires at least 995), p95=%s", 1000-misses, p95)
 	}

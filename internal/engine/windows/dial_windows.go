@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -38,7 +39,7 @@ func (d *Dialer) Close() error {
 }
 
 func bindSocket(a Adapter, v6 bool) func(string, string, syscall.RawConn) error {
-	return func(_, _ string, raw syscall.RawConn) error {
+	return func(network, _ string, raw syscall.RawConn) error {
 		var callErr error
 		err := raw.Control(func(fd uintptr) {
 			level, index := windows.IPPROTO_IP, a.Index4
@@ -50,6 +51,12 @@ func bindSocket(a Adapter, v6 bool) func(string, string, syscall.RawConn) error 
 				index = binary.LittleEndian.Uint32(b[:])
 			}
 			callErr = windows.SetsockoptInt(windows.Handle(fd), level, 31, int(index))
+			if callErr == nil && strings.HasPrefix(network, "tcp") {
+				// ConnectEx requires an explicit source bind. Let Windows reuse
+				// ephemeral ports when its existing auto-reuse configuration
+				// permits it; never change that machine-wide configuration.
+				callErr = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, 0x3007, 1) // SO_REUSE_UNICASTPORT.
+			}
 		})
 		return errors.Join(err, callErr)
 	}

@@ -9,6 +9,7 @@ import { BaselineDefect, Report } from './report.mjs';
 import { targets } from './targets.mjs';
 import { lifecycleOutput, timedPhase } from './lifecycle.mjs';
 import { startInspection } from './inspection.mjs';
+import { engineFirewall, plantUnrelatedFirewallRule } from './firewall.mjs';
 import { hostedOnly, identity, run, startHarness, until } from './testisp/harness.mjs';
 
 hostedOnly();
@@ -22,7 +23,7 @@ const output = createWriteStream(path.join(dir, 'server-output.log'));
 const serverOutput = lifecycleOutput((chunk) => output.write(chunk));
 const clientExe = path.join(dir, 'acceptance-app.exe');
 await copyFile(process.execPath, clientExe);
-let harness, responder, server, worker, dnsAdapter, quicServer, quic, inspection, restoreDNS = false;
+let harness, responder, server, worker, dnsAdapter, quicServer, quic, inspection, unrelatedFirewall, restoreDNS = false;
 const quicExe = path.resolve('dist/windows-test/quicprobe.exe');
 const mtuExe = path.resolve('dist/windows-test/mtuprobe.exe');
 const udpRejectExe = path.resolve('dist/windows-test/udpreject.exe');
@@ -88,6 +89,8 @@ async function clean() {
     const state = await network('state');
     const pnp = await pnpDevices();
     assert(Object.values(state).every((list) => list.length === 0) && pnp.length === 0, JSON.stringify({ ...state, pnp }));
+    if (options.profile === 'v1') await engineFirewall(options.engine, false);
+    if (unrelatedFirewall) await unrelatedFirewall.check();
     return { ...state, pnp };
   }, 'no NetSwitch adapter (including non-present PnP), route or firewall leftovers', 20_000);
 }
@@ -103,7 +106,7 @@ function rememberAppDevices(devices) {
   for (const device of devices.filter((device) => device.present)) appDeviceIDs.add(device.instanceId);
 }
 
-async function stoppedSnapshot() {
+async function stoppedSnapshot({ crashed = false } = {}) {
   const phases = {};
   const state = await timedPhase(phases, 'networkCheckMs', () => until(async () => {
     const value = await network('state');
@@ -112,7 +115,10 @@ async function stoppedSnapshot() {
   }, 'stopped app routes and present adapters disappear', 20000));
   const pnp = await timedPhase(phases, 'pnpCheckMs', pnpDevices);
   assert(!pnp.some((device) => device.present), `Present device survived stop: ${JSON.stringify(pnp)}`);
-  return { state, pnp, phases };
+  const firewall = options.profile === 'v1' ? await timedPhase(phases, 'firewallCheckMs',
+    () => engineFirewall(options.engine, crashed, { live: !crashed })) : undefined;
+  if (unrelatedFirewall) await unrelatedFirewall.check();
+  return { state, pnp, phases, firewall };
 }
 
 async function recordOrphanPnP(name, label, state, pnp) {
@@ -210,6 +216,7 @@ async function start() {
   const state = await server.on();
   await verifyEngineProcess(options, dataDir);
   rememberAppDevices(await pnpDevices());
+  if (options.profile === 'v1') await engineFirewall(options.engine, true);
   return state;
 }
 
@@ -228,6 +235,7 @@ try {
   inspection = await startInspection();
   await recordLaunch(options, path.join(dir, 'executables.json'));
   await report.test('clean before start', 'harness-baseline', clean);
+  if (options.profile === 'v1') unrelatedFirewall = await plantUnrelatedFirewallRule();
   dnsAdapter = await network('inspect');
   harness = await startHarness(path.join(dir, 'testisp'));
   responder = await targets(harness.uplink.address);
@@ -733,7 +741,7 @@ try {
         try { process.kill(engine.pid, 0); return false; }
         catch (error) { if (error.code !== 'ESRCH') throw error; return true; }
       }, 'crashed engine exited');
-      const crashed = await stoppedSnapshot();
+      const crashed = await stoppedSnapshot({ crashed: true });
       assert(crashed.pnp.some((device) => appDeviceIDs.has(device.instanceId) && !device.present),
         `No owned phantom existed before recovery; cleanup cannot receive credit: ${JSON.stringify(crashed)}`);
       const direct = await harness.probe();
@@ -841,6 +849,7 @@ try {
   if (responder) { await writeFile(path.join(dir, 'target-observations.json'), JSON.stringify(responder.seen, null, 2)); await responder.close(); }
   output.end();
   await report.save(path.join(dir, 'report.json'));
+  if (unrelatedFirewall) await unrelatedFirewall.close().catch((error) => { console.error(error); process.exitCode = 1; });
   if (inspection) await inspection.close().catch((error) => { console.error(error); process.exitCode = 1; });
   if (options.profile === 'v1' && report.results.some((result) => ['deferred', 'blocked', 'pending-shared-hook'].includes(result.status))) {
     console.error('The v1 profile cannot pass while required gates are deferred, blocked or pending the shared hook.'); process.exitCode = 1;

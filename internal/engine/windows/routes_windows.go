@@ -47,7 +47,7 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 	defer timings.begin("recovery.total")()
 	o := &objects{recovering: true, timings: timings}
 	j := &journal.Journal{Store: measuredJournalStore{Store: store, timings: timings}, Lock: lock, Kinds: make(map[string]journal.Object)}
-	for _, kind := range []string{"adapter", "interface", "dns", "address", "route"} {
+	for _, kind := range []string{"adapter", "interface", "dns", "address", "route", "wfp-sublayer", "wfp-filter"} {
 		j.Kinds[kind] = object{o, kind}
 	}
 	// The precise boot identity is persisted for diagnosis; the complete live
@@ -64,7 +64,7 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 	}
 	if err := s.Cleanup(ctx); err != nil {
 		s.Close()
-		return nil, fmt.Errorf("engine crash recovery: %w", err)
+		return nil, fmt.Errorf("engine crash recovery: %w", errors.Join(err, o.closeFirewall()))
 	}
 	o.recovering = false
 	r := &Routes{Instance: instance, session: s, objects: o, timings: timings, trace: newPacketTrace()}
@@ -74,7 +74,7 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 }
 
 func (r *Routes) Close() error {
-	return errors.Join(r.Cleanup(context.Background()), r.session.Close())
+	return errors.Join(r.Cleanup(context.Background()), r.session.Close(), r.objects.closeFirewall())
 }
 
 func (r *Routes) OpenTun(ctx context.Context) (platform.TunDevice, error) {
@@ -141,6 +141,12 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 		if err := r.session.Create(ctx, "address", fp); err != nil {
 			return nil, err
 		}
+	}
+	if err := r.session.Create(ctx, "wfp-sublayer", wfpLayerFingerprint(r.Instance)); err != nil {
+		return nil, err
+	}
+	if err := r.session.CreateBatch(ctx, wfpFilterFingerprints(r.Instance, luid, index)); err != nil {
+		return nil, err
 	}
 	finish := r.timings.begin("tun.session.open")
 	s, err := a.StartSession()
@@ -310,13 +316,23 @@ func (r *Routes) Quiesce() {
 	}
 }
 
-func (r *Routes) Cleanup(ctx context.Context) error {
+func (r *Routes) Cleanup(ctx context.Context) (err error) {
 	defer r.timings.begin("cleanup.total")()
 	r.Quiesce()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if tun := r.tun; tun != nil {
+		// Join even if journal reading or a mutation fails. The adapter's
+		// Remove also joins before destroying its device, so native rings
+		// cannot outlive the final stop acknowledgement or lose an error.
+		defer func() {
+			finish := r.timings.begin("tun.session.join.wait")
+			err = errors.Join(err, tun.Close())
+			finish()
+		}()
+	}
 	r.objects.recovering = true
-	err := r.session.Cleanup(ctx)
+	err = r.session.Cleanup(ctx)
 	r.objects.recovering = false
 	if err == nil {
 		r.capture = nil

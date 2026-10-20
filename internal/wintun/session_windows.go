@@ -42,6 +42,7 @@ type Stats struct {
 	ReadWakes        uint64
 	Placeholders     uint64
 	OversizedPackets uint64
+	CloseNanos       uint64
 }
 
 // Events are advisory and bounded. Stats remain authoritative if a caller
@@ -70,6 +71,8 @@ type Session struct {
 	wakeups                           atomic.Uint64
 	readWaits, readWakes              atomic.Uint64
 	placeholders, oversized           atomic.Uint64
+	closeStarted                      atomic.Int64
+	closeNanos                        atomic.Uint64
 }
 
 func (a *Adapter) StartSession() (*Session, error) {
@@ -131,7 +134,7 @@ func (*Session) RXChecksumVerified(p []byte) bool {
 	return false
 }
 func (s *Session) Stats() Stats {
-	return Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), ReadWaits: s.readWaits.Load(), ReadWakes: s.readWakes.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load()}
+	return Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), ReadWaits: s.readWaits.Load(), ReadWakes: s.readWakes.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load(), CloseNanos: s.closeNanos.Load()}
 }
 
 // fail is called with mu held. Recovery runs elsewhere so neither a full ring
@@ -155,7 +158,10 @@ func (s *Session) event(kind string, err error) {
 }
 
 func (s *Session) maintain() {
-	defer close(s.stopped)
+	defer func() {
+		s.closeNanos.Store(uint64(winclock.Since(time.Duration(s.closeStarted.Load()))))
+		close(s.stopped)
+	}()
 	defer close(s.events)
 	var lastLog time.Time
 	var lastRecovery time.Time
@@ -417,14 +423,21 @@ func (s *Session) WritePacket(ctx context.Context, packet []byte) error {
 	return err
 }
 
-func (s *Session) Close() error {
+// BeginClose interrupts packet I/O immediately and starts native teardown.
+// The owner must still call Close to join teardown and receive its result.
+func (s *Session) BeginClose() {
 	s.closeOnce.Do(func() {
+		s.closeStarted.Store(int64(winclock.Now()))
 		s.closed.Store(true)
 		// Close cannot wait for mu before signalling: a reader may be holding
 		// a read lock inside WaitForMultipleObjects.
 		windows.SetEvent(s.wake)
 		close(s.stop)
 	})
+}
+
+func (s *Session) Close() error {
+	s.BeginClose()
 	<-s.stopped
 	return s.closeErr
 }

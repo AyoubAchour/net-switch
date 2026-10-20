@@ -29,6 +29,7 @@ type objects struct {
 	adapter    *wintun.Adapter
 	recovering bool
 	timings    *phaseTimings
+	wfp        windows.Handle
 }
 type object struct {
 	all  *objects
@@ -36,6 +37,9 @@ type object struct {
 }
 
 func (o object) Validate(fp journal.Fingerprint) error {
+	if o.kind == "wfp-sublayer" || o.kind == "wfp-filter" {
+		return validateWFP(o.kind, fp)
+	}
 	if fp["guid"] != wintun.DefaultGUID {
 		return errors.New("journal object is not the engine's fixed GUID")
 	}
@@ -203,6 +207,9 @@ func (o object) Inspect(ctx context.Context, fp journal.Fingerprint) (journal.Fi
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}
+	if o.kind == "wfp-sublayer" || o.kind == "wfp-filter" {
+		return inspectWFP(o.all, o.kind, fp)
+	}
 	if o.kind == "adapter" {
 		if o.all.adapter != nil {
 			return maps.Clone(fp), true, nil
@@ -303,6 +310,9 @@ func (o object) Create(ctx context.Context, fp journal.Fingerprint) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if o.kind == "wfp-sublayer" || o.kind == "wfp-filter" {
+		return createWFP(o.all, o.kind, fp)
+	}
 	if o.kind == "adapter" {
 		a, err := wintun.Create(wintun.Config{Name: fp["name"], GUID: fp["guid"], TunnelType: "NetSwitch", MTU: 9000})
 		o.all.adapter = a
@@ -344,6 +354,9 @@ func (o object) Create(ctx context.Context, fp journal.Fingerprint) error {
 
 func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 	defer o.all.timings.begin(o.kind + ".remove.api")()
+	if o.kind == "wfp-sublayer" || o.kind == "wfp-filter" {
+		return removeWFP(o.all, o.kind, fp)
+	}
 	live, found, err := o.Inspect(ctx, fp)
 	if err != nil || !found || !maps.Equal(live, fp) {
 		return err
