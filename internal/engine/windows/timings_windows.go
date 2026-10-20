@@ -62,20 +62,33 @@ func (p *phaseTimings) report(instance, operation string, err error) {
 // work from the Windows API calls inside each journaled operation.
 type measuredJournalStore struct {
 	journal.Store
-	timings *phaseTimings
+	timings       *phaseTimings
+	beforeRemoved func() error
 }
 
+func (s measuredJournalStore) commitRemovals(records []journal.Record) error {
+	if len(records) != 0 && records[0].Phase == "removed" && s.beforeRemoved != nil {
+		return s.beforeRemoved()
+	}
+	return nil
+}
 func (s measuredJournalStore) Records() ([]journal.Record, error) {
 	defer s.timings.begin("journal.read")()
 	return s.Store.Records()
 }
 func (s measuredJournalStore) Append(record journal.Record) error {
+	if err := s.commitRemovals([]journal.Record{record}); err != nil {
+		return err
+	}
 	defer s.timings.begin("journal." + record.Phase)()
 	return s.Store.Append(record)
 }
 func (s measuredJournalStore) AppendBatch(records []journal.Record) error {
 	if len(records) == 0 {
 		return nil
+	}
+	if err := s.commitRemovals(records); err != nil {
+		return err
 	}
 	defer s.timings.begin("journal." + records[0].Phase)()
 	if batch, ok := s.Store.(journal.BatchStore); ok {

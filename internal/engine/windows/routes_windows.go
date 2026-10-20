@@ -47,7 +47,8 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 	timings := &phaseTimings{values: map[string]phaseTiming{}}
 	defer timings.begin("recovery.total")()
 	o := &objects{recovering: true, timings: timings}
-	j := &journal.Journal{Store: measuredJournalStore{Store: store, timings: timings}, Lock: lock, Kinds: make(map[string]journal.Object)}
+	j := &journal.Journal{Store: measuredJournalStore{Store: store, timings: timings, beforeRemoved: o.commitFirewallBatch},
+		Lock: lock, Kinds: make(map[string]journal.Object)}
 	for _, kind := range []string{"adapter", "interface", "dns", "address", "route", "wfp-sublayer", "wfp-filter"} {
 		j.Kinds[kind] = object{o, kind}
 	}
@@ -104,6 +105,7 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 		return nil, err
 	}
 	base := journal.Fingerprint{"guid": wintun.DefaultGUID, "luid": number(luid), "index": number(uint64(index))}
+	var setup []journal.Creation
 	for _, family := range []uint16{windows.AF_INET, windows.AF_INET6} {
 		fp := maps.Clone(base)
 		fp["family"] = number(uint64(family))
@@ -119,9 +121,7 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 		}
 		fp["before"] = string(before)
 		if settings(row) != desiredInterface() {
-			if err := r.session.Create(ctx, "interface", fp); err != nil {
-				return nil, err
-			}
+			setup = append(setup, journal.Creation{Kind: "interface", Fingerprint: maps.Clone(fp)})
 		}
 		finish = r.timings.begin("dns.inspect")
 		registration, err := dnsRegistration(fp)
@@ -131,24 +131,23 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 		}
 		fp["before"] = number(uint64(registration))
 		if registration != 0 {
-			if err := r.session.Create(ctx, "dns", fp); err != nil {
-				return nil, err
-			}
+			setup = append(setup, journal.Creation{Kind: "dns", Fingerprint: maps.Clone(fp)})
 		}
 	}
 	for _, prefix := range []string{"198.18.0.1/30", "fdfe:dcba:9876::1/126"} {
 		fp := maps.Clone(base)
 		fp["prefix"] = prefix
-		if err := r.session.Create(ctx, "address", fp); err != nil {
-			return nil, err
-		}
+		setup = append(setup, journal.Creation{Kind: "address", Fingerprint: fp})
 	}
 	layer := journal.Creation{Kind: "wfp-sublayer", Fingerprint: wfpLayerFingerprint(r.Instance)}
 	filters := wfpFilterFingerprints(r.Instance, luid, index)
-	if err := r.session.Create(ctx, layer.Kind, layer.Fingerprint); err != nil {
-		return nil, err
-	}
-	if err := r.session.CreateBatch(ctx, filters); err != nil {
+	setup = append(setup, layer)
+	setup = append(setup, filters...)
+	if err := func() (err error) {
+		r.objects.wfpCreates = 1 + len(filters)
+		defer func() { err = errors.Join(err, r.objects.abortFirewallBatch()) }()
+		return r.session.CreateBatch(ctx, setup)
+	}(); err != nil {
 		return nil, err
 	}
 	r.permissions = append([]journal.Creation{layer}, filters...)

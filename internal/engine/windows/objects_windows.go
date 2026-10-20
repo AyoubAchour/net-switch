@@ -30,6 +30,8 @@ type objects struct {
 	recovering bool
 	timings    *phaseTimings
 	wfp        windows.Handle
+	wfpBatch   bool
+	wfpCreates int
 }
 type object struct {
 	all  *objects
