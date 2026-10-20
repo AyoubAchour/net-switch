@@ -18,7 +18,9 @@ import (
 func TestWindowsTimestampCollisionPreservesPolicyAndExplicitClosures(t *testing.T) {
 	for _, blocked := range []bool{false, true} {
 		t.Run(map[bool]string{false: "repin then reconnect", true: "cap blocks existing line"}[blocked], func(t *testing.T) {
-			config := policy.Config{Lines: []platform.Line{{ID: "A"}, {ID: "B"}}, AppLines: map[string]string{owner.AppID: "A"}}
+			// A is the secondary: the main-line exception correctly forbids
+			// blocking B, which is first in priority order.
+			config := policy.Config{Lines: []platform.Line{{ID: "B"}, {ID: "A"}}, AppLines: map[string]string{owner.AppID: "A"}}
 			table := flows.New(flows.Defaults(), nil)
 			apply := func(revision uint64) policy.Applied {
 				t.Helper()
