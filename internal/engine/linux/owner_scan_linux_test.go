@@ -63,7 +63,7 @@ func TestCompletedSmallScanDoesNotHideLaterSocket(t *testing.T) {
 	}
 }
 
-func TestFoundHolderStopsBeforeUnrelatedDescriptors(t *testing.T) {
+func TestMatchedHolderDoesNotWaitForBatchCompletion(t *testing.T) {
 	o := newTestOwners(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -105,20 +105,89 @@ func TestFoundHolderStopsBeforeUnrelatedDescriptors(t *testing.T) {
 	}
 	o.windows[pid] = fdWindow{start: start, directory: directory.Ino, lastFD: -1, extent: int64(descriptors[255])}
 	o.rememberPID(rows[0].uid, pid)
-	owner, err := o.holders(ctx, rows[0])
+	// Block publication in a later batch, on a shard absent from the first
+	// 64 sockets. The first match must finish while that later work is stuck.
+	dir, err := openProcDescriptors("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstShards := map[*ownerIndex]bool{}
+	var blocked *ownerIndex
+	var blockedInode uint32
+	count := 0
+	_, visitErr := dir.Visit(4096, func(name []byte) bool {
+		inode, ok := socketInodeAt(dir.fd, string(name))
+		if !ok {
+			return true
+		}
+		shard := o.indexFor(inode)
+		if count < 64 {
+			firstShards[shard] = true
+		} else if !firstShards[shard] {
+			blocked, blockedInode = shard, inode
+			return false
+		}
+		count++
+		return true
+	})
+	dir.Close()
+	if visitErr != nil || blocked == nil || firstShards[o.indexFor(rows[0].inode)] == false {
+		t.Fatalf("fixture did not find an independent later shard: %v", visitErr)
+	}
+	blocked.mu.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			blocked.mu.Unlock()
+		}
+	}()
+	type result struct {
+		owner platform.Owner
+		err   error
+	}
+	done := make(chan result, 1)
+	go func() {
+		owner, err := o.holders(ctx, rows[0])
+		done <- result{owner, err}
+	}()
+	select {
+	case got := <-done:
+		if got.err != nil || got.owner.PID != pid {
+			t.Fatalf("first live descriptor: %+v %v", got.owner, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("matched owner waited for unrelated descriptor publication")
+	}
+	o.batches.mu.Lock()
+	var batch *descriptorBatch
+	for key, candidate := range o.batches.live {
+		if key.pid == pid {
+			batch = candidate
+			break
+		}
+	}
+	o.batches.mu.Unlock()
+	if batch == nil {
+		t.Fatal("fixture did not leave its later descriptor batch pending")
+	}
+	select {
+	case <-batch.done:
+		t.Fatal("fixture batch completed before releasing its blocked shard")
+	default:
+	}
+	blocked.mu.Unlock()
+	locked = false
+	select {
+	case <-batch.done:
+	case <-time.After(time.Second):
+		t.Fatal("descriptor batch did not finish after publication resumed")
+	}
+	if o.indexed(blockedInode).count() == 0 {
+		t.Fatal("returning the first match discarded the later socket hint")
+	}
+	owner, err := o.holders(ctx, socketRow{inode: blockedInode, uid: rows[0].uid, protocol: unix.IPPROTO_UDP})
 	if err != nil || owner.PID != pid {
-		t.Fatalf("first live descriptor: %+v %v", owner, err)
-	}
-	if o.indexed(rows[1].inode).count() != 0 {
-		t.Fatal("scanner kept reading unrelated descriptors after finding its requested socket")
-	}
-	if !o.windows[pid].fullScan.IsZero() {
-		t.Fatal("a targeted stop was recorded as a complete directory scan")
-	}
-	// The skipped neighbour must still be discoverable by a later request.
-	owner, err = o.holders(ctx, rows[1])
-	if err != nil || owner.PID != pid {
-		t.Fatalf("later live descriptor: %+v %v", owner, err)
+		t.Fatalf("later published descriptor: %+v %v", owner, err)
 	}
 }
 
