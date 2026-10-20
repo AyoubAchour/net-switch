@@ -603,6 +603,32 @@ func TestPrivateStateDirectory(t *testing.T) {
 	f.Close()
 }
 
+func TestStateDirectoryHandleExcludesReplacement(t *testing.T) {
+	hosted(t)
+	path := filepath.Join(t.TempDir(), "held")
+	directory, err := StateDirectory(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptr, _ := windows.UTF16PtrFromString(path)
+	openDelete := func() error {
+		handle, err := windows.CreateFile(ptr, windows.DELETE,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+		if err == nil {
+			windows.CloseHandle(handle)
+		}
+		return err
+	}
+	heldError := openDelete()
+	directory.Close()
+	releasedError := openDelete()
+	t.Logf("state-directory DELETE handle while held=%v after close=%v", heldError, releasedError)
+	if !errors.Is(heldError, windows.ERROR_SHARING_VIOLATION) || releasedError != nil {
+		t.Fatalf("the lifetime handle did not enforce replacement exclusion: held=%v released=%v", heldError, releasedError)
+	}
+}
+
 func TestStateDoesNotSalvageUntrustedRecords(t *testing.T) {
 	hosted(t)
 	parent := t.TempDir()

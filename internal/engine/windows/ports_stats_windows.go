@@ -19,10 +19,10 @@ import (
 
 type portTemplate struct {
 	SettingName                     string
-	DynamicPortRangeStartPort        *uint32
-	DynamicPortRangeNumberOfPorts    *uint32
-	AutoReusePortRangeStartPort      *uint32
-	AutoReusePortRangeNumberOfPorts  *uint32
+	DynamicPortRangeStartPort       *uint32
+	DynamicPortRangeNumberOfPorts   *uint32
+	AutoReusePortRangeStartPort     *uint32
+	AutoReusePortRangeNumberOfPorts *uint32
 }
 
 type portDiagnostics struct {
