@@ -37,7 +37,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        ref: [engine/wintun-tcp-probe, engine/wintun-tcp-platform-probe]
+        ref: [engine/wintun-tcp-before-sack, engine/wintun-tcp-platform-probe]
         repeat: [1, 2]
     env:
       GOTOOLCHAIN: local
@@ -59,18 +59,15 @@ jobs:
           cache: false
       - run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
       - run: ./scripts/prepare-wintun-tests.ps1
-      - name: Twenty TCP8 trials per implementation
-        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=16m' '-test.run=^TestWintunTCPProbe$'
-      - name: Two full performance comparisons
-        if: ${{ !cancelled() }}
+      - name: Six full performance comparisons with TCP state
         run: |
           $failures = 0
-          for ($i = 1; $i -le 2; $i++) {
+          for ($i = 1; $i -le 6; $i++) {
             Write-Host "PERFORMANCE_PROCESS $i"
             ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintunPerformance$'
             if ($LASTEXITCODE -ne 0) { $failures++ }
           }
-          Write-Host "PERFORMANCE_FAILURES $failures/2"
+          Write-Host "PERFORMANCE_FAILURES $failures/6"
           if ($failures) { exit 1 }
 
   testisp-reproduction:
