@@ -27,8 +27,7 @@ type descriptorBatchKey struct {
 }
 
 type descriptorSocket struct {
-	inode uint32
-	fd    int64
+	inode, fd uint32
 }
 
 type descriptorBatchResult struct {
@@ -286,34 +285,31 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		out.err = err
 		return out
 	}
-	found := make(map[uint32]holder, 32)
 	out.count, out.err = f.Visit(k.limit, func(name []byte) bool {
 		if expired() {
 			return false
 		}
-		fd, err := strconv.ParseInt(string(name), 10, 64)
+		fd, err := strconv.ParseUint(string(name), 10, 32)
 		if err != nil {
 			return true
 		}
-		out.lastFD = max(out.lastFD, fd)
+		out.lastFD = max(out.lastFD, int64(fd))
 		inode, ok := socketInodeAt(f.fd, string(name))
 		if !ok {
 			return true
 		}
-		out.sockets = append(out.sockets, descriptorSocket{inode: inode, fd: fd})
+		if out.sockets == nil {
+			out.sockets = make([]descriptorSocket, 0, min(k.limit, 64))
+		}
+		out.sockets = append(out.sockets, descriptorSocket{inode: inode, fd: uint32(fd)})
 		// Foreign processes share the same bounded directory work too. Keep
 		// their compact results for callers, but retain only requested positive
 		// hints globally so the engine's own sockets do not double the index.
 		if k.cacheAll || o.hasInodeWaiter(inode) {
-			found[inode] = holder{pid: k.pid, start: k.start, fd: string(name)}
-		}
-		if len(found) == 32 {
-			o.publish(found)
-			clear(found)
+			o.publishHolder(inode, holder{pid: k.pid, start: k.start, fd: string(name)})
 		}
 		return true
 	})
-	o.publish(found)
 	if expired() && out.err == nil {
 		out.err = context.DeadlineExceeded
 	}
