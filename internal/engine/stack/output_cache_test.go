@@ -4,6 +4,7 @@ import (
 	"context"
 	"runtime"
 	"testing"
+	"time"
 )
 
 func TestOutputCacheSurvivesGCAndEndsWithLink(t *testing.T) {
@@ -60,5 +61,43 @@ func TestOutputCacheRetentionIsBounded(t *testing.T) {
 	}
 	if l.buffers.largeCount != QueuePackets+64 {
 		t.Fatalf("cached %d buffers after %d outstanding loans", l.buffers.largeCount, len(loans))
+	}
+}
+
+func TestOutputBurstLetsTheRunnableWriterDrain(t *testing.T) {
+	previous := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previous)
+	l := NewLink()
+	defer l.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const total = 32768
+	ready, done := make(chan struct{}), make(chan int, 1)
+	go func() {
+		var batch [64]OutputPacket
+		count := 0
+		close(ready)
+		for count < total {
+			n := l.ReadOwnedBatch(ctx, batch[:])
+			if n == 0 {
+				break
+			}
+			for i := range n {
+				batch[i].Release()
+			}
+			count += n
+		}
+		done <- count
+	}()
+	<-ready
+	packet := make([]byte, 64)
+	for range total {
+		l.Send(packet)
+	}
+	if l.Dropped.Load() != 0 {
+		l.Close()
+	}
+	if count := <-done; count != total || l.Dropped.Load() != 0 {
+		t.Fatalf("runnable writer was starved: read %d/%d, dropped %d", count, total, l.Dropped.Load())
 	}
 }
