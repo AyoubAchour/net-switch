@@ -12,6 +12,11 @@ on:
         description: Temporarily repeat the two Windows failures with diagnostics
         type: boolean
         default: false
+      flake_suites:
+        description: Full suites or cold control clients only
+        type: choice
+        options: [both, cold]
+        default: both
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -38,7 +43,7 @@ jobs:
       max-parallel: 4
       matrix:
         arch: [x64, ARM64]
-        suite: [proof, acceptance]
+        suite: ${{ fromJSON(inputs.flake_suites == 'cold' && '["cold"]' || '["proof","acceptance"]') }}
         include:
           - arch: x64
             runner: windows-latest
@@ -84,10 +89,12 @@ jobs:
           FLAKE_SUITE: ${{ matrix.suite }}
         run: |
           $failures = 0
-          $rounds = if ($env:FLAKE_SUITE -eq 'proof') { 6 } else { 3 }
+          $rounds = if ($env:FLAKE_SUITE -eq 'proof') { 6 } elseif ($env:FLAKE_SUITE -eq 'cold') { 1 } else { 3 }
           for ($i = 1; $i -le $rounds; $i++) {
             Write-Host "FLAKE ROUND $i START $env:FLAKE_SUITE"
-            if ($env:FLAKE_SUITE -eq 'proof') {
+            if ($env:FLAKE_SUITE -eq 'cold') {
+              node tests/windows/testisp/cold-control.mjs
+            } elseif ($env:FLAKE_SUITE -eq 'proof') {
               node tests/windows/testisp/proof.mjs
             } else {
               node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry server.mjs --engine-exe engine/sing-box.exe --profile baseline
@@ -98,12 +105,17 @@ jobs:
           }
           Write-Host "FLAKE FAILURES $failures"
           if ($failures) { exit 1 }
+      - name: Verify parallel request failure diagnostics
+        run: |
+          node --test test/windows-client.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: flakes-${{ matrix.arch }}-${{ matrix.suite }}
           path: |
             dist/testisp-proof/
+            dist/testisp-cold/
             dist/windows-acceptance/*.json
             dist/windows-acceptance/testisp/*.json
             dist/windows-acceptance/**/*.log*

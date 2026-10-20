@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 if (!process.send) throw new Error('Use the Windows acceptance runner');
 const held = new Map();
+const requests = [];
 let serial = 0;
 const publicTarget = { host: '1.0.0.1', port: 443, path: '/cdn-cgi/trace', tls: true };
 let heartbeatPrevious = performance.now(), heartbeatTicks = 0, heartbeatMaxMs = 0;
@@ -46,15 +47,23 @@ async function requestOn(item) {
   const nonce = item.nonce ?? randomBytes(12).toString('hex');
   return new Promise((resolve, reject) => {
     const started = performance.now();
-    const detail = { id: item.id, host: target.host, port: target.port ?? target.http, tls: !!target.tls,
-      phase: 'waiting for socket', previousPort: item.port, bytesReceived: 0 };
-    const fail = (cause) => reject(new Error(`HTTP request failed: ${JSON.stringify({ ...detail,
-      elapsedMs: performance.now() - started, code: cause.code, error: cause.message })}`, { cause }));
+    let settled = false;
+    const detail = { id: item.id, nonce, at: new Date().toISOString(), host: target.host, port: target.port ?? target.http, tls: !!target.tls,
+      phase: 'waiting for socket', previousPort: item.port, bytesReceived: 0, timings: {} };
+    requests.push(detail);
+    if (requests.length > 64) requests.shift();
+    const phase = (name) => { detail.phase = name; detail.timings[name] = performance.now() - started; };
+    const fail = (cause) => {
+      if (settled) return;
+      settled = true;
+      Object.assign(detail, { elapsedMs: performance.now() - started, code: cause.code, error: cause.message });
+      reject(new Error(`HTTP request failed: ${JSON.stringify(detail)}`, { cause }));
+    };
     const request = target.tls ? httpsRequest : httpRequest;
     const req = request({ host: target.host, port: target.port ?? target.http, path: target.path ?? `/echo?nonce=${nonce}`,
       localAddress: target.source,
       servername: target.tls ? 'one.one.one.one' : undefined, agent: item.agent, signal: AbortSignal.timeout(8000) }, (res) => {
-      detail.phase = 'response';
+      phase('response');
       detail.statusCode = res.statusCode;
       const port = res.socket.localPort;
       item.socket = res.socket;
@@ -66,8 +75,10 @@ async function requestOn(item) {
           if (target.tls) assert.match(body, /(?:^|\n)ip=/); else assert.equal(JSON.parse(body).nonce, nonce);
           if (item.port) assert(req.reusedSocket && item.port === port, `Held connection ${item.id} was replaced`);
           item.port = port;
+          settled = true;
+          phase('complete');
           resolve({ id: item.id, port, body, reused: req.reusedSocket });
-        } catch (error) { reject(error); }
+        } catch (error) { fail(error); }
       });
     });
     req.on('socket', (socket) => {
@@ -77,9 +88,9 @@ async function requestOn(item) {
       };
       address();
       detail.reused = req.reusedSocket;
-      detail.phase = socket.connecting ? 'connecting' : 'tcp-connected';
-      if (socket.connecting) socket.once('connect', () => { address(); detail.phase = 'tcp-connected'; });
-      if (target.tls && !socket.authorized) socket.once('secureConnect', () => { detail.phase = 'tls-connected'; });
+      phase(socket.connecting ? 'connecting' : 'tcp-connected');
+      if (socket.connecting) socket.once('connect', () => { address(); phase('tcp-connected'); });
+      if (target.tls && !socket.authorized) socket.once('secureConnect', () => { phase('tls-connected'); });
     });
     req.on('error', fail); req.end();
   });
@@ -263,6 +274,7 @@ process.on('message', async ({ id, command, ...args }) => {
     else if (command === 'udp') result = await udp(args);
     else if (command === 'reuse') result = await reuse(args);
     else if (command === 'heartbeat') result = heartbeat();
+    else if (command === 'requests') result = requests;
     else if (command === 'reject') result = await rejectBurst(args);
     else if (command === 'reset') result = await reset(args);
     else if (command === 'status') result = args.ids.map((key) => ({ id: key, closed: held.get(key)?.socket?.destroyed === true }));

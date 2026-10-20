@@ -14,7 +14,7 @@ export async function targets(address) {
     const url = new URL(req.url, 'http://target');
     const observation = { source: req.socket.remoteAddress, port: req.socket.remotePort,
       nonce: url.searchParams.get('nonce'), path: url.pathname };
-    seen.push(observation);
+    seen.push({ ...observation, at: new Date().toISOString() });
     if (url.pathname === '/reset') {
       req.socket.resetAndDestroy();
       return;
