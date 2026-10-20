@@ -111,8 +111,12 @@ func readFlatpakInfo(root string, b []byte) ([]byte, error) {
 }
 
 func regularFile(fd int, limit int) error {
+	return regularKernelFile(fd, limit, false)
+}
+
+func regularKernelFile(fd int, limit int, direct bool) error {
 	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
+	if err := statKernelFile(fd, direct, &st); err != nil {
 		return err
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
@@ -127,12 +131,18 @@ func regularFile(fd int, limit int) error {
 // Repeated identity checks borrow scratch space. No bytes from this buffer
 // may escape the caller; only parsed numbers or copied identity strings do.
 func readInto(path string, b []byte) ([]byte, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOFOLLOW, 0)
+	fd, direct, err := openKernelFile(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOFOLLOW)
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(fd)
-	return readRegularInto(fd, b)
+	defer closeKernelFile(fd, direct)
+	if err := regularKernelFile(fd, len(b), direct); err != nil {
+		return nil, err
+	}
+	if direct && procLeaf(path) == "stat" {
+		return readBoundedWith(fd, b, readKernelData)
+	}
+	return readBounded(fd, b)
 }
 
 func readRegularInto(fd int, b []byte) ([]byte, error) {
@@ -143,9 +153,13 @@ func readRegularInto(fd int, b []byte) ([]byte, error) {
 }
 
 func readBounded(fd int, b []byte) ([]byte, error) {
+	return readBoundedWith(fd, b, unix.Read)
+}
+
+func readBoundedWith(fd int, b []byte, read func(int, []byte) (int, error)) ([]byte, error) {
 	n := 0
 	for n < len(b) {
-		got, err := unix.Read(fd, b[n:])
+		got, err := read(fd, b[n:])
 		if errors.Is(err, unix.EINTR) {
 			continue
 		}
@@ -159,7 +173,7 @@ func readBounded(fd int, b []byte) ([]byte, error) {
 	}
 	var extra [1]byte
 	for {
-		got, err := unix.Read(fd, extra[:])
+		got, err := read(fd, extra[:])
 		if errors.Is(err, unix.EINTR) {
 			continue
 		}
@@ -224,7 +238,7 @@ func readKernelFile(path string, limit int) ([]byte, error) {
 // their targets to PATH_MAX; reject truncation instead of growing indefinitely.
 func readProcLink(path string) (string, error) {
 	var b [128]byte
-	n, err := unix.Readlink(path, b[:])
+	n, err := readKernelLink(path, b[:])
 	if err != nil {
 		return "", err
 	}
@@ -233,7 +247,7 @@ func readProcLink(path string) (string, error) {
 	}
 	storage := processBuffers.Get()
 	defer processBuffers.Put(storage)
-	n, err = unix.Readlink(path, storage[:4096])
+	n, err = readKernelLink(path, storage[:4096])
 	if err != nil {
 		return "", err
 	}
@@ -272,9 +286,11 @@ func socketInodeAt(dir int, name string) (uint32, bool) {
 		if errno != 0 {
 			err = errno
 		}
+	} else if dir == unix.AT_FDCWD {
+		// This helper admits only a literal proc PID/fd/number path to the
+		// kernel-only fast path; arbitrary paths keep ordinary syscalls.
+		n, err = readKernelLink(name, b[:])
 	} else {
-		// Full path validation remains an ordinary syscall. Only an already
-		// pinned proc descriptor directory uses the bounded fast path above.
 		n, err = unix.Readlinkat(dir, name, b[:])
 	}
 	if err != nil || n >= len(b) || n < 10 || !bytes.HasPrefix(b[:n], []byte("socket:[")) || b[n-1] != ']' {

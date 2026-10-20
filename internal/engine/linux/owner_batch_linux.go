@@ -274,7 +274,7 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 	}
 	defer f.Close()
 	var metadata unix.Stat_t
-	if err := unix.Fstat(f.fd, &metadata); err != nil {
+	if err := statKernelFile(f.fd, f.direct, &metadata); err != nil {
 		out.err = err
 		return out
 	}

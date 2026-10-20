@@ -709,7 +709,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		defer closeDirectory()
 		descriptor := f.fd
 		var metadata unix.Stat_t
-		statErr := unix.Fstat(descriptor, &metadata)
+		statErr := statKernelFile(descriptor, f.direct, &metadata)
 		timing.add(phaseProcessOpen, time.Since(opened))
 		if statErr != nil {
 			return nil
@@ -1266,7 +1266,7 @@ func descriptorTail(f *procDescriptors, pid uint32, expired func() bool) (int64,
 		if _, err := f.Seek(mid+2, 0); err != nil {
 			return 0, err
 		}
-		n, err := unix.ReadDirent(f.fd, data[:])
+		n, err := readKernelDirectory(f.fd, f.direct, data[:])
 		if err != nil {
 			return 0, err
 		}
