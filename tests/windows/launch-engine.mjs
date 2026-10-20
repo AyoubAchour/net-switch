@@ -36,6 +36,7 @@ export async function startEngineDriver(options, dataDir, output) {
   const on = () => until(async () => {
     assert(child.exitCode === null && child.signalCode === null, 'Harness controller died');
     const state = await api('state');
+    if (state.routing.status === 'error') throw new Error(state.routing.error);
     return state.routing.status === 'on' && state;
   }, 'real-engine routing on', 120_000);
   const quit = async () => {

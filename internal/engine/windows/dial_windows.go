@@ -17,7 +17,19 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-type Dialer struct{ Routes *Routes }
+type Dialer struct {
+	Routes  *Routes
+	once    sync.Once
+	pool    *readiness
+	poolErr error
+}
+
+func (d *Dialer) Close() error {
+	if d.pool != nil {
+		return d.pool.close()
+	}
+	return nil
+}
 
 func bindSocket(a Adapter, v6 bool) func(string, string, syscall.RawConn) error {
 	return func(_, _ string, raw syscall.RawConn) error {
@@ -52,7 +64,12 @@ func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort
 	if err != nil {
 		return nil, err
 	}
-	return c.(*net.TCPConn), nil
+	d.once.Do(func() { d.pool, d.poolErr = newReadiness() })
+	if d.poolErr != nil {
+		c.Close()
+		return nil, d.poolErr
+	}
+	return &readySocket{blocking: c.(*net.TCPConn), pool: d.pool, local: c.LocalAddr(), remote: c.RemoteAddr()}, nil
 }
 
 type udpSocket struct {
@@ -87,6 +104,36 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 }
 func (s *udpSocket) Close() error              { return s.conn.Close() }
 func (s *udpSocket) LocalAddr() netip.AddrPort { return s.conn.LocalAddr().(*net.UDPAddr).AddrPort() }
+func (s *udpSocket) WaitReadable(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cancelled := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		s.conn.SetReadDeadline(time.Now())
+		close(cancelled)
+	})
+	defer func() {
+		if !stop() {
+			<-cancelled
+		}
+		s.conn.SetReadDeadline(time.Time{})
+	}()
+	waited := false
+	// Go 1.27's Windows RawRead waits with a zero-byte overlapped MSG_PEEK
+	// for datagram sockets. It consumes nothing, including zero-byte UDP.
+	err := s.raw.Read(func(uintptr) bool {
+		if waited {
+			return true
+		}
+		waited = true
+		return false
+	})
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
 func (s *udpSocket) ReadFrom(b []byte) (int, netip.AddrPort, error) {
 	n, addr, err := s.conn.ReadFromUDPAddrPort(b)
 	if platform.IsTooBig(err) {

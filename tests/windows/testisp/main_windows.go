@@ -127,6 +127,7 @@ func serve(args []string) error {
 	}
 	defer listener.Close()
 	mux := http.NewServeMux()
+	g.installCapacity(mux)
 	mux.HandleFunc("POST /targets", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Ports []int `json:"ports"`
