@@ -59,18 +59,13 @@ func findWorkers(t *testing.T, parent uint32, directory string) []workerRef {
 			windows.CloseHandle(h)
 			continue
 		}
-		command := make([]byte, 65536)
-		var needed uint32
-		err = windows.NtQueryInformationProcess(h, windows.ProcessCommandLineInformation, unsafe.Pointer(&command[0]), uint32(len(command)), &needed)
+		args, err := processArguments(h)
 		if err != nil {
 			windows.CloseHandle(h)
 			t.Logf("worker command line %d unavailable: %v", entry.ProcessID, err)
 			continue
 		}
-		text := (*windows.NTUnicodeString)(unsafe.Pointer(&command[0])).String()
-		args, err := windows.DecomposeCommandLine(text)
-		runtime.KeepAlive(command)
-		if err != nil || len(args) != 3 || args[1] != "worker" || (args[2] != "network" && args[2] != "meters" && args[2] != "outside") {
+		if len(args) != 3 || args[1] != "worker" || (args[2] != "network" && args[2] != "meters" && args[2] != "outside") {
 			windows.CloseHandle(h)
 			continue
 		}
@@ -80,6 +75,25 @@ func findWorkers(t *testing.T, parent uint32, directory string) []workerRef {
 		t.Fatal(err)
 	}
 	return refs
+}
+func processArguments(handle windows.Handle) ([]string, error) {
+	// NtQueryInformationProcess probes this as a pointer-aligned structure.
+	// A byte array may be stack allocated at a one-byte-aligned address.
+	command := make([]uint64, 8192)
+	var needed uint32
+	if err := windows.NtQueryInformationProcess(handle, windows.ProcessCommandLineInformation, unsafe.Pointer(&command[0]), uint32(len(command)*8), &needed); err != nil {
+		return nil, err
+	}
+	text := (*windows.NTUnicodeString)(unsafe.Pointer(&command[0])).String()
+	args, err := windows.DecomposeCommandLine(text)
+	runtime.KeepAlive(command)
+	return args, err
+}
+func TestProcessArgumentsUsesAlignedNativeBuffer(t *testing.T) {
+	args, err := processArguments(windows.CurrentProcess())
+	if err != nil || len(args) == 0 {
+		t.Fatal("read-only process argument query", args, err)
+	}
 }
 func assertServiceIsolation(t *testing.T, control, engine uint32) {
 	t.Helper()
