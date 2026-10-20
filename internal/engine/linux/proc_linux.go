@@ -275,6 +275,13 @@ func readProcLink(path string) (string, error) {
 // again for every descriptor in a shared scan. Long ordinary-file links are
 // deliberately ignored; they can never be socket identities.
 func socketInodeAt(dir int, name string) (uint32, bool) {
+	inode, ok, _ := socketInodeAtChecked(dir, name)
+	return inode, ok
+}
+
+// A mandatory recheck of a known holder must distinguish an absent descriptor
+// from an unreadable one. Ordinary exploratory scans remain best-effort above.
+func socketInodeAtChecked(dir int, name string) (uint32, bool, error) {
 	var b [64]byte
 	var n int
 	var err error
@@ -285,11 +292,11 @@ func socketInodeAt(dir int, name string) (uint32, bool) {
 		// cleanup may linger, so this must be an ordinary scheduling syscall.
 		var entry [16]byte
 		if len(name) == 0 || len(name) >= len(entry) {
-			return 0, false
+			return 0, false, unix.EINVAL
 		}
 		for i := range name {
 			if name[i] < '0' || name[i] > '9' {
-				return 0, false
+				return 0, false, unix.EINVAL
 			}
 			entry[i] = name[i]
 		}
@@ -304,9 +311,12 @@ func socketInodeAt(dir int, name string) (uint32, bool) {
 	} else {
 		n, err = unix.Readlinkat(dir, name, b[:])
 	}
-	if err != nil || n >= len(b) || n < 10 || !bytes.HasPrefix(b[:n], []byte("socket:[")) || b[n-1] != ']' {
-		return 0, false
+	if err != nil {
+		return 0, false, err
+	}
+	if n >= len(b) || n < 10 || !bytes.HasPrefix(b[:n], []byte("socket:[")) || b[n-1] != ']' {
+		return 0, false, nil
 	}
 	inode, err := strconv.ParseUint(string(b[8:n-1]), 10, 32)
-	return uint32(inode), err == nil
+	return uint32(inode), err == nil, err
 }

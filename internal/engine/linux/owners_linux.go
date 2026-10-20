@@ -577,6 +577,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 	var result platform.Owner
 	var found []holder
 	var unconfirmed []uint32
+	var absent []uint32
 	uncertainHolder := func(pid uint32) {
 		if !slices.Contains(unconfirmed, pid) {
 			unconfirmed = append(unconfirmed, pid)
@@ -657,6 +658,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		}
 		return false
 	}
+	needsConfirmation := func(pid uint32) bool {
+		return slices.Contains(unconfirmed, pid) && !hasHolder(pid) && !slices.Contains(absent, pid)
+	}
 	indexStarted := time.Now()
 	var cached []holder
 	if r.protocol == unix.IPPROTO_UDP {
@@ -710,17 +714,27 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		if err := checkHints(); err != nil {
 			return err
 		}
-		if seen[pid] || expired() {
+		if (seen[pid] && !needsConfirmation(pid)) || expired() {
 			return nil
 		}
 		seen[pid] = true
 		scannedPIDs++
+		scanFailure := func(err error) error {
+			if !needsConfirmation(pid) {
+				return nil
+			}
+			if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ESRCH) {
+				absent = append(absent, pid)
+				return nil
+			}
+			return err
+		}
 		dir := fmt.Sprintf("/proc/%d/fd", pid)
 		opened := time.Now()
 		f, err := openProcDescriptors(dir)
 		if err != nil {
 			timing.add(phaseProcessOpen, time.Since(opened))
-			return nil
+			return scanFailure(err)
 		}
 		closeDirectory := func() {
 			started := time.Now()
@@ -733,7 +747,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		statErr := statKernelFile(descriptor, f.direct, &metadata)
 		timing.add(phaseProcessOpen, time.Since(opened))
 		if statErr != nil {
-			return nil
+			return scanFailure(statErr)
 		}
 		canIndex := metadata.Uid == r.uid || slices.Contains(recent, pid)
 		lastPID, lastUID, lastIndexed = pid, metadata.Uid, canIndex
@@ -758,7 +772,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			start, err = processStart(pid)
 			timing.add(phaseProcessStart, time.Since(started))
 			if err != nil || expired() {
-				return nil
+				return scanFailure(err)
 			}
 		}
 		o.mu.Lock()
@@ -776,7 +790,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		if current.directory != metadata.Ino || (current.start != 0 && current.start != start) {
 			current = fdWindow{directory: metadata.Ino, start: start, lastFD: -1}
 		}
-		if current.fullUID == r.uid && !current.fullScan.Before(requested) {
+		if !needsConfirmation(pid) && current.fullUID == r.uid && !current.fullScan.Before(requested) {
 			o.mu.Unlock()
 			o.sharedScans.Add(1)
 			return o.indexed(r.inode).visit(accept)
@@ -802,7 +816,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		lastPosition = window.high
 		if position > 0 {
 			if _, err := f.Seek(position, 0); err != nil {
-				return nil
+				return scanFailure(err)
 			}
 		}
 		maxFD := window.high
@@ -810,6 +824,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		advancing := false
 		whole := false
 		matched := false
+		var inspectionErr error
 		visit := func(fd []byte) bool {
 			if expired() {
 				return false
@@ -821,7 +836,11 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 					maxFD = max(maxFD, number)
 				}
 			}
-			inode, ok := socketInodeAt(descriptor, string(fd))
+			inode, ok, err := socketInodeAtChecked(descriptor, string(fd))
+			if err != nil && needsConfirmation(pid) && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ESRCH) {
+				inspectionErr = err
+				return false
+			}
 			if !ok {
 				return true
 			}
@@ -914,7 +933,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 								break
 							}
 						}
-						if !matched && errors.Is(out.err, context.DeadlineExceeded) {
+						if !matched && (errors.Is(out.err, context.DeadlineExceeded) || errors.Is(out.err, context.Canceled)) {
 							continue acquire
 						}
 						// A window begun before this request can supply a live
@@ -952,7 +971,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 				o.windows[pid] = current
 			}
 		}()
-		if slices.Contains(unconfirmed, pid) {
+		if needsConfirmation(pid) {
 			// A representative FD can close while another duplicate remains.
 			// A recent observation is not a negative result for this process.
 			// Search its live directory before choosing a different holder;
@@ -965,14 +984,21 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			advancing = true
 			for !expired() {
 				n, err := f.Visit(128, visit)
-				if matched || errors.Is(err, io.EOF) {
+				if inspectionErr != nil {
+					return inspectionErr
+				}
+				if matched {
+					return nil
+				}
+				if errors.Is(err, io.EOF) {
+					absent = append(absent, pid)
 					return nil
 				}
 				if err != nil {
 					return err
 				}
 				if n == 0 {
-					return nil
+					return io.ErrNoProgress
 				}
 			}
 			return context.DeadlineExceeded
@@ -1098,9 +1124,25 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 	finish := func() (platform.Owner, error) {
 		// Another scanner may have published a conflicting live holder while
 		// this lookup validated its first one. Recheck all available hints.
-		if !expired() {
+		for !expired() {
 			if err := o.indexed(r.inode).visit(accept); err != nil {
 				return platform.Owner{}, err
+			}
+			// Validation can discover stale representatives during a scan or
+			// this final index visit. Resolve every such candidate, including
+			// ones previously seen through a partial or cached descriptor pass.
+			attempted := false
+			for i := 0; i < len(unconfirmed) && !expired(); i++ {
+				pid := unconfirmed[i]
+				if needsConfirmation(pid) {
+					attempted = true
+					if err := scan(pid, true); err != nil {
+						return platform.Owner{}, err
+					}
+				}
+			}
+			if !attempted {
+				break
 			}
 		}
 		// Finding one holder does not authorize skipping the remaining

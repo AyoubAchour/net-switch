@@ -39,14 +39,15 @@ type descriptorBatchResult struct {
 }
 
 type descriptorBatch struct {
-	key       descriptorBatchKey
-	queued    time.Time
-	deadline  time.Time
-	caller    context.Context // non-nil only for caller-owned conflict scans
-	inline    bool
-	done      chan struct{}
-	completed time.Time
-	result    descriptorBatchResult // immutable after done closes
+	key        descriptorBatchKey
+	queued     time.Time
+	deadline   time.Time
+	caller     context.Context // non-nil only for caller-owned conflict scans
+	inline     bool
+	registered bool // this job owns a live-map entry until completion/replacement
+	done       chan struct{}
+	completed  time.Time
+	result     descriptorBatchResult // immutable after done closes
 }
 
 type descriptorBatches struct {
@@ -111,45 +112,56 @@ func (o *Owners) descriptorBatch(ctx context.Context, key descriptorBatchKey, re
 	// and independent conflict reads do not need that exclusive lock at all.
 	queued := time.Now()
 	job := &descriptorBatch{key: key, queued: queued, deadline: queued.Add(8 * time.Millisecond), done: make(chan struct{}), inline: inline}
-	if inline && len(b.jobs) < cap(b.jobs) {
-		// Once the primary owner is known, these bounded windows only check
-		// other possible holders. Doing each on a worker and parking again
-		// multiplies scheduler handoffs by the number of processes in scope.
-		// Reuse completed fresh work above, but do not park a conflict check
-		// behind another caller's in-flight pass. A bounded duplicate read is
-		// cheaper than a scheduler handoff for each process in the scope, and
-		// an older negative would require a fresh read anyway. Primary-owner
-		// discovery still consumes its published positive hints and completed result.
-		// Keep the queue bound and this caller's original deadline/cancellation.
+	if inline {
 		job.caller = ctx
 		if deadline, ok := ctx.Deadline(); ok && deadline.Before(job.deadline) {
 			job.deadline = deadline
 		}
-		b.started.Add(1)
-		b.inline.Add(1)
-		b.workers.Add(1)
-		b.mu.RUnlock()
-		o.completeDescriptorBatch(job)
-		b.workers.Done()
-		return job, nil
+		canRun := len(b.jobs) < cap(b.jobs)
+		// Share bounded live work, including an older pass: a follower must
+		// still request a fresh pass before trusting an older negative. That
+		// second pass can serve all callers which arrived during the first.
+		// A busy registration lock never holds up an independent live read.
+		if b.liveMu.TryLock() {
+			if previous := b.live[key]; previous != nil && previous.deadline.After(time.Now()) {
+				b.shared.Add(1)
+				b.liveMu.Unlock()
+				b.mu.RUnlock()
+				return previous, nil
+			}
+			if canRun {
+				b.live[key] = job
+				job.registered = true
+			}
+			b.liveMu.Unlock()
+		}
+		if canRun {
+			b.started.Add(1)
+			b.inline.Add(1)
+			b.workers.Add(1)
+			b.mu.RUnlock()
+			o.completeDescriptorBatch(job)
+			b.workers.Done()
+			return job, nil
+		}
 	}
 	acquiring = time.Now()
 	b.liveMu.Lock()
 	locked = uint64(time.Since(acquiring))
 	b.lockNanos.Add(locked)
 	recordLookupMaximum(&b.maxLock, locked)
+	if previous := b.live[key]; previous != nil && previous.deadline.After(time.Now()) {
+		b.shared.Add(1)
+		b.liveMu.Unlock()
+		b.mu.RUnlock()
+		return previous, nil
+	}
 	if inline {
 		b.full.Add(1)
 		err := &descriptorQueueBusy{ready: b.available}
 		b.liveMu.Unlock()
 		b.mu.RUnlock()
 		return nil, err
-	}
-	if previous := b.live[key]; previous != nil {
-		b.shared.Add(1)
-		b.liveMu.Unlock()
-		b.mu.RUnlock()
-		return previous, nil
 	}
 	select {
 	case b.jobs <- job:
@@ -208,13 +220,16 @@ func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
 		b.aborted.Add(1)
 	}
 	var available chan struct{}
-	if !job.inline {
-		nextAvailable := make(chan struct{})
+	if !job.inline || job.registered {
+		var nextAvailable chan struct{}
+		if !job.inline {
+			nextAvailable = make(chan struct{})
+		}
 		b.liveMu.Lock()
 		if b.live[job.key] == job {
 			delete(b.live, job.key)
 		}
-		if b.available != nil {
+		if !job.inline && b.available != nil {
 			available = b.available
 			if b.closed.Load() {
 				b.available = nil
