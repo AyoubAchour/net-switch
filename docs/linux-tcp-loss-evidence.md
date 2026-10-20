@@ -28,6 +28,9 @@ Both buffer cases write `tcp-loss.jsonl` alongside their case log:
   and class (including any shaping), SNMP/TcpExt counters, and `ss -tinmo`
   socket queues, retransmits, timers and memory/drop counters. Softnet counters
   are host-wide per-CPU observations, not independent per-namespace losses.
+  Classes retain native text: older iproute2 does not support JSON for that
+  command and legitimately prints nothing when no classes exist. Command
+  errors still fail the diagnostic check; an empty successful dump does not.
 - Once a second and whenever an RTO changes: the engine's existing per-endpoint
   retransmits, RTOs, receive-buffer/segment-queue drops, checksum/send errors,
   buffer usage and grants, RTT/RTO and congestion state. Snapshots add no

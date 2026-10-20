@@ -23,7 +23,7 @@ type TrafficSnapshot struct {
 type TrafficHop struct {
 	Namespace                       string
 	Links, Qdiscs                   json.RawMessage
-	Classes                         map[string]json.RawMessage
+	Classes                         map[string]string
 	SNMP, Netstat, Softnet, Sockets string
 	Errors                          []string `json:",omitempty"`
 }
@@ -40,7 +40,7 @@ func (n *Net) Traffic(ctx context.Context) (TrafficSnapshot, error) {
 				continue
 			}
 		}
-		h := TrafficHop{Namespace: ns, Classes: map[string]json.RawMessage{}}
+		h := TrafficHop{Namespace: ns, Classes: map[string]string{}}
 		read := func(name string, args ...string) string {
 			out, err := r.In(ctx, ns, name, args...)
 			if err != nil {
@@ -67,7 +67,11 @@ func (n *Net) Traffic(ctx context.Context) (TrafficSnapshot, error) {
 		}
 		if json.Unmarshal(h.Links, &links) == nil {
 			for _, link := range links {
-				h.Classes[link.Name] = readJSON("tc", "-s", "-j", "-d", "class", "show", "dev", link.Name)
+				// Older iproute2 (Ubuntu 24.04) prints class statistics as text
+				// even with -j, and prints nothing for a successful empty dump.
+				// Preserve the complete native output; command failures above
+				// still fail collection. Qdisc/link dumps do support JSON.
+				h.Classes[link.Name] = read("tc", "-s", "-d", "class", "show", "dev", link.Name)
 			}
 		}
 		h.SNMP = read("cat", "/proc/net/snmp")
