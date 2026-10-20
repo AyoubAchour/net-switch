@@ -46,6 +46,7 @@ type fdWindow struct {
 	tailProbed bool
 	observed   time.Time
 	scanning   chan struct{}
+	assisting  chan struct{}
 	fullScan   time.Time // start of a completed, wholly indexed descriptor pass
 	fullUID    uint32
 }
@@ -55,8 +56,11 @@ type Owners struct {
 	lookupErrors    [4]atomic.Uint64
 	cgroupStats     [3]atomic.Uint64
 	sharedScans     atomic.Uint64
+	assistedScans   atomic.Uint64
 	lastLookupError atomic.Pointer[string]
 	mu              sync.Mutex
+	cgroupMu        sync.RWMutex
+	recentMu        sync.RWMutex
 	cgroups         map[uint64]string
 	recent          map[uint32][]uint32
 	cache           map[uint64]cachedHolders
@@ -76,6 +80,7 @@ type lookupStats struct {
 	MetadataRejected                             uint64
 	LastMetadataError                            string
 	SharedScans                                  uint64
+	AssistedScans                                uint64
 }
 
 func (o *Owners) Stats() any {
@@ -83,6 +88,7 @@ func (o *Owners) Stats() any {
 	s.CgroupHints, s.CgroupResolved, s.CgroupPopulated = o.cgroupStats[0].Load(), o.cgroupStats[1].Load(), o.cgroupStats[2].Load()
 	s.MetadataRejected = rejectedMetadata.Load()
 	s.SharedScans = o.sharedScans.Load()
+	s.AssistedScans = o.assistedScans.Load()
 	if p := lastRejectedMetadata.Load(); p != nil {
 		s.LastMetadataError = *p
 	}
@@ -391,14 +397,14 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 		return nil
 	}
 	o.cgroupStats[0].Add(1)
-	o.mu.Lock()
+	o.cgroupMu.RLock()
 	dir := o.cgroups[id]
-	o.mu.Unlock()
+	o.cgroupMu.RUnlock()
 	if dir == "" {
 		_ = o.refreshCgroups(ctx)
-		o.mu.Lock()
+		o.cgroupMu.RLock()
 		dir = o.cgroups[id]
-		o.mu.Unlock()
+		o.cgroupMu.RUnlock()
 	}
 	if dir == "" {
 		return nil
@@ -449,14 +455,14 @@ func (o *Owners) refreshCgroups(ctx context.Context) error {
 		}
 		return nil
 	})
-	o.mu.Lock()
+	o.cgroupMu.Lock()
 	if len(o.cgroups) > 8192 {
 		clear(o.cgroups)
 	}
 	for id, path := range found {
 		o.cgroups[id] = path
 	}
-	o.mu.Unlock()
+	o.cgroupMu.Unlock()
 	return err
 }
 
@@ -513,7 +519,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			o.mu.Lock()
 			window := o.windows[h.pid]
 			if window.start != h.start {
-				window = fdWindow{start: h.start, lastFD: -1, scanning: window.scanning}
+				window = fdWindow{start: h.start, lastFD: -1, scanning: window.scanning, assisting: window.assisting}
 			}
 			window.lastFD = fd
 			window.extent = max(window.extent, fd)
@@ -532,10 +538,15 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		return false
 	}
 	indexStarted := time.Now()
-	o.mu.Lock()
-	cached := o.cache[r.cookie].holders
+	var cached []holder
+	if r.protocol == unix.IPPROTO_UDP {
+		o.mu.Lock()
+		cached = o.cache[r.cookie].holders
+		o.mu.Unlock()
+	}
+	o.recentMu.RLock()
 	recent := o.recent[r.uid]
-	o.mu.Unlock()
+	o.recentMu.RUnlock()
 	indexed := o.indexed(r.inode)
 	initialIndexTime = time.Since(indexStarted)
 	hinted += len(cached) + indexed.count()
@@ -600,8 +611,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return nil
 		}
 		dir := fmt.Sprintf("/proc/%d/fd", pid)
-		// One scanner per process. Followers consume the inode hints it
-		// publishes instead of issuing the same hundreds of readlinks again.
+		// Share the normal scanner's hints. A descheduled scanner must not
+		// hold every follower until its deadline: after a short wait, allow
+		// one targeted assistant for this same process, never an unrelated walk.
 		gate := make(chan struct{})
 		remember := make(map[uint32]holder, 32)
 		if expired() {
@@ -616,7 +628,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		o.mu.Lock()
 		if len(o.windows) > 4096 {
 			for old, state := range o.windows {
-				if old != pid && state.scanning == nil {
+				if old != pid && state.scanning == nil && state.assisting == nil {
 					delete(o.windows, old)
 				}
 				if len(o.windows) <= 4096 {
@@ -633,17 +645,18 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			o.sharedScans.Add(1)
 			return o.indexed(r.inode).visit(accept)
 		}
+		assist := false
+		assistAfter := time.Now().Add(time.Millisecond)
 		for current.scanning != nil {
 			if result.AppID != "" {
 				o.mu.Unlock()
 				return o.indexed(r.inode).visit(accept)
 			}
-			// Do not mark a busy candidate as searched and walk unrelated
-			// processes. Wait for its bounded scan (or our own deadline),
-			// consume published matches, then scan this same PID's next window.
-			// A channel wake, rather than a sub-millisecond timer, avoids both
-			// scheduler rounding and losing the useful candidate under load.
+			// Keep enough of the caller's budget for a targeted pass. At most
+			// two scans may be active for a process; further followers consume
+			// either scan's published matches or wait for one of those slots.
 			busy := current.scanning
+			assisting := current.assisting
 			waitPID = pid
 			o.mu.Unlock()
 			waiting := time.Now()
@@ -651,10 +664,21 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			if notice != nil && result.AppID == "" {
 				ready = notice.ready
 			}
+			var timer *time.Timer
+			var timeToAssist <-chan time.Time
+			if assisting == nil {
+				timer = time.NewTimer(max(0, time.Until(assistAfter)))
+				timeToAssist = timer.C
+			}
 			select {
 			case <-busy:
+			case <-assisting:
 			case <-ready:
+			case <-timeToAssist:
 			case <-ctx.Done():
+			}
+			if timer != nil {
+				timer.Stop()
 			}
 			scanWait += time.Since(waiting)
 			if err := checkHints(); err != nil {
@@ -670,9 +694,18 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				o.sharedScans.Add(1)
 				return o.indexed(r.inode).visit(accept)
 			}
+			if current.scanning != nil && current.assisting == nil && !time.Now().Before(assistAfter) {
+				assist = true
+				break
+			}
 		}
 		scanStarted := time.Now()
-		current.scanning = gate
+		if assist {
+			current.assisting = gate
+			o.assistedScans.Add(1)
+		} else {
+			current.scanning = gate
+		}
 		o.windows[pid] = current
 		o.mu.Unlock()
 		// Validate identity only after publishing the fd batch and releasing
@@ -686,7 +719,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		defer func() {
 			o.mu.Lock()
 			window := o.windows[pid]
-			window.scanning = nil
+			if window.scanning == gate {
+				window.scanning = nil
+			}
+			if window.assisting == gate {
+				window.assisting = nil
+			}
 			o.windows[pid] = window
 			close(gate)
 			o.mu.Unlock()
@@ -703,7 +741,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		o.mu.Lock()
 		window := o.windows[pid]
 		if window.start != start {
-			window = fdWindow{start: start, lastFD: -1, scanning: gate}
+			window = fdWindow{start: start, lastFD: -1, scanning: window.scanning, assisting: window.assisting}
 		}
 		// Once a live holder is known, reuse other processes' very recent
 		// search windows. A burst must not rescan the same 64 descriptors in
@@ -901,19 +939,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return result, os.ErrNotExist
 		}
 		result.Generation = r.generation()
-		newRecent := make([]uint32, 1, 32)
-		newRecent[0] = result.PID
-		o.mu.Lock()
 		if r.protocol == unix.IPPROTO_UDP {
+			o.mu.Lock()
 			o.cache[r.cookie] = cachedHolders{found, time.Now()}
+			o.mu.Unlock()
 		}
-		for _, pid := range o.recent[r.uid] {
-			if pid != result.PID && len(newRecent) < 32 {
-				newRecent = append(newRecent, pid)
-			}
-		}
-		o.recent[r.uid] = newRecent
-		o.mu.Unlock()
+		o.rememberPID(r.uid, result.PID)
 		return result, nil
 	}
 	// Search each tier for actual holders, then fall back only if it found

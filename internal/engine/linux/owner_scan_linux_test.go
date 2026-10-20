@@ -157,3 +157,60 @@ func TestProcScratchSurvivesCollectionWithinItsBound(t *testing.T) {
 		t.Fatal("collection discarded the bounded lookup scratch cache")
 	}
 }
+
+func TestBusyHintedProcessGetsATargetedPassBeforeDeadline(t *testing.T) {
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rows, err := diagDump(ctx, unix.AF_INET, unix.IPPROTO_UDP, conn.LocalAddr().(*net.UDPAddr).AddrPort())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var row socketRow
+	for _, r := range rows {
+		if r.local == conn.LocalAddr().(*net.UDPAddr).AddrPort() {
+			row = r
+			break
+		}
+	}
+	if row.inode == 0 {
+		t.Fatal("fixture did not find its live socket")
+	}
+	o := newTestOwners(t)
+	if err := o.Warm(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pid := uint32(os.Getpid())
+	start, err := processStart(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := make(chan struct{})
+	defer close(blocked)
+	o.recentMu.Lock()
+	o.recent[row.uid] = []uint32{pid}
+	o.recentMu.Unlock()
+	o.mu.Lock()
+	o.windows[pid] = fdWindow{start: start, lastFD: -1, scanning: blocked}
+	o.mu.Unlock()
+	// The held scanner never completes during this lookup. A success must
+	// come from a real targeted fd pass, not from widening the time budget.
+	lookup, finish := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer finish()
+	owner, err := o.holders(lookup, row)
+	if err != nil || owner.PID != pid || owner.Generation != row.generation() {
+		t.Fatalf("busy hinted process: %+v %v", owner, err)
+	}
+	if o.assistedScans.Load() == 0 {
+		t.Fatal("fixture bypassed the blocked scanner instead of exercising assistance")
+	}
+	select {
+	case <-blocked:
+		t.Fatal("fixture released its scanner early")
+	default:
+	}
+}
