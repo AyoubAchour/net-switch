@@ -1,12 +1,16 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 
-function diff(env) {
-  const result = spawnSync(process.execPath, ['scripts/generate-gvisor.mjs', '--diff'], {
+const patches = readdirSync(new URL('../third_party/', import.meta.url))
+  .filter(name => /^gvisor-.*\.patch$/.test(name)).sort();
+
+function diff(patch, env) {
+  const result = spawnSync(process.execPath, ['scripts/generate-gvisor.mjs', '--diff', patch], {
     cwd: root, env, encoding: 'utf8', windowsHide: true,
   });
   assert.equal(result.status, 0, result.error?.message || result.stderr);
@@ -14,9 +18,18 @@ function diff(env) {
   return result.stdout;
 }
 
-test('gVisor patch keeps apply -p1 format under custom diff settings', () => {
-  const expected = diff(process.env);
-  assert.match(expected, /new file mode 100644\n[\s\S]*dispatcher_netswitch_test\.go/);
+for (const patch of patches) test(`${patch} regenerates byte for byte under custom diff settings`, () => {
+  const expected = diff(patch, process.env);
+  // Also serves as CI's canonical patch check, including file order and hashes.
+  assert.equal(expected, readFileSync(new URL(`../third_party/${patch}`, import.meta.url), 'utf8').replaceAll('\r\n', '\n'));
+  if (patch === 'gvisor-local-close.patch') {
+    assert.match(expected, /new file mode 100644\n[\s\S]*dispatcher_netswitch_test\.go/);
+    assert.match(expected, /Net Switch addition, not upstream/);
+    assert.doesNotMatch(expected, /RTORecovery/);
+  } else if (patch === 'gvisor-rto-recovery.patch') {
+    assert.match(expected, /RTORecovery/);
+    assert.doesNotMatch(expected, /dispatcher_netswitch_test|localCloseEnabled/);
+  }
   const settings = {
     'diff.noprefix': 'true',
     'diff.mnemonicPrefix': 'true',
@@ -36,7 +49,7 @@ test('gVisor patch keeps apply -p1 format under custom diff settings', () => {
     env[`GIT_CONFIG_KEY_${i}`] = key;
     env[`GIT_CONFIG_VALUE_${i}`] = value;
   });
-  const actual = diff(env);
+  const actual = diff(patch, env);
   assert.equal(actual, expected);
   // The generated tree already contains the patch, so reverse-check it.
   const apply = spawnSync('git', ['apply', '--check', '--reverse', '-p1', '-'], {
@@ -44,4 +57,15 @@ test('gVisor patch keeps apply -p1 format under custom diff settings', () => {
     env, input: actual, encoding: 'utf8', windowsHide: true,
   });
   assert.equal(apply.status, 0, apply.error?.message || apply.stderr);
+});
+
+test('diff mode requires one named patch instead of silently combining patches', () => {
+  assert.deepEqual(patches, ['gvisor-local-close.patch', 'gvisor-rto-recovery.patch']);
+  for (const args of [['--diff'], ['--diff', '../gvisor-local-close.patch'], ['--diff', 'missing.patch']]) {
+    const result = spawnSync(process.execPath, ['scripts/generate-gvisor.mjs', ...args], {
+      cwd: root, encoding: 'utf8', windowsHide: true,
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Usage: generate-gvisor\.mjs/);
+  }
 });

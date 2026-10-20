@@ -46,12 +46,6 @@ jobs:
       - name: Check tag and changelog
         id: metadata
         run: node scripts/release-metadata.mjs
-      - uses: ./.github/actions/cache-pinned-archive
-        with:
-          artifact: go
-      - uses: ./.github/actions/cache-pinned-archive
-        with:
-          artifact: wintun
       - name: Build and test the native helper with the pinned Go
         run: ./scripts/build-helper.ps1 -Arch ${{ matrix.arch }}
       - name: Build the tray program with the C# compiler that comes with Windows

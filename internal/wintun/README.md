@@ -101,22 +101,29 @@ process pause, and verifies that an idle caller alone is not exempted.
 Throughput uses delivered UDP bytes over a fixed interval and complete, hashed
 TCP transfers, with one and eight streams. The UDP load generator is a separate
 process, so it does not compete with only the Go session for Go scheduler slots
-while the DLL executes outside that limit. Six pairs alternate implementation
-order. Each TCP stack first runs two fixed, logged warm-up transfers: CPU profiles
+while the DLL executes outside that limit. Twelve matched pairs alternate
+implementation order, starting with ours. Within each pair, each metric runs
+back to back through the two sessions on the same adapter before proceeding to
+the next metric. Each TCP stack first runs two fixed, logged warm-up transfers: CPU profiles
 show both implementations' initial connections warming from roughly 320–450 to
 540–600 MB/s on the same x64 runner. The measured pairs compare the steady
-state of a long-lived engine. All measured samples remain in the comparison:
-a DLL `ERROR_INVALID_DATA` is logged
-as a baseline failure, its partial UDP goodput (or zero for an incomplete TCP
-transfer) is retained, and a fresh DLL session is used only for the next metric.
-No failed sample is retried into a pass. The locked design's 10% performance
-regression gate applies to the median of all six samples per implementation,
-never to an individual pair. UDP packets per wake-up and isolated batch copy,
-publication and SetEvent cost (1, 8 and 64 packets) are reported separately.
+state of a long-lived engine. All measured samples and errors are reported:
+a failed DLL measurement also fails the comparison instead of supplying a
+favorable denominator. No failed sample is retried into a pass.
+The 10% regression gate applies to the median of the twelve **per-pair**
+ours/DLL ratios, not the ratio of separately pooled medians. Throughput must
+reach 0.90; latency must stay at or below 1.10. This design decision controls
+for changing runner conditions without changing the regression allowance.
+Both implementations report read packets per successful native read wake-up
+and written packets per accepted nonempty write batch for every sample.
+The DLL hides its conditional write-event signals, so its batch count is
+explicitly not a signal count. Our actual write signals are reported too.
+Isolated batch copy, publication and SetEvent cost (1, 8 and 64 packets) are
+reported separately.
 Packet corruption in delivered data,
 unknown reference errors and failures of our session fail CI.
-The median averages the two central samples, retains the raw trial order in
-the report, and prevents one noisy trial from dominating either side. A
+The median averages the two central ratios and retains raw pair order and
+all sample values in the report. A
 sustained regression still fails the same 10% gate.
 
 TCP failures report session counters and ring cursors before socket or stack

@@ -1,3 +1,6 @@
+// Net Switch addition, not upstream.
+// Copyright (c) 2026 Ayoub Achour. Licensed under the MIT license; see the repository LICENSE.
+
 package tcp
 
 import (

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"runtime"
@@ -270,9 +271,31 @@ func TestPerformanceMedian(t *testing.T) {
 	if got := median(values); got != 42.85 || values[0] != 52.3 {
 		t.Fatalf("median=%v samples=%v", got, values)
 	}
-	// A sustained regression must still cross the unchanged 10% gate.
-	if median([]float64{52, 53, 54, 55, 56, 57}) <= median([]float64{45, 46, 45, 46, 45, 46})*1.1 {
-		t.Fatal("sustained regression hidden")
+	// Each pair shares its runner conditions. Pooling the implementations
+	// separately would report 90/200 = 0.45 here, instead of 0.90.
+	ratios, err := pairedRatios([]float64{90, 90, 180}, []float64{100, 200, 200})
+	if err != nil || median(ratios) != 0.90 {
+		t.Fatalf("matched ratios=%v err=%v", ratios, err)
+	}
+	// Alternating slow/fast conditions must not hide a sustained regression.
+	baseline := []float64{107, 170, 107, 170, 107, 170, 107, 170, 107, 170, 107, 170}
+	for _, scale := range []float64{0.89, 1.11} {
+		ours := make([]float64, len(baseline))
+		for i := range ours {
+			ours[i] = baseline[i] * scale
+		}
+		ratios, err := pairedRatios(ours, baseline)
+		if err != nil || math.Abs(median(ratios)-scale) > 1e-12 {
+			t.Fatalf("sustained regression hidden: %v %v", ratios, err)
+		}
+	}
+	for _, invalid := range [][]float64{nil, {100}, {100, 0}, {100, -1}, {100, math.NaN()}, {100, math.Inf(1)}} {
+		if _, err := pairedRatios([]float64{100, 100}, invalid); err == nil {
+			t.Fatalf("invalid reference accepted: %v", invalid)
+		}
+		if _, err := pairedRatios(invalid, []float64{100, 100}); err == nil {
+			t.Fatalf("invalid own sample accepted: %v", invalid)
+		}
 	}
 }
 

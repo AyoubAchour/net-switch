@@ -3,6 +3,7 @@ package stack_test
 import (
 	"bytes"
 	"encoding/binary"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,16 +31,37 @@ func tcpWithOptions(b, options []byte) []byte {
 }
 
 func TestTCPRecoveryAfterLostWindow(t *testing.T) {
-	for _, mode := range []string{"rack", "sack", "rack_reordered"} {
+	for _, mode := range []string{"rack", "sack", "rack_reordered", "rack_timer"} {
 		t.Run(mode, func(t *testing.T) { tcpRecoveryAfterLostWindow(t, mode) })
 	}
 }
 
+// Observe the real timer scheduled by packet handling, without exposing or
+// changing TCP internals. No timer is injected and no callback is called early.
+type recoveryClock struct {
+	*faketime.ManualClock
+	watch atomic.Bool
+	armed chan time.Duration
+	fired chan struct{}
+}
+
+func (c *recoveryClock) AfterFunc(d time.Duration, f func()) tcpip.Timer {
+	if d > 0 && d <= 2*time.Millisecond && c.watch.CompareAndSwap(true, false) {
+		timer := c.ManualClock.AfterFunc(d, func() { f(); close(c.fired) })
+		c.armed <- d
+		return timer
+	}
+	return c.ManualClock.AfterFunc(d, f)
+}
+
 func tcpRecoveryAfterLostWindow(t *testing.T, mode string) {
-	clock := faketime.NewManualClock()
+	clock := &recoveryClock{ManualClock: faketime.NewManualClock(), armed: make(chan time.Duration, 1), fired: make(chan struct{})}
 	options := ns.DefaultOptions()
 	options.Clock = clock
 	options.ClockResolution = 0
+	if mode == "rack_timer" {
+		options.ClockResolution = time.Millisecond
+	}
 	p := newPeerOptions(t, false, flows.Defaults(), options)
 	if mode == "sack" {
 		recovery := tcpip.TCPRecovery(0)
@@ -130,7 +152,7 @@ func tcpRecoveryAfterLostWindow(t *testing.T, mode string) {
 		}
 		clock.Advance(time.Millisecond)
 		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
-		if mode == "rack_reordered" && len(received) == mss {
+		if (mode == "rack_reordered" || mode == "rack_timer") && len(received) == mss {
 			// Deliver the third retransmitted segment before the second.
 			// This is a legitimate new SACK during RTO recovery, followed
 			// by a cumulative ACK once the gap is filled.
@@ -145,7 +167,35 @@ func tcpRecoveryAfterLostWindow(t *testing.T, mode string) {
 			sack := []byte{1, 1, 5, 10, 0, 0, 0, 0, 0, 0, 0, 0}
 			binary.BigEndian.PutUint32(sack[4:8], third.SequenceNumber())
 			binary.BigEndian.PutUint32(sack[8:12], third.SequenceNumber()+uint32(len(thirdData)))
+			if mode == "rack_timer" {
+				// Give the third segment a valid RTT sample, then keep the
+				// second delayed across the actual reordering deadline.
+				clock.Advance(10 * time.Millisecond)
+				clock.watch.Store(true)
+			}
 			p.inject(tcpWithOptions(p.packet(p.seq, p.ack, header.TCPFlagAck, nil), sack))
+			if mode == "rack_timer" {
+				var delay time.Duration
+				select {
+				case delay = <-clock.armed:
+				case <-time.After(time.Second):
+					t.Fatal("new SACK did not arm the reordering timer")
+				}
+				var info tcpip.TCPInfoOption
+				if err := ep.GetSockOpt(&info); err != nil || info.CcState != tcpip.RTORecovery {
+					t.Fatalf("before reordering timer: state=%+v error=%v", info, err)
+				}
+				clock.Advance(delay)
+				select {
+				case <-clock.fired:
+				default:
+					t.Fatal("armed reordering timer did not fire")
+				}
+				if err := ep.GetSockOpt(&info); err != nil || info.CcState != tcpip.RTORecovery {
+					t.Fatalf("reordering timer replaced timeout recovery: state=%+v error=%v", info, err)
+				}
+				t.Logf("real reordering timer armed and fired after %s during timeout recovery", delay)
+			}
 			received = append(received, secondData...)
 			received = append(received, thirdData...)
 			p.ack += uint32(len(secondData) + len(thirdData))

@@ -180,7 +180,12 @@ func startIO(t *testing.T, a *Adapter, mode string) batchIO {
 
 func newFixture(t *testing.T, mode string, capacity uint32) *fixture {
 	t.Helper()
-	f := &fixture{a: newAdapter(t, capacity)}
+	return fixtureOnAdapter(t, mode, newAdapter(t, capacity))
+}
+
+func fixtureOnAdapter(t *testing.T, mode string, adapter *Adapter) *fixture {
+	t.Helper()
+	f := &fixture{a: adapter}
 	f.io = startIO(t, f.a, mode)
 	f.startEcho(t)
 	t.Cleanup(func() { f.stopEcho(); must(t, f.io.Close()) })
@@ -268,6 +273,8 @@ type dllSession struct {
 	event, stop, cancelEvent              windows.Handle
 	receive, release, allocate, send, end uintptr
 	closed                                atomic.Bool
+	readPackets, readWaits, readWakes     atomic.Uint64
+	writtenPackets, writeBatches          atomic.Uint64
 }
 
 var nativeCopy = windows.NewLazySystemDLL("ntdll.dll").NewProc("RtlMoveMemory")
@@ -305,7 +312,8 @@ func startDLL(t *testing.T, a *Adapter) *dllSession {
 	return s
 }
 
-func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) (int, error) {
+func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) (n int, err error) {
+	defer func() { s.readPackets.Add(uint64(n)) }()
 	s.readMu.Lock()
 	defer s.readMu.Unlock()
 	s.mu.RLock()
@@ -364,14 +372,24 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 		if cancelEvent != 0 {
 			handles = append(handles, cancelEvent)
 		}
+		s.readWaits.Add(1)
 		_, err := windows.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		if err == nil {
+			s.readWakes.Add(1)
+		}
 		if err != nil {
 			return 0, err
 		}
 	}
 }
 
-func (s *dllSession) WriteBatch(packets [][]byte) (int, error) {
+func (s *dllSession) WriteBatch(packets [][]byte) (n int, err error) {
+	defer func() {
+		s.writtenPackets.Add(uint64(n))
+		if n != 0 {
+			s.writeBatches.Add(1)
+		}
+	}()
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.RLock()
@@ -379,7 +397,6 @@ func (s *dllSession) WriteBatch(packets [][]byte) (int, error) {
 	if s.closed.Load() {
 		return 0, net.ErrClosed
 	}
-	n := 0
 	for _, b := range packets {
 		p, _, e := syscall.SyscallN(s.allocate, s.h, uintptr(len(b)))
 		if p == 0 {

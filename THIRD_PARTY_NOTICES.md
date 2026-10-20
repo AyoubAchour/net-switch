@@ -91,9 +91,15 @@ dependencies; this does not replace the 0.3.x programs listed above.
 - gvisor.dev/gvisor `v0.0.0-20261017122056-1b7906fdee8c`, Apache-2.0.
   Copyright The gVisor Authors. License and authors are preserved in
   `third_party/gvisor/LICENSE` and `AUTHORS`, and in the generated vendor tree.
-  Net Switch modifies five TCP files for opt-in local-app close admission, TIME_WAIT handling and buffer accounting;
-  each has a modification notice. The reproducible patch is
-  `third_party/gvisor-timewait.patch`.
+  Net Switch modifies seven TCP files, each with a modification notice.
+  `third_party/gvisor-local-close.patch` contains the opt-in local-app close
+  admission, TIME_WAIT handling, retained-buffer budget and buffer accounting
+  hooks in five files. It also adds `dispatcher_netswitch_test.go`, marked
+  "Net Switch addition, not upstream".
+  `third_party/gvisor-rto-recovery.patch` changes `rack.go` and `snd.go` to
+  preserve TCP timeout recovery until its flight drains. This fix applies to
+  every user of the patched stack, independently of the opt-in close hooks.
+  The generator applies these reproducible patches in filename order.
 - github.com/google/btree v1.1.2, Apache-2.0; see
   `vendor/github.com/google/btree/LICENSE`.
 - golang.org/x/exp `v0.0.0-20250711185948-6ae5c78190dc`,

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"runtime"
@@ -367,119 +368,143 @@ func TestWintunProfile(t *testing.T) {
 	}
 }
 
+// Both paths expose successful native read waits. The DLL does not expose its
+// conditional write-event signals: count accepted WriteBatch calls separately,
+// never label them as DLL signals. Sample before teardown wakes the reader.
+func performanceCounters(io batchIO) (Stats, uint64) {
+	switch s := io.(type) {
+	case *Session:
+		stats := s.Stats()
+		return stats, stats.Wakeups // One signal per accepted nonempty batch.
+	case *dllSession:
+		return Stats{
+			ReadPackets: s.readPackets.Load(), ReadWaits: s.readWaits.Load(),
+			ReadWakes: s.readWakes.Load(), WrittenPackets: s.writtenPackets.Load(),
+		}, s.writeBatches.Load()
+	default:
+		panic("unknown performance session")
+	}
+}
+
+func pairedRatios(ours, dll []float64) ([]float64, error) {
+	if len(ours) == 0 || len(ours) != len(dll) {
+		return nil, fmt.Errorf("incomplete matched pairs: ours=%d DLL=%d", len(ours), len(dll))
+	}
+	ratios := make([]float64, len(ours))
+	for i := range ours {
+		if ours[i] <= 0 || dll[i] <= 0 || math.IsNaN(ours[i]) || math.IsNaN(dll[i]) || math.IsInf(ours[i], 0) || math.IsInf(dll[i], 0) {
+			return nil, fmt.Errorf("unusable pair %d: ours=%g DLL=%g", i, ours[i], dll[i])
+		}
+		ratios[i] = ours[i] / dll[i]
+	}
+	return ratios, nil
+}
+
 func TestWintunPerformance(t *testing.T) {
 	requireRunner(t)
-	results := map[string]map[string][]float64{"dll": {}, "ours": {}}
-	// Balance order across six pairs, then pool all samples. Hosted runners
-	// vary by about 30%; no individual pair is a 10% regression gate. Compare
-	// medians so one runner pause cannot dominate either implementation's score.
-	const pairs = 6
-	for trial := 0; trial < pairs; trial++ {
-		modes := []string{"dll", "ours"}
-		if trial%2 != 0 {
-			modes = []string{"ours", "dll"}
-		}
-		for _, mode := range modes {
-			t.Run(fmt.Sprintf("trial%d/%s", trial, mode), func(t *testing.T) {
-				f := newFixture(t, mode, 0)
-				measure := func(name string, value float64) {
-					results[mode][name] = append(results[mode][name], value)
-					report(t, map[string]any{"test": "performance", "arch": runtime.GOARCH, "trial": trial, "mode": mode, "metric": name, "value": value})
-				}
-				session, _ := f.io.(*Session)
-				measure("udp_p95_us", shortLatency(t, mode, session))
-				for _, streams := range []int{1, 8} {
-					var before Stats
-					if s, ok := f.io.(*Session); ok {
-						before = s.Stats()
-					}
-					value, err := udpTransfer(t, streams)
-					must(t, err)
-					if s, ok := f.io.(*Session); ok {
-						after := s.Stats()
-						packets, wakes := after.WrittenPackets-before.WrittenPackets, after.Wakeups-before.Wakeups
-						if wakes == 0 {
-							t.Fatal("UDP comparison wrote no batches")
-						}
-						report(t, map[string]any{"test": "udp_batching", "arch": runtime.GOARCH, "trial": trial, "streams": streams, "written_packets": packets, "wakeups": wakes, "packets_per_wakeup": float64(packets) / float64(wakes)})
-					}
-					if fault := f.fault(); fault != nil {
-						if mode != "dll" || !errors.Is(fault, windows.ERROR_INVALID_DATA) {
-							t.Fatal(fault)
-						}
-						// Retain the partial/failed DLL measurement. Only restart for
-						// the NEXT metric, never rerun a failed sample into a pass.
-						report(t, map[string]any{"test": "baseline_driver_failure", "arch": runtime.GOARCH, "trial": trial, "metric": fmt.Sprintf("udp_%d_MBps", streams), "error": fault.Error(), "recorded_MBps": value})
-						f.stopEcho()
-						must(t, f.io.Close())
-						f.io = startIO(t, f.a, mode)
-						f.faultMu.Lock()
-						f.lastFault = nil
-						f.faultMu.Unlock()
-						f.startEcho(t)
-					}
-					measure(fmt.Sprintf("udp_%d_MBps", streams), value)
-				}
-				f.stopEcho()
-				f.stopEcho = func() {}
-				for _, streams := range []int{1, 8} {
-					var value float64
-					var err error
-					var before Stats
-					func() {
-						stop := tcpEcho(t, f)
-						defer stop()
-						// Profiles show both stacks warming over their first two
-						// connections. The engine is long-lived: compare steady
-						// throughput after a fixed, visible warm-up for both paths.
-						for warm := 0; warm < 2; warm++ {
-							rate, warmErr := tcpTransfer(t, f, 1)
-							must(t, warmErr)
-							report(t, map[string]any{"test": "tcp_warmup", "arch": runtime.GOARCH, "mode": mode, "trial": trial, "streams": streams, "warmup": warm, "MBps": rate})
-						}
-						if s, ok := f.io.(*Session); ok {
-							before = s.Stats()
-						}
-						value, err = tcpTransfer(t, f, streams)
-					}()
-					if err != nil {
-						if mode != "dll" || !errors.Is(f.fault(), windows.ERROR_INVALID_DATA) {
-							t.Fatal(err)
-						}
-						report(t, map[string]any{"test": "baseline_driver_failure", "arch": runtime.GOARCH, "trial": trial, "metric": fmt.Sprintf("tcp_%d_MBps", streams), "error": f.fault().Error(), "recorded_MBps": 0})
-						must(t, f.io.Close())
-						f.io = startIO(t, f.a, mode)
-						f.faultMu.Lock()
-						f.lastFault = nil
-						f.faultMu.Unlock()
-					}
-					measure(fmt.Sprintf("tcp_%d_MBps", streams), value)
-					if s, ok := f.io.(*Session); ok {
-						after := s.Stats()
-						report(t, map[string]any{"test": "tcp_batching", "arch": runtime.GOARCH, "trial": trial, "streams": streams, "written_packets": after.WrittenPackets - before.WrittenPackets, "wakeups": after.Wakeups - before.Wakeups})
-					}
-				}
-			})
+	const pairs = 12
+	metrics := []struct {
+		name    string
+		streams int
+		tcp     bool
+	}{
+		{"udp_p95_us", 0, false},
+		{"udp_1_MBps", 1, false},
+		{"udp_8_MBps", 8, false},
+		{"tcp_1_MBps", 1, true},
+		{"tcp_8_MBps", 8, true},
+	}
+	results := map[string]map[string][]float64{"ours": {}, "dll": {}}
+	for _, metric := range metrics {
+		for _, mode := range []string{"ours", "dll"} {
+			// An absent/failed sample stays zero at its original pair index.
+			results[mode][metric.name] = make([]float64, pairs)
 		}
 	}
-	for metric, dllValues := range results["dll"] {
-		ownValues := results["ours"][metric]
-		if len(dllValues) != pairs || len(ownValues) != pairs {
-			t.Errorf("incomplete comparison: %s", metric)
-			continue
-		}
-		dll, own := median(dllValues), median(ownValues)
-		if dll == 0 {
-			t.Errorf("DLL median is zero for %s; no usable performance comparison", metric)
-			continue
-		}
-		report(t, map[string]any{"test": "performance_pooled", "statistic": "median", "arch": runtime.GOARCH, "pairs": pairs, "metric": metric, "dll": dll, "ours": own, "ratio": own / dll, "dll_samples": dllValues, "ours_samples": ownValues})
-		if metric == "udp_p95_us" {
-			if own > dll*1.10 {
-				t.Errorf("latency regression: ours %.2f, DLL %.2f us", own, dll)
+	for trial := 0; trial < pairs; trial++ {
+		t.Run(fmt.Sprintf("pair%d", trial), func(t *testing.T) {
+			a := newAdapter(t, 0)
+			modes := []string{"ours", "dll"}
+			if trial%2 != 0 {
+				modes = []string{"dll", "ours"}
 			}
-		} else if own < dll*0.90 {
-			t.Errorf("throughput regression %s: ours %.2f, DLL %.2f MB/s", metric, own, dll)
+			for _, metric := range metrics {
+				// Match the SAME metric back to back, not two whole suites.
+				for _, mode := range modes {
+					t.Run(metric.name+"/"+mode, func(t *testing.T) {
+						f := fixtureOnAdapter(t, mode, a)
+						if metric.tcp {
+							f.stopEcho()
+							f.stopEcho = tcpEcho(t, f)
+							// Identical fixed warm-up, logged and excluded from
+							// both measured samples; never retry a measured failure.
+							for warm := 0; warm < 2; warm++ {
+								rate, err := tcpTransfer(t, f, 1)
+								must(t, err)
+								report(t, map[string]any{"test": "tcp_warmup", "arch": runtime.GOARCH, "mode": mode, "trial": trial, "streams": metric.streams, "warmup": warm, "MBps": rate})
+							}
+						}
+						before, batchesBefore := performanceCounters(f.io)
+						var value float64
+						var err error
+						switch {
+						case metric.tcp:
+							value, err = tcpTransfer(t, f, metric.streams)
+						case metric.streams != 0:
+							value, err = udpTransfer(t, metric.streams)
+						default:
+							session, _ := f.io.(*Session)
+							value = shortLatency(t, mode, session)
+						}
+						after, batchesAfter := performanceCounters(f.io)
+						packets, wakes := after.ReadPackets-before.ReadPackets, after.ReadWakes-before.ReadWakes
+						written, batches := after.WrittenPackets-before.WrittenPackets, batchesAfter-batchesBefore
+						diagnostics := map[string]any{
+							"test": "performance", "arch": runtime.GOARCH, "trial": trial, "mode": mode,
+							"metric": metric.name, "value": value, "first": modes[0],
+							"read_packets": packets, "read_wakeups": wakes,
+							"read_waits":      after.ReadWaits - before.ReadWaits,
+							"written_packets": written, "write_batches": batches,
+							"error": fmt.Sprint(err), "fault": fmt.Sprint(f.fault()),
+						}
+						if wakes != 0 {
+							diagnostics["read_packets_per_wakeup"] = float64(packets) / float64(wakes)
+						}
+						if batches != 0 {
+							diagnostics["packets_per_write_batch"] = float64(written) / float64(batches)
+						}
+						if mode == "ours" {
+							diagnostics["write_signals"] = after.Wakeups - before.Wakeups
+						}
+						report(t, diagnostics)
+						// Report a failed reference too, but never turn an invalid
+						// denominator into a favorable throughput ratio.
+						must(t, errors.Join(err, f.fault()))
+						results[mode][metric.name][trial] = value
+					})
+				}
+				own, dll := results["ours"][metric.name][trial], results["dll"][metric.name][trial]
+				if own > 0 && dll > 0 {
+					report(t, map[string]any{"test": "performance_pair", "arch": runtime.GOARCH, "trial": trial, "metric": metric.name, "first": modes[0], "ours": own, "dll": dll, "ratio": own / dll})
+				}
+			}
+		})
+	}
+	for _, metric := range metrics {
+		ours, dll := results["ours"][metric.name], results["dll"][metric.name]
+		ratios, err := pairedRatios(ours, dll)
+		if err != nil {
+			t.Errorf("%s: %v; ours=%v DLL=%v", metric.name, err, ours, dll)
+			continue
+		}
+		ratio := median(ratios)
+		report(t, map[string]any{"test": "performance_paired", "statistic": "median_pair_ratio", "arch": runtime.GOARCH, "pairs": pairs, "metric": metric.name, "ratio": ratio, "pair_ratios": ratios, "dll_samples": dll, "ours_samples": ours})
+		if metric.name == "udp_p95_us" {
+			if ratio > 1.10 {
+				t.Errorf("latency regression: median matched ratio %.3f > 1.10", ratio)
+			}
+		} else if ratio < 0.90 {
+			t.Errorf("throughput regression %s: median matched ratio %.3f < 0.90", metric.name, ratio)
 		}
 	}
 }
