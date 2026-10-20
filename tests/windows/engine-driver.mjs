@@ -23,6 +23,7 @@ const settingsFile = path.join(directory, 'engine-driver.json');
 let engine, pipe, epoch = 0, instance = '', serial = 0, stopping = false, ready = false;
 let saved, adapters, latest, healthBusy = false, reconnecting;
 let fatalError;
+let heapProfile;
 const failures = [];
 const pending = new Map();
 let queue = Promise.resolve();
@@ -93,7 +94,20 @@ async function connect() {
 async function launch() {
   // libuv assigns ordinary Windows children to a kill-on-parent-close job.
   // The engine owns its lease and must survive this test controller's death.
-  engine = spawn(exe, ['run', '--standalone-admin', '--state-dir', stateDir], { detached: true, windowsHide: true, stdio: ['ignore', 'inherit', 'inherit'] });
+  const env = { ...process.env };
+  // Build concurrency is capped by CI; the process under measurement uses
+  // Go's production processor default and the engine's unchanged limits.
+  delete env.GOMAXPROCS;
+  heapProfile = undefined;
+  if (env.NETSWITCH_ENGINE_HEAP_CAPTURE === '1') {
+    const nonce = randomUUID().replaceAll('-', '');
+    heapProfile = { nonce, directory: path.join(directory, `heap-${nonce}`), sequence: 0 };
+    env.NETSWITCH_ENGINE_HEAP_DIR = heapProfile.directory;
+    env.NETSWITCH_ENGINE_HEAP_NONCE = nonce;
+  }
+  engine = spawn(exe, ['run', '--standalone-admin', '--state-dir', stateDir], {
+    detached: true, windowsHide: true, stdio: ['ignore', 'inherit', 'inherit'], env,
+  });
   const current = engine;
   engine.on('error', (error) => console.error(error));
   engine.on('exit', (code, signal) => {
@@ -207,6 +221,21 @@ async function api(route, body) {
   switch (route) {
   case 'state': return state();
   case 'engine-command': return command(body.method, body.fields ?? {}, body.timeout);
+  case 'engine-heap': {
+    assert(ready && heapProfile && engine?.exitCode === null, 'Hosted heap capture was not enabled for this live engine');
+    const requestNonce = randomUUID().replaceAll('-', '');
+    const sequence = ++heapProfile.sequence;
+    const result = await exec(exe, ['heap-capture', '--profile-dir', heapProfile.directory,
+      '--nonce', heapProfile.nonce, '--instance', instance, '--pid', String(engine.pid),
+      '--sequence', String(sequence), '--request-nonce', requestNonce, '--label', String(body?.label ?? '')],
+    { windowsHide: true, timeout: 30_000, maxBuffer: 128 << 10 });
+    const capture = JSON.parse(result.stdout);
+    assert(capture.Nonce === heapProfile.nonce && capture.Instance === instance && capture.PID === engine.pid &&
+      capture.Request.Sequence === sequence && capture.Request.RequestNonce === requestNonce &&
+      capture.ForcedGCAfter > capture.ForcedGCBefore && capture.Instrumented,
+    'Heap response did not prove a fresh capture from this engine');
+    return capture;
+  }
   case 'lines/add': {
     const a = adapters.find((a) => a.alias === body.alias);
     assert(a, `Missing adapter ${body.alias}`);

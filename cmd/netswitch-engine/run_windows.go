@@ -17,6 +17,9 @@ import (
 )
 
 func run(args []string) error {
+	if len(args) > 0 && args[0] == "heap-capture" {
+		return winengine.CaptureHeapCommand(args[1:])
+	}
 	// Only this read operation is exposed by the standalone engine. Reuse the
 	// existing native worker protocol and isolation instead of a scripting host.
 	if len(args) == 3 && args[0] == "worker" && args[1] == "query" && args[2] == "tcp-port-configuration" {

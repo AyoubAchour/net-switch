@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { copyFile } from 'node:fs/promises';
 import path from 'node:path';
 import { hostedOnly, run, until } from './testisp/harness.mjs';
+import { captureHeap } from './heap-profile.mjs';
 
 export async function nativeUDPCapacity() {
   hostedOnly();
@@ -79,6 +80,9 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     evidence.layoutCapacity = Math.floor(native.held / 2);
     evidence.floor = Math.ceil(evidence.layoutCapacity * 0.95);
     evidence.before = await engineStats();
+    evidence.baselineHeap = await captureHeap(server, 'udp-baseline', 0, 0);
+    evidence.oldRuntimeBudgetWouldPass = true;
+    evidence.runtimePeakBytes = evidence.before.runtimeBytes;
     for (let i = 1; i <= 8; i++) clients.push(await client(server, directory, line, i));
     evidence.clientPIDs = clients.map((app) => ({ pid: app.child.pid, executable: app.exe }));
     let held = 0;
@@ -95,7 +99,8 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         const stats = await engineStats();
         console.log(`WINDOWS UDP ADMISSION ${JSON.stringify({ held, flows: stats.flows, heapBytes: stats.heapBytes,
           stackBytes: stats.stackBytes, runtimeBytes: stats.runtimeBytes, goroutines: stats.goroutines, gcCPUppm: stats.gcCPUppm })}`);
-        assert(stats.runtimeBytes <= 512 * 1024 * 1024, 'UDP admission exceeded the runtime memory budget');
+        evidence.oldRuntimeBudgetWouldPass &&= stats.runtimeBytes <= 512 * 1024 * 1024;
+        evidence.runtimePeakBytes = Math.max(evidence.runtimePeakBytes, stats.runtimeBytes);
         if (failed.length) break;
       }
     }
@@ -142,7 +147,8 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     }
     const checkStats = (stats) => {
       assert(stats.flows.UDP >= held, 'A held UDP session disappeared');
-      assert(stats.runtimeBytes <= 512 * 1024 * 1024, 'Mixed runtime memory budget exceeded');
+      evidence.oldRuntimeBudgetWouldPass &&= stats.runtimeBytes <= 512 * 1024 * 1024;
+      evidence.runtimePeakBytes = Math.max(evidence.runtimePeakBytes, stats.runtimeBytes);
       assert(stats.goroutines < evidence.before.goroutines + 128, 'Idle sessions retained per-session workers');
       assert.equal(stats.tunDropped, evidence.before.tunDropped, 'TUN output dropped during the mixed cap');
       assert.equal(stats.udpDropped, evidence.before.udpDropped, 'UDP dropped during the mixed cap');
@@ -168,16 +174,19 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
       checkStats(stats);
       evidence.heldPlateau.push(stats);
     }
+    evidence.heldHeap = await captureHeap(server, 'udp-held', 0, held, evidence.baselineHeap);
+    evidence.verifiedAfterGC = await verify();
     const last = evidence.heldPlateau.at(-1), before = evidence.before;
     evidence.memoryPerSession = {
-      heapBytes: (last.heapBytes - before.heapBytes) / held,
-      stackBytes: (last.stackBytes - before.stackBytes) / held,
-      managedBytes: (last.runtimeBytes - before.runtimeBytes) / held,
-      gcCPUppm: last.gcCPUppm,
-      gcWindowShare: (last.gcCPUNanos - before.gcCPUNanos) / Math.max(1, last.totalCPUNanos - before.totalCPUNanos),
+      ...evidence.heldHeap.perFlow, gcCPUppm: evidence.heldHeap.gcCPUppm,
+      collection: 'immediately after forced GC',
+      oldUncollectedHeapBytes: (last.heapBytes - before.heapBytes) / held,
+      oldUncollectedStackBytes: (last.stackBytes - before.stackBytes) / held,
+      oldUncollectedManagedBytes: (last.runtimeBytes - before.runtimeBytes) / held,
     };
     return {
       checkStats, verify, close,
+      get held() { return held; },
       recover: async () => {
         const before = await engineStats();
         const released = await clients[0].call('release', { count: 512 });

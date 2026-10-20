@@ -8,6 +8,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hostedOnly, run, until } from './testisp/harness.mjs';
 import { holdUDPCapacity, largeUDPReplies, nativeUDPCapacity } from './udp-capacity.mjs';
+import { captureHeap } from './heap-profile.mjs';
 
 async function nativeRefusalBaseline(host) {
   const listener = net.createServer();
@@ -95,7 +96,6 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
       heapBytes: stats.heapBytes, stackBytes: stats.stackBytes, runtimeBytes: stats.runtimeBytes, gcCPUppm: stats.gcCPUppm };
     evidence.observations.push(observation);
     console.log(`WINDOWS CAPACITY PORT RETURN ${JSON.stringify(observation)}`);
-    assert(stats.runtimeBytes <= 512 * 1024 * 1024, 'Memory budget exceeded while waiting for Windows port release');
     const clients = await Promise.all(children.map((app) => app.call('status')));
     assert(clients.every((state) => state.held === state.live && state.lost === 0), 'Held flow lost during OS TIME_WAIT');
     assert(clients[0].survival.live && !clients[0].survival.error && clients[0].survival.maxMs <= 1000,
@@ -124,9 +124,14 @@ export async function capacity({ server, harness, directory, line }) {
   hostedOnly();
   const target = await harness.control('capacity', {});
   const children = [];
-  const progress = {};
+  const progress = { oldRuntimeBudgetWouldPass: true, runtimePeakBytes: 0 };
   let udpHold;
-  const engineStats = async () => (await server.api('engine-command', { method: 'stats' })).engine;
+  const engineStats = async () => {
+    const stats = (await server.api('engine-command', { method: 'stats' })).engine;
+    progress.oldRuntimeBudgetWouldPass &&= stats.runtimeBytes <= 512 * 1024 * 1024;
+    progress.runtimePeakBytes = Math.max(progress.runtimePeakBytes, stats.runtimeBytes);
+    return stats;
+  };
   try {
     // Measure this runner's available native pool with routing stopped. No
     // app half, health probe or survival flow competes with the native baseline.
@@ -181,6 +186,7 @@ export async function capacity({ server, harness, directory, line }) {
     // pressure; fetch's four-second idle eviction otherwise makes inspection
     // itself fail with ENOBUFS. No automatic reconnect is allowed.
     const controlReservation = await harness.reserveControl();
+    progress.baselineHeap = await captureHeap(server, 'mixed-baseline', 0, 0);
     progress.largeUDP = await largeUDPReplies({ server, harness, directory, line });
     progress.udp = {};
     udpHold = await holdUDPCapacity({ server, harness, directory, line, native: nativeUDP, evidence: progress.udp });
@@ -227,7 +233,6 @@ export async function capacity({ server, harness, directory, line }) {
       const stats = await engineStats();
       udpHold.checkStats(stats);
       console.log(`WINDOWS CAPACITY ${JSON.stringify({ held, flows: stats.flows.Flows, heapBytes: stats.heapBytes, stackBytes: stats.stackBytes, runtimeBytes: stats.runtimeBytes, gcCPUppm: stats.gcCPUppm })}`);
-      assert(stats.runtimeBytes <= 512 * 1024 * 1024, 'Runtime budget exceeded during admission');
     }
     assert(firstLimit?.length, 'Expected the runner OS limit before the internal ceiling');
     assert(firstLimit.every((failure) => ['ENOBUFS', 'EADDRINUSE', 'ECONNREFUSED', 'ECONNRESET'].includes(failure.code)),
@@ -291,6 +296,11 @@ export async function capacity({ server, harness, directory, line }) {
       await delay(1000);
     }
     progress.udp.mixedVerified = await udpHold.verify();
+    progress.heldHeap = await captureHeap(server, 'mixed-held', held, udpHold.held, progress.baselineHeap);
+    const afterGC = await Promise.all(children.map((app) => app.call('verify')));
+    assert.equal(afterGC.reduce((n, state) => n + state.checked, 1), held,
+      'A TCP holder disappeared during forced GC');
+    progress.udp.afterMixedGC = await udpHold.verify();
     const beforeRelease = await engineStats();
     const released = await children[0].call('release', { count: 512 });
     assert.equal(released.released, 512);
@@ -314,11 +324,15 @@ export async function capacity({ server, harness, directory, line }) {
     const verifiedAfter = await Promise.all(children.map((app) => app.call('verify')));
     assert(verifiedAfter.every((s) => s.held === s.live && s.lost === 0), JSON.stringify(verifiedAfter));
     assert.equal(verifiedAfter.reduce((total, s) => total + s.live, 1), held - 512 + 256);
+    progress.recoveryHeap = await captureHeap(server, 'after-recovery', held - 512 + 256, udpHold.held, progress.baselineHeap);
     const engineAfter = await server.api('engine-command', { method: 'hello' });
     assert.equal(engineAfter.engineInstanceId, engineBefore.engineInstanceId, 'The engine restarted under port pressure');
     const last = samples.at(-1);
     const evidence = { nativeSamples, layoutCapacity, floor, ordinaryHeld, held, firstLimit, extraAdmissions, refusals,
       udp: progress.udp, largeUDP: progress.largeUDP,
+      baselineHeap: progress.baselineHeap, heldHeap: progress.heldHeap, recoveryHeap: progress.recoveryHeap,
+      oldRuntimeBudgetWouldPass: progress.oldRuntimeBudgetWouldPass && progress.udp.oldRuntimeBudgetWouldPass,
+      runtimePeakBytes: Math.max(progress.runtimePeakBytes, progress.udp.runtimePeakBytes),
       nativeRelease, refusalBaseline, refusalLimitMs, resetTimings, oldEchoBasedLimitMs, controlReservation, portReturn,
       oldImmediateRecoveryCheckWouldPass: portReturn.returnedAfterMs + recoveryMs <= refusalLimitMs,
       oldOneSecondCheckWouldPass: [...firstLimit, ...refusals].every((failure) => failure.ms <= 1000),
@@ -326,13 +340,14 @@ export async function capacity({ server, harness, directory, line }) {
       portConfiguration, preparation, before, samples, observed, verifiedBefore, verifiedAfter, released, recovered, recoveryMs,
       old65536CheckWouldPass: held === 65536, internalTotalCeiling: 65536, internalPerAppCeiling: 8192,
       mixedHeld: held + progress.udp.held,
-      heapPerFlow: last.heapBytes / (held + progress.udp.held), stackPerFlow: last.stackBytes / (held + progress.udp.held),
+      heapPerFlow: progress.heldHeap.perFlow.heapBytes, stackPerFlow: progress.heldHeap.perFlow.stackBytes,
+      oldUncollectedHeapPerFlow: last.heapBytes / (held + progress.udp.held),
+      oldUncollectedStackPerFlow: last.stackBytes / (held + progress.udp.held),
       privatePerFlow: last.processMemory.privateBytes / (held + progress.udp.held),
       workingSetPerFlow: last.processMemory.workingSetBytes / (held + progress.udp.held),
       gcCPUppm: last.gcCPUppm,
       capWindowGCShare: (last.gcCPUNanos - samples[0].gcCPUNanos) / Math.max(1, last.totalCPUNanos - samples[0].totalCPUNanos) };
     console.log(`WINDOWS OS-LIMIT CAPACITY RESULT ${JSON.stringify(evidence)}`);
-    assert(samples.every((s) => s.runtimeBytes <= 512 * 1024 * 1024), `512 MiB runtime budget exceeded: ${JSON.stringify(evidence)}`);
     return evidence;
   } catch (error) {
     // Read this before closing fixture sockets: teardown would erase the

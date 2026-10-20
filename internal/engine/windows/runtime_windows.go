@@ -142,6 +142,11 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 		}
 	}
 	e.OnFatal, routes.Fatal, server.OnCleanupFailure = fail, fail, fail
+	stopProfile, err := startHeapProfile(routes.Instance, standalone)
+	if err != nil {
+		return err
+	}
+	defer func() { err = errors.Join(err, stopProfile()) }()
 	pipe, err := ListenPipe(EnginePipe, standalone)
 	if err != nil {
 		return err
