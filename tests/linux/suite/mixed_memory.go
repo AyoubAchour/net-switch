@@ -51,6 +51,31 @@ func (e *Env) checkCapacityMemory(label string, st engine.Stats) {
 	e.T.Logf("MEMORY %s availability: RSS=%t kernel-socket=%t (unavailable readings are not zero-memory claims)", label, st.Counters["rssMeasured"] == 1, st.Counters["kernelSocketMeasured"] == 1)
 }
 
+// fullIdentifiedApp says whether one app filled its identified per-app pool
+// of TCP plus UDP, judged by the servers alone: its held TCP connections
+// whose probe a server saw arrive from the app's pinned line, plus its UDP
+// sockets whose datagram did. Explicit unknown owners leave on main a and
+// sit in their own pool, so they never count, and neither may a pin to a.
+// The engine's counts and peaks play no part. Each tuple's engine identity
+// and route is checked against the same server records separately
+// (floodSessions, checkHeldTCP), so a misattributed or misrouted socket
+// fails there rather than passing here.
+func fullIdentifiedApp(tcp app.HeldList, udp sessions, line engine.LineID) (full bool, tcpOn, udpOn int) {
+	if line == "a" {
+		return false, 0, 0
+	}
+	unique := map[string]bool{}
+	for _, c := range tcp.Conns {
+		key := c.Local + " " + c.Remote
+		if !unique[key] && topo.LineOfText(c.Seen) == line {
+			tcpOn++
+		}
+		unique[key] = true
+	}
+	udpOn = udp.serverLines[line]
+	return udpOn > 0 && tcpOn+udpOn == tcpFlowsPerApp, tcpOn, udpOn
+}
+
 func mixedCaps(e *Env) {
 	// The total flow limit includes UDP. Filling both §5.9 caps therefore
 	// means 65,536 - 16,384 TCP flows, plus the separately capped TIME_WAIT.
@@ -123,7 +148,10 @@ func mixedCaps(e *Env) {
 	}
 	fullCombinedApp := false
 	for _, name := range udpNames {
-		fullCombinedApp = fullCombinedApp || held[name].Established+udpHeld[name].gotOut == tcpFlowsPerApp
+		ok, tcpOn, udpOn := fullIdentifiedApp(held[name], udpHeld[name], e.loadLine(name))
+		e.T.Logf("MIXED APP POOL %s: servers saw %d TCP and %d UDP sockets from line %s, full=%t; old engine-inclusive verdict=%t",
+			name, tcpOn, udpOn, e.loadLine(name), ok, held[name].Established+udpHeld[name].gotOut == tcpFlowsPerApp)
+		fullCombinedApp = fullCombinedApp || ok
 	}
 	tcpCredit := e.capacityAccounting("mixed TCP", "tcp", withTW, full, 80000+capacityTailAttempts, total, refused, capacityMixed, fullCombinedApp)
 	e.T.Check(full.Flows == int64(total)+udpStats.UDP, "mixed accounting matches every held TCP and UDP socket (%d = %d + %d)", full.Flows, total, udpStats.UDP)

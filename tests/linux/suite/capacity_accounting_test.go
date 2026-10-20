@@ -4,11 +4,13 @@ package suite
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/AyoubAchour/net-switch/tests/linux/app"
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
 	"github.com/AyoubAchour/net-switch/tests/linux/harness"
 )
@@ -152,18 +154,70 @@ func TestUDPAccountingRequiresExactDecisionCountAndRealSessions(t *testing.T) {
 	}
 }
 
-func TestMixedCapacityAcceptsOnlyAnActuallyFullCombinedAppPool(t *testing.T) {
-	for _, independent := range []bool{false, true} {
-		s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{PerApp: 50, Unknown: 10}, PeakPerApp: 8192, PeakUnknown: 2048, Counters: map[string]uint64{"tcpRejected": 60, "forcedGCHeapBytes": 400 << 20}}
-		report := runCapacityCheck(t, func(e *Env) {
-			credit := e.capacityAccounting("mixed", "tcp", engine.Stats{}, s, 150, 90, 60, capacityMixed, independent)
-			e.exactCapacity("mixed", 90, 100, credit)
-		})
-		if !independent {
-			requireFailure(t, report, "UDP-holding client app")
-		} else if report.JobFailed {
-			t.Fatal(report)
+// mixedApp builds one app's server-side view: TCP connections whose probes
+// the servers saw from each source address, and UDP sockets per line.
+func mixedApp(tcp map[string]int, udp map[engine.LineID]int) (app.HeldList, sessions) {
+	var list app.HeldList
+	for _, src := range []string{"203.0.113.2", "192.0.2.1", "192.0.2.5", ""} {
+		for range tcp[src] {
+			c := app.Held{Local: fmt.Sprintf("10.0.%d.%d:%d", len(list.Conns)/250, len(list.Conns)%250, 40000+len(list.Conns)%20000), Remote: "198.51.100.10:7"}
+			if src != "" {
+				c.Seen = fmt.Sprintf("%s:%d", src, 30000+len(list.Conns))
+			}
+			list.Conns = append(list.Conns, c)
 		}
+	}
+	list.Established = len(list.Conns)
+	return list, sessions{serverLines: udp}
+}
+
+func TestMixedCapacityCountsOnlyServerObservedIdentifiedSockets(t *testing.T) {
+	const c, a, b = "203.0.113.2", "192.0.2.1", "192.0.2.5"
+	for _, test := range []struct {
+		name string
+		tcp  map[string]int
+		udp  map[engine.LineID]int
+		line engine.LineID
+		dupe bool
+		full bool
+		on   [2]int
+	}{
+		{"full with an unknown TCP extra", map[string]int{c: 4192, a: 1}, map[engine.LineID]int{"c": 4000}, "c", false, true, [2]int{4192, 4000}},
+		{"full with an unknown UDP extra", map[string]int{c: 4192}, map[engine.LineID]int{"c": 4000, "a": 1}, "c", false, true, [2]int{4192, 4000}},
+		{"full with unknown extras on both", map[string]int{c: 4192, a: 3}, map[engine.LineID]int{"c": 4000, "a": 2}, "c", false, true, [2]int{4192, 4000}},
+		{"one short, an unknown TCP makes 8192", map[string]int{c: 4191, a: 1}, map[engine.LineID]int{"c": 4000}, "c", false, false, [2]int{4191, 4000}},
+		{"one short, an unknown UDP makes 8192", map[string]int{c: 4192}, map[engine.LineID]int{"c": 3999, "a": 1}, "c", false, false, [2]int{4192, 3999}},
+		{"TCP-only app", map[string]int{c: 8192}, nil, "c", false, false, [2]int{8192, 0}},
+		{"TCP-only app with unknown UDP", map[string]int{c: 8192}, map[engine.LineID]int{"a": 1}, "c", false, false, [2]int{8192, 0}},
+		{"TCP left on the wrong line", map[string]int{c: 4191, b: 1}, map[engine.LineID]int{"c": 4000}, "c", false, false, [2]int{4191, 4000}},
+		{"UDP left on the wrong line", map[string]int{c: 4192}, map[engine.LineID]int{"c": 3999, "b": 1}, "c", false, false, [2]int{4192, 3999}},
+		{"TCP without a server observation", map[string]int{c: 4191, "": 1}, map[engine.LineID]int{"c": 4000}, "c", false, false, [2]int{4191, 4000}},
+		{"over the cap", map[string]int{c: 4193}, map[engine.LineID]int{"c": 4000}, "c", false, false, [2]int{4193, 4000}},
+		{"repeated tuple counts once", map[string]int{c: 4191}, map[engine.LineID]int{"c": 4000}, "c", true, false, [2]int{4191, 4000}},
+		{"pin to main cannot separate unknowns", map[string]int{a: 4192}, map[engine.LineID]int{"a": 4000}, "a", false, false, [2]int{0, 0}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			list, udp := mixedApp(test.tcp, test.udp)
+			if test.dupe {
+				list.Conns = append(list.Conns, list.Conns[0])
+				list.Established++
+			}
+			full, tcpOn, udpOn := fullIdentifiedApp(list, udp, test.line)
+			if full != test.full || [2]int{tcpOn, udpOn} != test.on {
+				t.Fatalf("got full=%t TCP=%d UDP=%d, want full=%t %v", full, tcpOn, udpOn, test.full, test.on)
+			}
+			// The verdict is the only thing that lets a mixed per-app refusal pass.
+			s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{PerApp: 50, Unknown: 10}, PeakPerApp: 8192, PeakUnknown: 2048, Counters: map[string]uint64{"tcpRejected": 60, "forcedGCHeapBytes": 400 << 20}}
+			report := runCapacityCheck(t, func(e *Env) {
+				credit := e.capacityAccounting("mixed", "tcp", engine.Stats{}, s, 150, 90, 60, capacityMixed, full)
+				e.exactCapacity("mixed", 90, 100, credit)
+			})
+			if !test.full {
+				requireFailure(t, report, "UDP-holding client app")
+			} else if report.JobFailed {
+				t.Fatal(report)
+			}
+		})
 	}
 }
 

@@ -108,6 +108,9 @@ type sessions struct {
 	unknown                   int // matched by the client's own local endpoint, never by its label
 	refusedButOut             int // refused, yet the datagram got out anyway
 	lostOut, lostBack         int // never reached a server and never refused; or reached one and never answered
+	// serverLines counts the sockets that reached a server by the line the
+	// server saw them arrive from: the servers' own view, never the engine's.
+	serverLines map[engine.LineID]int
 }
 
 func (s sessions) admitted() int   { return max(s.gotOut, s.listed) }
@@ -139,7 +142,10 @@ func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) 
 				serverLine[i] = topo.LineOfText(rec.Src)
 			}
 		}
-		s := sessions{opened: r.Opened, answered: r.Answered, refused: r.Refused, gotOut: len(seen), listed: listed[AppPath(name)]}
+		s := sessions{opened: r.Opened, answered: r.Answered, refused: r.Refused, gotOut: len(seen), listed: listed[AppPath(name)], serverLines: map[engine.LineID]int{}}
+		for _, line := range serverLine {
+			s.serverLines[line]++
+		}
 		if _, ok := e.Eng.(engine.V1); ok {
 			e.T.Require(len(r.Locals) == r.Opened, "%s reports every local UDP endpoint (%d of %d)", name, len(r.Locals), r.Opened)
 			unique := map[string]bool{}
