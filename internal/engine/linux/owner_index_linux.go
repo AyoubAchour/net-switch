@@ -7,6 +7,7 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const ownerIndexShards = 64
@@ -16,6 +17,49 @@ type ownerIndex struct {
 	mu      sync.Mutex
 	inodes  map[uint32]inodeHolders
 	waiters map[uint32]*inodeWaiter
+	cookies map[uint64]cachedHolders
+}
+
+func (o *Owners) cookieIndex(cookie uint64) *ownerIndex {
+	return &o.index[maphash.Comparable(o.indexSeed, cookie)%ownerIndexShards]
+}
+
+func (o *Owners) cachedHolders(cookie uint64) []holder {
+	s := o.cookieIndex(cookie)
+	s.mu.Lock()
+	h := s.cookies[cookie].holders
+	s.mu.Unlock()
+	return h
+}
+
+func (o *Owners) cacheHolders(cookie uint64, holders []holder) {
+	s := o.cookieIndex(cookie)
+	s.mu.Lock()
+	if s.cookies == nil {
+		s.cookies = make(map[uint64]cachedHolders, 16)
+	}
+	s.cookies[cookie] = cachedHolders{holders, time.Now()}
+	s.mu.Unlock()
+}
+
+func (o *Owners) forgetCookie(cookie uint64) {
+	s := o.cookieIndex(cookie)
+	s.mu.Lock()
+	delete(s.cookies, cookie)
+	s.mu.Unlock()
+}
+
+func (o *Owners) pruneCookies(live map[uint64]bool, started time.Time) {
+	for i := range o.index {
+		s := &o.index[i]
+		s.mu.Lock()
+		for cookie, cached := range s.cookies {
+			if !live[cookie] && cached.observed.Before(started) {
+				delete(s.cookies, cookie)
+			}
+		}
+		s.mu.Unlock()
+	}
 }
 
 func (o *Owners) indexFor(inode uint32) *ownerIndex {

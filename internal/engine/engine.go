@@ -332,6 +332,15 @@ func (e *Engine) Stats() any {
 		s["tcpInvalid"] = e.tcp.Invalid.Load()
 		s["tcpDialFailed"] = e.tcp.DialFailed.Load()
 	}
+	if e.stack != nil {
+		stats := e.stack.Stats()
+		s["tcpSegmentsSent"] = stats.TCP.SegmentsSent.Value()
+		s["tcpRetransmits"] = stats.TCP.Retransmits.Value()
+		s["tcpRTOs"] = stats.TCP.Timeouts.Value()
+		s["tcpSACKRecoveries"] = stats.TCP.SACKRecovery.Value()
+		s["tcpSpuriousRTOs"] = stats.TCP.SpuriousRTORecovery.Value()
+		s["transportDropped"] = stats.DroppedPackets.Value()
+	}
 	if e.udp != nil {
 		s["udpRejected"] = e.udp.Rejected.Load()
 		s["udpInvalid"] = e.udp.Invalid.Load()
