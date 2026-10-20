@@ -38,6 +38,7 @@ type readiness struct {
 	capture     bool
 	closes      [1024]nativeSocketClose
 	closedCount uint64
+	poll        func([]pollFD) int32
 }
 
 type nativeSocketClose struct {
@@ -66,7 +67,7 @@ func newReadiness() (*readiness, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &readiness{port: winhandle.Open(port, "TCP completion port open"), watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{}, stop: make(chan struct{}), capture: hostedTraceEnabled()}
+	p := &readiness{port: winhandle.Open(port, "TCP completion port open"), watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{}, stop: make(chan struct{}), capture: hostedTraceEnabled(), poll: pollWritable}
 	p.wg.Go(p.completions)
 	p.wg.Go(p.pollWrites)
 	return p, nil
@@ -151,6 +152,11 @@ type pollFD struct {
 	Events, Returned int16
 }
 
+func pollWritable(rows []pollFD) int32 {
+	n, _, _ := winsock.NewProc("WSAPoll").Call(uintptr(unsafe.Pointer(&rows[0])), uintptr(len(rows)), 0)
+	return int32(n)
+}
+
 func (p *readiness) pollWrites() {
 	var rows []pollFD
 	var watches []*socketWatch
@@ -164,15 +170,19 @@ func (p *readiness) pollWrites() {
 			rows = append(rows, pollFD{Socket: w.socket.Handle("TCP write poll snapshot"), Events: 0x10}) // POLLWRNORM.
 			watches = append(watches, w)
 		}
-		p.mu.Unlock()
 		if len(rows) == 0 {
+			p.mu.Unlock()
 			continue
 		}
 		for _, w := range watches {
 			w.socket.Handle("TCP write poll call")
 		}
-		n, _, _ := winsock.NewProc("WSAPoll").Call(uintptr(unsafe.Pointer(&rows[0])), uintptr(len(rows)), 0)
-		if int32(n) <= 0 {
+		// Detach removes the writer under this same mutex before its owner
+		// closes the socket. Keep the borrow through the nonblocking query,
+		// not just through copying the numeric values into rows.
+		n := p.poll(rows)
+		p.mu.Unlock()
+		if n <= 0 {
 			continue
 		}
 		for i, row := range rows {
