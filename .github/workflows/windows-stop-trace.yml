@@ -1,0 +1,36 @@
+name: Windows stop trace analysis
+
+on:
+  push:
+    branches: [engine/windows-platform-trace]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Read the already captured Windows trace
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 39494705642 --repo AyoubAchour/net-switch --name windows-engine-focus-ARM64 --dir dist
+      - name: Explain waits without running the engine
+        run: node tests/windows/stop-trace.mjs
