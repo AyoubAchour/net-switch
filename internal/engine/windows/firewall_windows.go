@@ -282,6 +282,8 @@ func inspectWFP(o *objects, kind string, fp journal.Fingerprint) (journal.Finger
 		defer wfpDLL.NewProc("FwpmFreeMemory0").Call(uintptr(unsafe.Pointer(&row)))
 		if !matchesWFPFilter(row, fp) {
 			live["changed"] = "1"
+		} else if row.Flags&32 != 0 && !o.recovering {
+			return nil, false, errors.New("owned WFP permission is disabled")
 		}
 	}
 	return live, true, nil
