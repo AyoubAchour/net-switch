@@ -198,6 +198,8 @@ jobs:
         # A timing failure stays red, but must not hide independent packet and
         # lifecycle evidence. This is intentionally not continue-on-error.
         if: ${{ !cancelled() && steps.native-build.outcome == 'success' && steps.native-dll.outcome == 'success' }}
+        env:
+          NETSWITCH_ENGINE_TEST_TRACE: '1'
         run: |
           node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

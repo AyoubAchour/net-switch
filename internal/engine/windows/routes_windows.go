@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"net/netip"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -25,7 +27,18 @@ import (
 type bindingTable map[string]Adapter
 
 func (r *Routes) StopPhase(name string) func() {
-	return r.timings.begin("engine.stop." + name)
+	finish := r.timings.begin("engine.stop." + name)
+	if r.trace == nil || (name != "tcp-join" && name != "stack-join") {
+		return finish
+	}
+	// Hosted-only evidence for a slow join; never enabled on a user's machine.
+	timer := time.AfterFunc(10*time.Millisecond, func() {
+		b := make([]byte, 256<<10)
+		n := runtime.Stack(b, true)
+		record, _ := json.Marshal(map[string]any{"instance": r.Instance, "operation": "stop-wait", "phase": name, "stacks": string(b[:n])})
+		log.Printf("WINDOWS LIFECYCLE %s", record)
+	})
+	return func() { timer.Stop(); finish() }
 }
 
 type Routes struct {
