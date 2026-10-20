@@ -115,6 +115,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Measure real held flows without waiting for unrelated cases
         if: ${{ !cancelled() && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
+        env:
+          NETSWITCH_ENGINE_TEST_TRACE: '1'
         run: |
           node tests/windows/capacity-profile.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
