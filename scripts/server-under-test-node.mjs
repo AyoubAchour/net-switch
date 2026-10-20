@@ -5,6 +5,7 @@ import path from 'node:path';
 import { createServer } from '../lib/server-factory.mjs';
 import { Engine } from '../lib/engine.mjs';
 import { platformFor } from '../lib/platform/index.mjs';
+import { installHttpsConfigWriter } from './control-test-https.mjs';
 
 const value = (flag) => {
   const i = process.argv.indexOf(flag);
@@ -15,4 +16,6 @@ const mode = process.argv.includes('--dev-proxy') ? 'proxy' : 'tun';
 if (mode === 'tun' && (process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted')) {
   throw new Error('TUN control tests require a disposable GitHub-hosted runner.');
 }
-await createServer({ engine: new Engine({ platform: platformFor(), singBoxPath: value('--engine-executable'), dataDir: value('--machine-data'), mode }) });
+const dataDir = value('--machine-data');
+installHttpsConfigWriter(dataDir);
+await createServer({ engine: new Engine({ platform: platformFor(), singBoxPath: value('--engine-executable'), dataDir, mode }) });

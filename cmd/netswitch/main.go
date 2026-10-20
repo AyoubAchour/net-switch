@@ -245,7 +245,7 @@ func run() (runErr error) {
 		log.append("the control journal was damaged: " + journal.Recovery.Reason)
 	}
 	engineLog := &logger{path: filepath.Join(*machine, "engine.log")}
-	adapter = singbox.New(singbox.Options{Executable: path, DataDir: *machine, Mode: mode, Platform: system, Log: engineLog.append, Files: ioOptions, Crash: crash})
+	adapter = singbox.New(singbox.Options{Executable: path, DataDir: *machine, Mode: mode, Platform: system, Log: engineLog.append, Files: controlTestFiles(ioOptions), Crash: crash})
 	installed := false
 	pf, err := win.ProgramFiles()
 	if err != nil {

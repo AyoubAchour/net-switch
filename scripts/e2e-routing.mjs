@@ -1,8 +1,8 @@
 // Checks that routing really sends new connections where the rules say, with
 // the real engine: the main line by default, an app's own line once it is
-// pinned there, and every line while combining. Runs the server in test mode
-// (a local proxy instead of the network adapter, so no administrator rights
-// and nothing else on the PC changes), with both lines on the same adapter:
+// pinned there, and every line while combining. Runs on a disposable hosted
+// Windows runner with a local TLS fixture. The server uses test mode
+// (a local proxy instead of the network adapter), with both lines on one adapter:
 // lines are told apart by the engine's outbound, not by the adapter.
 //
 //   node scripts/e2e-routing.mjs [--engine-dir path\to\engine]
@@ -20,14 +20,19 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { connect as tlsConnect } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { randomBytes } from 'node:crypto';
 import { killTree, runPowerShellJson } from '../lib/ps.mjs';
 import { launchServer, recordServerAndEngine, isNodeServer, launchSpec } from './server-under-test.mjs';
 import { verifyEngineProcess } from '../tests/windows/launch.mjs';
+import { localHttps } from './tun-test-https.mjs';
+import { hostedOnly } from '../tests/windows/testisp/harness.mjs';
 
+hostedOnly();
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Windows names a program by its real path; Node may run through a link (nvm).
 const SELF = realpathSync.native(process.execPath);
-const TARGET = { host: '1.1.1.1', port: 443, path: '/cdn-cgi/trace' };
+const publicTarget = { host: '1.1.1.1', port: 443, path: '/cdn-cgi/trace', servername: 'one.one.one.one', publicTrace: true };
+let httpsResponder, localTarget;
 
 const dataDir = await mkdtemp(path.join(tmpdir(), 'net-switch-e2e-'));
 await recordServerAndEngine();
@@ -103,7 +108,8 @@ async function routingOn() {
 // One deadline covers the proxy, TLS and the answer; any other answer, or the
 // connection closing first, fails the request instead of hanging the test.
 const REQUEST_TIMEOUT_MS = 20_000;
-function connectThroughProxy(proxyPort) {
+function connectThroughProxy(proxyPort, target = localTarget) {
+  const nonce = randomBytes(16).toString('hex');
   return new Promise((resolve, reject) => {
     let settled = false;
     const sockets = [];
@@ -112,19 +118,21 @@ function connectThroughProxy(proxyPort) {
       settled = true;
       clearTimeout(timer);
       for (const socket of sockets) socket.destroy();
-      reject(error);
+      reject(error.code === 'ECONNRESET'
+        ? new Error(`transport reset (origin unproven): ${target.host}:${target.port} (${error.message})`, { cause: error }) : error);
     };
     const timer = setTimeout(() => fail(new Error('the request through the proxy took too long')), REQUEST_TIMEOUT_MS);
-    const tunnel = request({ host: '127.0.0.1', port: proxyPort, method: 'CONNECT', path: `${TARGET.host}:${TARGET.port}` });
+    const tunnel = request({ host: '127.0.0.1', port: proxyPort, method: 'CONNECT', path: `${target.host}:${target.port}` });
     tunnel.on('error', fail);
     tunnel.on('connect', (response, socket) => {
       sockets.push(socket);
       if (response.statusCode !== 200) {
-        fail(new Error(`the proxy answered ${response.statusCode}`));
+        fail(new Error(`local proxy CONNECT failed: HTTP ${response.statusCode}`));
         return;
       }
-      const secure = tlsConnect({ socket, servername: 'one.one.one.one' }, () => {
-        secure.write(`GET ${TARGET.path} HTTP/1.1\r\nHost: one.one.one.one\r\nConnection: keep-alive\r\n\r\n`);
+      const secure = tlsConnect({ socket, servername: target.servername, ca: target.ca }, () => {
+        if (!secure.authorized) { fail(new Error(`TLS verification failed: ${secure.authorizationError}`)); return; }
+        secure.write(`GET ${target.path ?? `/?nonce=${nonce}`} HTTP/1.1\r\nHost: ${target.servername}\r\nConnection: keep-alive\r\n\r\n`);
       });
       sockets.push(secure);
       let text = '';
@@ -134,15 +142,27 @@ function connectThroughProxy(proxyPort) {
         if (!text.includes('\r\n\r\n')) return;
         const status = /^HTTP\/1\.[01] (\d{3})/.exec(text)?.[1];
         if (status !== '200') {
-          fail(new Error(`the site answered ${status ?? 'something unreadable'}`));
+          const label = target.publicTrace && secure.authorized && /^5\d\d$/.test(status) ? 'public target unavailable: ' : '';
+          fail(new Error(`${label}the site answered ${status ?? 'something unreadable'}`));
           return;
+        }
+        const body = text.slice(text.indexOf('\r\n\r\n') + 4);
+        if (target.publicTrace) {
+          if (!/(?:^|\n)ip=[^\r\n]+\r?\n/.test(body)) return;
+        } else {
+          const length = Number(/\r\ncontent-length:\s*(\d+)/i.exec(text)?.[1]);
+          if (!length) { fail(new Error('Local HTTPS response has no content length')); return; }
+          if (Buffer.byteLength(body) < length) return;
+          try { check(JSON.parse(body).nonce === nonce, 'local HTTPS response echoes this request'); }
+          catch (error) { fail(error); return; }
         }
         settled = true;
         clearTimeout(timer);
         open.push(secure);
         resolve(secure);
       });
-      secure.on('end', () => fail(new Error('the site closed the connection before answering')));
+      secure.on('end', () => fail(new Error('early close (origin unproven): connection ended before the HTTPS answer')));
+      secure.on('close', () => fail(new Error('early close (origin unproven): connection closed before the HTTPS answer')));
       secure.on('error', fail);
     });
     tunnel.end();
@@ -220,6 +240,17 @@ try {
   const second = state.lines[1];
   const proxyPort = state.routing.proxyPort;
 
+  const address = await runPowerShellJson(`(Get-NetIPAddress -InterfaceAlias '${main.alias.replaceAll("'", "''")}' -AddressFamily IPv4 | Where-Object AddressState -eq 'Preferred' | Select-Object -First 1).IPAddress | ConvertTo-Json -Compress`);
+  httpsResponder = await localHttps(address);
+  localTarget = { ...httpsResponder.target, host: address, port: httpsResponder.port };
+  // Exactly one public request: a local peer cannot prove real internet egress.
+  // No held-socket/count assertion relies on this independently owned server.
+  if (!process.argv.includes('--public-via-tun')) {
+    await connectThroughProxy(proxyPort, publicTarget);
+    check(true, 'one public HTTPS trace proves real internet egress through the selected Control proxy');
+    await closeAll();
+  }
+
   await openMany(3, proxyPort);
   let counts = await connectionsPerLine(3);
   check(counts[main.id] === 3 && !counts[second.id], `without a choice, connections use the main line (${JSON.stringify(counts)})`);
@@ -279,6 +310,7 @@ try {
   console.error(log.split('\n').slice(-40).join('\n'));
 } finally {
   for (const socket of open.splice(0)) socket.destroy();
+  if (httpsResponder) await httpsResponder.close();
   // Quit the normal way, so the engine stops too; else end the whole tree.
   if (server.exitCode === null && session) await api('quit', {}).catch(() => {});
   await delay(1000);

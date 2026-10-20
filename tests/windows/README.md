@@ -69,8 +69,30 @@ Its HTTPS peer is local, with a fresh certificate trusted only by the client.
 One non-final destination rewrite leaves the real pins, selectors and bound
 outbounds in charge. TestISP counters prove the bb path, and client port reuse
 plus the responder's socket identity prove the original connections survive.
-All 20 lifecycle cycles use the unchanged product config. This job has no public
-traffic target; the default control-service mode keeps its public trace probes.
+Control now uses that same local TLS peer and path assertions. The Node test
+launcher intercepts only its engine-config write; Go's `control_test_https`
+build uses the existing file-I/O seam. The normal Go binary contains no fixture
+reader. Both save the original config and assert that the one non-final rule
+and `log.level=info` are the entire difference. Startup and shutdown still belong to Control.
+The marker is removed before all 20 ordinary lifecycle cycles.
+
+Control sends one public trace request through the TUN on physical line aa,
+with verified TLS and an engine record proving the app, source port and line.
+Its preceding proxy-routing run uses `--public-via-tun` to avoid a second
+public request. Standalone proxy-routing runs retain their one public request;
+the direct engine-adapter TUN mode stays local. All held-socket assertions use
+local TLS. This is a count of explicit test requests, not
+the product's background line-health probes. See
+[the target inventory](control-https-inventory.md) for those and the separate
+acceptance/TestISP suites.
+
+Before cleanup after a failure, Control TUN records fresh Control state,
+independent 2.5-second engine API probes, two CPU/memory/thread samples of the
+PID in `engine.pid`, Windows TCP rows and NetSwitch adapter counters. Client
+request/connect/secureConnect timestamps and responder FIN/error/close events
+join source ports to responder connection IDs. The traffic engine's info log
+is printed on failure and saved with the artifacts; ordinary lifecycle runs
+restore the product's warn log level.
 
 ## Classification
 
