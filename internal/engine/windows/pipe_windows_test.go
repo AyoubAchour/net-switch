@@ -237,9 +237,9 @@ func TestPipeDisconnectedBeforeAcceptIsRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer p.Close()
+	defer func() { p.Close() }()
 	name, _ := windows.UTF16PtrFromString(EnginePipe)
-	for range 32 {
+	for round := range 32 {
 		// Connect and disappear before the server calls ConnectNamedPipe.
 		h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil,
 			windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
@@ -253,6 +253,32 @@ func TestPipeDisconnectedBeforeAcceptIsRetryable(t *testing.T) {
 		if !errors.Is(err, errPeerRefused) {
 			t.Fatalf("early disconnect became fatal: %v", err)
 		}
+		if round != 31 {
+			// Each deterministic pre-Accept case needs a freshly created
+			// instance. DisconnectNamedPipe requires ConnectNamedPipe before
+			// another client can connect; production calls Accept immediately.
+			p.Close()
+			p, err = ListenPipe(EnginePipe, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		conn, err := p.Accept(ctx)
+		if err == nil {
+			_, err = conn.Write([]byte("ok"))
+			conn.Close()
+		}
+		done <- err
+	}()
+	// Re-arm the same last instance, exactly as the production accept loop
+	// does. The client waits for listening, not for an arbitrary sleep.
+	if ok, _, err := windows.NewLazySystemDLL("kernel32.dll").NewProc("WaitNamedPipeW").Call(uintptr(unsafe.Pointer(name)), 1000); ok == 0 {
+		t.Fatal(err)
 	}
 	h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil,
 		windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
@@ -261,20 +287,13 @@ func TestPipeDisconnectedBeforeAcceptIsRetryable(t *testing.T) {
 	}
 	client := os.NewFile(uintptr(h), EnginePipe)
 	defer client.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	conn, err := p.Accept(ctx)
-	if err != nil {
-		t.Fatalf("legitimate peer after early disconnects: %v", err)
-	}
-	defer conn.Close()
 	client.SetDeadline(time.Now().Add(time.Second))
-	if _, err := conn.Write([]byte("ok")); err != nil {
-		t.Fatal(err)
-	}
 	var b [2]byte
 	if _, err := io.ReadFull(client, b[:]); err != nil || string(b[:]) != "ok" {
 		t.Fatalf("legitimate reply after retry: %q %v", b, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("legitimate peer after early disconnects: %v", err)
 	}
 	t.Log("32 disconnects before Accept remained retryable; legitimate peer then received its reply")
 }
