@@ -40,9 +40,10 @@ type socketOwner struct {
 	created uint64
 }
 type ownerSnapshot struct {
-	at   time.Time
-	rows map[platform.Tuple]tcpCandidates
-	err  error
+	at      time.Time
+	rows    map[platform.Tuple]tcpCandidates
+	err     error
+	rawRows uint64
 }
 
 type tcpCandidates struct {
@@ -70,6 +71,8 @@ type LookupHistogram struct {
 	SnapshotBuckets    []uint64 `json:"snapshotBuckets"`
 	ProcessBuckets     []uint64 `json:"processBuckets"`
 	RefreshBuckets     []uint64 `json:"refreshBuckets"`
+	TCPRawRows         uint64   `json:"tcpRawRows"`
+	TCPPeakRows        uint64   `json:"tcpPeakRows"`
 }
 
 var lookupBounds = [...]uint64{100, 250, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, ^uint64(0)}
@@ -86,6 +89,7 @@ type Owners struct {
 	count, misses, ambiguous, maxUS                               atomic.Uint64
 	tcpRefreshes, tcpReadNanos, tcpIndexNanos, cacheMissRefreshes atomic.Uint64
 	tcpRetries                                                    atomic.Uint64
+	tcpPeakRows                                                   atomic.Uint64
 }
 
 func NewOwners() *Owners { return &Owners{paths: make(map[processKey]platform.Owner)} }
@@ -127,6 +131,10 @@ func (o *Owners) Stats() LookupHistogram {
 		UpperUS: append([]uint64(nil), lookupBounds[:]...), Buckets: make([]uint64, len(lookupBounds)),
 		TCPRetries: o.tcpRetries.Load(), SnapshotBuckets: make([]uint64, len(lookupBounds)), ProcessBuckets: make([]uint64, len(lookupBounds)), RefreshBuckets: make([]uint64, len(lookupBounds))}
 	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
+	h.TCPPeakRows = o.tcpPeakRows.Load()
+	if snapshot := o.snapshot.Load(); snapshot != nil {
+		h.TCPRawRows = snapshot.rawRows
+	}
 	for i := range h.Buckets {
 		h.Buckets[i] = o.hist[i].Load()
 		h.SnapshotBuckets[i], h.ProcessBuckets[i] = o.snapshotHist[i].Load(), o.processHist[i].Load()
@@ -298,10 +306,16 @@ func (o *Owners) refreshTCP(pending *tcpRefresh) {
 				s.err = err
 				break
 			}
+			s.rawRows += uint64(binary.LittleEndian.Uint32(b))
 		}
 		o.tcpIndexNanos.Add(uint64(time.Since(indexStart)))
 	}
 	measureStage(&o.refreshHist, s.at)
+	for old := o.tcpPeakRows.Load(); s.rawRows > old; old = o.tcpPeakRows.Load() {
+		if o.tcpPeakRows.CompareAndSwap(old, s.rawRows) {
+			break
+		}
+	}
 	// The map and result never change after publication. Wake-up readers
 	// need no shared mutex, including the burst immediately after a dump.
 	pending.result = &s
