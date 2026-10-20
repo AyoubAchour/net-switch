@@ -25,21 +25,22 @@ import (
 type bindingTable map[string]Adapter
 
 type Routes struct {
-	Instance string
-	mu       sync.Mutex
-	session  *journal.Session
-	objects  *objects
-	tun      *wintun.Session
-	lines    []platform.Line
-	bindings atomic.Pointer[bindingTable]
-	active   atomic.Bool
-	capture  []journal.Fingerprint
-	cancel   context.CancelFunc
-	done     chan struct{}
-	Table    *flows.Table
-	Fatal    func(error)
-	timings  *phaseTimings
-	trace    *packetTrace
+	Instance    string
+	mu          sync.Mutex
+	session     *journal.Session
+	objects     *objects
+	tun         *wintun.Session
+	lines       []platform.Line
+	bindings    atomic.Pointer[bindingTable]
+	active      atomic.Bool
+	capture     []journal.Fingerprint
+	permissions []journal.Creation
+	cancel      context.CancelFunc
+	done        chan struct{}
+	Table       *flows.Table
+	Fatal       func(error)
+	timings     *phaseTimings
+	trace       *packetTrace
 }
 
 func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Routes, error) {
@@ -142,12 +143,15 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 			return nil, err
 		}
 	}
-	if err := r.session.Create(ctx, "wfp-sublayer", wfpLayerFingerprint(r.Instance)); err != nil {
+	layer := journal.Creation{Kind: "wfp-sublayer", Fingerprint: wfpLayerFingerprint(r.Instance)}
+	filters := wfpFilterFingerprints(r.Instance, luid, index)
+	if err := r.session.Create(ctx, layer.Kind, layer.Fingerprint); err != nil {
 		return nil, err
 	}
-	if err := r.session.CreateBatch(ctx, wfpFilterFingerprints(r.Instance, luid, index)); err != nil {
+	if err := r.session.CreateBatch(ctx, filters); err != nil {
 		return nil, err
 	}
+	r.permissions = append([]journal.Creation{layer}, filters...)
 	finish := r.timings.begin("tun.session.open")
 	s, err := a.StartSession()
 	finish()
@@ -279,6 +283,23 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 			}
 		}
 		if err == nil && up {
+			for _, permission := range r.permissions {
+				live, found, inspectErr := (object{r.objects, permission.Kind}).Inspect(ctx, permission.Fingerprint)
+				if inspectErr != nil {
+					err = inspectErr
+					break
+				}
+				if !found {
+					if err = r.session.Create(ctx, permission.Kind, permission.Fingerprint); err != nil {
+						break
+					}
+				} else if !maps.Equal(live, permission.Fingerprint) {
+					err = errors.New("owned WFP ICMP permission changed")
+					break
+				}
+			}
+		}
+		if err == nil && up {
 			for _, fp := range r.capture {
 				live, found, inspectErr := (object{r.objects, "route"}).Inspect(ctx, fp)
 				if inspectErr != nil {
@@ -336,6 +357,7 @@ func (r *Routes) Cleanup(ctx context.Context) (err error) {
 	r.objects.recovering = false
 	if err == nil {
 		r.capture = nil
+		r.permissions = nil
 		r.tun = nil
 	}
 	return err
