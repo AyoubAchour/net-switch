@@ -108,8 +108,8 @@ async function stoppedSnapshot() {
   return { state, pnp };
 }
 
-async function recordOrphanPnP(name, state, pnp) {
-  await observe(name, 'baseline-defect', async () => {
+async function recordOrphanPnP(name, label, state, pnp) {
+  await observe(name, label, async () => {
     assert(pnp.every((device) => !device.present && appDeviceIDs.has(device.instanceId)), `Unrecognized PnP leftover: ${JSON.stringify(pnp)}`);
     if (pnp.length) throw new BaselineDefect('Engine exit left an owned, non-present Wintun device; Get-NetAdapter could not see it', { state, pnp });
     return { state, pnp };
@@ -641,7 +641,7 @@ try {
       cycles.push(n); console.log(`cycle ${n}/20`);
     }
     const devices = [...new Map(snapshots.flatMap((s) => s.pnp).map((device) => [device.instanceId, device])).values()];
-    await recordOrphanPnP('PnP cleanup across 20 normal routing stops', { snapshots }, devices);
+    await recordOrphanPnP('PnP cleanup across 20 normal routing stops', 'baseline-defect', { snapshots }, devices);
     return cycles;
   });
   await report.test('engine crash with automatic restart', 'parity', async () => {
@@ -655,7 +655,7 @@ try {
     const response = await client('open', { target: responder.virtual }); await client('close');
     const devices = await pnpDevices();
     rememberAppDevices(devices);
-    await recordOrphanPnP('PnP cleanup after automatic engine restart', { engine, restarted }, devices.filter((device) => !device.present));
+    await recordOrphanPnP('PnP cleanup after automatic engine restart', 'parity', { engine, restarted }, devices.filter((device) => !device.present));
     return { engine, restarted, response };
   });
   await report.test('crash without a restart restores direct connectivity', 'parity', async () => {
@@ -669,7 +669,7 @@ try {
       catch (error) { if (error.code !== 'ESRCH') throw error; return { pid: engine.pid, exitedWithoutHarnessKill: true }; }
     }, 'engine exits on its own after control process death', 30_000);
     const state = await stoppedSnapshot();
-    await recordOrphanPnP('PnP cleanup immediately after control-process crash', state.state, state.pnp);
+    await recordOrphanPnP('PnP cleanup immediately after control-process crash', 'baseline-defect', state.state, state.pnp);
     const direct = await harness.probe();
     await start();
     const response = await client('open', { target: responder.virtual }); await client('close');
