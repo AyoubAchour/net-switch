@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      loss_probe:
+        description: Exercise TCP retransmission with a controlled packet peer
+        type: boolean
+        default: false
       tcp_probe:
         description: Capture TCP8 stalls before session teardown
         type: boolean
@@ -28,6 +32,25 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  loss-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.loss_probe
+    name: TCP lost-window reproduction
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go test -v -count=1 -timeout=30s -run '^TestTCPRecoveryAfterLostWindow$' ./internal/engine/stack
+
   tcp-probe:
     if: github.event_name == 'workflow_dispatch' && inputs.tcp_probe
     name: TCP8 evidence / ${{ matrix.ref }} / ${{ matrix.repeat }}
@@ -72,7 +95,7 @@ jobs:
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.tcp_probe
+    if: github.event_name == 'workflow_dispatch' && !inputs.tcp_probe && !inputs.loss_probe
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
