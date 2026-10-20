@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      latency_probe:
+        description: Diagnose the ARM64 median latency measurement
+        type: boolean
+        default: false
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -24,9 +28,47 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  latency-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.latency_probe
+    name: ARM64 latency probe / monitor ${{ matrix.monitor }}
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        monitor: ['0', '1']
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+      NETSWITCH_WINTUN_LATENCY_DIAGNOSTICS: ${{ matrix.monitor }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - run: ./scripts/prepare-wintun-tests.ps1
+      - name: Repeat the original full performance comparison
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.count=3' '-test.run=^TestWintunPerformance$'
+      - name: Compare client placement with the same ten-percent gate
+        if: ${{ !cancelled() }}
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.count=3' '-test.run=^TestWintunLatencyProbe$'
+
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.latency_probe
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:

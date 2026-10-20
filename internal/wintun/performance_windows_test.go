@@ -256,6 +256,18 @@ func TestWintunUDPClient(t *testing.T) {
 }
 
 func shortLatency(t *testing.T, mode string) float64 {
+	var monitor *pauseMonitor
+	if os.Getenv("NETSWITCH_WINTUN_LATENCY_DIAGNOSTICS") == "1" {
+		monitor = startPauseMonitor(t, nil)
+	}
+	type slowTrip struct {
+		start, end int64
+		rescued    bool
+	}
+	var slow []slowTrip
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	totalStart := ticks()
 	c := udpSocket(t)
 	defer c.Close()
 	samples := make([]time.Duration, 20000)
@@ -294,12 +306,26 @@ func shortLatency(t *testing.T, mode string) float64 {
 			}
 			break
 		}
+		end := ticks()
 		if i >= 0 {
-			samples[i] = elapsed(start)
+			samples[i] = qpcDuration(start, end)
+			if samples[i] > 50*time.Millisecond {
+				slow = append(slow, slowTrip{start, end, rescued})
+			}
 		}
 	}
-	report(t, map[string]any{"test": "burst_latency_sample", "arch": runtime.GOARCH, "mode": mode, "measured_round_trips": len(samples), "warmup_round_trips": 1000, "timeout_rescues": rescues})
+	seconds := elapsed(totalStart).Seconds()
+	runtime.ReadMemStats(&after)
+	if monitor != nil {
+		monitor.finish(t)
+		for _, trip := range slow {
+			classification, covered := classifyPause(trip.start, trip.end, trip.rescued, overlappingGaps(monitor.gaps[0], trip.start, trip.end), overlappingGaps(monitor.gaps[1], trip.start, trip.end))
+			report(t, map[string]any{"test": "burst_slow_trip", "mode": mode, "ms": qpcDuration(trip.start, trip.end).Seconds() * 1000, "classification": classification, "common_pause_ms": covered.Seconds() * 1000})
+		}
+		report(t, map[string]any{"test": "burst_pause_monitor", "mode": mode, "heartbeat_gaps": monitor.gaps[0], "scheduler_gaps": monitor.gaps[1]})
+	}
 	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	report(t, map[string]any{"test": "burst_latency_sample", "arch": runtime.GOARCH, "mode": mode, "measured_round_trips": len(samples), "warmup_round_trips": 1000, "timeout_rescues": rescues, "p50_us": float64(samples[len(samples)/2]) / 1000, "p95_us": float64(samples[len(samples)*95/100]) / 1000, "p99_us": float64(samples[len(samples)*99/100]) / 1000, "max_us": float64(samples[len(samples)-1]) / 1000, "seconds": seconds, "gc_count": after.NumGC - before.NumGC, "gc_pause_ns": after.PauseTotalNs - before.PauseTotalNs, "over_50_ms": len(slow)})
 	return float64(samples[len(samples)*95/100]) / 1000
 }
 
