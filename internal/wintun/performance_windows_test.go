@@ -421,6 +421,7 @@ func TestWintunPerformance(t *testing.T) {
 						}
 						value, err = tcpTransfer(t, streams)
 						if err != nil {
+							session, _ := f.io.(*Session)
 							report(t, map[string]any{"test": "tcp_failure_before_teardown", "mode": mode, "trial": trial, "streams": streams, "state": observeSession(session), "error": err.Error(), "fault": fmt.Sprint(f.fault())})
 							stack := make([]byte, 1<<20)
 							t.Logf("TCP failure goroutines:\n%s", stack[:runtime.Stack(stack, true)])
