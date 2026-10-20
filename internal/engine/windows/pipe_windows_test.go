@@ -85,7 +85,7 @@ func restrictedPeerToken(t *testing.T) windows.Token {
 	disabled := windows.SIDAndAttributes{Sid: admin}
 	var token windows.Token
 	ok, _, err := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken").Call(
-		uintptr(original), 1, 1, uintptr(unsafe.Pointer(&disabled)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&token)))
+		uintptr(original), 1|4, 1, uintptr(unsafe.Pointer(&disabled)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&token))) // DISABLE_MAX_PRIVILEGE | LUA_TOKEN.
 	if ok == 0 {
 		t.Fatalf("create restricted peer token: %v", err)
 	}

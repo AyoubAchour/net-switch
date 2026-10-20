@@ -41,8 +41,12 @@ type socketOwner struct {
 }
 type ownerSnapshot struct {
 	at   time.Time
-	rows map[platform.Tuple][]uint32
+	rows map[platform.Tuple]tcpCandidates
 	err  error
+}
+
+type tcpCandidates struct {
+	pid, count uint32
 }
 
 type LookupHistogram struct {
@@ -162,16 +166,16 @@ func ownerRows(b []byte, offset, stride int) ([][]byte, error) {
 	return rows, nil
 }
 
-func parseTCP(b []byte, v6 bool, rows map[platform.Tuple][]uint32) error {
+func parseTCP(b []byte, v6 bool, rows map[platform.Tuple]tcpCandidates) error {
 	stride := 24
 	if v6 {
 		stride = 56
 	}
-	raw, err := ownerRows(b, 4, stride)
-	if err != nil {
-		return err
+	if len(b) < 4 || uint64(binary.LittleEndian.Uint32(b)) > uint64((len(b)-4)/stride) {
+		return errors.New("truncated TCP owner rows")
 	}
-	for _, r := range raw {
+	for i, count := 0, int(binary.LittleEndian.Uint32(b)); i < count; i++ {
+		r := b[4+i*stride : 4+(i+1)*stride]
 		var src, dst netip.Addr
 		var sp, dp uint16
 		var pid uint32
@@ -188,7 +192,9 @@ func parseTCP(b []byte, v6 bool, rows map[platform.Tuple][]uint32) error {
 			continue
 		}
 		key := platform.Tuple{Source: netip.AddrPortFrom(src.Unmap(), sp), Destination: netip.AddrPortFrom(dst.Unmap(), dp)}
-		rows[key] = append(rows[key], pid)
+		value := rows[key]
+		value.pid, value.count = pid, value.count+1
+		rows[key] = value
 	}
 	return nil
 }
@@ -227,25 +233,39 @@ func (o *Owners) tcpSnapshot(ctx context.Context, after time.Time) (ownerSnapsho
 
 func (o *Owners) refreshTCP(done chan struct{}) {
 	// The IP Helper call is synchronous and cannot be cancelled. Keep at
-	// most one native read in flight, while every lookup can still leave at
+	// most one snapshot in flight, while every lookup can still leave at
 	// its own 50 ms deadline. One caller's cancellation cannot poison peers.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	s := ownerSnapshot{at: time.Now(), rows: make(map[platform.Tuple][]uint32)}
+	s := ownerSnapshot{at: time.Now()}
 	o.tcpRefreshes.Add(1)
+	// Both families belong to one snapshot. Their native reads are independent;
+	// query them together rather than charging two serial IP Helper latencies
+	// to every waiting SYN. At most these two calls are in flight.
+	var tables [2][]byte
+	var failures [2]error
+	var reads sync.WaitGroup
 	for i, family := range []uint32{windows.AF_INET, windows.AF_INET6} {
-		readStart := time.Now()
-		b, err := readOwnerTableInto(ctx, tcpTable, family, tcpOwnerPIDAll, &o.tcpBuffers[i])
-		o.tcpReadNanos.Add(uint64(time.Since(readStart)))
+		reads.Go(func() {
+			readStart := time.Now()
+			tables[i], failures[i] = readOwnerTableInto(ctx, tcpTable, family, tcpOwnerPIDAll, &o.tcpBuffers[i])
+			o.tcpReadNanos.Add(uint64(time.Since(readStart)))
+		})
+	}
+	reads.Wait()
+	s.err = errors.Join(failures[:]...)
+	if s.err == nil {
 		indexStart := time.Now()
-		if err == nil {
-			err = parseTCP(b, family == windows.AF_INET6, s.rows)
+		capacity := len(tables[0])/24 + len(tables[1])/56
+		// One scalar value per tuple avoids allocating a slice for every row.
+		s.rows = make(map[platform.Tuple]tcpCandidates, capacity)
+		for i, b := range tables {
+			if err := parseTCP(b, i == 1, s.rows); err != nil {
+				s.err = err
+				break
+			}
 		}
 		o.tcpIndexNanos.Add(uint64(time.Since(indexStart)))
-		if err != nil {
-			s.err = err
-			break
-		}
 	}
 	o.mu.Lock()
 	o.snapshot = s
@@ -312,23 +332,23 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 		if e != nil {
 			return owner, e
 		}
-		pids := s.rows[tuple]
+		candidates := s.rows[tuple]
 		// A cached snapshot may predate this socket. Its absence is not an
 		// OS lookup miss and must not burn two backoff intervals while the
 		// same old table remains inside its five-millisecond cache window.
-		if len(pids) == 0 && s.at.Before(start) {
+		if candidates.count == 0 && s.at.Before(start) {
 			o.cacheMissRefreshes.Add(1)
 			s, e = o.tcpSnapshot(ctx, s.at)
 			if e != nil {
 				return owner, e
 			}
-			pids = s.rows[tuple]
+			candidates = s.rows[tuple]
 		}
-		if len(pids) > 1 {
+		if candidates.count > 1 {
 			return owner, platform.ErrAmbiguous
 		}
-		if len(pids) == 1 {
-			return o.process(pids[0])
+		if candidates.count == 1 {
+			return o.process(candidates.pid)
 		}
 		after = s.at
 	}

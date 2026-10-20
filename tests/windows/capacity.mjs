@@ -60,12 +60,16 @@ export async function capacity({ server, harness, directory, line }) {
       const stats = await engineStats();
       assert.equal(stats.flows.Flows, 65536, 'The engine did not retain the actual flow cap');
       assert.equal(stats.flows.Handshakes, 0);
+      assert(stats.processMemory?.privateBytes > 0 && stats.processMemory?.workingSetBytes > 0,
+        `Windows process memory was not measured: ${JSON.stringify(stats)}`);
       samples.push(stats);
       await delay(1000);
     }
     const last = samples.at(-1);
     const evidence = { before, samples, observed,
       heapPerFlow: last.heapBytes / 65536, stackPerFlow: last.stackBytes / 65536,
+      privatePerFlow: last.processMemory.privateBytes / 65536,
+      workingSetPerFlow: last.processMemory.workingSetBytes / 65536,
       gcCPUppm: last.gcCPUppm,
       capWindowGCShare: (last.gcCPUNanos - samples[0].gcCPUNanos) / Math.max(1, last.totalCPUNanos - samples[0].totalCPUNanos) };
     console.log(`WINDOWS CAPACITY RESULT ${JSON.stringify(evidence)}`);

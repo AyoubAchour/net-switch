@@ -30,6 +30,11 @@ func (r *Runtime) Stats() any {
 	stats["ownerLookup"] = r.owners.Stats()
 	stats["bindings"] = r.routes.Bindings()
 	stats["wintun"] = r.routes.TunStats()
+	if memory, err := processMemory(); err == nil {
+		stats["processMemory"] = memory
+	} else {
+		stats["processMemoryError"] = err.Error()
+	}
 	return stats
 }
 
