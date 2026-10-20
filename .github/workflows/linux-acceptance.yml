@@ -27,6 +27,10 @@ on:
         type: choice
         options: [all, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm]
         default: all
+      trace_artifact:
+        description: 'Analyse an existing trace artifact only (no new engine workload)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -36,7 +40,35 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  trace-analysis:
+    if: ${{ inputs.trace_artifact != '' }}
+    name: Analyse saved runtime trace
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Summarize saved scheduler and syscall timing in memory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ inputs.trace_artifact }}
+        run: |
+          [[ "$ARTIFACT" =~ ^[0-9]+$ ]]
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT/zip" | node scripts/ci-trace-summary.mjs
   linux:
+    if: ${{ !inputs.trace_artifact }}
     name: Linux acceptance / ${{ matrix.runner }}
     # Pinned labels: ubuntu-latest moves between releases.
     runs-on: ${{ matrix.runner }}
@@ -170,7 +202,7 @@ jobs:
             find "$RUNNER_TEMP/acceptance" \( -name 'block*.pprof' -o -name 'mutex*.pprof' \) -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodefraction=0 -focus='Owners' -nodecount=20 "$RUNNER_TEMP/netswitch-engine" {} \;
             find "$RUNNER_TEMP/acceptance" -name 'runtime.trace' -print0 | while IFS= read -r -d '' trace; do
               for kind in sched syscall; do
-                sudo "$(command -v go)" tool trace -pprof="$kind" "$trace" | go tool pprof -top -cum -nodecount=40 /dev/stdin
+                sudo "$(command -v go)" tool trace -pprof="$kind" "$trace" | node scripts/profile-summary.mjs "$kind"
               done
             done
           fi
