@@ -16,6 +16,13 @@ route, then persists the created marks together. Cleanup checks each fingerprint
 in reverse order and commits removed marks together; durable intents recover any
 interrupted phase. Physical defaults and interface metrics are left alone.
 
+The same journal owns a fixed WFP sublayer and three persistent filters for
+inbound ICMPv4 type 3 and ICMPv6 types 1/2, scoped to the TUN's arrival-interface
+LUID. Deletion checks the complete fingerprint inside a WFP transaction.
+Persistent filters let recovery observe and remove actual crash leftovers;
+unrelated filters are never adopted. Native WFP calls avoid launching a shell
+or configuring firewall policy through COM.
+
 Owner snapshots use the all-state TCP table and the module-owner UDP table.
 UDP's creation timestamp is part of its generation; PID alone cannot identify a
 reopened socket. Lookup histograms are exposed by `stats`. A failed or incomplete
@@ -24,6 +31,9 @@ UDP dump cannot renew the NAT's two-second validation bound.
 All socket creation sets the per-family interface option and binds the source
 address. A failed binding never falls back to an unbound socket. Discovery keeps
 virtual interfaces eligible so VPN-as-a-line policy can be added independently.
+Outbound TCP also requests `SO_REUSE_UNICASTPORT`; its effect depends on Windows'
+existing auto-reuse port configuration. The engine never changes global port
+ranges or registry settings.
 
 The Wintun session already preserves packet order and reopens corrupt rings.
 The engine uses batch writes and checksum-verification metadata. Interface-down
@@ -67,6 +77,9 @@ was copied or adapted.
 - [Microsoft high-resolution interval timing](https://learn.microsoft.com/windows/win32/sysinfo/acquiring-high-resolution-time-stamps)
 - [Microsoft UDP creation timestamps](https://learn.microsoft.com/windows/win32/api/udpmib/ns-udpmib-mib_udprow_owner_module)
 - [Winsock interface binding and fragmentation options](https://learn.microsoft.com/windows/win32/winsock/ipproto-ip-socket-options)
+- [Winsock per-socket port reuse](https://learn.microsoft.com/windows/win32/winsock/sol-socket-socket-options)
+- [WFP conditions and layers](https://learn.microsoft.com/windows/win32/fwp/filtering-conditions-available-at-each-filtering-layer)
+- [WFP filter arbitration](https://learn.microsoft.com/windows/win32/fwp/filter-arbitration)
 - [IP Helper route creation](https://learn.microsoft.com/windows/win32/api/netioapi/nf-netioapi-createipforwardentry2)
 - [IP Helper interface configuration](https://learn.microsoft.com/windows/win32/api/netioapi/nf-netioapi-setipinterfaceentry)
 - [Per-interface DNS settings](https://learn.microsoft.com/windows/win32/api/netioapi/ns-netioapi-dns_interface_settings)
