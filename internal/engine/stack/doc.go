@@ -7,8 +7,11 @@
 // Timer and closed-processor drains use the same silent handoff. TIME_WAIT
 // releases live-flow quotas immediately and has a separate memory-sized cap;
 // a close above that cap skips the wait without resetting or rejecting a SYN.
-// Payload-free LAST_ACK/CLOSING endpoints share this cap, so lost final ACKs
-// cannot leave unlimited FIN retransmitters outside admission accounting.
+// Payload-free LAST_ACK/CLOSING endpoints share this cap. Overflow keeps its
+// FIN for one second before the 250 ms sweep may reset it, letting an app read
+// already-received data and ACK a normal FIN. Overflow is counted separately:
+// its bound is the unacknowledged closes in a 1.25 s window, including bursts,
+// plus sweep/scheduler delay. Queued or unacknowledged payload still counts as live.
 // The exported gVisor hook is independent of the engine and can also be used
 // by the TestISP gateway with tcp.SetTimeWaitHandler(s, forwarder.HandlePacket).
 //

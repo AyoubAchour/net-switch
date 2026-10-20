@@ -1212,6 +1212,7 @@ func (e *Endpoint) closePendingAcceptableConnectionsLocked() {
 // cleanupLocked frees all resources associated with the endpoint.
 // +checklocks:e.mu
 func (e *Endpoint) cleanupLocked() {
+	e.leaveTimeWaitPolicy()
 	if e.snd != nil {
 		e.snd.resendTimer.cleanup()
 		e.snd.probeTimer.cleanup()
@@ -1274,10 +1275,6 @@ func (e *Endpoint) cleanupLocked() {
 		e.purgeReadQueue()
 	}
 	e.stack.CompleteTransportEndpointCleanup(e)
-	if e.timeWaitLeave != nil {
-		e.timeWaitLeave()
-	}
-	e.timeWaitEnter, e.timeWaitLeave = nil, nil
 	tcpip.DeleteDanglingEndpoint(e)
 }
 

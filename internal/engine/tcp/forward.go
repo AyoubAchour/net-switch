@@ -58,7 +58,7 @@ func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Cont
 			f.finishClose(ep)
 		}
 	})
-	f.wg.Go(f.maintain)
+	f.startMaintenance()
 	return f
 }
 
@@ -262,7 +262,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 		ticket.EndTimeWait()
 	})
-	c := &connection{id: id, ep: ep, ticket: ticket, last: time.Now(), done: make(chan struct{})}
+	c := &connection{id: id, ep: ep, ticket: ticket, clock: f.stack.Clock(), last: f.stack.Clock().Now(), done: make(chan struct{})}
 	f.mu.Lock()
 	if f.ctx.Err() != nil || closedState(ep) {
 		f.mu.Unlock()

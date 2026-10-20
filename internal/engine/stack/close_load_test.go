@@ -42,10 +42,9 @@ func TestCloseAtCapUnderLoad(t *testing.T) {
 		case "app_fin", "simultaneous":
 			last := p.prepareFinalACK(path == "simultaneous")
 			p.inject(last)
-			if h := readCloseReset(t, p); h.SequenceNumber() != p.ack {
-				t.Fatal("late final ACK reset has the wrong sequence")
+			if g := p.table.Stats(); g.ClosingOverflow != 0 {
+				t.Fatal("clean close leaked overflow", g)
 			}
-			expectedResets += 2 // Retained overflow, then the harmless late ACK.
 		case "remote_fin":
 			p.closeActive()
 		case "app_rst":
@@ -97,7 +96,7 @@ func TestCloseAtCapUnderLoad(t *testing.T) {
 	p.current.conn.Close()
 	counts["app_rst"]++
 	n++
-	if g := p.table.Stats(); g.Admitted != uint64(n) || g.Flows != 0 || g.TimeWait != 0 || p.dials.Load() != uint64(n) {
+	if g := p.table.Stats(); g.Admitted != uint64(n) || g.Flows != 0 || g.TimeWait != 0 || g.ClosingOverflow != 0 || g.ClosingOverflowPeak > 1 || p.dials.Load() != uint64(n) {
 		t.Fatal(p.diagnostics())
 	}
 	// Upstream relay accounting may finish just after the close packet. Drain
@@ -112,5 +111,5 @@ func TestCloseAtCapUnderLoad(t *testing.T) {
 	if got := p.table.Totals().Apps["peer"].Up; got != uint64(n*4) {
 		t.Fatalf("upload accounting=%d want=%d", got, n*4)
 	}
-	t.Logf("%d connections in %s at flow/per-app cap=1; each path=%v; expected close RST=%d; false budget RST=0; payloads hash-checked", n, time.Since(start), counts, expectedResets)
+	t.Logf("%d connections in %s at flow/per-app cap=1; each path=%v; expected abort RST=%d; clean-close RST=0; false budget RST=0; overflow peak=%d; payloads hash-checked", n, time.Since(start), counts, expectedResets, p.table.Stats().ClosingOverflowPeak)
 }

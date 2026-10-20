@@ -169,8 +169,8 @@ func SetTimeWaitHandler(s *stack.Stack, handler func(stack.TransportEndpointID, 
 
 // SetTimeWaitPolicy installs a per-endpoint close-time budget. enter runs once
 // before publishing TIME_WAIT or its final ACK; false closes silently after
-// the current segment. leave runs once on removal, including non-TIME_WAIT
-// closes, so the caller can release admission without scanning endpoints.
+// the current segment. leave runs once before unregistering or sending a
+// reset, including non-TIME_WAIT closes, without scanning endpoints.
 // Both callbacks run under the endpoint lock and must not block or call
 // endpoint methods. Install before shutdown.
 // A per-endpoint decision avoids changing the stack-wide 60-second protection
@@ -179,6 +179,15 @@ func (e *Endpoint) SetTimeWaitPolicy(enter func() bool, leave func()) {
 	e.LockUser()
 	defer e.UnlockUser()
 	e.timeWaitEnter, e.timeWaitLeave = enter, leave
+}
+
+// +checklocks:e.mu
+func (e *Endpoint) leaveTimeWaitPolicy() {
+	leave := e.timeWaitLeave
+	e.timeWaitEnter, e.timeWaitLeave = nil, nil
+	if leave != nil {
+		leave()
+	}
 }
 
 // SetLocalCloseFence explicitly enables ordered close processing independently
@@ -219,8 +228,8 @@ func (p *protocol) drainLocalClose() *Endpoint {
 }
 
 // CloseRetained resets a payload-free LAST_ACK/CLOSING endpoint when the
-// retained-endpoint budget is exhausted. Do not silently lose its FIN retry:
-// the peer may still be waiting for EOF if the first FIN was dropped.
+// retained-endpoint budget is exhausted and the caller's FIN-ACK grace has
+// expired. Never call at FIN emission: the app may have unread received data.
 func (e *Endpoint) CloseRetained() {
 	e.LockUser()
 	defer e.UnlockUser()

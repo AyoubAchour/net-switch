@@ -32,7 +32,7 @@ function prove(tag, run, failures, passes = []) {
       assert.equal(ended.length, 1, `${name} did not ${action}\n${result.stdout}`);
       if (action === 'fail') {
         const messages = events.filter(e => e.Test === name && e.Output).map(e => e.Output.replace(/^.*\.go:\d+: /, '').trim());
-        const evidence = messages.filter(message => /retir|retained|unexpected RST|false close rejection|gate/.test(message));
+        const evidence = messages.filter(message => /retir|retained|unexpected RST|false close rejection|gate|unread reply/.test(message));
         assert.ok(evidence.length > 0, `${name} failed without admission evidence\n${result.stdout}`);
         console.log(`PROOF ${tag} ${name}: failed in ${ended[0].Elapsed}s; ${evidence[0]}`);
       } else {
@@ -45,3 +45,4 @@ function prove(tag, run, failures, passes = []) {
 
 prove('close_admission_disabled', '^Test(CloseAdmission|CloseIdleAdmission|CloseBeforeFinalACK|CloseHandshakeCap|CloseKeepsQueuedDataCounted|CloseRSTDuringHandshake|CloseHandshakeCompletionOwnsRelease|CloseHandshakeBeforeHangupNotification|TimeWaitFinalACKReleasesAdmission)$', releaseCases, preserved);
 prove('close_fence_disabled', '^Test(CloseAdmission|CloseRSTDuringHandshake)$', fenceCases);
+prove('close_grace_disabled', '^TestCloseRetainedHalfCloseRead$', ['TestCloseRetainedHalfCloseRead']);

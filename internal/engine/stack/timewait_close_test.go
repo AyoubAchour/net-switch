@@ -83,6 +83,9 @@ func TestTimeWaitSYNBeforeRemoval(t *testing.T) {
 	if got := p.stack.FindTransportEndpoint(header.IPv4ProtocolNumber, tcp.ProtocolNumber, id, ns.NIC); got != ep {
 		t.Fatal("cleanup barrier must precede demux removal")
 	}
+	if g := p.table.Stats(); g.TimeWait != 0 || g.Flows != 0 {
+		t.Fatal("leave must release before unregistering the endpoint", g)
+	}
 	p.openWith(1000, func(syn []byte) {
 		p.inject(syn) // The old endpoint still owns the tuple at this point.
 		unblock()
@@ -159,7 +162,7 @@ func TestTimeWaitSYNBeforeCloseState(t *testing.T) {
 	removed, release, expired := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	unblock := sync.OnceFunc(func() { close(release) })
 	defer unblock()
-	// Test barrier: hold cleanup after unregister but before StateClose.
+	// Test barrier: hold cleanup before unregister and StateClose.
 	// The normal budget leave callback never blocks. The monitor will close
 	// this test's old ticket and return its reservation after cleanup resumes.
 	ep.SetTimeWaitPolicy(nil, func() { close(removed); <-release })

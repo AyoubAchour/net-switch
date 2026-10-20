@@ -352,7 +352,7 @@ jobs:
       - name: Sustain 1000 successful connections per second at default limits
         env:
           NETSWITCH_TIMEWAIT_GATE: '1'
-        run: go test -v -count=1 -run '^Test(TimeWait(ThousandPerSecondSuccess|SameTupleUnderLoad)|CloseAtCapUnderLoad)$' ./internal/engine/stack
+        run: go test -v -count=1 -run '^Test(TimeWait(ThousandPerSecondSuccess|SameTupleUnderLoad)|CloseAtCapUnderLoad|CloseRetainedOverflowLoad)$' ./internal/engine/stack
       - name: Measure other-flow latency during a closing 100 MB download
         run: go test -run '^$' -bench '^BenchmarkCloseDownloadOtherFlow$' -benchtime=3x -count=1 ./internal/engine/stack
       - name: Measure SYN admission at total and handshake caps with 65536 flows

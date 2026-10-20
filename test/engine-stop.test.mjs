@@ -63,7 +63,7 @@ test('a locked PID file cannot turn a confirmed engine stop into a failure', { s
     assert.equal(engine.child, null);
     assert.equal(engine.status, 'off');
     assert.equal(await readFile(engine.pidPath, 'utf8'), String(child.pid), 'the lock must still be active');
-    assert.match(await readFile(engine.logPath, 'utf8'), /stopped.*PID.*(EPERM|EBUSY|EACCES)/i);
+    assert.match(await readFile(engine.logPath, 'utf8'), /stale engine PID.*(EPERM|EBUSY|EACCES)/i);
   } finally {
     // Release test-owned helpers even when an assertion fails, before the
     // temporary-directory cleanup hook tries to remove the locked file.

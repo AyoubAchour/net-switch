@@ -3,11 +3,18 @@ package tcp
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	gtcp "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
+
+// FIN-only overflow lives for at most this grace plus one 250 ms sweep interval
+// (plus sweep/scheduler delay). At a close rate R, the last 1.25 s of unacked
+// closes remain, including any burst in that window. Payload stays flow-counted.
+const ClosingGrace = time.Second
 
 type pendingOpen struct {
 	ticket    flowapi.Ticket
@@ -71,8 +78,13 @@ func (c *connection) releaseAdmission() {
 	case gtcp.StateLastAck, gtcp.StateClosing:
 		ep := c.ep.(*gtcp.Endpoint)
 		if _, send := ep.BufferUsage(); send <= 0 {
-			if !c.ticket.TimeWait() {
-				ep.CloseRetained()
+			if !c.ticket.Closing() {
+				// ACKed data may still be unread in the app. Never follow our
+				// FIN immediately with a reset that would discard that data.
+				c.overflowDeadline.CompareAndSwap(0, int64(c.clock.NowMonotonic().Add(ClosingGrace).Sub(tcpip.MonotonicTime{})))
+				if !closeGraceEnabled {
+					ep.CloseRetained()
+				}
 			}
 			// Cleanup can race the state read above, before the reservation.
 			if closedState(ep) {

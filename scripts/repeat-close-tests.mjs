@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 
 const groups = {
   TimeWait: ['BlockedAndBudgetReuse', 'FinalACKReleasesAdmission', 'LostFinalACK', 'SYNBetweenRemovalAndHook', 'LateHookDoesNotReadmitLiveFlow', 'ClosingQueue', 'SYNBeforeCloseState', 'SYNBeforeRemoval', 'ZeroCapClosingBatch'],
-  Close: ['Admission', 'IdleAdmission', 'FINWithoutPolicy', 'KeepsQueuedDataCounted', 'RSTDuringHandshake', 'BeforeFinalACK', 'HandshakeCap', 'RetainedCap', 'RetainedCapLostFIN', 'UnknownACKGetsReset', 'HandshakeCompletionOwnsRelease', 'HandshakeBeforeHangupNotification', 'FencePreservesListenerProcessing', 'FenceWakesRemainingSegments'],
+  Close: ['Admission', 'IdleAdmission', 'FINWithoutPolicy', 'KeepsQueuedDataCounted', 'RSTDuringHandshake', 'BeforeFinalACK', 'HandshakeCap', 'RetainedCap', 'RetainedCapLostFIN', 'RetainedHalfCloseRead', 'RetainedOverflowBound', 'RemovalBeforeReset', 'UnknownACKGetsReset', 'HandshakeCompletionOwnsRelease', 'HandshakeBeforeHangupNotification', 'FencePreservesListenerProcessing', 'FenceWakesRemainingSegments'],
 };
 const parents = Object.entries(groups).flatMap(([prefix, names]) => names.map(name => `Test${prefix}${name}`));
 const required = [...parents, 'TestCloseHandshakeCap/1', 'TestCloseHandshakeCap/2048', 'TestCloseRetainedCap/simultaneous_false', 'TestCloseRetainedCap/simultaneous_true'];

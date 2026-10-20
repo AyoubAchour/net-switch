@@ -35,35 +35,16 @@ func TestCloseRetainedCap(t *testing.T) {
 			p.open(2000)
 			p.upload([]byte("second"))
 			second := p.endpoint()
-			// Fill the retained cap with the first endpoint. The second resets
-			// after its FIN so losing that FIN cannot leave the app waiting.
-			if simultaneous {
-				p.current.conn.CloseWrite()
-				h := p.wait(header.TCPFlagFin)
-				p.inject(p.packet(p.seq, p.ack, header.TCPFlagFin|header.TCPFlagAck, nil))
-				p.seq++
-				p.ack = h.SequenceNumber() + 1
-			} else {
-				p.inject(p.packet(p.seq, p.ack, header.TCPFlagFin|header.TCPFlagAck, nil))
-				p.seq++
-				p.receiveEOF()
-				p.current.conn.CloseWrite()
-				h := p.wait(header.TCPFlagFin)
-				p.ack = h.SequenceNumber() + 1
-			}
-			closeSignal(t, p.current.sentEOF, "retained overflow CloseWrite")
-			if state := tcp.EndpointState(second.State()); state != tcp.StateError {
-				t.Fatal("overflow endpoint can keep retransmitting", state)
-			}
-			if g := p.table.Stats(); g.TimeWait != 1 || g.TimeWaitSkipped != 1 || g.Flows != 0 {
+			secondACK := p.prepareFinalACK(simultaneous)
+			if g := p.table.Stats(); g.TimeWait != 1 || g.TimeWaitSkipped != 1 || g.Flows != 0 || g.ClosingOverflow != 1 {
 				t.Fatal("retained cap or live count wrong", g)
 			}
-			readCloseReset(t, p)
-			// Unknown ACKs get the upstream reset, including a harmless late
-			// final ACK from an app whose FIN-only endpoint hit the cap.
-			p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
-			if h := readCloseReset(t, p); h.SequenceNumber() != p.ack {
-				t.Fatal("late ACK reset has the wrong sequence")
+			p.inject(secondACK)
+			if state := tcp.EndpointState(second.State()); state != tcp.StateClose {
+				t.Fatal("overflow FIN ACK did not close cleanly", state)
+			}
+			if g := p.table.Stats(); g.ClosingOverflow != 0 || g.ClosingOverflowPeak != 1 {
+				t.Fatal("FIN ACK leaked overflow accounting", g)
 			}
 			p.inject(firstACK)
 			if simultaneous {
@@ -76,7 +57,7 @@ func TestCloseRetainedCap(t *testing.T) {
 			} else if g := p.table.Stats(); g.TimeWait != 0 {
 				t.Fatal("LAST_ACK removal leaked retained slot", g)
 			}
-			if p.stack.Stats().TCP.ResetsSent.Value() != 2 || p.table.Stats().Rejected != 0 {
+			if p.stack.Stats().TCP.ResetsSent.Value() != 0 || p.table.Stats().Rejected != 0 {
 				t.Fatal(p.diagnostics())
 			}
 		})
@@ -128,7 +109,10 @@ func TestCloseRetainedCapLostFIN(t *testing.T) {
 	limits := flows.Defaults()
 	limits.Flows, limits.PerApp, limits.TimeWait = 1, 1, 1
 	link := &dropCloseFINLink{Link: ns.NewLink()}
-	p := newPeerLink(t, false, limits, ns.DefaultOptions(), link.Link, link)
+	clock := faketime.NewManualClock()
+	o := ns.DefaultOptions()
+	o.Clock = clock
+	p := newPeerLink(t, false, limits, o, link.Link, link)
 	p.open(1000)
 	p.upload([]byte("retained"))
 	p.prepareFinalACK(false)
@@ -137,6 +121,7 @@ func TestCloseRetainedCapLostFIN(t *testing.T) {
 	}
 	p.port++
 	p.open(2000)
+	ep := p.endpoint()
 	p.upload([]byte("half-close then wait for EOF"))
 	p.inject(p.packet(p.seq, p.ack, header.TCPFlagFin|header.TCPFlagAck, nil))
 	p.seq++
@@ -146,6 +131,17 @@ func TestCloseRetainedCapLostFIN(t *testing.T) {
 	closeSignal(t, p.current.sentEOF, "overflow CloseWrite with dropped FIN")
 	if link.dropped.Load() != 1 || link.finSeq.Load() != p.ack {
 		t.Fatal("test did not drop the only FIN before EOF", link.dropped.Load(), link.finSeq.Load(), p.ack)
+	}
+	if g := p.table.Stats(); g.ClosingOverflow != 1 || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
+		t.Fatal("FIN was reset before its ACK grace", g)
+	}
+	clock.Advance(time.Second - time.Nanosecond)
+	if g := p.table.Stats(); g.ClosingOverflow != 1 || tcp.EndpointState(ep.State()) != tcp.StateLastAck || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
+		t.Fatal("unacknowledged FIN did not get its full grace", g)
+	}
+	clock.Advance(time.Nanosecond)
+	if tcp.EndpointState(ep.State()) != tcp.StateError || p.table.Stats().ClosingOverflow != 0 {
+		t.Fatal("sweep did not reset the unacknowledged FIN at the bound", p.diagnostics())
 	}
 	// gVisor's active reset uses SND.NXT, which includes the lost FIN. An
 	// RFC 5961 peer challenges this in-window reset instead of accepting it.
@@ -159,7 +155,7 @@ func TestCloseRetainedCapLostFIN(t *testing.T) {
 	if g := p.table.Stats(); g.Flows != 0 || g.TimeWait != 1 || g.TimeWaitSkipped != 1 || g.Rejected != 0 {
 		t.Fatal("overflow accounting", g)
 	}
-	t.Log("dropped the overflow FIN; active reset plus challenge ACK ends the half-closed peer without waiting for EOF")
+	t.Log("lost overflow FIN survives until 1 s, then sweep resets it; challenge ACK gets an acceptable reset; overflow=0")
 }
 
 func TestCloseUnknownACKGetsReset(t *testing.T) {

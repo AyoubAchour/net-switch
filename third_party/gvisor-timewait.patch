@@ -1,5 +1,5 @@
 diff --git a/pkg/tcpip/transport/tcp/connect.go b/pkg/tcpip/transport/tcp/connect.go
-index 62f42f4..89820c7 100644
+index 62f42f4..b42da44 100644
 --- a/pkg/tcpip/transport/tcp/connect.go
 +++ b/pkg/tcpip/transport/tcp/connect.go
 @@ -12,6 +12,8 @@
@@ -11,7 +11,15 @@ index 62f42f4..89820c7 100644
  package tcp
  
  import (
-@@ -1195,6 +1197,21 @@ func (e *Endpoint) tryDeliverSegmentFromClosedEndpoint(s *segment) {
+@@ -1095,6 +1097,7 @@ func (e *Endpoint) sendData(next *segment) {
+ // indicating that the connection is being reset due to receiving a RST.
+ // +checklocks:e.mu
+ func (e *Endpoint) resetConnectionLocked(err tcpip.Error) {
++	e.leaveTimeWaitPolicy()
+ 	// Only send a reset if the connection is being aborted for a reason
+ 	// other than receiving a reset.
+ 	e.hardError = err
+@@ -1195,6 +1198,21 @@ func (e *Endpoint) tryDeliverSegmentFromClosedEndpoint(s *segment) {
  //
  // +checklocksexclude:e.segmentQueue.mu
  func (e *Endpoint) drainClosingSegmentQueue() {
@@ -33,7 +41,7 @@ index 62f42f4..89820c7 100644
  	for {
  		s := e.segmentQueue.dequeue()
  		if s == nil {
-@@ -1537,11 +1554,18 @@ func (e *Endpoint) handleTimeWaitSegments() (extendTimeWait bool, reuseTW func()
+@@ -1537,11 +1555,18 @@ func (e *Endpoint) handleTimeWaitSegments() (extendTimeWait bool, reuseTW func()
  						}
  						// We explicitly do not DecRef the segment as it's still valid and
  						// being reflected to a listening endpoint.
@@ -121,7 +129,7 @@ index d138e3b..ace2723 100644
  	// goroutine as endpoint.UnlockUser will wake up the processor if the
  	// segment queue is not empty.
 diff --git a/pkg/tcpip/transport/tcp/endpoint.go b/pkg/tcpip/transport/tcp/endpoint.go
-index 788a2f2..3ad3242 100644
+index 788a2f2..f732204 100644
 --- a/pkg/tcpip/transport/tcp/endpoint.go
 +++ b/pkg/tcpip/transport/tcp/endpoint.go
 @@ -12,6 +12,8 @@
@@ -163,19 +171,16 @@ index 788a2f2..3ad3242 100644
  	oldstate := EndpointState(e.state.Swap(uint32(state)))
  	switch state {
  	case StateEstablished:
-@@ -1258,6 +1274,10 @@ func (e *Endpoint) cleanupLocked() {
- 		e.purgeReadQueue()
- 	}
- 	e.stack.CompleteTransportEndpointCleanup(e)
-+	if e.timeWaitLeave != nil {
-+		e.timeWaitLeave()
-+	}
-+	e.timeWaitEnter, e.timeWaitLeave = nil, nil
- 	tcpip.DeleteDanglingEndpoint(e)
- }
- 
+@@ -1196,6 +1212,7 @@ func (e *Endpoint) closePendingAcceptableConnectionsLocked() {
+ // cleanupLocked frees all resources associated with the endpoint.
+ // +checklocks:e.mu
+ func (e *Endpoint) cleanupLocked() {
++	e.leaveTimeWaitPolicy()
+ 	if e.snd != nil {
+ 		e.snd.resendTimer.cleanup()
+ 		e.snd.probeTimer.cleanup()
 diff --git a/pkg/tcpip/transport/tcp/protocol.go b/pkg/tcpip/transport/tcp/protocol.go
-index a3c8295..d3f657c 100644
+index a3c8295..9d37e9a 100644
 --- a/pkg/tcpip/transport/tcp/protocol.go
 +++ b/pkg/tcpip/transport/tcp/protocol.go
 @@ -12,6 +12,8 @@
@@ -207,7 +212,7 @@ index a3c8295..d3f657c 100644
  
  	mu protocolRWMutex `state:"nosave"`
  
-@@ -139,6 +145,104 @@ type protocol struct {
+@@ -139,6 +145,113 @@ type protocol struct {
  	tsOffsetSecret [16]byte `state:"nosave"`
  }
  
@@ -235,8 +240,8 @@ index a3c8295..d3f657c 100644
 +
 +// SetTimeWaitPolicy installs a per-endpoint close-time budget. enter runs once
 +// before publishing TIME_WAIT or its final ACK; false closes silently after
-+// the current segment. leave runs once on removal, including non-TIME_WAIT
-+// closes, so the caller can release admission without scanning endpoints.
++// the current segment. leave runs once before unregistering or sending a
++// reset, including non-TIME_WAIT closes, without scanning endpoints.
 +// Both callbacks run under the endpoint lock and must not block or call
 +// endpoint methods. Install before shutdown.
 +// A per-endpoint decision avoids changing the stack-wide 60-second protection
@@ -245,6 +250,15 @@ index a3c8295..d3f657c 100644
 +	e.LockUser()
 +	defer e.UnlockUser()
 +	e.timeWaitEnter, e.timeWaitLeave = enter, leave
++}
++
++// +checklocks:e.mu
++func (e *Endpoint) leaveTimeWaitPolicy() {
++	leave := e.timeWaitLeave
++	e.timeWaitEnter, e.timeWaitLeave = nil, nil
++	if leave != nil {
++		leave()
++	}
 +}
 +
 +// SetLocalCloseFence explicitly enables ordered close processing independently
@@ -285,8 +299,8 @@ index a3c8295..d3f657c 100644
 +}
 +
 +// CloseRetained resets a payload-free LAST_ACK/CLOSING endpoint when the
-+// retained-endpoint budget is exhausted. Do not silently lose its FIN retry:
-+// the peer may still be waiting for EOF if the first FIN was dropped.
++// retained-endpoint budget is exhausted and the caller's FIN-ACK grace has
++// expired. Never call at FIN emission: the app may have unread received data.
 +func (e *Endpoint) CloseRetained() {
 +	e.LockUser()
 +	defer e.UnlockUser()

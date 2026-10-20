@@ -78,7 +78,6 @@ func (p *peer) receiveEOF() {
 func (p *peer) prepareFinalACK(simultaneous bool) []byte {
 	p.t.Helper()
 	ep := p.endpoint()
-	skipped := p.table.Stats().TimeWaitSkipped
 	if simultaneous {
 		p.current.conn.CloseWrite()
 		h := p.wait(header.TCPFlagFin)
@@ -103,12 +102,6 @@ func (p *peer) prepareFinalACK(simultaneous bool) []byte {
 	want := tcp.StateLastAck
 	if simultaneous {
 		want = tcp.StateClosing
-	}
-	if p.table.Stats().TimeWaitSkipped > skipped {
-		want = tcp.StateError
-		if h := readCloseReset(p.t, p); h.SequenceNumber() != p.ack {
-			p.t.Fatal("overflow reset has the wrong sequence")
-		}
 	}
 	if state != want {
 		p.t.Fatalf("close state=%s want=%s", state, want)
