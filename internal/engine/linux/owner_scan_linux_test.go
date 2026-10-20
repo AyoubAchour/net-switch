@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -134,5 +135,25 @@ func TestRelativeSocketInodeUsesTheLiveProcDescriptor(t *testing.T) {
 	}
 	if _, ok := socketInodeAt(int(dir.Fd()), "../exe"); ok {
 		t.Fatal("relative scan accepted a non-numeric entry")
+	}
+}
+
+func TestProcScratchSurvivesCollectionWithinItsBound(t *testing.T) {
+	var pool procScratch[[16 << 10]byte]
+	var held [65]*[16 << 10]byte
+	for i := range held {
+		held[i] = pool.Get()
+	}
+	for _, b := range held {
+		pool.Put(b)
+	}
+	if pool.count != 64 {
+		t.Fatalf("retained %d scratch buffers, want 64", pool.count)
+	}
+	want := held[63]
+	runtime.GC()
+	runtime.GC()
+	if got := pool.Get(); got != want {
+		t.Fatal("collection discarded the bounded lookup scratch cache")
 	}
 }

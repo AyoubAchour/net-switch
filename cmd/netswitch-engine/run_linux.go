@@ -22,7 +22,7 @@ func run(args []string) error {
 	socket := f.String("socket", "/run/netswitch/engine.sock", "root-only control socket")
 	state := f.String("state-dir", "/var/lib/netswitch", "private ownership/state directory")
 	profiles := f.String("profile-dir", "", "private diagnostics directory; SIGUSR1 captures heap and goroutine profiles")
-	cpuProfile := f.Bool("cpu-profile", false, "record CPU profile in the diagnostics directory")
+	cpuProfile := f.Bool("cpu-profile", false, "record CPU and sampled contention profiles in the diagnostics directory")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}

@@ -559,6 +559,8 @@ func exerciseTCPBufferBudget(e *Env, s engine.Controller) {
 	}
 	release.Open(e)
 	intact, open, earned := 0, 0, 0
+	endStats := stats(e, s)
+	e.T.Logf("TCP growth workload: lookups=%d misses=%d owners=%s counters=%v", endStats.LookupCount, endStats.LookupMisses, endStats.OwnerLookup, endStats.Counters)
 	for i, bg := range bgs {
 		var r app.BulkHoldResult
 		bg.WaitJSON(e, time.Minute, &r)

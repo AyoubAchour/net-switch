@@ -17,8 +17,41 @@ import (
 
 var errKernelFileLimit = errors.New("kernel file exceeds read limit")
 var errNotRegular = errors.New("identity metadata is not a regular file")
-var processBuffers = sync.Pool{New: func() any { return new([16 << 10]byte) }}
-var flatpakBuffers = sync.Pool{New: func() any { return new([64 << 10]byte) }}
+
+// The lookup deadline also applies under memory pressure. Unlike sync.Pool,
+// these bounded scratch caches survive GC, so checking a PID does not create
+// a fresh 16 KiB allocation/assist after each collection. At most 1 MiB of
+// ordinary and 4 MiB of Flatpak scratch is retained, allocated only on demand.
+type procScratch[T any] struct {
+	mu    sync.Mutex
+	items [64]*T
+	count int
+}
+
+func (p *procScratch[T]) Get() *T {
+	p.mu.Lock()
+	if p.count != 0 {
+		p.count--
+		b := p.items[p.count]
+		p.items[p.count] = nil
+		p.mu.Unlock()
+		return b
+	}
+	p.mu.Unlock()
+	return new(T)
+}
+
+func (p *procScratch[T]) Put(b *T) {
+	p.mu.Lock()
+	if p.count < len(p.items) {
+		p.items[p.count] = b
+		p.count++
+	}
+	p.mu.Unlock()
+}
+
+var processBuffers procScratch[[16 << 10]byte]
+var flatpakBuffers procScratch[[64 << 10]byte]
 var rejectedMetadata atomic.Uint64
 var lastRejectedMetadata atomic.Pointer[string]
 
@@ -198,7 +231,7 @@ func readProcLink(path string) (string, error) {
 	if n < len(b) {
 		return string(b[:n]), nil
 	}
-	storage := processBuffers.Get().(*[16 << 10]byte)
+	storage := processBuffers.Get()
 	defer processBuffers.Put(storage)
 	n, err = unix.Readlink(path, storage[:4096])
 	if err != nil {
