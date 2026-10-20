@@ -46,6 +46,7 @@ func (e *Env) capacityAccounting(label, protocol string, before, after engine.St
 		capDecisions += r.PerApp
 	}
 	if protocol == "udp" {
+		e.T.Check(after.Counters["udpOpenFailed"] == before.Counters["udpOpenFailed"], "%s: no native UDP open failed (%d)", label, after.Counters["udpOpenFailed"]-before.Counters["udpOpenFailed"])
 		r = after.RefusedUDP.Sub(before.RefusedUDP)
 		forward = after.Counters["udpRejected"] - before.Counters["udpRejected"]
 		capDecisions = r.UDP

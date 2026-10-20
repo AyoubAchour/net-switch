@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
 // A nonblocking peer with explicit readiness and short writes exercises the
@@ -28,6 +30,120 @@ type readyPeer struct {
 	writeClosed, closed    chan struct{}
 	watching               chan struct{}
 	writeOnce, closeOnce   sync.Once
+}
+
+type stalledAppOwners struct{ next atomic.Uint64 }
+
+func (o *stalledAppOwners) TCP(context.Context, platform.Tuple) (platform.Owner, error) {
+	app := "stalled"
+	if o.next.Add(1) > 512 {
+		app = "healthy"
+	}
+	return platform.Owner{AppID: app}, nil
+}
+func (*stalledAppOwners) UDP(context.Context, netip.AddrPort) (platform.Owner, error) {
+	return platform.Owner{}, nil
+}
+
+func Test512NonReadingConnectionsDoNotBlockAnotherAppsDataOrFIN(t *testing.T) {
+	control := &testfake.Controller{Line: "A"}
+	peers := make(chan *readyPeer, 1)
+	f, dial := harness(t, control, testfake.Dialer{TCPFunc: func(context.Context, string, netip.AddrPort) (platform.TCPConn, error) {
+		p := newReadyPeer()
+		peers <- p
+		return p, nil
+	}})
+	f.owners = &stalledAppOwners{}
+	var apps []*gonet.TCPConn
+	defer func() {
+		for _, app := range apps {
+			app.Close()
+		}
+	}()
+	var stalled []*readyPeer
+	payload := bytes.Repeat([]byte("s"), 256<<10)
+	for range 512 {
+		app, err := dial()
+		if err != nil {
+			t.Fatal(err)
+		}
+		apps = append(apps, app)
+		peer := <-peers
+		select {
+		case <-peer.watching:
+		case <-time.After(2 * time.Second):
+			t.Fatal("relay setup stalled")
+		}
+		peer.mu.Lock()
+		peer.download.Write(payload)
+		wake := peer.wake
+		peer.mu.Unlock()
+		wake()
+		stalled = append(stalled, peer)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		backpressured := 0
+		for _, peer := range stalled {
+			peer.mu.Lock()
+			left := peer.download.Len()
+			peer.mu.Unlock()
+			if left > 0 && left < len(payload) {
+				backpressured++
+			}
+		}
+		if backpressured == 512 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fixture only stalled %d/512 receivers", backpressured)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	began := time.Now()
+	for range 4 {
+		app, err := dial()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer app.Close()
+		peer := <-peers
+		select {
+		case <-peer.watching:
+		case <-time.After(time.Second):
+			t.Fatal("healthy relay setup stalled")
+		}
+		peer.mu.Lock()
+		peer.download.WriteString("healthy data and FIN")
+		peer.eof = true
+		wake := peer.wake
+		peer.mu.Unlock()
+		wake()
+		app.SetReadDeadline(time.Now().Add(2 * time.Second))
+		got, err := io.ReadAll(app)
+		if err != nil || string(got) != "healthy data and FIN" {
+			t.Fatalf("healthy app stalled: %q %v", got, err)
+		}
+		app.CloseWrite()
+	}
+	for _, peer := range stalled {
+		peer.mu.Lock()
+		remaining := peer.download.Len()
+		peer.mu.Unlock()
+		if remaining == 0 {
+			t.Fatal("stalled fixture drained before healthy probes")
+		}
+		select {
+		case <-peer.closed:
+			t.Fatal("stalled app was cut to free capacity")
+		default:
+		}
+	}
+	held, peak := f.RelayBufferBytes()
+	if peak > RelayHeldBudget {
+		t.Fatal("relay exceeded byte budget")
+	}
+	t.Logf("512 non-reading gVisor connections remain open; 4 healthy downloads and FIN completed in %s; loans=%d bytes peak=%d", time.Since(began), held, peak)
 }
 
 func newReadyPeer() *readyPeer {
@@ -351,6 +467,38 @@ func TestRelayLoanFIFOAndAppLimit(t *testing.T) {
 	}
 	if w.loans != 0 || len(w.waiting) != 0 {
 		t.Fatal("loans leaked")
+	}
+}
+
+func TestRelayGlobalLoanBoundReservesFreedSlotForFIFOHead(t *testing.T) {
+	w := &relayWorkers{wake: make(chan struct{}, 1)}
+	holders := make([]*readyRelay, RelayHeldBudget/RelayBuffer)
+	for i := range holders {
+		holders[i] = &readyRelay{workers: w, app: string(rune('a' + i/RelayAppLoans))}
+		if !w.borrow(holders[i]) {
+			t.Fatal("capacity refused too early")
+		}
+	}
+	waiter := &readyRelay{workers: w, app: "new app"}
+	if w.borrow(waiter) || w.loans*RelayBuffer != RelayHeldBudget {
+		t.Fatal("global loan bound exceeded")
+	}
+	w.giveBack(holders[0])
+	if w.borrow(holders[0]) {
+		t.Fatal("returning holder stole FIFO reservation")
+	}
+	if !w.borrow(waiter) {
+		t.Fatal("FIFO waiter did not receive reserved capacity")
+	}
+	w.giveBack(waiter)
+	if !w.borrow(holders[0]) {
+		t.Fatal("previous holder never resumed")
+	}
+	for _, r := range holders {
+		w.giveBack(r)
+	}
+	if w.loans != 0 || w.bufferPeak*RelayBuffer != RelayHeldBudget {
+		t.Fatal("loan accounting leaked or exceeded bound")
 	}
 }
 

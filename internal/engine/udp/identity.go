@@ -26,6 +26,17 @@ func (n *NAT) sessions() []*session {
 	return out
 }
 
+func (n *NAT) NegativeCacheSize() int {
+	total := 0
+	for i := range n.table {
+		b := &n.table[i]
+		b.Lock()
+		total += len(b.negative)
+		b.Unlock()
+	}
+	return total
+}
+
 // Reconcile serializes dumps. A result is only as fresh as the dump's start,
 // so a stalled snapshot cannot give an old identity two more seconds of life.
 func (n *NAT) Reconcile(ctx context.Context) {

@@ -86,6 +86,7 @@ type NAT struct {
 	io                                                               *udpWorkers
 	Invalid, Dropped, Rejected, IdentityErrors, Oversize, ReadErrors atomic.Uint64
 	PeakQueuePackets, PeakQueueBytes                                 atomic.Uint64
+	OpenFailed                                                       atomic.Uint64
 }
 
 func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.DatagramOutput, mtu int) *NAT {
@@ -409,6 +410,7 @@ func (s *session) run() {
 		socket, err = n.dialer.OpenUDP(ctx, decision.Line, s.source.Addr().Is6())
 	}
 	if err != nil {
+		n.OpenFailed.Add(1)
 		if observer, ok := n.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil {
 			observer.LineError(decision.Line, err)
 		}

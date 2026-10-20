@@ -82,6 +82,20 @@ func TestEpollUDPRepliesAndErrorsKeepOneMapping(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("UDP error queue did not wake")
 	}
+	// Do not read A's pending error first. Linux delivers that error to the
+	// next send even when it targets a healthy, different destination B.
+	healthy, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer healthy.Close()
+	if n, err := s.TryWriteTo([]byte("destination B"), healthy.LocalAddr().(*net.UDPAddr).AddrPort(), false); err != nil || n != 13 {
+		t.Fatalf("A's ICMP lost B's datagram: %d %v", n, err)
+	}
+	healthy.SetReadDeadline(time.Now().Add(time.Second))
+	if n, _, err := healthy.ReadFromUDP(data[:]); err != nil || string(data[:n]) != "destination B" {
+		t.Fatalf("B did not receive its own data: %q %v", data[:max(n, 0)], err)
+	}
 	s.TryReadFrom(data[:])
 	select {
 	case e := <-reported:

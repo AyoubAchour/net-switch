@@ -373,8 +373,17 @@ func (e *Env) retryLine(label, name string, want engine.LineID, within time.Dura
 	attempt := 0
 	for time.Now().Before(deadline) {
 		attempt++
+		var before engine.Stats
+		v1, isV1 := e.Eng.(engine.V1)
+		if isV1 {
+			before = stats(e, v1.Session())
+		}
 		r := e.TCP(name, AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "1", "--timeout", "2000")
 		e.T.Logf("%s convergence attempt %d: OK=%d lines=%s errors=%v; this attempt does not count toward the hard owner probes", label, attempt, r.OK, Describe(Lines(r.Seen)), r.Errors)
+		if isV1 {
+			after := stats(e, v1.Session())
+			e.T.Logf("%s convergence attempt %d ownership: lookups=%d unknown=%d detail=%s", label, attempt, after.LookupCount-before.LookupCount, after.LookupMisses-before.LookupMisses, after.OwnerLookup)
+		}
 		if r.OK == 1 && Lines(r.Seen)[want] == 1 {
 			break
 		}

@@ -145,6 +145,8 @@ type UDPConn interface {
 // blocking UDPErrorQueue interface is only used by the legacy UDPConn path.
 type ReadyUDP interface {
 	UDPConn
+	// Watch installs bounded readiness bookkeeping without waiting for I/O or
+	// a worker. It may run under the session lock also used by packet ingress.
 	Watch(func()) (Readiness, error)
 	TryReadFrom([]byte) (int, netip.AddrPort, error)
 	TryWriteTo([]byte, netip.AddrPort, bool) (int, error)

@@ -326,23 +326,26 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 	for _, line := range lines {
 		previous, existing := next[line.ID]
 		match, err := resolveLine(ctx, links, line.Interface, line.Addresses)
-		if err != nil {
+		ambiguous := errors.Is(err, errAmbiguousLine)
+		if err != nil && !ambiguous {
 			return err
 		}
-		if match == nil {
+		if match == nil && !ambiguous {
 			if existing {
 				continue
 			} // a down line still needs its failover lane
 			return fmt.Errorf("line %s: interface not found", line.ID)
 		}
-		if match.Attrs().Index == p.tunSpec.Index {
+		if match != nil && match.Attrs().Index == p.tunSpec.Index {
 			return errors.New("the TUN cannot be an egress line")
 		}
 		if existing {
-			if previous.Index != match.Attrs().Index || previous.Name != match.Attrs().Name {
+			if ambiguous || previous.Index != match.Attrs().Index || previous.Name != match.Attrs().Name {
 				replaced = append(replaced, line.ID)
 			}
-			previous.Index, previous.Name = match.Attrs().Index, match.Attrs().Name
+			if match != nil {
+				previous.Index, previous.Name = match.Attrs().Index, match.Attrs().Name
+			}
 			previous.Interface, previous.MatchAddresses = line.Interface, slices.Clone(line.Addresses)
 			next[line.ID] = previous
 			continue
@@ -351,7 +354,12 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 		if n > 255 {
 			return errors.New("line allocation exhausted; restart required")
 		}
-		next[line.ID] = lineState{ID: line.ID, Name: match.Attrs().Name, Interface: line.Interface, MatchAddresses: slices.Clone(line.Addresses), Index: match.Attrs().Index, N: n, Table: 21000 + p.base + n, Mark: uint32(0x4e530000 + p.base + n)}
+		var name string
+		var index int
+		if match != nil {
+			name, index = match.Attrs().Name, match.Attrs().Index
+		}
+		next[line.ID] = lineState{ID: line.ID, Name: name, Interface: line.Interface, MatchAddresses: slices.Clone(line.Addresses), Index: index, N: n, Table: 21000 + p.base + n, Mark: uint32(0x4e530000 + p.base + n)}
 	}
 	old := p.lines
 	p.lines = next

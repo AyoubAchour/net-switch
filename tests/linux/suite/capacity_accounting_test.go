@@ -142,7 +142,8 @@ func TestMixedCapacityAcceptsOnlyAnActuallyFullCombinedAppPool(t *testing.T) {
 	for _, independent := range []bool{false, true} {
 		s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{PerApp: 50, Unknown: 10}, PeakPerApp: 8192, PeakUnknown: 2048, Counters: map[string]uint64{"tcpRejected": 60, "forcedGCHeapBytes": 400 << 20}}
 		report := runCapacityCheck(t, func(e *Env) {
-			e.capacityAccounting("mixed", "tcp", engine.Stats{}, s, 150, 90, 60, capacityMixed, independent)
+			credit := e.capacityAccounting("mixed", "tcp", engine.Stats{}, s, 150, 90, 60, capacityMixed, independent)
+			e.exactCapacity("mixed", 90, 100, credit)
 		})
 		if !independent {
 			requireFailure(t, report, "UDP-holding client app")
