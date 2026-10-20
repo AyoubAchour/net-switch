@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"os"
+	"reflect"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,7 @@ import (
 
 	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
 	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
+	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
 type tcpProgressConn struct {
@@ -58,7 +61,10 @@ func startTCPProbe(t *testing.T, f *fixture, link *ns.Link, stack *gv.Stack) *tc
 				return
 			case <-ticker.C:
 				if time.Since(p.start) >= 3*time.Second {
-					p.trace.Store(true)
+					if !p.trace.Swap(true) {
+						stack := make([]byte, 1<<20)
+						t.Logf("TCP still running before deadlines:\n%s", stack[:runtime.Stack(stack, true)])
+					}
 					p.snapshot("running")
 				}
 			}
@@ -75,11 +81,45 @@ func (p *tcpProbe) stop() {
 
 func (p *tcpProbe) snapshot(reason string) {
 	s, _ := p.f.io.(*Session)
+	var endpoints []map[string]any
+	if p.trace.Load() {
+		for _, endpoint := range p.stack.RegisteredEndpoints() {
+			ep, ok := endpoint.(*tcp.Endpoint)
+			if !ok || ep.EndpointState() != tcp.StateEstablished {
+				continue
+			}
+			ep.LockUser()
+			value := reflect.ValueOf(ep).Elem()
+			sender := value.FieldByName("snd")
+			receiver := value.FieldByName("rcv")
+			if !sender.IsNil() && !receiver.IsNil() {
+				sender, receiver = sender.Elem(), receiver.Elem()
+				state := map[string]any{"port": ep.TransportEndpointInfo.ID.RemotePort}
+				for _, name := range []string{"SndUna", "SndNxt", "SndWnd", "SndWndScale"} {
+					state[name] = sender.FieldByName(name).Uint()
+				}
+				for _, name := range []string{"Outstanding", "SndCwnd", "Ssthresh", "RTO"} {
+					state[name] = sender.FieldByName(name).Int()
+				}
+				state["fast_recovery"] = sender.FieldByName("FastRecovery").FieldByName("Active").Bool()
+				state["zero_window_probing"] = sender.FieldByName("zeroWindowProbing").Bool()
+				for _, name := range []string{"RcvNxt", "RcvAcc"} {
+					state[name] = receiver.FieldByName(name).Uint()
+				}
+				next := sender.FieldByName("writeNext")
+				if !next.IsNil() {
+					state["write_next"] = next.Elem().FieldByName("sequenceNumber").Uint()
+				}
+				endpoints = append(endpoints, state)
+			}
+			ep.UnlockUser()
+		}
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	tcp := p.stack.Stats().TCP
 	counters := map[string]uint64{"received": tcp.ValidSegmentsReceived.Value(), "sent": tcp.SegmentsSent.Value(), "retransmits": tcp.Retransmits.Value(), "timeouts": tcp.Timeouts.Value(), "checksum_errors": tcp.ChecksumErrors.Value(), "resets_sent": tcp.ResetsSent.Value(), "resets_received": tcp.ResetsReceived.Value(), "connected": tcp.CurrentConnected.Value(), "send_errors": tcp.SegmentSendErrors.Value()}
-	report(p.t, map[string]any{"test": "tcp_probe", "reason": reason, "seconds": time.Since(p.start).Seconds(), "state": observeSession(s), "link_drops": p.link.Dropped.Load(), "tcp_stats": counters, "packets": p.packets, "fault": fmt.Sprint(p.f.fault())})
+	report(p.t, map[string]any{"test": "tcp_probe", "reason": reason, "seconds": time.Since(p.start).Seconds(), "state": observeSession(s), "link_drops": p.link.Dropped.Load(), "tcp_stats": counters, "packets": p.packets, "endpoints": endpoints, "fault": fmt.Sprint(p.f.fault())})
 }
 
 func (p *tcpProbe) packet(direction string, b []byte) {
@@ -104,8 +144,12 @@ func (p *tcpProbe) packet(direction string, b []byte) {
 
 func TestWintunTCPProbe(t *testing.T) {
 	requireRunner(t)
-	for trial := 0; trial < 20; trial++ {
-		for _, mode := range []string{"ours", "dll"} {
+	modes, trials := []string{"ours", "dll"}, 20
+	if os.Getenv("NETSWITCH_WINTUN_TCP_MODE") == "ours" {
+		modes, trials = []string{"ours"}, 100
+	}
+	for trial := 0; trial < trials; trial++ {
+		for _, mode := range modes {
 			t.Run(fmt.Sprintf("trial%d/%s", trial, mode), func(t *testing.T) {
 				f := newFixture(t, mode, 0)
 				f.stopEcho()
