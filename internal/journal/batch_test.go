@@ -14,10 +14,11 @@ type batchMemoryStore struct {
 	records []Record
 	steps   *steps
 	syncs   int
+	readErr error
 }
 
 func (s *batchMemoryStore) Records() ([]Record, error) {
-	return append([]Record(nil), s.records...), nil
+	return append([]Record(nil), s.records...), s.readErr
 }
 func (s *batchMemoryStore) Append(r Record) error { return s.AppendBatch([]Record{r}) }
 func (s *batchMemoryStore) AppendBatch(records []Record) error {
@@ -33,6 +34,39 @@ func (s *batchMemoryStore) AppendBatch(records []Record) error {
 	}
 	s.syncs++
 	return s.steps.hit() // durable, but caller may never observe success
+}
+
+func TestFailedCleanupReadOrValidationFencesCreation(t *testing.T) {
+	for _, corrupt := range []bool{false, true} {
+		t.Run(fmt.Sprintf("validation=%t", corrupt), func(t *testing.T) {
+			store := &batchMemoryStore{steps: &steps{}}
+			obj := &object{steps: &steps{}}
+			j := &Journal{Store: store, Lock: &locker{}, Kinds: map[string]Object{"route": obj}}
+			s, err := j.Open(context.Background(), "boot", "engine")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			if corrupt {
+				store.records = []Record{{ID: "invalid"}}
+			} else {
+				store.readErr = errors.New("journal read failed")
+			}
+			if err := s.Cleanup(context.Background()); err == nil {
+				t.Fatal("cleanup failure was hidden")
+			}
+			store.readErr, store.records = nil, nil
+			if err := s.Create(context.Background(), "route", fingerprint()); err == nil || obj.live != nil || store.syncs != 0 {
+				t.Fatal("failed cleanup allowed a subsequent mutation")
+			}
+			if err := s.Cleanup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Create(context.Background(), "route", fingerprint()); err != nil {
+				t.Fatal("successful recovery did not reopen admission", err)
+			}
+		})
+	}
 }
 
 type checkedBatchObject struct {
