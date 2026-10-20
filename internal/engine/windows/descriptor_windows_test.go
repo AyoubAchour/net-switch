@@ -36,7 +36,9 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 				}
 				defer listener.Close()
 			}
-			for round := range 512 {
+			// Normal FIN rows remain in TIME_WAIT. Keep this diagnostic small
+			// enough for the later, mandatory 2,000-row owner timing fixture.
+			for round := range 128 {
 				func() {
 					var conn interface {
 						File() (*os.File, error)
@@ -129,7 +131,7 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 					}
 				}()
 			}
-			t.Log("512 transfers kept type and binding through both source closes; TCP payload and FIN verified")
+			t.Log("128 transfers kept type and binding through both source closes; TCP payload and FIN verified")
 		})
 	}
 }
