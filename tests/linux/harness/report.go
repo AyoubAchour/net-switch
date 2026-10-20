@@ -22,17 +22,18 @@ type Executable struct {
 
 // CaseResult is a case's entry in the report.
 type CaseResult struct {
-	ID         string   `json:"id"`
-	Title      string   `json:"title"`
-	Label      Label    `json:"label"`
-	Defect     string   `json:"defect,omitempty"`
-	Waits      string   `json:"waits,omitempty"`
-	Spec       string   `json:"spec,omitempty"`
-	Outcome    Outcome  `json:"outcome"`
-	DurationMS int64    `json:"durationMs"`
-	Checks     []Check  `json:"checks,omitempty"`
-	Notes      []string `json:"notes,omitempty"`
-	Error      string   `json:"error,omitempty"`
+	ID             string   `json:"id"`
+	Title          string   `json:"title"`
+	Label          Label    `json:"label"`
+	Defect         string   `json:"defect,omitempty"`
+	ReleaseBlocker string   `json:"releaseBlocker,omitempty"`
+	Waits          string   `json:"waits,omitempty"`
+	Spec           string   `json:"spec,omitempty"`
+	Outcome        Outcome  `json:"outcome"`
+	DurationMS     int64    `json:"durationMs"`
+	Checks         []Check  `json:"checks,omitempty"`
+	Notes          []string `json:"notes,omitempty"`
+	Error          string   `json:"error,omitempty"`
 }
 
 // Detail is the most useful single line about a result: the harness error,
@@ -45,13 +46,22 @@ func (r CaseResult) Detail() string {
 		return "waits for " + r.Waits
 	}
 	for _, check := range r.Checks {
-		if !check.OK && !check.Defect {
+		if !check.OK && !check.Defect && !check.ReleaseBlocker {
 			return check.Message
 		}
 	}
 	for _, check := range r.Checks {
 		if check.Defect && (!check.OK || r.Outcome == NotReproduced) {
 			return check.Message
+		}
+	}
+	for _, check := range r.Checks {
+		if check.ReleaseBlocker {
+			measurement := "threshold failed: "
+			if check.OK {
+				measurement = "threshold met: "
+			}
+			return measurement + check.Message + "; " + r.ReleaseBlocker
 		}
 	}
 	return ""
@@ -145,7 +155,7 @@ func (r *Report) WriteMarkdown(w io.Writer) {
 		}
 		fmt.Fprintf(w, "%s\n\n", strings.Join(parts, " · "))
 	}
-	order := []Outcome{Pass, KnownDefect, NotRun, PendingGate, Fail, NotReproduced, GateMissing, Error}
+	order := []Outcome{Pass, ReleaseBlocked, KnownDefect, NotRun, PendingGate, Fail, NotReproduced, GateMissing, Error}
 	var counts []string
 	for _, o := range order {
 		if n := r.Totals[o]; n > 0 {

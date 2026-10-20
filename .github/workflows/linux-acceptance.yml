@@ -1,13 +1,19 @@
 name: Acceptance
 
 # The 1.0 profile runs the real Linux engine in isolated namespaces. Every
-# former baseline defect is a required pass; missing gates fail the job.
+# ordinary assertion remains mandatory. Three explicitly declared attribution
+# requirements are reported as release blockers until the eBPF follow-up lands.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
+      release_gate:
+        description: 'Check Linux 1.0 release blockers and pending gates only (no engine workload)'
+        type: boolean
+        required: false
+        default: false
       profile:
         description: 'Record CPU profiles and a bounded scheduling trace for selected cases'
         type: boolean
@@ -45,8 +51,30 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  release-gate:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_gate }}
+    name: Linux 1.0 release gate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Test release classification and mandatory failures
+        run: go test -count=1 -v ./tests/linux/harness ./tests/linux/suite
+      - name: Refuse a release while any declared gate is unfinished
+        run: go run ./tests/linux/cmd/nsaccept release-gate
   trace-analysis:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.trace_artifact != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.release_gate && inputs.trace_artifact != '' }}
     name: Analyse saved runtime trace
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 10
@@ -73,7 +101,7 @@ jobs:
           [[ "$ARTIFACT" =~ ^[0-9]+$ ]]
           gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT/zip" | node scripts/ci-trace-summary.mjs
   linux:
-    if: ${{ !inputs.trace_artifact }}
+    if: ${{ !inputs.release_gate && !inputs.trace_artifact }}
     name: Linux acceptance / ${{ matrix.runner }}
     # Pinned labels: ubuntu-latest moves between releases.
     runs-on: ${{ matrix.runner }}
@@ -136,6 +164,7 @@ jobs:
         env:
           GOFLAGS: -mod=vendor
         run: |
+          go test -count=1 -v ./tests/linux/harness ./tests/linux/suite
           go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
           go build -trimpath -o "$RUNNER_TEMP/netswitch-engine" ./cmd/netswitch-engine
           go build -trimpath -tags acceptance -o "$RUNNER_TEMP/netswitch-engine-faults" ./cmd/netswitch-engine

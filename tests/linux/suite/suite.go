@@ -95,9 +95,22 @@ type registry struct {
 	cases []*harness.Case
 }
 
+// The owner decision in SYSTEM-DESIGN 5.6 (2026-10-20) defers only these
+// attribution assertions until eBPF lands. Capacity, survival and every other
+// assertion in the same workloads remain mandatory PR checks.
+func stormAttributionBlocker(id string) string {
+	switch id {
+	case "overload.tcp-connection-storm", "overload.tcp-handshakes-in-flight", "overload.tcp-flows-total":
+		return "Linux eBPF attribution is pending; 1.0 release blocker under SYSTEM-DESIGN 5.6 (2026-10-20)"
+	default:
+		return ""
+	}
+}
+
 func (r *registry) add(id, title string, label harness.Label, spec string, timeout time.Duration, fn caseFunc) {
 	r.cases = append(r.cases, &harness.Case{
 		ID: id, Title: title, Label: label, Spec: spec, Timeout: timeout,
+		ReleaseBlocker: stormAttributionBlocker(id),
 		Run: func(t *harness.T) {
 			e := r.setup(t)
 			fn(e)
@@ -107,7 +120,12 @@ func (r *registry) add(id, title string, label harness.Label, spec string, timeo
 					t.Require(err == nil, "read this overload case's lookup window (%v)", err)
 					t.Require(e.ownerFaultStart == nil && st.LookupCount >= e.injectedLookups && st.LookupMisses >= e.injectedMisses, "every injected owner-fault window ended and its counters are accounted for")
 					count, misses := st.LookupCount-e.injectedLookups, st.LookupMisses-e.injectedMisses
-					t.Check(count > 0 && misses*200 <= count, "this overload window identifies at least 99.5%% of non-injected lookups (%d misses of %d; deliberately injected %d misses of %d reported separately)", misses, count, e.injectedMisses, e.injectedLookups)
+					t.Require(count > 0, "the overload window contains measured non-injected lookups (%d)", count)
+					check := t.Check
+					if stormAttributionBlocker(id) != "" {
+						check = t.ReleaseCheck
+					}
+					check(count > 0 && misses*200 <= count, "this overload window identifies at least 99.5%% of non-injected lookups (%d misses of %d; deliberately injected %d misses of %d reported separately)", misses, count, e.injectedMisses, e.injectedLookups)
 				}
 			}
 		},
