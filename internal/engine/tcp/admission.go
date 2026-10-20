@@ -18,7 +18,7 @@ const ClosingGrace = time.Second
 
 type pendingOpen struct {
 	ticket    flowapi.Ticket
-	request   *gtcp.ForwarderRequest // published under f.mu before endpoint creation
+	request   atomic.Pointer[gtcp.ForwarderRequest] // published once before endpoint creation
 	once      sync.Once
 	completed atomic.Bool
 	hungUp    atomic.Bool // endpoint-specific notification, never inferred from a reused tuple
@@ -29,7 +29,7 @@ func (f *Forwarder) complete(id stack.TransportEndpointID, p *pendingOpen, reset
 		// CreateEndpoint holds the request lock until the handshake wakes.
 		// Complete waits only for that return, never for dial/relay cleanup.
 		// Do not hold f.mu: handshake cleanup can hand a queued SYN back to us.
-		p.request.Complete(reset)
+		p.request.Load().Complete(reset)
 		f.mu.Lock()
 		if f.pending[id] == p {
 			delete(f.pending, id)
@@ -45,9 +45,9 @@ func (f *Forwarder) finishClose(ep *gtcp.Endpoint) {
 		return
 	}
 	id := ep.TransportEndpointInfo.ID
-	f.mu.Lock()
+	f.mu.RLock()
 	c, p := f.connections[id], f.pending[id]
-	f.mu.Unlock()
+	f.mu.RUnlock()
 	if c != nil && c.ep == ep {
 		c.releaseAdmission()
 	}
