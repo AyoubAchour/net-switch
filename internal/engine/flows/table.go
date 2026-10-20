@@ -54,6 +54,7 @@ type Gauges struct {
 	// Histograms can be subtracted across a cold-socket test phase.
 	LookupHistogram                                                                                   [201]uint64
 	UDPReadBytes                                                                                      int64
+	UDPReplyBytes, UDPReplyPeakBytes                                                                  int64
 	UDPAdapterBytes                                                                                   int64
 	DoubleReleases                                                                                    uint64
 	TimeWait                                                                                          int
@@ -89,6 +90,8 @@ type Table struct {
 	eventsDropped        atomic.Uint64
 	pendingBytes         atomic.Int64
 	udpReadBytes         atomic.Int64
+	replyBytes           atomic.Int64
+	replyPeakBytes       atomic.Int64
 	pendingPeakBytes     atomic.Int64
 	doubleReleases       atomic.Uint64
 }
@@ -508,6 +511,35 @@ func (t *Table) ReleasePending(n int) {
 		}
 	}
 }
+
+// Established replies cannot be starved by first-packet queues. This bound
+// covers both borrowed receive storage and fragments retained by the writer.
+func (t *Table) ReserveReply(n int) bool {
+	for {
+		old := t.replyBytes.Load()
+		if n < 0 || int64(n) > flowapi.UDPReplyBudget-old {
+			return false
+		}
+		if t.replyBytes.CompareAndSwap(old, old+int64(n)) {
+			for peak := t.replyPeakBytes.Load(); old+int64(n) > peak && !t.replyPeakBytes.CompareAndSwap(peak, old+int64(n)); peak = t.replyPeakBytes.Load() {
+			}
+			return true
+		}
+	}
+}
+func (t *Table) ReleaseReply(n int) {
+	for {
+		old := t.replyBytes.Load()
+		if n < 0 || int64(n) > old {
+			t.doubleReleases.Add(1)
+			t.Emit(flowapi.Event{Type: "log", Message: "invalid UDP reply byte release"})
+			return
+		}
+		if t.replyBytes.CompareAndSwap(old, old-int64(n)) {
+			return
+		}
+	}
+}
 func (t *Table) AllowReject(app string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -537,6 +569,8 @@ func (t *Table) Stats() Gauges {
 	g := t.gauges
 	g.PendingBytes = t.pendingBytes.Load()
 	g.UDPReadBytes = t.udpReadBytes.Load()
+	g.UDPReplyBytes = t.replyBytes.Load()
+	g.UDPReplyPeakBytes = t.replyPeakBytes.Load()
 	g.PendingPeakBytes = t.pendingPeakBytes.Load()
 	g.DoubleReleases = t.doubleReleases.Load()
 	g.EventsDropped = t.eventsDropped.Load()
@@ -544,7 +578,7 @@ func (t *Table) Stats() Gauges {
 }
 
 // Receive storage is borrowed only after readability and is already charged
-// to PendingBytes. This gauge distinguishes it from per-socket adapter state.
+// to UDPReplyBytes. This gauge distinguishes it from per-socket adapter state.
 func (t *Table) ObserveUDPRead(delta int) { t.udpReadBytes.Add(int64(delta)) }
 
 func (t *Table) Events() <-chan flowapi.Event { return t.events }

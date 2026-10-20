@@ -138,6 +138,7 @@ type CloseResult struct {
 
 // Env is where a driver runs its engine.
 type Env struct {
+	CPUs int // optional real process affinity and Go scheduler limit
 	// Netns is the network namespace standing in for the PC.
 	Netns string
 	// WorkDir holds the engine's config, state and log for this case.
@@ -322,6 +323,7 @@ type Stats struct {
 	// Byte budgets in use (5.9).
 	TCPBytes, PendingBytes, SnapshotBytes int64
 	UDPReadBytes                          int64
+	UDPReplyBytes, UDPReplyPeakBytes      int64
 	UDPAdapterBytes                       int64
 	PendingPeakBytes                      int64
 	// Counters since the engine started.

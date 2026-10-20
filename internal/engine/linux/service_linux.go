@@ -39,6 +39,24 @@ func peerRoot(c *net.UnixConn) error {
 	return nil
 }
 
+func checkSocketDirectory(path string) error {
+	st, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() || st.Mode().Perm()&0022 != 0 {
+		return errors.New("control socket directory must not be writable by other users")
+	}
+	var directory unix.Stat_t
+	if err := unix.Lstat(path, &directory); err != nil {
+		return err
+	}
+	if directory.Uid != uint32(os.Geteuid()) {
+		return errors.New("control socket directory belongs to another user")
+	}
+	return nil
+}
+
 func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *engine.Engine, *protocol.Server)) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -80,12 +98,8 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	if err := os.MkdirAll(filepath.Dir(socket), 0700); err != nil {
 		return err
 	}
-	st, err := os.Lstat(filepath.Dir(socket))
-	if err != nil {
+	if err := checkSocketDirectory(filepath.Dir(socket)); err != nil {
 		return err
-	}
-	if !st.IsDir() || st.Mode().Perm()&0022 != 0 {
-		return errors.New("control socket directory must not be writable by other users")
 	}
 	// Holding the lifetime flock proves the previous engine is gone. A stale
 	// socket is removed only if root owns an actual socket, never a link/file.

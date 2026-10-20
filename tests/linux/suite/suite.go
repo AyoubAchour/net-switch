@@ -77,6 +77,7 @@ type Env struct {
 	injectedLookups, injectedMisses uint64
 	deferAttribution                bool
 	streamFlows                     map[string]engine.Flow
+	engineCPUs                      int
 }
 
 type caseFunc func(e *Env)
@@ -254,7 +255,7 @@ func (e *Env) StartEngine(cfg engine.Config) {
 		_ = e.Before.Write(filepath.Join(e.T.Dir(), "state-before.txt"))
 	}
 	e.engCfg = cfg
-	env := engine.Env{Netns: topo.DUT, WorkDir: filepath.Join(e.T.Dir(), "engine"), Logf: e.T.Logf}
+	env := engine.Env{Netns: topo.DUT, WorkDir: filepath.Join(e.T.Dir(), "engine"), Logf: e.T.Logf, CPUs: e.engineCPUs}
 	start := time.Now()
 	if err := e.Eng.Start(e.Ctx(), env, cfg); err != nil {
 		e.T.Fatalf("engine didn't start: %v", err)

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -34,6 +35,8 @@ var bypass = []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
 
 type lineState struct {
 	ID, Name           string
+	Interface          string
+	MatchAddresses     []netip.Addr
 	Index, N, Table    int
 	Mark               uint32
 	Addresses          []netip.Addr
@@ -171,17 +174,8 @@ func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 	if err := p.journal.Create(ctx, "tun", p.objects.fingerprint(p.tunSpec)); err != nil {
 		return rollback(err)
 	}
-	for _, cidr := range []string{"198.18.0.1/30", "fdfe:dcba:9876::1/126"} {
-		if prefix(cidr).IP.To4() == nil {
-			setting, err := readKernelFile("/proc/sys/net/ipv6/conf/"+p.tunSpec.Name+"/disable_ipv6", 32)
-			if errors.Is(err, os.ErrNotExist) || (err == nil && len(setting) > 0 && setting[0] == '1') {
-				p.ipv4Only = true
-				continue
-			}
-			if err != nil {
-				return rollback(err)
-			}
-		}
+	p.ipv4Only = true
+	for _, cidr := range []string{"198.18.0.1/30"} {
 		v := addressObject{index, p.tunSpec.Name, p.tunSpec.Alias, cidr}
 		if err := p.journal.Create(ctx, "address", p.objects.fingerprint(v)); err != nil {
 			return rollback(err)
@@ -192,6 +186,48 @@ func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 		return p.WrapTun(p.objects.tun), nil
 	}
 	return p.objects.tun, nil
+}
+
+// The default applies to newly created links, not to existing physical lines.
+// Change only our journal-owned TUN; a physical IPv6 line requires capture even
+// when the TUN inherited disable_ipv6=1.
+func (p *Platform) enableIPv6(ctx context.Context) error {
+	path := "/proc/sys/net/ipv6/conf/" + p.tunSpec.Name + "/disable_ipv6"
+	if err := os.WriteFile(path, []byte("0\n"), 0600); err != nil {
+		return fmt.Errorf("enable IPv6 on the engine TUN: %w", err)
+	}
+	v := addressObject{p.tunSpec.Index, p.tunSpec.Name, p.tunSpec.Alias, "fdfe:dcba:9876::1/126"}
+	if err := p.journal.Create(ctx, "address", p.objects.fingerprint(v)); err != nil {
+		return err
+	}
+	p.ipv4Only = false
+	return nil
+}
+
+func resolveLine(ctx context.Context, links []netlink.Link, name string, addresses []netip.Addr) (netlink.Link, error) {
+	var match netlink.Link
+	for _, link := range links {
+		if name != "" {
+			if link.Attrs().Name == name {
+				return link, nil
+			}
+			continue
+		}
+		addrs, err := retryDump(ctx, func() ([]netlink.Addr, error) { return netlink.AddrList(link, netlink.FAMILY_ALL) })
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range addrs {
+			ip, _ := netip.AddrFromSlice(a.IP)
+			if slices.Contains(addresses, ip.Unmap()) {
+				if match != nil && match.Attrs().Index != link.Attrs().Index {
+					return nil, errors.New("ambiguous line interface")
+				}
+				match = link
+			}
+		}
+	}
+	return match, nil
 }
 
 func allRoutes(ctx context.Context) ([]netlink.Route, error) {
@@ -287,27 +323,9 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 	}
 	for _, line := range lines {
 		previous, existing := next[line.ID]
-		var match netlink.Link
-		for _, link := range links {
-			if line.Interface != "" {
-				if link.Attrs().Name == line.Interface {
-					match = link
-				}
-				continue
-			}
-			addrs, err := retryDump(ctx, func() ([]netlink.Addr, error) { return netlink.AddrList(link, netlink.FAMILY_ALL) })
-			if err != nil {
-				return err
-			}
-			for _, a := range addrs {
-				ip, _ := netip.AddrFromSlice(a.IP)
-				if slices.Contains(line.Addresses, ip.Unmap()) {
-					if match != nil && match.Attrs().Index != link.Attrs().Index {
-						return errors.New("ambiguous line interface")
-					}
-					match = link
-				}
-			}
+		match, err := resolveLine(ctx, links, line.Interface, line.Addresses)
+		if err != nil {
+			return err
 		}
 		if match == nil {
 			if existing {
@@ -323,6 +341,7 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 				replaced = append(replaced, line.ID)
 			}
 			previous.Index, previous.Name = match.Attrs().Index, match.Attrs().Name
+			previous.Interface, previous.MatchAddresses = line.Interface, slices.Clone(line.Addresses)
 			next[line.ID] = previous
 			continue
 		}
@@ -330,11 +349,11 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 		if n > 255 {
 			return errors.New("line allocation exhausted; restart required")
 		}
-		next[line.ID] = lineState{ID: line.ID, Name: match.Attrs().Name, Index: match.Attrs().Index, N: n, Table: 21000 + p.base + n, Mark: uint32(0x4e530000 + p.base + n)}
+		next[line.ID] = lineState{ID: line.ID, Name: match.Attrs().Name, Interface: line.Interface, MatchAddresses: slices.Clone(line.Addresses), Index: match.Attrs().Index, N: n, Table: 21000 + p.base + n, Mark: uint32(0x4e530000 + p.base + n)}
 	}
 	old := p.lines
 	p.lines = next
-	if err := p.reconcileLocked(ctx); err != nil {
+	if err := p.reconcileRetry(ctx); err != nil {
 		p.lines = old
 		if p.capturing && p.Fatal != nil {
 			go p.Fatal(fmt.Errorf("cannot reconcile line revision safely: %w", err))
@@ -406,6 +425,37 @@ func (p *Platform) add(ctx context.Context, kind string, fp journal.Fingerprint)
 	return nil
 }
 func (p *Platform) reconcileLocked(ctx context.Context) error {
+	links, err := retryDump(ctx, netlink.LinkList)
+	if err != nil {
+		return err
+	}
+	resolved := make(map[string]netlink.Link, len(p.lines))
+	for id, line := range p.lines {
+		name := line.Interface
+		if name == "" && len(line.MatchAddresses) == 0 {
+			name = line.Name
+		}
+		link, err := resolveLine(ctx, links, name, line.MatchAddresses)
+		if err != nil {
+			return err
+		}
+		resolved[id] = link
+		if link != nil && p.ipv4Only {
+			addrs, err := retryDump(ctx, func() ([]netlink.Addr, error) { return netlink.AddrList(link, unix.AF_INET6) })
+			if err != nil {
+				return err
+			}
+			hasIPv6 := false
+			for _, a := range addrs {
+				hasIPv6 = hasIPv6 || !a.IP.IsLoopback()
+			}
+			if hasIPv6 {
+				if err := p.enableIPv6(ctx); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	routes, err := allRoutes(ctx)
 	if err != nil {
 		return err
@@ -471,18 +521,16 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 		}
 	}
 	for id, l := range p.lines {
-		// Interface names are the configured binding. A replug creates a new
-		// index and must recover without requiring a policy revision.
-		link, err := netlink.LinkByName(l.Name)
+		// Resolve the original selector, including an address-only line whose
+		// replacement adapter has a different name and index.
+		link := resolved[id]
 		l.Up = false
 		l.Default4 = false
 		l.Default6 = false
 		l.Addresses = nil
-		if err != nil && !linkMissing(err) {
-			return err
-		}
-		if err == nil && link.Attrs().Name == l.Name {
+		if link != nil {
 			l.Index = link.Attrs().Index
+			l.Name = link.Attrs().Name
 			l.Up = link.Attrs().Flags&net.FlagUp != 0
 			addrs, err := retryDump(ctx, func() ([]netlink.Addr, error) { return netlink.AddrList(link, netlink.FAMILY_ALL) })
 			if err != nil {
@@ -581,6 +629,11 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			}
 		}
 	}
+	if !p.ipv4Only && p.capturing {
+		if err := p.captureFamily(ctx, unix.AF_INET6); err != nil {
+			return err
+		}
+	}
 	if p.journalDirty {
 		if err := p.journal.Compact(); err != nil {
 			return err
@@ -606,22 +659,40 @@ func (p *Platform) Capture(ctx context.Context) error {
 	}
 	p.captureOwned = make(map[string]ownedObject)
 	p.captureOrder = nil
+	for _, fam := range p.families() {
+		if err := p.captureFamily(ctx, fam); err != nil {
+			return err
+		}
+	}
+	p.capturing = true
+	p.publishBindings()
+	run, cancel := context.WithCancel(p.ctx)
+	p.monitorCancel = cancel
+	p.monitorDone = make(chan struct{})
+	go p.monitor(run, p.monitorDone)
+	return nil
+}
+
+func (p *Platform) captureFamily(ctx context.Context, family int) error {
 	create := func(kind string, fp journal.Fingerprint) error {
 		if err := p.add(ctx, kind, fp); err != nil {
 			return err
 		}
-		p.captureOwned[kind+fp["object"]] = ownedObject{kind, fp}
-		p.captureOrder = append(p.captureOrder, ownedObject{kind, fp})
+		key := kind + fp["object"]
+		if _, exists := p.captureOwned[key]; !exists {
+			p.captureOwned[key] = ownedObject{kind, fp}
+			p.captureOrder = append(p.captureOrder, ownedObject{kind, fp})
+		}
 		return nil
 	}
 	for _, cidr := range bypass {
 		r := netlink.NewRule()
 		r.Family = unix.AF_INET
 		if prefix(cidr).IP.To4() == nil {
-			if p.ipv4Only {
-				continue
-			}
 			r.Family = unix.AF_INET6
+		}
+		if r.Family != family {
+			continue
 		}
 		r.Priority = p.base + 9100
 		r.Table = unix.RT_TABLE_MAIN
@@ -632,7 +703,7 @@ func (p *Platform) Capture(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, fam := range p.families() {
+	for _, fam := range []int{family} {
 		r := netlink.Route{Family: fam, Table: 21000 + p.base, LinkIndex: p.tunSpec.Index, Dst: prefix(defaultCIDR(fam)), Type: unix.RTN_UNICAST, Protocol: routeProtocol, Scope: netlink.SCOPE_LINK}
 		// IPv6 substitutes IP6_RT_PRIO_USER (1024) for an omitted/zero
 		// metric. Persist the value that will actually identify this route.
@@ -646,7 +717,7 @@ func (p *Platform) Capture(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, fam := range p.families() {
+	for _, fam := range []int{family} {
 		r := netlink.NewRule()
 		r.Family = fam
 		r.Priority = p.base + 12000
@@ -658,13 +729,35 @@ func (p *Platform) Capture(ctx context.Context) error {
 			return err
 		}
 	}
-	p.capturing = true
-	p.publishBindings()
-	run, cancel := context.WithCancel(p.ctx)
-	p.monitorCancel = cancel
-	p.monitorDone = make(chan struct{})
-	go p.monitor(run, p.monitorDone)
 	return nil
+}
+
+func transientNetlink(err error) bool {
+	var timeout net.Error
+	return errors.Is(err, unix.EINTR) || errors.Is(err, unix.EAGAIN) ||
+		errors.Is(err, unix.ENOBUFS) || errors.Is(err, unix.ETIMEDOUT) ||
+		errors.Is(err, netlink.ErrDumpInterrupted) || (errors.As(err, &timeout) && timeout.Timeout())
+}
+
+func (p *Platform) reconcileRetry(ctx context.Context) error {
+	return retryReconcile(ctx, p.reconcileLocked)
+}
+
+func retryReconcile(ctx context.Context, reconcile func(context.Context) error) error {
+	for attempt := 0; ; attempt++ {
+		err := reconcile(ctx)
+		if err == nil || !transientNetlink(err) || attempt == 2 || ctx.Err() != nil {
+			return err
+		}
+		log.Printf("Linux route reconciliation failed temporarily (attempt %d/3): %v; retrying", attempt+1, err)
+		timer := time.NewTimer(time.Duration(attempt+1) * 100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 	defer close(done)
@@ -681,7 +774,7 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 		for id, l := range p.lines {
 			old[id] = l
 		}
-		err := p.reconcileLocked(ctx)
+		err := p.reconcileRetry(ctx)
 		var down []string
 		var removed []netip.Addr
 		if err == nil {

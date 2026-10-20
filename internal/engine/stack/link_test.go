@@ -107,7 +107,10 @@ func TestInboundAndMTUDoNotWaitForOutputCopy(t *testing.T) {
 	observed := false
 	l.SetObserver(func(*gv.PacketBuffer) { observed = true })
 	copying, resume, written := make(chan struct{}), make(chan struct{}), make(chan struct{})
-	go func() { l.enqueue(1, func(dst []byte) { close(copying); <-resume; dst[0] = 7 }); close(written) }()
+	go func() {
+		l.enqueue(1, packetOther, false, func(dst []byte) { close(copying); <-resume; dst[0] = 7 })
+		close(written)
+	}()
 	defer func() { close(resume); <-written; l.Close() }()
 	<-copying
 	done := make(chan bool, 1)

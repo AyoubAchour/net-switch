@@ -2,6 +2,7 @@ package stack
 
 import (
 	"context"
+	"encoding/binary"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,64 @@ import (
 )
 
 const QueuePackets = 1024
+const ReservedControlPackets = 128
+
+type packetClass uint8
+
+const (
+	packetOther packetClass = iota
+	packetTCPData
+	packetTCPControl
+	packetUDP
+	packetICMP
+)
+
+// Reserve space for ACK/SYN/FIN/RST, ICMP and small datagrams. DNS answers
+// retain that space even when they are larger than a small datagram.
+func classifyOutput(size int, ip, transport []byte) (packetClass, bool) {
+	var protocol byte
+	if len(ip) >= 20 && ip[0]>>4 == 4 {
+		protocol = ip[9]
+	} else if len(ip) >= 40 && ip[0]>>4 == 6 {
+		protocol = ip[6]
+		if protocol == 44 && len(ip) >= 48 {
+			protocol = ip[40]
+		}
+	}
+	switch protocol {
+	case 6:
+		if len(transport) >= 20 {
+			headerBytes := int(transport[12]>>4) * 4
+			if transport[13]&0x07 != 0 || size <= len(ip)+headerBytes {
+				return packetTCPControl, false
+			}
+		}
+		return packetTCPData, true
+	case 17:
+		dns := len(transport) >= 8 && binary.BigEndian.Uint16(transport) == 53
+		return packetUDP, size > 1232 && !dns
+	case 1, 58:
+		return packetICMP, false
+	default:
+		return packetOther, size > 256
+	}
+}
+
+func classifyRaw(p []byte) (packetClass, bool) {
+	headerBytes := 0
+	if len(p) >= 20 && p[0]>>4 == 4 {
+		headerBytes = int(p[0]&15) * 4
+	} else if len(p) >= 40 && p[0]>>4 == 6 {
+		headerBytes = 40
+		if p[6] == 44 {
+			headerBytes += 8
+		}
+	}
+	if headerBytes <= 0 || headerBytes > len(p) {
+		return packetOther, len(p) > 256
+	}
+	return classifyOutput(len(p), p[:headerBytes], p[headerBytes:])
+}
 
 // GC must not evict the output cache precisely when the engine hits its
 // memory target. Keep at most one queue plus one writer batch of each size,
@@ -103,22 +162,23 @@ func (pool *outputBuffers) close() {
 // Link owns its output buffers. A slot is reserved before copying a packet;
 // neither stack writers nor the UDP reply path wait for the TUN consumer.
 type Link struct {
-	ingress      sync.Mutex
-	mu           sync.Mutex
-	dispatcher   gv.NetworkDispatcher
-	observer     func(*gv.PacketBuffer)
-	afterInbound func()
-	delivery     atomic.Pointer[linkDelivery]
-	queue        [QueuePackets]OutputPacket
-	buffers      outputBuffers
-	head, count  int
-	peak         int
-	mtu          atomic.Uint32
-	closed       bool
-	onClose      func()
-	ready        chan struct{}
-	done         chan struct{}
-	Dropped      atomic.Uint64
+	ingress       sync.Mutex
+	mu            sync.Mutex
+	dispatcher    gv.NetworkDispatcher
+	observer      func(*gv.PacketBuffer)
+	afterInbound  func()
+	delivery      atomic.Pointer[linkDelivery]
+	queue         [QueuePackets]OutputPacket
+	buffers       outputBuffers
+	head, count   int
+	peak          int
+	mtu           atomic.Uint32
+	closed        bool
+	onClose       func()
+	ready         chan struct{}
+	done          chan struct{}
+	Dropped       atomic.Uint64
+	droppedByType [5]atomic.Uint64
 }
 
 type linkDelivery struct {
@@ -135,10 +195,25 @@ func NewLink() *Link {
 	return l
 }
 
-func (l *Link) enqueue(size int, copyInto func([]byte)) bool {
+func (l *Link) drop(kind packetClass, n uint64) {
+	l.Dropped.Add(n)
+	l.droppedByType[kind].Add(n)
+}
+
+func (l *Link) DropCounts() map[string]uint64 {
+	return map[string]uint64{
+		"tcpData":    l.droppedByType[packetTCPData].Load(),
+		"tcpControl": l.droppedByType[packetTCPControl].Load(),
+		"udp":        l.droppedByType[packetUDP].Load(),
+		"icmp":       l.droppedByType[packetICMP].Load(),
+		"other":      l.droppedByType[packetOther].Load(),
+	}
+}
+
+func (l *Link) enqueue(size int, kind packetClass, bulk bool, copyInto func([]byte)) bool {
 	l.mu.Lock()
-	if l.closed || size > int(l.mtu.Load()) || size <= 0 || l.count == QueuePackets {
-		l.Dropped.Add(1)
+	if l.closed || size > int(l.mtu.Load()) || size <= 0 || l.count == QueuePackets || (bulk && l.count >= QueuePackets-ReservedControlPackets) {
+		l.drop(kind, 1)
 		l.mu.Unlock()
 		return false
 	}
@@ -164,7 +239,8 @@ func (l *Link) enqueue(size int, copyInto func([]byte)) bool {
 }
 
 func (l *Link) Send(p []byte) bool {
-	return l.enqueue(len(p), func(dst []byte) { copy(dst, p) })
+	kind, bulk := classifyRaw(p)
+	return l.enqueue(len(p), kind, bulk, func(dst []byte) { copy(dst, p) })
 }
 
 // SendBatch transfers all fragments together without another payload copy.
@@ -172,12 +248,19 @@ func (l *Link) Send(p []byte) bool {
 func (l *Link) SendBatch(packets [][]byte, release func()) bool {
 	l.mu.Lock()
 	valid := !l.closed && len(packets) > 0 && len(packets) <= QueuePackets-l.count
+	kind, bulk := packetOther, false
+	if len(packets) > 0 {
+		kind, bulk = classifyRaw(packets[0])
+	}
+	if bulk && len(packets) > QueuePackets-ReservedControlPackets-l.count {
+		valid = false
+	}
 	mtu := int(l.mtu.Load())
 	for _, p := range packets {
 		valid = valid && len(p) > 0 && len(p) <= mtu
 	}
 	if !valid {
-		l.Dropped.Add(uint64(len(packets)))
+		l.drop(kind, uint64(len(packets)))
 		l.mu.Unlock()
 		if release != nil {
 			release()
@@ -211,7 +294,8 @@ func (l *Link) SendBatch(packets [][]byte, release func()) bool {
 
 func (l *Link) WritePackets(pkts gv.PacketBufferList) (int, tcpip.Error) {
 	for _, p := range pkts.AsSlice() {
-		l.enqueue(p.Size(), func(dst []byte) {
+		kind, bulk := classifyOutput(p.Size(), p.NetworkHeader().Slice(), p.TransportHeader().Slice())
+		l.enqueue(p.Size(), kind, bulk, func(dst []byte) {
 			views, skip := p.AsViewList()
 			for view := views.Front(); view != nil; view = view.Next() {
 				part := view.AsSlice()

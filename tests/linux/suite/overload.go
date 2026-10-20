@@ -326,8 +326,9 @@ func tcpStorm(e *Env) {
 	e.T.Note("Storm offered %d fixed connection attempts, 300 at a time, with no retries; the identified cap remains %d.", storm, tcpFlowsPerApp)
 	from := e.Mark()
 	hold := e.Start(Run{App: "bravo", Args: append([]string{"tcphold", "--to", floodTargets(0, wire.PortHold), "--count", strconv.Itoa(storm),
-		"--concurrency", "300", "--timeout", "5000"}, release.Arg()...)})
-	hold.WaitLine(e, "holding ", 3*time.Minute)
+		"--concurrency", "300", "--timeout", "5000", "--tuples", "--probe"}, release.Arg()...)})
+	var held app.HeldList
+	hold.WaitHeld(e, "held", 3*time.Minute, &held)
 	e.ExpectTCP("foxtrot during the storm", "foxtrot", AsUser, "a", topo.Server4, 3)
 	e.T.Check(hold.Running(), "bravo still holds its connections")
 	known, unknown := 0, 0
@@ -354,6 +355,7 @@ func tcpStorm(e *Env) {
 		// Unknown flows are a separate pool on the main lane (5.4). The
 		// known app must actually reach its limit for this case to prove it.
 		e.T.Check(known >= tcpFlowsPerApp, "identified bravo connections reach the %d per-app limit (%d)", tcpFlowsPerApp, known)
+		e.checkHeldTCP(map[string]app.HeldList{"bravo": held}, map[string]*Bg{"bravo": hold})
 	}
 	release.Open(e)
 	var r app.HoldResult
@@ -473,16 +475,15 @@ func tcpFlowsTotalCase(e *Env) {
 	bgs := map[string]*Bg{}
 	for i, name := range names {
 		bgs[name] = e.Start(Run{App: name, Args: append([]string{"tcphold", "--to", floodTargets(i, wire.PortHold), "--count", strconv.Itoa(perApp),
-			"--concurrency", "100", "--timeout", "10000"}, release.Arg()...)})
+			"--concurrency", "100", "--timeout", "10000", "--tuples", "--probe"}, release.Arg()...)})
 	}
 	established := 0
+	held := map[string]app.HeldList{}
 	for _, name := range names {
-		line := bgs[name].WaitLine(e, "holding ", 4*time.Minute)
-		n, err := strconv.Atoi(strings.TrimPrefix(line, "holding "))
-		if err != nil {
-			e.T.Fatalf("%s: %q", name, line)
-		}
-		established += n
+		var list app.HeldList
+		bgs[name].WaitHeld(e, "held", 4*time.Minute, &list)
+		held[name] = list
+		established += list.Established
 	}
 	// The servers' own count of what got out, while everything is held.
 	isHold := func(r inet.Record) bool {
@@ -492,6 +493,7 @@ func tcpFlowsTotalCase(e *Env) {
 	accepted := Select(recs, isHold)
 	unknown := 0
 	if v1, ok := e.Eng.(engine.V1); ok {
+		e.checkHeldTCP(held, bgs)
 		if profiler, ok := e.Eng.(interface{ CaptureProfiles(context.Context) error }); ok {
 			ctx, cancel := context.WithTimeout(e.Ctx(), 15*time.Second)
 			err := profiler.CaptureProfiles(ctx)

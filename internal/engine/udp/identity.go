@@ -175,4 +175,6 @@ func (n *NAT) Close() {
 		s.close()
 	}
 	n.wg.Wait()
+	close(n.io.stop)
+	n.io.wg.Wait()
 }

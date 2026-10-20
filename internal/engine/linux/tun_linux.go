@@ -10,6 +10,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -29,6 +30,8 @@ type Tun struct {
 	sizes              []int
 	next, count, mtu   int
 	readErrors         atomic.Uint64
+	readBackoffs       atomic.Uint64
+	readBackoff        time.Duration
 	closedRead         error
 	ioDone             <-chan struct{}
 	ioStop             func() bool
@@ -125,7 +128,7 @@ func (t *Tun) Stats() any {
 	if s == nil {
 		return nil
 	}
-	return map[string]uint64{"ingressPackets": s.TxPackets, "ingressDropped": s.TxDropped, "egressPackets": s.RxPackets, "egressDropped": s.RxDropped, "readDrops": t.readErrors.Load()}
+	return map[string]uint64{"ingressPackets": s.TxPackets, "ingressDropped": s.TxDropped, "egressPackets": s.RxPackets, "egressDropped": s.RxDropped, "readDrops": t.readErrors.Load(), "readBackoffs": t.readBackoffs.Load()}
 }
 func (t *Tun) BindIOContext(ctx context.Context) {
 	t.ioDone = ctx.Done()
@@ -179,7 +182,21 @@ func (t *Tun) ReadPacket(ctx context.Context, out []byte) (int, error) {
 				// device failure. Read can return valid leading segments with
 				// ErrTooManySegments; drain those in order before reading again.
 				t.readErrors.Add(1)
+				if n == 0 {
+					t.readBackoff = min(100*time.Millisecond, max(time.Millisecond, t.readBackoff*2))
+					t.readBackoffs.Add(1)
+					timer := time.NewTimer(t.readBackoff)
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						return 0, ctx.Err()
+					case <-timer.C:
+					}
+				}
 			}
+		}
+		if n > 0 || err == nil {
+			t.readBackoff = 0
 		}
 		t.next, t.count = 0, n
 	}

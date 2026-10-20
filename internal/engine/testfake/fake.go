@@ -44,8 +44,10 @@ type Controller struct {
 	Line                              string
 	Begun, Closed, Resolved, Up, Down atomic.Uint64
 	Pending                           atomic.Int64
+	Reply                             atomic.Int64
 	ReadBytes                         atomic.Int64
 	Limit                             int64
+	ReplyLimit                        int64
 }
 
 func (c *Controller) Begin(_ string, _ platform.Tuple) (flowapi.Ticket, error) {
@@ -69,6 +71,22 @@ func (c *Controller) ReservePending(n int) bool {
 }
 func (c *Controller) ReleasePending(n int) { c.Pending.Add(-int64(n)) }
 func (c *Controller) ObserveUDPRead(n int) { c.ReadBytes.Add(int64(n)) }
+func (c *Controller) ReserveReply(n int) bool {
+	for {
+		old := c.Reply.Load()
+		limit := c.ReplyLimit
+		if limit == 0 {
+			limit = flowapi.UDPReplyBudget
+		}
+		if old+int64(n) > limit {
+			return false
+		}
+		if c.Reply.CompareAndSwap(old, old+int64(n)) {
+			return true
+		}
+	}
+}
+func (c *Controller) ReleaseReply(n int) { c.Reply.Add(-int64(n)) }
 
 type Ticket struct {
 	c    *Controller

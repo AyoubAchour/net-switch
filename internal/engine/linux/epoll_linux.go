@@ -11,7 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// A single kernel readiness loop serves all real TCP sockets. Monotonic
+// A single kernel readiness loop serves all real TCP and UDP sockets. Monotonic
 // registration IDs, not fd numbers or Go pointers, make queued stale events
 // harmless after Detach and descriptor reuse. Callbacks only schedule work.
 type socketPoller struct {
@@ -23,7 +23,7 @@ type socketPoller struct {
 type socketWatch struct {
 	mu         sync.Mutex
 	p          *socketPoller
-	s          *tcpSocket
+	control    func(func(uintptr)) error
 	id         uint64
 	wake       func()
 	attached   bool // protected by mu
@@ -70,13 +70,17 @@ func (s *tcpSocket) Watch(wake func()) (platform.Readiness, error) {
 	if err := s.takeReadiness(); err != nil {
 		return nil, err
 	}
+	return p.watch(s.control, wake), nil
+}
+
+func (p *socketPoller) watch(control func(func(uintptr)) error, wake func()) *socketWatch {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.next++
-	w := &socketWatch{p: p, s: s, id: p.next, wake: wake}
+	w := &socketWatch{p: p, control: control, id: p.next, wake: wake}
 	w.attached = true
 	p.entries[w.id] = w
-	return w, nil
+	return w
 }
 
 func (w *socketWatch) Arm(read, write bool) error {
@@ -93,7 +97,7 @@ func (w *socketWatch) Arm(read, write bool) error {
 		mask |= unix.EPOLLOUT
 	}
 	var armErr error
-	err := w.s.control(func(fd uintptr) {
+	err := w.control(func(fd uintptr) {
 		if !read && !write {
 			// EPOLLHUP is unconditional, even with an empty mask. Delete the
 			// interest while app-side backpressure prevents consuming EOF.
@@ -126,7 +130,7 @@ func (w *socketWatch) Detach() {
 	delete(w.p.entries, w.id)
 	w.p.mu.Unlock()
 	if w.registered {
-		_ = w.s.control(func(fd uintptr) { _ = unix.EpollCtl(w.p.fd, unix.EPOLL_CTL_DEL, int(fd), nil) })
+		_ = w.control(func(fd uintptr) { _ = unix.EpollCtl(w.p.fd, unix.EPOLL_CTL_DEL, int(fd), nil) })
 	}
 }
 

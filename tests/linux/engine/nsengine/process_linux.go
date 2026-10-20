@@ -12,11 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
+	"golang.org/x/sys/unix"
 )
 
 type engineProcess struct {
@@ -25,6 +28,7 @@ type engineProcess struct {
 	err                                  error
 	socket, temporary, state, netns, log string
 	profiles                             string
+	captures                             int
 }
 
 func (d *Driver) launch(ctx context.Context, env engine.Env) error {
@@ -61,6 +65,36 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 	const launch = `if [ -f "$1" ]; then mount --bind "$1" /etc/resolv.conf || exit; fi; shift; exec "$@"`
 	p.cmd = exec.Command("nsenter", "--net="+filepath.Join("/run/netns", env.Netns), "--", "unshare", "--mount", "--propagation", "private", "--", "sh", "-c", launch, "nsengine", filepath.Join("/etc/netns", env.Netns, "resolv.conf"), d.exe.Path, "run", "--socket", p.socket, "--state-dir", p.state)
 	p.cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+filepath.Join(filepath.Dir(env.WorkDir), "inet", "probe-ca.pem"))
+	if env.CPUs > 0 {
+		var allowed unix.CPUSet
+		if err := unix.SchedGetaffinity(0, &allowed); err != nil {
+			f.Close()
+			return err
+		}
+		var cpus []string
+		for i := 0; i < 1024 && len(cpus) < env.CPUs; i++ {
+			if allowed.IsSet(i) {
+				cpus = append(cpus, strconv.Itoa(i))
+			}
+		}
+		if len(cpus) != env.CPUs {
+			f.Close()
+			return fmt.Errorf("requested %d engine CPUs, only %d available", env.CPUs, len(cpus))
+		}
+		// Put taskset around the namespace launcher. The affinity survives
+		// every exec and applies to all engine threads, not just Go workers.
+		p.cmd.Args = append([]string{"taskset", "--cpu-list", strings.Join(cpus, ",")}, p.cmd.Args...)
+		path, err := exec.LookPath("taskset")
+		if err != nil {
+			f.Close()
+			return err
+		}
+		p.cmd.Path = path
+		p.cmd.Env = append(p.cmd.Env, "GOMAXPROCS="+strconv.Itoa(env.CPUs))
+		if env.Logf != nil {
+			env.Logf("engine process restricted to CPUs %s, GOMAXPROCS=%d", strings.Join(cpus, ","), env.CPUs)
+		}
+	}
 	p.cmd.Args = append(p.cmd.Args, "--profile-dir", p.profiles)
 	if os.Getenv("NSACCEPT_PROFILE") == "true" {
 		p.cmd.Args = append(p.cmd.Args, "--cpu-profile", "--trace-profile")
@@ -153,13 +187,18 @@ func (d *Driver) CaptureProfiles(ctx context.Context) error {
 	if !d.running() {
 		return errors.New("profile capture requires a running engine")
 	}
+	path := filepath.Join(d.process.profiles, "memory.json")
+	d.process.captures++
+	if d.process.captures > 1 {
+		path = filepath.Join(d.process.profiles, fmt.Sprintf("sample-%03d", d.process.captures), "memory.json")
+	}
 	if err := d.process.cmd.Process.Signal(syscall.SIGUSR1); err != nil {
 		return err
 	}
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		if data, err := os.ReadFile(filepath.Join(d.process.profiles, "memory.json")); err == nil && json.Valid(data) {
+		if data, err := os.ReadFile(path); err == nil && json.Valid(data) {
 			return nil
 		}
 		select {
