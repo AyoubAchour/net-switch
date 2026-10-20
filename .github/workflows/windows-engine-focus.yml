@@ -22,7 +22,7 @@ jobs:
   engine:
     name: Windows engine / ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'x64' || 'ARM64' }}
     runs-on: ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'windows-latest' || 'windows-11-arm' }}
-    timeout-minutes: 40
+    timeout-minutes: 60
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
