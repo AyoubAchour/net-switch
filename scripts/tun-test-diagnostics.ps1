@@ -33,7 +33,7 @@ if ($before.alive -and $after.alive -and $before.started -eq $after.started) {
 }
 try {
   $rows = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object {
-    $_.OwningProcess -in @($ClientPid, $EnginePid)
+    $_.OwningProcess -gt 0 -and $_.OwningProcess -in @($ClientPid, $EnginePid)
   } | Select-Object OwningProcess, LocalAddress, LocalPort, RemoteAddress, RemotePort,
     @{Name='State'; Expression={$_.State.ToString()}},
     @{Name='toResponder'; Expression={$_.RemoteAddress -eq $ResponderAddress -and $_.RemotePort -eq $ResponderPort}})

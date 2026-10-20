@@ -7,15 +7,16 @@ import { hostedOnly, run } from '../tests/windows/testisp/harness.mjs';
 export async function probe(label, url, headers, log) {
   const started = performance.now();
   const at = new Date().toISOString();
+  const signal = AbortSignal.timeout(2500);
   let result;
   try {
-    const response = await fetch(url, { headers, signal: AbortSignal.timeout(2500) });
+    const response = await fetch(url, { headers, signal });
     const value = await response.json();
     result = { outcome: response.ok ? 'answered' : 'HTTP error', status: response.status,
       value: label === 'Control /state' ? { routing: value.routing } : value };
   } catch (error) {
     const code = error.cause?.code ?? error.code;
-    result = { outcome: error.name === 'TimeoutError' || code === 'ETIMEDOUT' ? 'timed out'
+    result = { outcome: signal.aborted || code === 'ETIMEDOUT' ? 'timed out'
       : code === 'ECONNREFUSED' ? 'refused' : 'failed', code, error: error.message };
   }
   log(`Live ${label}: ${JSON.stringify({ at, ms: Math.round(performance.now() - started), ...result })}`);
@@ -41,7 +42,9 @@ export async function diagnoseControl(engine, clientPid, responder, log) {
   tasks.push(run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
     path.resolve('scripts/tun-test-diagnostics.ps1'), '-EnginePid', String(enginePid),
     '-ClientPid', String(clientPid), '-ResponderAddress', responder?.address ?? '',
-    '-ResponderPort', String(responder?.port ?? 0)], { timeout: 45_000, env: { PSModulePath: undefined } })
+    // ARM64 CIM reads can each take 20–30 s. This failure-only collection is
+    // outside every traffic deadline; the independent API probes stay at 2.5 s.
+    '-ResponderPort', String(responder?.port ?? 0)], { timeout: 90_000, env: { PSModulePath: undefined } })
     .then(({ stdout }) => log(stdout), (error) => log(`Windows diagnostics failed (partial output included): ${error.message}`)));
   await Promise.all(tasks);
 }

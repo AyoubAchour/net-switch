@@ -130,3 +130,40 @@ engine is not answering`. This points to engine/API non-response before any
 selector test, not a public-target closure. Its cause is not established, and
 the failed sample is retained. x64/2 passed the full 100-socket reuse assertion
 and all 20 ordinary lifecycle cycles.
+
+### Round 2: deliberately stalled engine
+
+The coordinator adopted the reviewer's diagnostic suggestions. A temporary
+four-job [dispatch 39496916346](https://github.com/AyoubAchour/net-switch/actions/runs/39496916346)
+used commit `a9399d7b6c06c20ca45d6a2d621b2fa373ed9b71`.
+Only its Node x64 job suspended sing-box, after three successful TUN TLS requests.
+The next request failed at the unchanged ten-second deadline. The injection,
+dispatch input and helper were removed before the final head.
+
+[Job 118884241637](https://github.com/AyoubAchour/net-switch/actions/runs/39496916346/job/118884241637)
+failed as intended. Abridged evidence, collected before cleanup:
+
+```text
+INJECTED engine suspend succeeded: pid=6912
+request 4: failed at 10002 ms; connectAt=null; secureConnectAt=null
+Live Control /state: 9 ms; routing.status=on; routing.error=null
+Live engine /version: 2513 ms; timed out
+Live engine /connections: 2513 ms; timed out
+Engine process samples: alive=true; CPU 0.203125 -> 0.203125 s; 20 threads
+Engine CPU delta: 0 s over 2010 ms
+Working set: 65,261,568 bytes; private memory: 82,485,248 bytes
+TCP: three Established engine upstreams to the TLS responder
+NetSwitch: received 48,397 bytes; sent 22,192 bytes; zero discards/errors
+server.log: speed readings stopped: the engine is not answering
+engine.log: INFO startup, process discovery and outbound connection records
+INJECTED engine resume succeeded: pid=6912
+ok - final cleanup: no TUN adapter, routes or sing-tun firewall rules
+```
+
+The fresh Control state still reported on; the independent API and process
+checks exposed the stalled engine. No client TCP rows remained by the Windows
+snapshot, and the responder's three upstreams remained open until the engine
+resumed. The first three requests have connect and verified secureConnect
+timestamps; request 4 reached neither stage. Responder FIN/close records name
+each connection and source port. This proves the diagnostics, not the cause
+of the earlier un-injected startup timeout, which remains unknown.

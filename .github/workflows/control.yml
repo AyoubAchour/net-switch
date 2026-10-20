@@ -1,12 +1,6 @@
 name: Go control service
 
 on:
-  workflow_dispatch:
-    inputs:
-      diagnostic_failure:
-        description: Temporarily suspend the test engine in Node x64 to prove failure diagnostics
-        type: boolean
-        default: false
   push:
     branches: [port/control-service]
   pull_request:
@@ -22,7 +16,6 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
-      max-parallel: 4
       matrix:
         runner: [windows-latest, windows-11-arm]
         control: [node, go]
@@ -71,8 +64,6 @@ jobs:
           node scripts/e2e-routing.mjs --server-executable $server --public-via-tun
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: TUN against the selected control executable
-        env:
-          CONTROL_DIAGNOSTIC_FAILURE: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic_failure && matrix.control == 'node' && matrix.arch == 'x64' && '1' || '0' }}
         run: |
           if ('${{ matrix.control }}' -eq 'go') {
             go build -tags control_test_https -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-https-fixture" -o bin/netswitch-tun.exe ./cmd/netswitch
