@@ -130,6 +130,7 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 					b := make([]byte, 65536)
 					if !immediate {
 						if n, source, err := s.TryReadFrom(b); n != 0 || source.IsValid() || !errors.Is(err, platform.ErrWouldBlock) {
+							udpReceiveDiagnostic(t, s)
 							t.Fatalf("empty queue: n=%d source=%s err=%v", n, source, err)
 						}
 					}
@@ -153,6 +154,7 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 						t.Fatalf("changed datagram: n=%d source=%s/%s err=%v", n, source, wantSource, err)
 					}
 					if n, source, err := s.TryReadFrom(b); n != 0 || source.IsValid() || !errors.Is(err, platform.ErrWouldBlock) {
+						udpReceiveDiagnostic(t, s)
 						t.Fatalf("datagram was duplicated: n=%d source=%s err=%v", n, source, err)
 					}
 					// Cancellation is a one-shot interest replacement, with no
@@ -171,6 +173,7 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 					udpWake(t, wakes)
 					n, source, err = s.TryReadFrom(b)
 					if err != nil || source != wantSource || !bytes.Equal(b[:n], payload) {
+						udpReceiveDiagnostic(t, s)
 						t.Fatalf("cancel/rearm changed payload or source: %d %s %v", n, source, err)
 					}
 					if network == "udp4" || size <= 65000 {
