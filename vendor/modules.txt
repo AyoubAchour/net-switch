@@ -1,3 +1,6 @@
+# github.com/godbus/dbus/v5 v5.2.4
+## explicit; go 1.20
+github.com/godbus/dbus/v5
 # github.com/google/btree v1.1.2
 ## explicit; go 1.18
 github.com/google/btree

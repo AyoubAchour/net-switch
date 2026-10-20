@@ -225,7 +225,7 @@ func (c *Core) State() map[string]any {
 	if routing {
 		ipv6 = s.StartedWith != nil && s.StartedWith.IPv6
 	}
-	if c.wanted && s.Status == "error" && (c.op.Mode != "tun" || c.elevated) {
+	if c.wanted && s.Status == "error" && (c.op.Mode != "tun" || c.elevated) && (!c.op.ServiceMode || len(c.failureTimes) < 5) {
 		retryAt = c.retryAt
 	}
 	if c.offer != nil && c.values["skippedUpdate"] != c.offer.Version {

@@ -42,6 +42,7 @@ func EngineService(ctx context.Context, ready func(), c Config, log func(string)
 		return err
 	}
 	runtime.state.Epoch = previous.Epoch
+	runtime.state.Applied = previous.Applied // history; hello reads only the live adapter
 	table := flows.New(flows.Defaults(), nil)
 	server := protocol.New(runtime, table, nil)
 	runtime.state.Instance = server.Instance

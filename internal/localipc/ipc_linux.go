@@ -107,7 +107,7 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 	p, err := credentials(c)
 	if err != nil {
 		c.Close()
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrPeer, err)
 	}
 	return &Conn{ReadWriteCloser: c, Peer: p}, nil
 }

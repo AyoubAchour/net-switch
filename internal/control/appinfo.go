@@ -9,6 +9,21 @@ import (
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 )
 
+// DesktopConnected reopens failed display-only reads after the owner's session
+// returns. Routing never depends on the availability of shell metadata.
+func (c *Core) DesktopConnected() {
+	c.installedMu.Lock()
+	c.installedCached = nil
+	c.installedExpires = 0
+	c.installedMu.Unlock()
+	c.mu.Lock()
+	c.infoAttempted = map[string]bool{}
+	c.mu.Unlock()
+	if c.op.AutostartAllowed {
+		c.op.Background(func() { c.RefreshAutostart(c.ctx) })
+	}
+}
+
 func (c *Core) lookupInfo(paths []string) {
 	c.mu.Lock()
 	if c.ctx.Err() != nil {

@@ -43,6 +43,9 @@ type Options struct {
 	// SyncFile is used by the control recovery journal. Other settings keep
 	// their legacy write behavior. It runs before the atomic rename.
 	SyncFile func(string) error
+	// SyncParent makes an acknowledged rename durable across an OS restart.
+	// Service journals supply it; legacy behavior-port callers leave it nil.
+	SyncParent func(string) error
 }
 type Recovery struct {
 	Reason     string  `json:"reason"`
@@ -330,6 +333,9 @@ func AtomicWrite(file string, text []byte, o Options) error {
 	for attempt := 0; ; attempt++ {
 		err := o.Files.Rename(temp, file)
 		if err == nil {
+			if o.SyncParent != nil {
+				return o.SyncParent(filepath.Dir(file))
+			}
 			return nil
 		}
 		if attempt >= 10 || !retryable(err) {

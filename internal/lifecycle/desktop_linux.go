@@ -1,11 +1,15 @@
 package lifecycle
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/godbus/dbus/v5"
 )
 
 func desktopAutostart(on *bool) (any, error) {
@@ -41,14 +45,25 @@ func desktopAutostart(on *bool) (any, error) {
 	return err == nil, err
 }
 func ShowPairing(url, code string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	bus, err := dbus.ConnectSessionBus(dbus.WithContext(ctx))
+	if err != nil {
+		return fmt.Errorf("the owner session's notification service is unavailable: %w", err)
+	}
+	defer bus.Close()
+	var id uint32
+	err = bus.Object("org.freedesktop.Notifications", "/org/freedesktop/Notifications").
+		CallWithContext(ctx, "org.freedesktop.Notifications.Notify", 0, "Net Switch", uint32(0), "network-workgroup",
+			"Connect to Net Switch", "Enter "+code+" in your browser. This code expires in two minutes.",
+			[]string{}, map[string]dbus.Variant{"transient": dbus.MakeVariant(true)}, int32(120000)).Store(&id)
+	if err != nil {
+		return fmt.Errorf("show pairing code in the owner's session: %w", err)
+	}
 	cmd := exec.Command("xdg-open", url)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 	go cmd.Wait()
-	// notify-send uses the owner's session bus. No credential is ever passed
-	// in arguments: the code goes through stdin to the desktop's own console
-	// until M5 supplies the native notification/window binding.
-	fmt.Printf("Net Switch pairing code: %s (valid for two minutes)\n", code)
 	return nil
 }

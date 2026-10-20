@@ -35,7 +35,7 @@ type Access struct {
 }
 
 func (a *Access) status() any {
-	return map[string]any{"owner": a.Owner, "pending": a.Owner.User == "", "routing": a.Remote.Snapshot().Status, "error": a.Remote.Snapshot().Error, "controlPID": os.Getpid(), "engineInstanceId": a.Remote.Snapshot().Instance}
+	return map[string]any{"owner": a.Owner, "pending": a.Owner.User == "", "routing": a.Remote.Snapshot().Status, "error": a.Remote.Snapshot().Error, "controlPID": os.Getpid(), "engineInstanceId": a.Remote.Snapshot().Instance, "desktopPID": a.Desktop.PID()}
 }
 func (a *Access) request(ctx context.Context, peer localipc.Peer, statusOnly bool, session string, r controlRequest) (any, error) {
 	if r.Method == "status" {
@@ -57,10 +57,12 @@ func (a *Access) request(ctx context.Context, peer localipc.Peer, statusOnly boo
 		a.Tokens.Close(session)
 		return true, nil
 	case "signin":
-		a.Desktop.Connect(session)
+		a.Desktop.Connect(session, peer.PID)
+		a.Core.DesktopConnected()
 		return true, a.Core.Routing(ctx, true)
 	case "desktop-connect":
-		a.Desktop.Connect(session)
+		a.Desktop.Connect(session, peer.PID)
+		a.Core.DesktopConnected()
 		return true, nil
 	case "routing":
 		return true, a.Core.Routing(ctx, r.On)
@@ -135,9 +137,17 @@ func accept(ctx context.Context, l localipc.Listener, serve func(*localipc.Conn)
 	slots := make(chan struct{}, 32)
 	var clients sync.WaitGroup
 	defer clients.Wait()
+	var peerReport time.Time
 	for {
 		c, err := l.Accept(ctx)
 		if err != nil {
+			if errors.Is(err, localipc.ErrPeer) {
+				if time.Since(peerReport) > 10*time.Second {
+					log(err.Error())
+					peerReport = time.Now()
+				}
+				continue
+			}
 			if ctx.Err() != nil || errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
 				return nil
 			}

@@ -147,6 +147,8 @@ func (r *Remote) renew(rpc *RPC) {
 	}
 }
 func (r *Remote) call(ctx context.Context, method string, payload any, opID string, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 	r.mu.Lock()
 	rpc, instance, epoch := r.rpc, r.instance, r.epoch
 	r.mu.Unlock()
@@ -173,6 +175,8 @@ func (r *Remote) refresh(ctx context.Context) error {
 	return nil
 }
 func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
 	if err := r.Attach(ctx, true); err != nil {
 		r.Fail(err)
 		return err

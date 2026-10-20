@@ -216,10 +216,14 @@ func Install(c Config) error {
 		}
 		if err == nil {
 			// Keep the small set required by worker token creation and native
-			// reads. No debug, backup/restore or load-driver privilege.
+			// reads. Only Engine can load the signed TUN driver.
 			// MULTI_SZ needs embedded zeroes; build it explicitly.
 			var names []uint16
-			for _, name := range []string{"SeChangeNotifyPrivilege", "SeImpersonatePrivilege", "SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege"} {
+			privileges := []string{"SeChangeNotifyPrivilege", "SeImpersonatePrivilege", "SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege"}
+			if entry.name == Engine {
+				privileges = append(privileges, "SeLoadDriverPrivilege")
+			}
+			for _, name := range privileges {
 				part, _ := windows.UTF16FromString(name)
 				names = append(names, part...)
 			}

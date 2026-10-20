@@ -2,6 +2,8 @@
 package lifecycle
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -24,6 +26,14 @@ type Owner struct {
 	User string `json:"user"`
 	Name string `json:"name"`
 }
+type durableFiles struct{}
+
+func (durableFiles) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+func (durableFiles) WriteFile(path string, b []byte, mode os.FileMode) error {
+	return os.WriteFile(path, b, mode)
+}
+func (durableFiles) Remove(path string) error     { return os.Remove(path) }
+func (durableFiles) Rename(from, to string) error { return durableRename(from, to) }
 
 func randomID() string {
 	var b [32]byte
@@ -45,13 +55,13 @@ func Save(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	if err := settings.AtomicWrite(path, b, settings.Options{SyncFile: syncFile}); err != nil {
+	if err := settings.AtomicWrite(path, b, settings.Options{Files: durableFiles{}, SyncFile: syncFile}); err != nil {
 		return err
 	}
 	if err := SyncDirectory(filepath.Dir(path)); err != nil {
 		return err
 	}
-	if err := settings.AtomicWrite(path+".bak", b, settings.Options{SyncFile: syncFile}); err != nil {
+	if err := settings.AtomicWrite(path+".bak", b, settings.Options{Files: durableFiles{}, SyncFile: syncFile}); err != nil {
 		return fmt.Errorf("primary saved, backup failed: %w", err)
 	}
 	return SyncDirectory(filepath.Dir(path))
@@ -132,6 +142,23 @@ func Inspect(data string) (map[string]any, error) {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 		out[name] = value
+	}
+	if b, err := os.ReadFile(filepath.Join(data, "engine-journal.json")); err == nil {
+		scan := bufio.NewScanner(bytes.NewReader(b))
+		scan.Buffer(make([]byte, 4096), 1<<20)
+		records := []json.RawMessage{}
+		for scan.Scan() {
+			if !json.Valid(scan.Bytes()) {
+				return nil, errors.New("engine journal has an incomplete or damaged record; inspection did not change it")
+			}
+			records = append(records, append(json.RawMessage{}, scan.Bytes()...))
+		}
+		if err := scan.Err(); err != nil {
+			return nil, err
+		}
+		out["engine-journal.json"] = records
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
 	return out, nil
 }

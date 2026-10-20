@@ -3,10 +3,12 @@ const form = document.querySelector('form');
 const code = document.getElementById('code');
 const error = document.getElementById('error');
 const button = document.querySelector('button');
+if (matchMedia('(pointer: fine)').matches) code.focus();
 form.addEventListener('submit', async event => {
   event.preventDefault();
   if (!form.reportValidity()) return;
   button.disabled = true;
+  button.textContent = 'Connecting…';
   error.textContent = '';
   try {
     const response = await fetch('/api/pair', {
@@ -25,5 +27,6 @@ form.addEventListener('submit', async event => {
     code.select();
   } finally {
     button.disabled = false;
+    button.textContent = 'Connect';
   }
 });

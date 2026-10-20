@@ -3,6 +3,7 @@ package settings
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -53,3 +54,25 @@ func TestJournalSyncCompletesBeforeAtomicReplacement(t *testing.T) {
 		}
 	}
 }
+func TestServiceJournalSyncsRenamedParentBeforeReturning(t *testing.T) {
+	dir := t.TempDir()
+	parents := 0
+	store := New(dir, Options{FileName: "control-journal.json", Defaults: map[string]any{"revision": float64(0)}, SyncParent: func(path string) error {
+		if path != dir {
+			t.Fatal("wrong durability directory", path)
+		}
+		parents++
+		// Rename must already have made the complete primary visible.
+		if _, err := os.ReadFile(storePath(dir)); err != nil {
+			t.Fatal("parent synced before replacement", err)
+		}
+		return nil
+	}})
+	if _, err := store.Update(map[string]any{"revision": float64(1)}); err != nil {
+		t.Fatal(err)
+	}
+	if parents != 2 {
+		t.Fatalf("primary and backup parent syncs: %d", parents)
+	}
+}
+func storePath(dir string) string { return filepath.Join(dir, "control-journal.json") }

@@ -64,6 +64,7 @@ type Options struct {
 	// remains a behavior oracle until the engine swap.
 	ServiceMode bool
 	BootID      string
+	Checkpoint  func(string)
 }
 type AppTracker interface {
 	Reset()
@@ -148,6 +149,7 @@ type Core struct {
 	applyMu                                      sync.Mutex
 	saveMu                                       sync.Mutex
 	failureTimes                                 []int64
+	failureDirty                                 bool
 }
 
 func New(ctx context.Context, o Options) (*Core, error) {
@@ -268,6 +270,10 @@ func New(ctx context.Context, o Options) (*Core, error) {
 				}
 			}
 			_ = json.Unmarshal(raw["failures"], &c.failureTimes)
+			if c.wanted && len(c.failureTimes) >= 5 {
+				o.Engine.Fail(fmt.Errorf("Routing stopped after five failures in ten minutes. Turn routing on to retry."))
+				c.lastStatus = "error"
+			}
 		}
 	}
 	c.syncLanesLocked()
@@ -326,9 +332,24 @@ func (c *Core) save(changes map[string]any, remove ...string) error {
 			c.mu.Unlock()
 			return err
 		}
+		// The journal is authoritative. Refresh the complete settings mirror,
+		// including a previously committed change whose mirror write failed.
+		changes = map[string]any{}
+		for k, v := range next {
+			changes[k] = v
+		}
+		for k := range c.op.Settings.Values() {
+			if _, ok := next[k]; !ok {
+				changes[k] = settings.Delete
+			}
+		}
 	}
 	v, err := c.op.Settings.Update(changes)
 	if err != nil {
+		if c.op.ServiceMode {
+			c.log("desired settings committed; settings mirror will be repaired on the next save or restart: %v", err)
+			return nil
+		}
 		return err
 	}
 	c.mu.Lock()
@@ -511,6 +532,10 @@ func (c *Core) statusLocked(s engine.Snapshot) {
 				}
 			}
 			c.failureTimes = append(recent, c.now())
+			c.failureDirty = true
+			if len(c.failureTimes) >= 5 {
+				c.op.Engine.Fail(fmt.Errorf("Routing stopped after five failures in ten minutes. Turn routing on to retry."))
+			}
 		}
 		c.retryAt = c.now() + d[min(c.retryAttempts, len(d)-1)]
 		c.retryAttempts++
@@ -703,11 +728,12 @@ func (c *Core) Routing(ctx context.Context, on bool) error {
 
 // ResumeRouting preserves the crash budget when SCM restarts Control.
 func (c *Core) ResumeRouting(ctx context.Context) error {
-	c.mu.Lock()
-	c.wanted = true
-	c.mu.Unlock()
+	if !c.WantsRouting() {
+		return c.op.Engine.Stop(ctx)
+	}
 	return c.Start(ctx)
 }
+func (c *Core) WantsRouting() bool { c.mu.Lock(); defer c.mu.Unlock(); return c.wanted }
 func (c *Core) restart(ctx context.Context) error {
 	ctx = c.ctx
 	c.mu.Lock()
@@ -735,11 +761,26 @@ func (c *Core) applyPolicy(ctx context.Context, auto bool) error {
 	p := c.policyLocked()
 	gen := c.generation
 	s := c.op.Engine.Snapshot()
+	pending := c.pendingRevision
 	if auto && !p.Combine {
 		p.Shares = append(lines.Shares{}, s.Policy.Shares...)
 	}
 	c.mu.Unlock()
-	if reflect.DeepEqual(p, s.Policy) && s.AppliedRevision != 0 {
+	sameRevision := !c.op.ServiceMode || pending != nil && pending.Number == s.AppliedRevision && pending.Hash == s.AppliedHash
+	if reflect.DeepEqual(p, s.Policy) && s.AppliedRevision != 0 && sameRevision {
+		if c.op.ServiceMode {
+			c.mu.Lock()
+			changed := c.pendingInstance != s.Instance
+			if changed {
+				c.pendingInstance = s.Instance
+				c.pendingRevision = &engine.Revision{Number: s.AppliedRevision, Hash: s.AppliedHash, Policy: p}
+				c.revision = max(c.revision, s.AppliedRevision)
+			}
+			c.mu.Unlock()
+			if changed {
+				return c.persistJournal()
+			}
+		}
 		return nil
 	}
 	intents, err := c.pendingClosures()
@@ -761,6 +802,7 @@ func (c *Core) applyPolicy(ctx context.Context, auto bool) error {
 	if ack.Number != revision.Number || ack.Hash != revision.Hash {
 		return fmt.Errorf("engine acknowledged a different revision")
 	}
+	c.checkpoint("control-after-apply-ack")
 	if err := c.recordIntentAcks(intents, ack); err != nil {
 		return err
 	}
@@ -775,6 +817,12 @@ func (c *Core) applyPolicy(ctx context.Context, auto bool) error {
 	}
 	c.logPolicyRulesLocked(s.Policy, p, auto)
 	return nil
+}
+
+func (c *Core) checkpoint(point string) {
+	if c.op.Checkpoint != nil {
+		c.op.Checkpoint(point)
+	}
 }
 
 func (c *Core) recordLanesLocked(p engine.Policy) {
@@ -827,6 +875,9 @@ func (c *Core) labelLocked(id string) string {
 	return id
 }
 func (c *Core) Supervise(ctx context.Context) error {
+	if c.op.ServiceMode {
+		defer c.persistFailureBudget()
+	}
 	c.mu.Lock()
 	recheck := c.op.Mode == "tun" && !c.elevated && c.now()-c.elevationAt >= 30000
 	c.mu.Unlock()
@@ -917,6 +968,23 @@ func (c *Core) Supervise(ctx context.Context) error {
 		return c.Start(ctx)
 	}
 	return nil
+}
+func (c *Core) persistFailureBudget() {
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
+	c.mu.Lock()
+	dirty := c.failureDirty
+	c.failureDirty = false
+	c.mu.Unlock()
+	if !dirty {
+		return
+	}
+	if err := c.persistJournal(); err != nil {
+		c.mu.Lock()
+		c.failureDirty = true
+		c.mu.Unlock()
+		c.log("cannot persist engine crash budget: %v", err)
+	}
 }
 func (c *Core) bindingChangedLocked(s engine.Snapshot) bool {
 	if s.StartedWith == nil {

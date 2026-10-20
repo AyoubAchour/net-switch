@@ -7,6 +7,7 @@ require gvisor.dev/gvisor v0.0.0-20261017122056-1b7906fdee8c
 replace gvisor.dev/gvisor => ./third_party/gvisor
 
 require (
+	github.com/godbus/dbus/v5 v5.2.4
 	github.com/quic-go/quic-go v0.64.0
 	golang.org/x/sys v0.49.0
 )

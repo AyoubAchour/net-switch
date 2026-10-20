@@ -20,6 +20,29 @@ func ConnectDesktop(ctx context.Context, status bool) (*RPC, error) {
 	}
 	return NewRPC(conn), nil
 }
+
+// ConfigureAutostart is the per-user installer hook. It writes only the
+// enrolled user's Run key/XDG entry; it does not turn routing on.
+func ConfigureAutostart(ctx context.Context, mode string) (any, error) {
+	if mode != "on" && mode != "off" && mode != "status" {
+		return nil, fmt.Errorf("autostart must be on, off or status")
+	}
+	if err := service.Activate(ctx); err != nil {
+		return nil, err
+	}
+	rpc, err := ConnectDesktop(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	defer rpc.Close()
+	if err := rpc.Call(ctx, map[string]any{"method": "session"}, nil); err != nil {
+		return nil, err
+	}
+	if mode == "status" {
+		return DesktopCall(ctx, "autostart", nil)
+	}
+	return DesktopCall(ctx, "autostart-set", map[string]any{"on": mode == "on"})
+}
 func Desktop(ctx context.Context, show bool) error {
 	first := true
 	for ctx.Err() == nil {

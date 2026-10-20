@@ -15,11 +15,12 @@ const pipeClientRights = windows.FILE_READ_DATA | windows.FILE_WRITE_DATA |
 	windows.FILE_READ_ATTRIBUTES | windows.FILE_WRITE_ATTRIBUTES | windows.SYNCHRONIZE
 
 type listener struct {
-	mu       sync.Mutex
-	endpoint Endpoint
-	sd       *windows.SECURITY_DESCRIPTOR
-	pending  windows.Handle
-	closed   bool
+	mu        sync.Mutex
+	endpoint  Endpoint
+	sd        *windows.SECURITY_DESCRIPTOR
+	pending   windows.Handle
+	closed    bool
+	accepting bool
 }
 
 func DefaultPath(kind string) string {
@@ -76,6 +77,10 @@ func (l *listener) Close() error {
 	l.closed = true
 	if l.pending != 0 {
 		_ = windows.CancelIoEx(l.pending, nil)
+		if !l.accepting {
+			windows.CloseHandle(l.pending)
+			l.pending = 0
+		}
 	}
 	return nil
 }
@@ -86,7 +91,17 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 		return nil, os.ErrClosed
 	}
 	h := l.pending
+	l.accepting = true
 	l.mu.Unlock()
+	defer func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.accepting = false
+		if l.closed && l.pending != 0 {
+			windows.CloseHandle(l.pending)
+			l.pending = 0
+		}
+	}()
 	event, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
 		return nil, err
@@ -102,6 +117,11 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 	}
 	if err != nil && err != windows.ERROR_PIPE_CONNECTED {
 		windows.CloseHandle(h)
+		l.mu.Lock()
+		if l.pending == h {
+			l.pending = 0
+		}
+		l.mu.Unlock()
 		return nil, err
 	}
 	l.mu.Lock()
@@ -114,6 +134,9 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 	// Keep an instance alive throughout replacement so a competing server
 	// cannot take the name between clients.
 	l.pending, err = l.create(false)
+	if err != nil {
+		l.pending = 0
+	}
 	l.mu.Unlock()
 	if err != nil {
 		windows.CloseHandle(h)
@@ -122,12 +145,12 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 	var pid uint32
 	if err := windows.GetNamedPipeClientProcessId(h, &pid); err != nil {
 		windows.CloseHandle(h)
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrPeer, err)
 	}
 	p, err := processPeer(pid)
 	if err != nil {
 		windows.CloseHandle(h)
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", ErrPeer, err)
 	}
 	return &Conn{ReadWriteCloser: os.NewFile(uintptr(h), l.endpoint.Path), Peer: p}, nil
 }

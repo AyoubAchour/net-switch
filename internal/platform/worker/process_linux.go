@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+
+	"github.com/AyoubAchour/net-switch/internal/service"
 )
 
 type linuxProcess struct {
@@ -23,6 +25,7 @@ func Start(executable string, args []string) (Process, error) {
 		return nil, fmt.Errorf("worker launcher requires its executable and worker mode")
 	}
 	cmd := exec.Command(executable, args...)
+	cmd.Env = service.ChildEnvironment()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	p := &linuxProcess{cmd: cmd}
 	var err error

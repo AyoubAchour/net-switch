@@ -381,7 +381,11 @@ func (c *Core) reconnect(ctx context.Context, key string) (map[string]any, error
 		func() {
 			c.applyMu.Lock()
 			defer c.applyMu.Unlock()
-			_ = c.saveIntent(intent)
+			if err := c.saveIntent(intent); err != nil {
+				failed += len(routed)
+				c.log("Reconnect was not sent: %v", err)
+				return
+			}
 			result, err := c.op.Engine.CloseFlows(ctx, intent.Request)
 			if err != nil {
 				failed += len(routed)
@@ -392,7 +396,10 @@ func (c *Core) reconnect(ctx context.Context, key string) (map[string]any, error
 			failed += result.Failed
 			gone += result.Gone
 			if result.Failed == 0 {
-				_ = c.completeIntent(intent.ID)
+				c.checkpoint("control-after-close-ack")
+				if err := c.completeIntent(intent.ID); err != nil {
+					c.log("Reconnect completed; its durable acknowledgement is pending: %v", err)
+				}
 			} else {
 				c.log("could not finish closure: %v", c.retryClosure(intent, fmt.Errorf("%d connections could not be closed", result.Failed)))
 			}

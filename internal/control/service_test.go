@@ -56,3 +56,32 @@ func TestServiceRevisionPersistsSettingsAndPolicyBeforeApply(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+func TestServiceSettingsMirrorFailureKeepsCommittedSettings(t *testing.T) {
+	c, _, _, files := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	files.failPrefix = c.op.Settings.File + "."
+	if err := c.save(map[string]any{"checkForUpdates": false}); err != nil {
+		t.Fatal(err)
+	}
+	if c.values["checkForUpdates"] != false || js.Object(c.op.Journal.Values()["settings"])["checkForUpdates"] != false {
+		t.Fatal("committed desired setting lost")
+	}
+	files.failPrefix = ""
+	if err := c.save(map[string]any{"skippedUpdate": "1.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	if c.op.Settings.Values()["checkForUpdates"] != false {
+		t.Fatal("later mirror write lost previous committed setting")
+	}
+}
+func TestServiceResumeHonorsCommittedStop(t *testing.T) {
+	c, e, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	c.wanted = false
+	if err := c.ResumeRouting(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.wanted || e.Snapshot().Status == "on" {
+		t.Fatal("Control restart reversed the owner's committed stop")
+	}
+}

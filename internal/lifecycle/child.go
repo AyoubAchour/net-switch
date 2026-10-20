@@ -5,6 +5,7 @@ import (
 	"os/exec"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/singbox"
+	"github.com/AyoubAchour/net-switch/internal/service"
 )
 
 type adapterChild struct {
@@ -20,6 +21,7 @@ func (p *adapterChild) Kill() error       { return p.cmd.Process.Kill() }
 func (p *adapterChild) Wait() error       { defer p.release(); return p.cmd.Wait() }
 func startAdapter(exe, config, dir string) (singbox.Child, error) {
 	cmd := exec.Command(exe, "run", "-c", config, "--disable-color")
+	cmd.Env = service.ChildEnvironment()
 	cmd.Dir = dir
 	out, err := cmd.StdoutPipe()
 	if err != nil {

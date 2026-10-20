@@ -4,9 +4,12 @@ package localipc
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
 )
+
+var ErrPeer = errors.New("IPC peer could not be authenticated")
 
 type Peer struct {
 	User    string `json:"user"`

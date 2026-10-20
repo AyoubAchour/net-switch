@@ -17,10 +17,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/lifecycle"
+	"github.com/AyoubAchour/net-switch/internal/lines"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 	linuxbox "github.com/AyoubAchour/net-switch/tests/linux/engine/singbox"
@@ -62,6 +64,13 @@ func clientMain(args []string) int {
 		}
 		return 0
 	}
+	if len(args) > 0 && args[0] == "engine-denied" {
+		if err := engineDenied(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	statusOnly := len(args) > 0 && args[0] == "status"
@@ -95,13 +104,18 @@ type actor interface {
 	command(string, ...string) *exec.Cmd
 	id() string
 	close()
+	cleanup(func())
 }
 type client struct {
-	cmd    *exec.Cmd
-	input  io.WriteCloser
-	output *bufio.Reader
-	stderr bytes.Buffer
+	cmd      *exec.Cmd
+	input    io.WriteCloser
+	output   *bufio.Reader
+	stderr   bytes.Buffer
+	waitOnce sync.Once
+	waitErr  error
 }
+
+func (c *client) wait() error { c.waitOnce.Do(func() { c.waitErr = c.cmd.Wait() }); return c.waitErr }
 
 func openClient(t *testing.T, user actor, status bool) *client {
 	t.Helper()
@@ -125,7 +139,7 @@ func openClient(t *testing.T, user actor, status bool) *client {
 	if err = c.cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { c.input.Close(); _ = c.cmd.Process.Kill(); _ = c.cmd.Wait() })
+	user.cleanup(func() { c.input.Close(); _ = c.cmd.Process.Kill(); _ = c.wait() })
 	return c
 }
 func (c *client) call(t *testing.T, method string, extra map[string]any) (json.RawMessage, error) {
@@ -139,7 +153,9 @@ func (c *client) call(t *testing.T, method string, extra map[string]any) (json.R
 	}
 	line, err := c.output.ReadBytes('\n')
 	if err != nil {
-		return nil, fmt.Errorf("client exited: %w: %s", err, c.stderr.String())
+		_ = c.cmd.Process.Kill()
+		exit := c.wait()
+		return nil, fmt.Errorf("client exited: %w; process=%v state=%v stderr=%s", err, exit, c.cmd.ProcessState, c.stderr.String())
 	}
 	var reply struct {
 		Result json.RawMessage `json:"result"`
@@ -170,6 +186,7 @@ type status struct {
 	Routing    string  `json:"routing"`
 	Instance   string  `json:"engineInstanceId"`
 	ControlPID uint32  `json:"controlPID"`
+	DesktopPID uint32  `json:"desktopPID"`
 	Error      *string `json:"error"`
 }
 
@@ -260,18 +277,40 @@ func TestRealServices(t *testing.T) {
 	if !filepath.IsAbs(dir) {
 		t.Fatal("missing executable directory")
 	}
+	for _, name := range []string{"netswitch", "netswitch-engine", "netswitch-desktop", "netswitchctl"} {
+		path := filepath.Join(dir, binary(name))
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(b)
+		arg := "version"
+		if name == "netswitch" || name == "netswitch-desktop" {
+			arg = "--version"
+		}
+		version, err := exec.Command(path, arg).CombinedOutput()
+		if err != nil {
+			t.Fatal(err, string(version))
+		}
+		t.Logf("executable=%s sha256=%x version=%s", path, sum, strings.TrimSpace(string(version)))
+	}
 	data := testData()
 	if err := lifecycle.PrepareDirectory(data); err != nil {
 		t.Fatal(err)
 	}
 	owner, other := newActor(t, "NSLifecycleOwner"), newActor(t, "NSLifecycleOther")
-	defer owner.close()
-	defer other.close()
+	t.Cleanup(owner.close)
+	t.Cleanup(other.close)
 	adapter := fixture(t, dir)
 	config := lifecycle.Config{Directory: dir, Data: data, Adapter: adapter, Mode: "proxy"}
 	if err := lifecycle.Save(filepath.Join(data, "service-config.json"), config); err != nil {
 		t.Fatal(err)
 	}
+	nic, address := primaryInterface(t)
+	if err := lifecycle.Save(filepath.Join(data, "settings.json"), map[string]any{"lines": []lines.Line{{ID: "a1", Alias: nic, Label: "Test line", Weight: 1}}, "ipv6": "off", "checkForUpdates": false}); err != nil {
+		t.Fatal(err)
+	}
+	echo := echoServer(t, address)
 	if err := service.Install(service.Config{Directory: dir, Data: data}); err != nil {
 		t.Fatal(err)
 	}
@@ -358,16 +397,69 @@ func TestRealServices(t *testing.T) {
 		if status != 200 {
 			t.Fatal("paired bearer refused")
 		}
+		var next string
+		c.must(t, "pair", nil, &next)
+		wrong := "000000"
+		if wrong == next {
+			wrong = "000001"
+		}
+		for range 3 {
+			status, _ = api(t, session.URL, "", "POST", "/api/pair", `{"code":"`+wrong+`"}`)
+			if status != 401 {
+				t.Fatal("wrong code accepted")
+			}
+		}
+		status, _ = api(t, session.URL, "", "POST", "/api/pair", `{"code":"`+next+`"}`)
+		if status != 401 {
+			t.Fatal("code accepted after three global attempts")
+		}
+		temporary := openClient(t, owner, false)
+		var short struct {
+			Token string `json:"token"`
+			URL   string `json:"url"`
+		}
+		temporary.must(t, "session", nil, &short)
+		status, _ = api(t, short.URL, short.Token, "GET", "/api/state", "")
+		if status != 200 {
+			t.Fatal("temporary token was never valid")
+		}
+		temporary.input.Close()
+		wait(t, "token revoked on desktop disconnect", 5*time.Second, func() bool {
+			status, _ := api(t, short.URL, short.Token, "GET", "/api/state", "")
+			return status == 401
+		})
 	})
 	c.must(t, "signin", nil, nil)
 	wait(t, "routing on", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	first := getStatus(t, c)
+	t.Run("engine-ipc-rejects-standard-users", func(t *testing.T) {
+		exe, _ := os.Executable()
+		for _, user := range []actor{owner, other} {
+			if b, err := user.command(exe, "client", "engine-denied").CombinedOutput(); err != nil {
+				t.Fatal(err, string(b))
+			}
+		}
+	})
+	t.Run("adapter-carries-traffic", func(t *testing.T) {
+		stream := proxyStream(t, session.URL, session.Token, echo)
+		defer stream.Close()
+		checkEcho(t, stream)
+	})
 	t.Run("desktop-death-keeps-routing", func(t *testing.T) {
 		desktop := owner.command(filepath.Join(dir, binary("netswitch-desktop")), "--background")
 		if err := desktop.Start(); err != nil {
 			t.Fatal(err)
 		}
-		time.Sleep(2 * time.Second)
+		t.Cleanup(func() { _ = desktop.Process.Kill(); _ = desktop.Wait() })
+		wait(t, "owner desktop attached", 20*time.Second, func() bool { return getStatus(t, c).DesktopPID == uint32(desktop.Process.Pid) })
+		status, b := api(t, session.URL, session.Token, "GET", "/api/installed-apps", "")
+		if status != 200 {
+			t.Fatal("owner-session app listing failed", status, string(b))
+		}
+		var apps []any
+		if err := json.Unmarshal(b, &apps); err != nil {
+			t.Fatal("desktop did not return an app list", err)
+		}
 		if err := desktop.Process.Kill(); err != nil {
 			t.Fatal(err)
 		}
@@ -377,6 +469,9 @@ func TestRealServices(t *testing.T) {
 		}
 	})
 	t.Run("control-crash-reattaches", func(t *testing.T) {
+		stream := proxyStream(t, session.URL, session.Token, echo)
+		defer stream.Close()
+		checkEcho(t, stream)
 		old, err := service.Query(service.Control)
 		if err != nil {
 			t.Fatal(err)
@@ -386,6 +481,7 @@ func TestRealServices(t *testing.T) {
 			t.Fatal(err)
 		}
 		kill(t, old.PID)
+		checkEcho(t, stream)
 		wait(t, "SCM/systemd Control recovery", 25*time.Second, func() bool {
 			s, err := service.Query(service.Control)
 			return err == nil && s.Running && s.PID != old.PID
@@ -398,16 +494,32 @@ func TestRealServices(t *testing.T) {
 		if err != nil || s.Instance != first.Instance || engineAfter.PID != engine.PID {
 			t.Fatal("Control restart replaced engine", s, err)
 		}
+		checkEcho(t, stream)
 	})
 	t.Run("stale-controller-fenced", func(t *testing.T) { engineProbe(t, dir, data, "fence") })
 	wait(t, "Control reattaches after fencing", 15*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+	for _, point := range []string{"control-after-desired-commit", "control-after-apply-ack", "engine-after-apply-commit"} {
+		t.Run(point, func(t *testing.T) {
+			c = durableCrash(t, data, point, session.URL, session.Token, echo, owner)
+			c.must(t, "session", nil, &session)
+		})
+	}
+	t.Run("closure-replay-keeps-newer-flows", func(t *testing.T) {
+		c = replayClosure(t, data, session.URL, session.Token, echo, owner)
+		c.must(t, "session", nil, &session)
+	})
 	t.Run("engine-crash-recovers", func(t *testing.T) {
+		stream := proxyStream(t, session.URL, session.Token, echo)
+		defer stream.Close()
+		checkEcho(t, stream)
 		engine, err := service.Query(service.Engine)
 		if err != nil {
 			t.Fatal(err)
 		}
 		before := getStatus(t, c)
 		kill(t, engine.PID)
+		expectClosed(t, stream)
+		directEcho(t, echo)
 		wait(t, "new engine instance", 40*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
 	})
 	t.Run("explicit-stop-acknowledged", func(t *testing.T) {
@@ -419,7 +531,55 @@ func TestRealServices(t *testing.T) {
 		c.must(t, "routing", map[string]any{"on": true}, nil)
 		wait(t, "restart after explicit stop", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	})
+	t.Run("five-failures-stay-stopped-across-control-restart", func(t *testing.T) {
+		c.must(t, "routing", map[string]any{"on": true}, nil) // explicit Retry resets the budget
+		for i := 0; i < 5; i++ {
+			engine, err := service.Query(service.Engine)
+			if err != nil || !engine.Running {
+				t.Fatal("crash precondition", engine, err)
+			}
+			before := getStatus(t, c).Instance
+			kill(t, engine.PID)
+			if i < 4 {
+				wait(t, "bounded engine retry", 45*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before })
+			}
+		}
+		wait(t, "durable crash-loop latch", 15*time.Second, func() bool {
+			var journal struct {
+				Failures []int64 `json:"failures"`
+			}
+			return lifecycle.Read(filepath.Join(data, "control-journal.json"), &journal) == nil && len(journal.Failures) >= 5
+		})
+		control, err := service.Query(service.Control)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kill(t, control.PID)
+		wait(t, "Control recovers with retry budget", 25*time.Second, func() bool {
+			s, err := service.Query(service.Control)
+			return err == nil && s.Running && s.PID != control.PID
+		})
+		c = openClient(t, owner, false)
+		c.must(t, "session", nil, &session)
+		deadline := time.Now().Add(32 * time.Second)
+		for time.Now().Before(deadline) {
+			engine, err := service.Query(service.Engine)
+			if err != nil || engine.Running {
+				t.Fatal("crash loop restarted after its fifth failure", engine, err)
+			}
+			time.Sleep(time.Second)
+		}
+		s := getStatus(t, c)
+		if s.Routing != "error" || s.Error == nil || !strings.Contains(*s.Error, "retry") {
+			t.Fatal("crash-loop error is not actionable", s)
+		}
+		c.must(t, "routing", map[string]any{"on": true}, nil)
+		wait(t, "owner Retry releases latch", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+	})
 	t.Run("lease-lapse-fails-open", func(t *testing.T) {
+		stream := proxyStream(t, session.URL, session.Token, echo)
+		defer stream.Close()
+		checkEcho(t, stream)
 		restore := disableRecovery(t)
 		defer restore()
 		control, err := service.Query(service.Control)
@@ -436,7 +596,10 @@ func TestRealServices(t *testing.T) {
 		if err != nil || still.PID != engine.PID || !still.Running {
 			t.Fatal("engine died immediately with Control", err)
 		}
+		checkEcho(t, stream)
 		wait(t, "30-second lease cleanup", 40*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
+		expectClosed(t, stream)
+		directEcho(t, echo)
 	})
 	t.Run("reboot-like-restart-waits-for-sign-in", func(t *testing.T) {
 		// Model a new boot while keeping both durable journals, rather than
@@ -485,7 +648,7 @@ func kill(t *testing.T, pid uint32) {
 		t.Fatal(err)
 	}
 }
-func probe(ctx context.Context) error {
+func probe(ctx context.Context, issued *uint64) error {
 	endpoint := localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine}
 	c, err := localipc.Dial(ctx, endpoint)
 	if err != nil {
@@ -510,6 +673,7 @@ func probe(ctx context.Context) error {
 	if second.Epoch != first.Epoch+1 {
 		return fmt.Errorf("engine did not issue consecutive epochs")
 	}
+	*issued = second.Epoch
 	for _, method := range []string{"renew", "start", "apply", "stop", "closeFlows"} {
 		if err = rpc.Call(ctx, map[string]any{"method": method, "engineInstanceId": hello.Instance, "epoch": first.Epoch}, nil); err == nil {
 			return fmt.Errorf("stale %s accepted", method)
@@ -519,4 +683,27 @@ func probe(ctx context.Context) error {
 		return fmt.Errorf("wrong instance accepted")
 	}
 	return rpc.Call(ctx, map[string]any{"method": "renew", "engineInstanceId": hello.Instance, "epoch": second.Epoch}, nil)
+}
+func engineProbe(t *testing.T, _, data, _ string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	engine, err := service.Query(service.Engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var epoch uint64
+	if err := probe(ctx, &epoch); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, "Control acquired a fresh engine epoch", 20*time.Second, func() bool {
+		var state struct {
+			Epoch uint64 `json:"epoch"`
+		}
+		return lifecycle.Read(filepath.Join(data, "engine-state.json"), &state) == nil && state.Epoch > epoch
+	})
+	after, err := service.Query(service.Engine)
+	if err != nil || after.PID != engine.PID {
+		t.Fatal("fencing replaced the engine", err)
+	}
 }

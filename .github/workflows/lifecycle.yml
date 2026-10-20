@@ -54,7 +54,7 @@ jobs:
           ./scripts/fetch-engine.ps1
           $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles 'NetSwitch-Lifecycle-CI'
           foreach ($name in @('netswitch', 'netswitch-engine', 'netswitch-desktop', 'netswitchctl')) {
-            go build -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"
+            go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') ./tests/lifecycle
@@ -70,7 +70,7 @@ jobs:
         run: |
           sudo install -d -o "$(id -u)" -g "$(id -g)" "$NETSWITCH_LIFECYCLE_DIR"
           for name in netswitch netswitch-engine netswitch-desktop netswitchctl; do
-            go build -o "$NETSWITCH_LIFECYCLE_DIR/$name" "./cmd/$name"
+            go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o "$NETSWITCH_LIFECYCLE_DIR/$name" "./cmd/$name"
           done
           go test -c -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" ./tests/lifecycle
           sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"

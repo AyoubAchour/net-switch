@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0d0f12">
   <title>Connect to Net Switch</title>
   <link rel="icon" href="/favicon.svg">
   <link rel="stylesheet" href="/pair.css">
@@ -16,8 +17,8 @@
     <form>
       <label for="code">Six-digit code</label>
       <input id="code" name="code" type="text" inputmode="numeric"
-        autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"
-        aria-describedby="help error" required autofocus>
+        autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" spellcheck="false"
+        aria-describedby="help error" required>
       <p id="help">The code expires after two minutes.</p>
       <p id="error" role="alert"></p>
       <button type="submit">Connect</button>

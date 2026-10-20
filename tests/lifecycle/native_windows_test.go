@@ -26,12 +26,23 @@ import (
 type windowsActor struct {
 	name, sid string
 	token     windows.Token
+	t         *testing.T
 }
+
+func (a *windowsActor) cleanup(fn func()) { a.t.Cleanup(fn) }
 
 func (a *windowsActor) id() string { return a.sid }
 func (a *windowsActor) command(exe string, args ...string) *exec.Cmd {
 	cmd := exec.Command(exe, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(a.token), CreationFlags: windows.DETACHED_PROCESS, HideWindow: true}
+	env, err := a.token.Environ(false)
+	if err != nil {
+		a.t.Fatal(err)
+	}
+	for _, name := range []string{"GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "NETSWITCH_LIFECYCLE_CI", "NETSWITCH_LIFECYCLE_DIR"} {
+		env = append(env, name+"="+os.Getenv(name))
+	}
+	cmd.Env = env
 	return cmd
 }
 func (a *windowsActor) close() {
@@ -75,7 +86,7 @@ func newActor(t *testing.T, name string) actor {
 		t.Fatal("test user is elevated")
 	}
 	t.Logf("standard user %s enrolled=%s", name, user.User.Sid.String())
-	return &windowsActor{name: name, sid: user.User.Sid.String(), token: token}
+	return &windowsActor{name: name, sid: user.User.Sid.String(), token: token, t: t}
 }
 func testData() string { return filepath.Join(os.Getenv("ProgramData"), "NetSwitch-Lifecycle-CI") }
 func verifyPermissions(t *testing.T, owner, other actor) {
@@ -155,14 +166,6 @@ func desktopDenied() error {
 		return fmt.Errorf("desktop pipe denied for wrong reason: %w", err)
 	}
 	return nil
-}
-func engineProbe(t *testing.T, _, _, _ string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := probe(ctx); err != nil {
-		t.Fatal(err)
-	}
 }
 func probeMain([]string) int { return 2 }
 func disableRecovery(t *testing.T) func() {

@@ -39,6 +39,7 @@ type operation struct {
 }
 type Server struct {
 	mu                          sync.Mutex
+	mutation                    sync.Mutex
 	Instance                    string
 	now                         func() time.Time
 	epoch                       uint64
@@ -97,6 +98,13 @@ func (s *Server) Handle(ctx context.Context, r Request) Reply {
 	return reply
 }
 func (s *Server) execute(ctx context.Context, r Request) (any, error) {
+	switch r.Method {
+	case "attach", "start", "apply", "stop", "closeFlows", "adapterForgetLane":
+		// A new controller cannot overtake an accepted mutation. Renewals
+		// remain independent of adapter file/HTTP work and disk flushes.
+		s.mutation.Lock()
+		defer s.mutation.Unlock()
+	}
 	s.mu.Lock()
 	if r.Method == "hello" {
 		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks"}}
@@ -132,7 +140,9 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		return true, nil
 	}
 	if r.Method == "stop" && s.stopping && r.Instance == s.Instance && r.Epoch == s.epoch {
+		s.mu.Unlock()
 		err := s.runtime.Stop(ctx)
+		s.mu.Lock()
 		if err == nil {
 			s.stopped = true
 		}
@@ -163,6 +173,8 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 	defer s.mu.Unlock()
 	if r.Adapter != nil && r.Method != "stop" && r.Method != "renew" {
 		if adapter, ok := s.runtime.(AdapterRuntime); ok {
+			s.mu.Unlock()
+			defer s.mu.Lock()
 			return adapter.AdapterRequest(ctx, r)
 		}
 		return nil, errors.New("adapter payload is not supported")
@@ -178,12 +190,19 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 			return nil, errors.New("revision required")
 		}
 		if r.Method == "start" {
+			s.mu.Unlock()
+			defer s.mu.Lock()
 			return s.runtime.Start(ctx, *r.Revision)
 		}
+		s.mu.Unlock()
+		defer s.mu.Lock()
 		return s.runtime.Apply(ctx, *r.Revision)
 	case "stop":
 		s.stopping = true
-		if err := s.runtime.Stop(ctx); err != nil {
+		s.mu.Unlock()
+		err := s.runtime.Stop(ctx)
+		s.mu.Lock()
+		if err != nil {
 			return nil, err
 		}
 		s.stopped = true
@@ -294,6 +313,8 @@ func (s *Server) effect(ctx context.Context, r Request, run func() (any, error))
 // CheckLease shares the mutation/attach lock. Once cleanup begins, no new
 // controller can resurrect this engine instance.
 func (s *Server) CheckLease(ctx context.Context) error {
+	s.mutation.Lock()
+	defer s.mutation.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {

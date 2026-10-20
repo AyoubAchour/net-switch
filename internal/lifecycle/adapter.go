@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"time"
 
 	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/engine/singbox"
+	"github.com/AyoubAchour/net-switch/internal/faultpoint"
 )
 
 type adapterPayload struct {
@@ -26,6 +28,7 @@ type engineState struct {
 	Applied  *ce.Acknowledgement `json:"appliedRevision"`
 }
 type adapterRuntime struct {
+	mu      sync.Mutex
 	adapter *singbox.Adapter
 	data    string
 	state   engineState // serialized by the protocol's lease mutex
@@ -34,6 +37,8 @@ type adapterRuntime struct {
 func (a *adapterRuntime) InitialEpoch() uint64 { return a.state.Epoch }
 
 func (a *adapterRuntime) SaveEpoch(epoch uint64) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	next := a.state
 	next.Epoch = epoch
 	if err := Save(filepath.Join(a.data, "engine-state.json"), next); err != nil {
@@ -44,6 +49,8 @@ func (a *adapterRuntime) SaveEpoch(epoch uint64) error {
 }
 func (a *adapterRuntime) AdapterSnapshot() any {
 	s := a.adapter.Snapshot()
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	s.Instance = a.state.Instance
 	return s
 }
@@ -64,6 +71,9 @@ func (a *adapterRuntime) AdapterRequest(ctx context.Context, r protocol.Request)
 		if p.Revision == nil {
 			return nil, errors.New("complete revision required")
 		}
+		if r.Method == "apply" && a.adapter.Snapshot().Status != "on" {
+			return nil, errors.New("engine has no loaded revision; start is required")
+		}
 		if r.Method == "start" {
 			if err := a.adapter.Start(ctx, p.Revision.Policy); err != nil {
 				return nil, err
@@ -80,10 +90,12 @@ func (a *adapterRuntime) AdapterRequest(ctx context.Context, r protocol.Request)
 		if err != nil {
 			return nil, err
 		}
+		a.mu.Lock()
 		ack.Instance = a.state.Instance
 		next := a.state
 		next.Applied = &ack
 		if err := Save(filepath.Join(a.data, "engine-state.json"), next); err != nil {
+			a.mu.Unlock()
 			// An unrecorded applied revision cannot safely acknowledge closure
 			// cutoffs. Fail open and let recovery restart a fresh instance.
 			stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -91,13 +103,18 @@ func (a *adapterRuntime) AdapterRequest(ctx context.Context, r protocol.Request)
 			return nil, errors.Join(err, a.adapter.Stop(stopCtx))
 		}
 		a.state = next
+		a.mu.Unlock()
+		faultpoint.Hit(a.data, "engine-after-apply-commit")
 		return ack, nil
 	case "flows":
 		return a.adapter.Connections(ctx)
 	case "stats":
 		return a.AdapterSnapshot(), nil
 	case "closeFlows":
-		if p.Close == nil || p.Close.OperationID != r.OpID || r.OpID == "" || p.Close.Instance != a.state.Instance {
+		a.mu.Lock()
+		instance := a.state.Instance
+		a.mu.Unlock()
+		if p.Close == nil || p.Close.OperationID != r.OpID || r.OpID == "" || p.Close.Instance != instance {
 			return nil, errors.New("invalid closure operation")
 		}
 		// The IPC instance is the service lifetime, while Clash IDs belong to

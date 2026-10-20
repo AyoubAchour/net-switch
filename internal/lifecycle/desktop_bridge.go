@@ -22,14 +22,23 @@ type DesktopBridge struct {
 	Base    platform.System
 	mu      sync.Mutex
 	owner   string
+	pid     uint32
 	queue   []DesktopWork
 	pending map[string]chan desktopResult
 }
 
-func (d *DesktopBridge) Connect(id string) {
+func (d *DesktopBridge) Connect(id string, pid uint32) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.owner != id {
+		for key, ch := range d.pending {
+			ch <- desktopResult{err: errors.New("desktop session replaced")}
+			delete(d.pending, key)
+		}
+		d.queue = nil
+	}
 	d.owner = id
+	d.pid = pid
 	if d.pending == nil {
 		d.pending = map[string]chan desktopResult{}
 	}
@@ -41,12 +50,14 @@ func (d *DesktopBridge) Disconnect(id string) {
 		return
 	}
 	d.owner = ""
+	d.pid = 0
 	for key, ch := range d.pending {
 		ch <- desktopResult{err: errors.New("desktop disconnected")}
 		delete(d.pending, key)
 	}
 	d.queue = nil
 }
+func (d *DesktopBridge) PID() uint32 { d.mu.Lock(); defer d.mu.Unlock(); return d.pid }
 func (d *DesktopBridge) Poll(id string) []DesktopWork {
 	d.mu.Lock()
 	defer d.mu.Unlock()

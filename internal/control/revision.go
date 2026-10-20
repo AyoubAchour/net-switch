@@ -76,6 +76,11 @@ func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine
 	if previous := c.pendingRevision; previous != nil && c.pendingInstance == snapshot.Instance &&
 		snapshot.AppliedRevision < previous.Number && previous.Hash == hash && reflect.DeepEqual(c.closures, intents) {
 		c.mu.Unlock()
+		if c.op.ServiceMode {
+			if err := c.persistJournal(); err != nil {
+				return engine.Revision{}, err
+			}
+		}
 		return *previous, nil
 	}
 	number := c.revision + 1
@@ -103,6 +108,7 @@ func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine
 		c.mu.Unlock()
 		return engine.Revision{}, err
 	}
+	c.checkpoint("control-after-desired-commit")
 	return revision, nil
 }
 
@@ -319,6 +325,7 @@ func (c *Core) finishClosures(ctx context.Context, gen uint64) error {
 			failures = append(failures, c.retryClosure(intent, err))
 			continue
 		}
+		c.checkpoint("control-after-close-ack")
 		if result.Closed > 0 && intent.Purpose != "reconnect" {
 			plural := ""
 			if result.Closed != 1 {

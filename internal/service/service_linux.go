@@ -37,7 +37,9 @@ func Run(_ string, program Program) error {
 	})
 }
 func systemctl(ctx context.Context, args ...string) error {
-	b, err := exec.CommandContext(ctx, "/usr/bin/systemctl", args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "/usr/bin/systemctl", args...)
+	cmd.Env = ChildEnvironment()
+	b, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("systemctl %v: %w: %s", args, err, b)
 	}
@@ -50,12 +52,21 @@ func Start(ctx context.Context, name string) error { return systemctl(ctx, "star
 func Activate(context.Context) error              { return nil }
 func Stop(ctx context.Context, name string) error { return systemctl(ctx, "stop", unit(name)) }
 func Query(name string) (Status, error) {
-	b, err := exec.Command("/usr/bin/systemctl", "show", "--property=MainPID", "--value", unit(name)).Output()
+	cmd := exec.Command("/usr/bin/systemctl", "show", "--property=MainPID,ActiveState,SubState", unit(name))
+	cmd.Env = ChildEnvironment()
+	b, err := cmd.Output()
 	if err != nil {
 		return Status{}, err
 	}
-	n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 32)
-	return Status{PID: uint32(n), Running: n != 0}, err
+	values := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	n, err := strconv.ParseUint(values["MainPID"], 10, 32)
+	return Status{PID: uint32(n), Running: values["ActiveState"] == "active" && values["SubState"] == "running" && n != 0}, err
 }
 func SetOwner(string) error { return nil }
 func quoted(s string) string {

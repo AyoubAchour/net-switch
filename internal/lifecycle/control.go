@@ -15,9 +15,11 @@ import (
 	assets "github.com/AyoubAchour/net-switch"
 	"github.com/AyoubAchour/net-switch/internal/control"
 	"github.com/AyoubAchour/net-switch/internal/crashnet"
+	"github.com/AyoubAchour/net-switch/internal/faultpoint"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 	"github.com/AyoubAchour/net-switch/internal/settings"
+	"github.com/AyoubAchour/net-switch/internal/updates"
 )
 
 func ControlService(serviceCtx context.Context, ready func(), c Config, log func(string)) error {
@@ -31,13 +33,31 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	// Attach before considering any cleanup or new start. A Control restart
 	// must preserve the engine's existing flows and fixed closure cutoffs.
 	attachCtx, stopAttach := context.WithTimeout(ctx, 10*time.Second)
-	err = remote.Attach(attachCtx, false)
+	defer stopAttach()
+	status, statusErr := service.Query(service.Engine)
+	if statusErr != nil {
+		return fmt.Errorf("query engine before reattachment: %w", statusErr)
+	}
+	if status.PID != 0 || status.Running {
+		for {
+			err = remote.Attach(attachCtx, false)
+			if err == nil {
+				break
+			}
+			if waitErr := localipc.Pause(attachCtx, 200*time.Millisecond); waitErr != nil {
+				stopAttach()
+				return fmt.Errorf("live engine could not be reattached; journal left intact: %w", err)
+			}
+		}
+	} else {
+		err = errors.New("engine service is stopped")
+	}
 	stopAttach()
 	wasRunning := err == nil && remote.Snapshot().Status == "on"
 	if err != nil {
 		log("no existing engine attachment: " + err.Error())
 	}
-	ioOptions := settings.Options{SyncFile: syncFile, OnBackupError: func(err error) { log("backup: " + err.Error()) }}
+	ioOptions := settings.Options{Files: durableFiles{}, SyncFile: syncFile, SyncParent: SyncDirectory, OnBackupError: func(err error) { log("backup: " + err.Error()) }}
 	store := settings.New(c.Data, ioOptions)
 	if _, err := store.Load(); err != nil {
 		return err
@@ -50,7 +70,10 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 		return err
 	}
 	if journal.Recovery != nil {
-		return fmt.Errorf("control journal needs administrator recovery: %s", journal.Recovery.Reason)
+		if !journal.Recovery.UsedBackup {
+			return fmt.Errorf("control journal needs administrator recovery: %s", journal.Recovery.Reason)
+		}
+		log("control journal restored from its protected backup: " + journal.Recovery.Reason)
 	}
 	undoOptions := ioOptions
 	undoOptions.FileName = "windows-undo.json"
@@ -67,7 +90,15 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	// A Control failure releases its connection, not the engine. The service
 	// manager gets the first recovery opportunity; the lease is the fallback.
 	crash := crashnet.New(log, func(context.Context) error { cancel(); return nil })
-	core, err := control.New(ctx, control.Options{Engine: remote, Platform: desktop, Settings: store, Undo: undo, Journal: journal, IO: ioOptions, Mode: c.Mode, Version: assets.AppVersion(), UserDir: c.Data, Log: log, Crash: crash, ServiceMode: true, BootID: boot, AutostartAllowed: true})
+	core, err := control.New(ctx, control.Options{Engine: remote, Platform: desktop, Settings: store, Undo: undo, Journal: journal, IO: ioOptions, Mode: c.Mode, Version: assets.AppVersion(), UserDir: c.Data, Log: log, Crash: crash, ServiceMode: true, BootID: boot, AutostartAllowed: true, Checkpoint: func(point string) { faultpoint.Hit(c.Data, point) }, CheckUpdate: func(ctx context.Context) (*updates.Offer, error) {
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		architecture, err := desktop.Base.Call(ctx, "architecture", nil)
+		if err != nil {
+			return nil, err
+		}
+		return updates.Check(ctx, assets.AppVersion(), fmt.Sprint(architecture))
+	}})
 	if err != nil {
 		return err
 	}
@@ -168,7 +199,12 @@ func Log(data, process string) func(string) {
 		mu.Lock()
 		defer mu.Unlock()
 		fmt.Fprintln(os.Stderr, message)
-		f, err := os.OpenFile(filepath.Join(data, process+".log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		path := filepath.Join(data, process+".log")
+		if info, err := os.Stat(path); err == nil && info.Size() > 5<<20 {
+			_ = os.Remove(path + ".old")
+			_ = os.Rename(path, path+".old")
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 		if err == nil {
 			_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), message)
 			f.Close()

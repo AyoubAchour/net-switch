@@ -1,7 +1,6 @@
 package lifecycle_test
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 )
@@ -19,18 +17,23 @@ import (
 type linuxActor struct {
 	name, uid string
 	number    uint32
+	t         *testing.T
+	home      string
 }
+
+func (a *linuxActor) cleanup(fn func()) { a.t.Cleanup(fn) }
 
 func (a *linuxActor) id() string { return a.uid }
 func (a *linuxActor) command(exe string, args ...string) *exec.Cmd {
 	cmd := exec.Command(exe, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: a.number, Gid: a.number, NoSetGroups: false}}
+	cmd.Env = append(os.Environ(), "HOME="+a.home, "USER="+a.name)
 	return cmd
 }
 func (a *linuxActor) close() { _ = exec.Command("userdel", a.name).Run() }
 func newActor(t *testing.T, name string) actor {
 	t.Helper()
-	if b, err := exec.Command("useradd", "--no-create-home", name).CombinedOutput(); err != nil {
+	if b, err := exec.Command("useradd", "--create-home", name).CombinedOutput(); err != nil {
 		t.Fatal(err, string(b))
 	}
 	u, err := user.Lookup(name)
@@ -41,7 +44,7 @@ func newActor(t *testing.T, name string) actor {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &linuxActor{name: name, uid: u.Uid, number: uint32(n)}
+	return &linuxActor{name: name, uid: u.Uid, number: uint32(n), home: u.HomeDir, t: t}
 }
 func testData() string { return "/var/lib/netswitch-lifecycle-ci" }
 func verifyPermissions(t *testing.T, owner, other actor) {
@@ -74,15 +77,7 @@ func permissionProbe() error {
 	fmt.Println("standard-user store access denied; desktop socket permits status")
 	return nil
 }
-func desktopDenied() error { return nil }
-func engineProbe(t *testing.T, _, _, _ string) {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := probe(ctx); err != nil {
-		t.Fatal(err)
-	}
-}
+func desktopDenied() error              { return nil }
 func probeMain([]string) int            { return 2 }
 func hostedMain(*testing.M) (bool, int) { return false, 0 }
 func disableRecovery(t *testing.T) func() {
