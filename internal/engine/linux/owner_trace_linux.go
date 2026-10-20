@@ -3,6 +3,7 @@
 package linux
 
 import (
+	"context"
 	"fmt"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"os"
@@ -49,11 +50,12 @@ func (t *descriptorTrace) end(index int) {
 }
 
 type descriptorFailure struct {
-	job               *descriptorBatch
-	target            platform.Tuple
-	requested, failed int64
-	lookupDeadline    int64
-	stage             uint32
+	job                 *descriptorBatch
+	target              platform.Tuple
+	requested, observed int64
+	lookupDeadline      int64
+	stage               uint32
+	outcome             string
 }
 type descriptorScanSnapshot struct {
 	Target                                                                      platform.Tuple
@@ -67,6 +69,8 @@ type descriptorScanSnapshot struct {
 	QueueAtEnqueue, InFlightAtEnqueue, QueueAtStart, InFlightAtStart            int64
 	Stage                                                                       string
 	FailureStage                                                                string
+	Outcome                                                                     string
+	ObservedNS                                                                  int64
 	Reads                                                                       []descriptorReadStamp
 	OmittedReads                                                                int
 }
@@ -78,13 +82,34 @@ func descriptorStage(stage uint32) string {
 func (f *descriptorFailure) snapshot() descriptorScanSnapshot {
 	j := f.job
 	s := descriptorScanSnapshot{Target: f.target, PID: j.key.pid, Offset: j.key.offset, OpenedFD: j.openedFDPlusOne.Load() - 1, Limit: j.key.limit, Inline: j.inline,
-		RequestedNS: f.requested, EnqueuedNS: j.queued.UnixNano(), WorkerStartedNS: j.startedNS.Load(), DeadlineNS: j.deadline.UnixNano(), LookupDeadlineNS: f.lookupDeadline, FailedNS: f.failed, CompletedNS: j.completedNS.Load(),
+		RequestedNS: f.requested, EnqueuedNS: j.queued.UnixNano(), WorkerStartedNS: j.startedNS.Load(), DeadlineNS: j.deadline.UnixNano(), LookupDeadlineNS: f.lookupDeadline, ObservedNS: f.observed, Outcome: f.outcome, CompletedNS: j.completedNS.Load(),
 		QueueAtEnqueue: j.queueAtEnqueue, InFlightAtEnqueue: j.inFlightAtEnqueue, QueueAtStart: j.queueAtStart.Load(), InFlightAtStart: j.inFlightAtStart.Load(), Stage: descriptorStage(j.stage.Load()), FailureStage: descriptorStage(f.stage)}
+	if f.outcome == "deadline" {
+		s.FailedNS = f.observed
+	} else {
+		s.FailureStage = ""
+	}
 	j.trace.mu.Lock()
 	s.Reads = append([]descriptorReadStamp(nil), j.trace.reads...)
 	s.OmittedReads = j.trace.omitted
 	j.trace.mu.Unlock()
 	return s
+}
+
+func observeDescriptorBatch(ctx context.Context, job *descriptorBatch, row socketRow, requested time.Time, outcome string) *descriptorFailure {
+	event := &descriptorFailure{job: job, target: platform.Tuple{Source: row.local, Destination: row.remote}, requested: requested.UnixNano(), observed: time.Now().UnixNano(), stage: job.stage.Load(), outcome: outcome}
+	if deadline, ok := ctx.Deadline(); ok {
+		event.lookupDeadline = deadline.UnixNano()
+	}
+	return event
+}
+
+func (o *Owners) recordSlowBatch(ctx context.Context, job *descriptorBatch, row socketRow, requested time.Time) {
+	if time.Since(job.queued) < time.Millisecond {
+		return
+	}
+	sequence := o.batches.slowSequence.Add(1)
+	o.batches.slow[(sequence-1)%uint64(len(o.batches.slow))].Store(observeDescriptorBatch(ctx, job, row, requested, "slow batch"))
 }
 
 func descriptorTableSize() (int, error) {

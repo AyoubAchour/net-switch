@@ -619,14 +619,12 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 		}
 		p.lines[id] = l
 	}
-	if len(unavailable) > 0 {
-		usable := false
-		for _, line := range p.lines {
-			usable = usable || (line.Up && (line.Default4 || line.Default6))
-		}
-		if !usable {
-			return fmt.Errorf("no usable line remains after ambiguous address selection: %v", unavailable)
-		}
+	// Preserve ordinary link/default-route recovery on every unambiguous
+	// line. A DHCP gap must not become a whole-engine shutdown merely because
+	// a different line is ambiguous. Fail open when ambiguity itself leaves
+	// no line that can safely be selected.
+	if len(unavailable) > 0 && len(unavailable) == len(p.lines) {
+		return fmt.Errorf("no unambiguous line remains: %v", unavailable)
 	}
 	// New addresses select their table before old address selectors disappear.
 	for _, kind := range []string{"rule", "route", "binding"} {

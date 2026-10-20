@@ -44,7 +44,7 @@ func TestKernelAmbiguousAddressDisablesOnlyItsLine(t *testing.T) {
 	if _, err = p.OpenTun(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err = p.Prepare(ctx, []platform.Line{{ID: "a", Addresses: []netip.Addr{netip.MustParseAddr("192.0.2.1")}}, {ID: "b", Interface: b.Name}}); err != nil {
+	if err = p.Prepare(ctx, []platform.Line{{ID: "a", Addresses: []netip.Addr{netip.MustParseAddr("192.0.2.1")}}, {ID: "b", Addresses: []netip.Addr{netip.MustParseAddr("198.51.100.1")}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = p.binding("a", false); err != nil {
@@ -80,10 +80,26 @@ func TestKernelAmbiguousAddressDisablesOnlyItsLine(t *testing.T) {
 	if err = netlink.AddrAdd(b, duplicate); err != nil {
 		t.Fatal(err)
 	}
-	if err = netlink.LinkSetDown(b); err != nil {
+	def := netlink.Route{Family: unix.AF_INET, LinkIndex: b.Index, Table: unix.RT_TABLE_MAIN, Dst: prefix("0.0.0.0/0"), Type: unix.RTN_UNICAST, Scope: netlink.SCOPE_LINK, Priority: 20}
+	if err = netlink.RouteDel(&def); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.reconcileLocked(ctx); err != nil {
+		t.Fatal("a temporary default-route gap on the other line shut down routing", err)
+	}
+	if err = netlink.RouteAdd(&def); err != nil {
+		t.Fatal(err)
+	}
+	if err = p.reconcileLocked(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = p.binding("b", false); err != nil {
+		t.Fatal("the unambiguous line failed to recover", err)
+	}
+	if err = netlink.AddrAdd(a, &netlink.Addr{IPNet: prefix("198.51.100.1/32")}); err != nil {
 		t.Fatal(err)
 	}
 	if err = p.reconcileLocked(ctx); err == nil {
-		t.Fatal("no usable line did not fail open")
+		t.Fatal("all ambiguous line selectors did not fail open")
 	}
 }

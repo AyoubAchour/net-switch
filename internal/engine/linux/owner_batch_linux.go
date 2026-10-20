@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"golang.org/x/sys/unix"
 )
 
@@ -77,6 +76,8 @@ type descriptorBatches struct {
 	active                                                 atomic.Int64
 	failureSequence                                        atomic.Uint64
 	failures                                               [8]atomic.Pointer[descriptorFailure]
+	slowSequence                                           atomic.Uint64
+	slow                                                   [8]atomic.Pointer[descriptorFailure]
 }
 
 type descriptorQueueBusy struct{ ready <-chan struct{} }
@@ -287,10 +288,7 @@ func (o *Owners) recordBatchWait(ctx context.Context, job *descriptorBatch, row 
 	stage := job.stage.Load()
 	message := fmt.Sprintf("stage=%s pid=%d offset=%d limit=%d visited=%d age=%s expired=%t queued=%d inline=%t", descriptorStage(stage), job.key.pid, job.key.offset, job.key.limit, job.visited.Load(), time.Since(job.queued), time.Now().After(job.deadline), len(o.batches.jobs), job.inline)
 	o.batches.lastWait.Store(&message)
-	failure := &descriptorFailure{job: job, target: platform.Tuple{Source: row.local, Destination: row.remote}, requested: requested.UnixNano(), failed: time.Now().UnixNano(), stage: stage}
-	if deadline, ok := ctx.Deadline(); ok {
-		failure.lookupDeadline = deadline.UnixNano()
-	}
+	failure := observeDescriptorBatch(ctx, job, row, requested, "deadline")
 	sequence := o.batches.failureSequence.Add(1)
 	o.batches.failures[(sequence-1)%uint64(len(o.batches.failures))].Store(failure)
 }

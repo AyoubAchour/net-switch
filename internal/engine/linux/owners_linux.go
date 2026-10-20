@@ -87,6 +87,7 @@ type lookupStats struct {
 	LastError                                                                            string
 	LastBatchWait                                                                        string
 	FailedScans                                                                          []descriptorScanSnapshot
+	SlowScans                                                                            []descriptorScanSnapshot
 	FDTableSize                                                                          int
 	FDTableSizeError                                                                     string
 	MetadataRejected                                                                     uint64
@@ -150,6 +151,11 @@ func (o *Owners) Stats() any {
 	for i := range o.batches.failures {
 		if f := o.batches.failures[i].Load(); f != nil {
 			s.FailedScans = append(s.FailedScans, f.snapshot())
+		}
+	}
+	for i := range o.batches.slow {
+		if f := o.batches.slow[i].Load(); f != nil {
+			s.SlowScans = append(s.SlowScans, f.snapshot())
 		}
 	}
 	return s
@@ -944,6 +950,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 							}
 						}
 						matched = true
+						o.recordSlowBatch(ctx, job, r, requested)
 						select {
 						case <-job.done:
 						default:
@@ -951,6 +958,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 						}
 						return 0, nil
 					case <-job.done:
+						o.recordSlowBatch(ctx, job, r, requested)
 						o.batches.resumed(job, waiting)
 						out := job.result
 						scannedFDs += out.count
