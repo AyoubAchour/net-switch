@@ -154,6 +154,11 @@ func (o *Owners) runDescriptorBatches() {
 		recordLookupMaximum(&b.maxCompletion, completion)
 		close(job.done)
 		b.mu.Unlock()
+		// Publishing a shared batch makes its callers runnable. Under a SYN
+		// burst, immediately taking more queued work repeatedly replaces that
+		// handoff. Let callers validate the finished result within their own
+		// deadline before this worker takes another bounded directory window.
+		runtime.Gosched()
 	}
 }
 
