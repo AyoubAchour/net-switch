@@ -262,6 +262,37 @@ func TestCallerOwnedDescriptorBatchHonorsCancellation(t *testing.T) {
 	}
 }
 
+func TestConflictBatchChecksTheProcessWithoutWaitingForAnotherCaller(t *testing.T) {
+	row, _, _, key, _ := sharedBatchSocket(t)
+	o := newTestOwners(t)
+	pending := &descriptorBatch{key: key, done: make(chan struct{})}
+	o.batches.jobs = make(chan *descriptorBatch, 128)
+	o.batches.available = make(chan struct{})
+	o.batches.live = map[descriptorBatchKey]*descriptorBatch{key: pending}
+	requested := time.Now()
+	job, err := o.descriptorBatch(context.Background(), key, requested, true)
+	if err != nil || job == pending {
+		t.Fatal("conflict check inherited another caller's scheduling delay", err)
+	}
+	select {
+	case <-job.done:
+	default:
+		t.Fatal("conflict check did not finish its own pass")
+	}
+	select {
+	case <-pending.done:
+		t.Fatal("fixture's unrelated caller was completed")
+	default:
+	}
+	if o.indexed(row.inode).count() == 0 {
+		t.Fatal("conflict check skipped the real inherited socket")
+	}
+	shared, err := o.descriptorBatch(context.Background(), key, requested, false)
+	if err != nil || shared != job {
+		t.Fatal("overlapping discovery did not reuse the fresh conflict result", err)
+	}
+}
+
 type cancelAfterHolderContext struct {
 	context.Context
 	o      *Owners

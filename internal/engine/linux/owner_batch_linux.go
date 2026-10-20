@@ -88,7 +88,7 @@ func (o *Owners) descriptorBatch(ctx context.Context, key descriptorBatchKey, re
 		b.mu.Unlock()
 		return previous, nil
 	}
-	if previous := b.live[key]; previous != nil {
+	if previous := b.live[key]; previous != nil && !inline {
 		b.shared.Add(1)
 		b.mu.Unlock()
 		return previous, nil
@@ -108,9 +108,12 @@ func (o *Owners) descriptorBatch(ctx context.Context, key descriptorBatchKey, re
 		// Once the primary owner is known, these bounded windows only check
 		// other possible holders. Doing each on a worker and parking again
 		// multiplies scheduler handoffs by the number of processes in scope.
-		// The first caller performs that work; overlapping callers still share
-		// the same live job and fresh completed result. Keep the queue bound
-		// and the caller's original deadline, including cancellation.
+		// Reuse completed fresh work above, but do not park a conflict check
+		// behind another caller's in-flight pass. A bounded duplicate read is
+		// cheaper than a scheduler handoff for each process in the scope, and
+		// an older negative would require a fresh read anyway. Primary-owner
+		// discovery can still join this job and consume its published hints.
+		// Keep the queue bound and this caller's original deadline/cancellation.
 		job.caller = ctx
 		if deadline, ok := ctx.Deadline(); ok && deadline.Before(job.deadline) {
 			job.deadline = deadline
@@ -174,20 +177,31 @@ func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
 		b.aborted.Add(1)
 	}
 	b.mu.Lock()
-	delete(b.live, job.key)
+	if b.live[job.key] == job {
+		delete(b.live, job.key)
+	}
+	var available chan struct{}
 	if b.available != nil {
-		close(b.available)
+		available = b.available
 		b.available = make(chan struct{})
 	}
 	if job.result.err == nil || errors.Is(job.result.err, io.EOF) {
-		b.recent[maphash.Comparable(o.indexSeed, job.key)%uint64(len(b.recent))] = job
+		slot := maphash.Comparable(o.indexSeed, job.key) % uint64(len(b.recent))
+		if previous := b.recent[slot]; previous == nil || previous.result.began.Before(job.result.began) {
+			b.recent[slot] = job
+		}
 	}
 	job.completed = time.Now()
 	completion := uint64(job.completed.Sub(serviced))
 	b.completionNanos.Add(completion)
 	recordLookupMaximum(&b.maxCompletion, completion)
-	close(job.done)
 	b.mu.Unlock()
+	// Waking every follower can itself schedule work. Publish the immutable
+	// result under the lock, then notify without holding the shared job map.
+	close(job.done)
+	if available != nil {
+		close(available)
+	}
 }
 
 func (b *descriptorBatches) resumed(job *descriptorBatch, waiting time.Time) {
@@ -267,7 +281,7 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 			current.high = max(current.high, out.lastFD)
 		}
 		current.observed = time.Now()
-		if k.offset == 0 && k.cacheAll && errors.Is(out.err, io.EOF) {
+		if k.offset == 0 && k.cacheAll && errors.Is(out.err, io.EOF) && current.fullScan.Before(out.began) {
 			current.fullScan, current.fullUID = out.began, k.uid
 			current.fdCount = metadata.Size
 		}
