@@ -14,6 +14,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 )
@@ -77,13 +78,14 @@ func (r ring) data() []byte               { return r.bytes[ringHeader:] }
 // release requirements), including on ARM64. Native memory has no Go finalizer:
 // an incomplete driver teardown must retain it even after the session is gone.
 type rings struct {
-	send, receive                 ring
-	allocation                    uintptr
-	registered, closed            bool
-	device, readEvent, writeEvent windows.Handle
-	head, tail                    uint32
-	placeholders, oversized       uint64 // protected by the session's read lock
-	closeProfile                  CloseDetails
+	send, receive                      ring
+	allocation                         uintptr
+	registered, closed                 bool
+	device, readEvent, writeEvent      windows.Handle
+	deviceOwner, readOwner, writeOwner winhandle.Owner
+	head, tail                         uint32
+	placeholders, oversized            uint64 // protected by the session's read lock
+	closeProfile                       CloseDetails
 }
 
 type CloseDetails struct {
@@ -128,10 +130,12 @@ func openRings(path string, capacity uint32) (_ *rings, err error) {
 	if err != nil {
 		return nil, err
 	}
+	r.readOwner = winhandle.Open(r.readEvent, "Wintun read event open")
 	r.writeEvent, err = windows.CreateEvent(nil, 0, 0, nil)
 	if err != nil {
 		return nil, err
 	}
+	r.writeOwner = winhandle.Open(r.writeEvent, "Wintun write event open")
 	p, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return nil, err
@@ -141,12 +145,13 @@ func openRings(path string, capacity uint32) (_ *rings, err error) {
 		r.device = 0
 		return nil, err
 	}
+	r.deviceOwner = winhandle.OpenDriverHandle(r.device, "Wintun ring device open")
 	desc := registration{
-		Send:    ringRegistration{uint32(len(r.send.bytes)), &r.send.bytes[0], r.readEvent},
-		Receive: ringRegistration{uint32(len(r.receive.bytes)), &r.receive.bytes[0], r.writeEvent},
+		Send:    ringRegistration{uint32(len(r.send.bytes)), &r.send.bytes[0], r.readHandle()},
+		Receive: ringRegistration{uint32(len(r.receive.bytes)), &r.receive.bytes[0], r.writeHandle()},
 	}
 	var returned uint32
-	err = windows.DeviceIoControl(r.device, registerRingsIOCTL, (*byte)(unsafe.Pointer(&desc)), uint32(unsafe.Sizeof(desc)), nil, 0, &returned, nil)
+	err = windows.DeviceIoControl(r.deviceOwner.Handle("Wintun ring registration"), registerRingsIOCTL, (*byte)(unsafe.Pointer(&desc)), uint32(unsafe.Sizeof(desc)), nil, 0, &returned, nil)
 	if err != nil {
 		return nil, fmt.Errorf("register Wintun rings: %w", err)
 	}
@@ -156,6 +161,20 @@ func openRings(path string, capacity uint32) (_ *rings, err error) {
 
 func (r *rings) close() error {
 	return r.closeWith(windows.CloseHandle)
+}
+
+func (r *rings) readHandle() windows.Handle {
+	if r.readOwner.IsZero() {
+		return r.readEvent // Synthetic ring fault-injection fixtures.
+	}
+	return r.readOwner.Handle("Wintun read event")
+}
+
+func (r *rings) writeHandle() windows.Handle {
+	if r.writeOwner.IsZero() {
+		return r.writeEvent // Synthetic ring fault-injection fixtures.
+	}
+	return r.writeOwner.Handle("Wintun write event")
 }
 
 func (r *rings) awaitRelease() bool {
@@ -179,6 +198,7 @@ func (r *rings) closeWith(closeHandle func(windows.Handle) error) error {
 	var err error
 	h := r.device
 	r.device = 0
+	closedDevice := false
 	released := !r.registered || r.send.load(4) == ^uint32(0)
 	if r.registered && !released && r.receive.load(0) == ^uint32(0) {
 		// PnP closes the handle BEFORE Receive.Head, then publishes Send.Tail.
@@ -189,7 +209,12 @@ func (r *rings) closeWith(closeHandle func(windows.Handle) error) error {
 		r.closeProfile.DriverWaitNanos += uint64(winclock.Since(started))
 	} else if h != 0 && (!r.registered || !released) {
 		started := winclock.Now()
-		err = closeHandle(h)
+		closedDevice = true
+		if r.deviceOwner.IsZero() {
+			err = closeHandle(h) // Injected synthetic close, not a native open.
+		} else {
+			err = r.deviceOwner.Close("Wintun ring device close", closeHandle)
+		}
 		r.closeProfile.DeviceNanos = uint64(winclock.Since(started))
 		if r.registered {
 			started = winclock.Now()
@@ -203,11 +228,24 @@ func (r *rings) closeWith(closeHandle func(windows.Handle) error) error {
 	if !released {
 		err = errors.Join(err, errRingsRetained)
 	}
+	if !closedDevice && !r.deviceOwner.IsZero() {
+		// The driver's removal protocol closes this handle before publishing
+		// the ring markers. End our reference without closing its recycled value.
+		r.deviceOwner.DriverReleased("Wintun driver removal observed")
+	}
 	started := winclock.Now()
-	for _, h := range []*windows.Handle{&r.readEvent, &r.writeEvent} {
-		if *h != 0 {
-			err = errors.Join(err, closeHandle(*h))
-			*h = 0
+	for _, event := range []struct {
+		value *windows.Handle
+		owner winhandle.Owner
+		site  string
+	}{{&r.readEvent, r.readOwner, "Wintun read event close"}, {&r.writeEvent, r.writeOwner, "Wintun write event close"}} {
+		if *event.value != 0 {
+			if event.owner.IsZero() {
+				err = errors.Join(err, closeHandle(*event.value))
+			} else {
+				err = errors.Join(err, event.owner.Close(event.site, closeHandle))
+			}
+			*event.value = 0
 		}
 	}
 	r.closeProfile.EventsNanos = uint64(winclock.Since(started))
@@ -374,7 +412,7 @@ func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
 		r.receive.store(4, tail)
 		// Never consult Receive.Alertable. An auto-reset event retains this
 		// signal until the driver waits, including the store/load race in 0.14.1.
-		err = windows.SetEvent(r.writeEvent)
+		err = windows.SetEvent(r.writeHandle())
 	}
 	return
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/apppath"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -404,9 +405,10 @@ func (o *Owners) process(pid uint32) (platform.Owner, error) {
 	if err != nil {
 		return platform.Owner{}, err
 	}
-	defer windows.CloseHandle(h)
+	processOwner := winhandle.Open(h, "owner lookup process open")
+	defer processOwner.HandleClose("owner lookup process close")
 	var creation, exit, kernel, user windows.Filetime
-	if err := windows.GetProcessTimes(h, &creation, &exit, &kernel, &user); err != nil {
+	if err := windows.GetProcessTimes(processOwner.Handle("owner lookup creation time"), &creation, &exit, &kernel, &user); err != nil {
 		return platform.Owner{}, err
 	}
 	start := uint64(creation.HighDateTime)<<32 | uint64(creation.LowDateTime)
@@ -417,7 +419,7 @@ func (o *Owners) process(pid uint32) (platform.Owner, error) {
 	if cached.Path == "" {
 		b := make([]uint16, 32768)
 		n := uint32(len(b))
-		if err := windows.QueryFullProcessImageName(h, 0, &b[0], &n); err != nil {
+		if err := windows.QueryFullProcessImageName(processOwner.Handle("owner lookup executable path"), 0, &b[0], &n); err != nil {
 			return platform.Owner{}, err
 		}
 		path := windows.UTF16ToString(b[:n])

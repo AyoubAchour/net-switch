@@ -4,6 +4,7 @@ package winengine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,10 +16,15 @@ import (
 	"unsafe"
 
 	winplatform "github.com/AyoubAchour/net-switch/internal/platform/windows"
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("NETSWITCH_EXPECT_HANDLECHECK") == "1" && !winhandle.Enabled {
+		fmt.Fprintln(os.Stderr, "CI required netswitch_handlecheck but it was not compiled")
+		os.Exit(1)
+	}
 	if len(os.Args) == 4 && os.Args[1] == "worker" && os.Args[2] == "query" && os.Args[3] == "tcp-port-configuration" {
 		os.Exit(winplatform.Run(os.Args[2:]))
 	}
@@ -36,7 +42,12 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	result := m.Run()
+	if winhandle.Enabled {
+		value, _ := json.Marshal(winhandle.Stats())
+		fmt.Printf("WINDOWS HANDLE OWNERSHIP %s\n", value)
+	}
+	os.Exit(result)
 }
 
 func mediumPeerIdentity() error {
@@ -77,7 +88,7 @@ func deniedPipeClient() error {
 	p, _ := windows.UTF16PtrFromString(EnginePipe)
 	h, err := windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
 	if err == nil {
-		windows.CloseHandle(h)
+		winhandle.Open(h, "denied pipe probe unexpectedly opened").HandleClose("denied pipe probe close")
 		return errors.New("medium deny-only peer opened the engine pipe")
 	}
 	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
@@ -87,7 +98,16 @@ func deniedPipeClient() error {
 	return nil
 }
 
-func restrictedPeerToken(t *testing.T) windows.Token {
+type peerToken struct {
+	windows.Token
+	owner winhandle.Owner
+}
+
+func (p peerToken) Close() error {
+	return p.owner.CloseGo("restricted peer token close", p.Token.Close)
+}
+
+func restrictedPeerToken(t *testing.T) peerToken {
 	t.Helper()
 	var original windows.Token
 	// CreateRestrictedToken preserves the handle's access rights. The fixture
@@ -95,7 +115,8 @@ func restrictedPeerToken(t *testing.T) windows.Token {
 	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ASSIGN_PRIMARY|windows.TOKEN_ADJUST_DEFAULT, &original); err != nil {
 		t.Fatalf("open parent token: %v", err)
 	}
-	defer original.Close()
+	originalOwner := winhandle.Open(windows.Handle(original), "restricted peer original token open")
+	defer originalOwner.CloseGo("restricted peer original token close", original.Close)
 	admin, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
 		t.Fatal(err)
@@ -103,21 +124,22 @@ func restrictedPeerToken(t *testing.T) windows.Token {
 	disabled := windows.SIDAndAttributes{Sid: admin}
 	var token windows.Token
 	ok, _, err := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken").Call(
-		uintptr(original), 1|4, 1, uintptr(unsafe.Pointer(&disabled)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&token))) // DISABLE_MAX_PRIVILEGE | LUA_TOKEN.
+		uintptr(originalOwner.Handle("restricted peer token duplicate")), 1|4, 1, uintptr(unsafe.Pointer(&disabled)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&token))) // DISABLE_MAX_PRIVILEGE | LUA_TOKEN.
 	if ok == 0 {
 		t.Fatalf("create restricted peer token: %v", err)
 	}
+	tokenOwner := winhandle.Open(windows.Handle(token), "restricted peer token open")
 	medium, err := windows.StringToSid("S-1-16-8192")
 	if err != nil {
-		token.Close()
+		tokenOwner.CloseGo("restricted peer SID failure close", token.Close)
 		t.Fatal(err)
 	}
 	label := windows.Tokenmandatorylabel{Label: windows.SIDAndAttributes{Sid: medium, Attributes: windows.SE_GROUP_INTEGRITY}}
-	if err := windows.SetTokenInformation(token, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), uint32(unsafe.Sizeof(label))+uint32(medium.Len())); err != nil {
-		token.Close()
+	if err := windows.SetTokenInformation(windows.Token(tokenOwner.Handle("restricted peer integrity")), windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), uint32(unsafe.Sizeof(label))+uint32(medium.Len())); err != nil {
+		tokenOwner.CloseGo("restricted peer integrity failure close", token.Close)
 		t.Fatalf("lower peer integrity to Medium: %v", err)
 	}
-	return token
+	return peerToken{token, tokenOwner}
 }
 
 func TestEnginePipeAuthenticatesRealTokens(t *testing.T) {
@@ -135,7 +157,7 @@ func TestEnginePipeAuthenticatesRealTokens(t *testing.T) {
 	}
 	child := exec.Command(self)
 	child.Env = append(os.Environ(), "NETSWITCH_PIPE_DENIED_CHILD=1")
-	child.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(token), CreationFlags: windows.DETACHED_PROCESS, HideWindow: true}
+	child.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(token.owner.Handle("restricted pipe peer launch")), CreationFlags: windows.DETACHED_PROCESS, HideWindow: true}
 	output, err := child.CombinedOutput()
 	t.Logf("%s", output)
 	if err != nil {
@@ -168,7 +190,7 @@ func TestEnginePipeAuthenticatesRealTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := os.NewFile(uintptr(h), EnginePipe)
+	client := winhandle.NewFile(winhandle.Open(h, "legitimate pipe regression open"), EnginePipe)
 	defer client.Close()
 	client.SetDeadline(time.Now().Add(3 * time.Second))
 	if _, err := client.Write([]byte("ping")); err != nil {
@@ -200,7 +222,7 @@ func TestServiceEnginePipeRejectsAdministrator(t *testing.T) {
 	ptr, _ := windows.UTF16PtrFromString(EnginePipe)
 	h, err := windows.CreateFile(ptr, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
 	if err == nil {
-		windows.CloseHandle(h)
+		winhandle.Open(h, "service pipe negative probe unexpectedly opened").HandleClose("service pipe negative probe close")
 		t.Fatal("administrator opened the SYSTEM-only service pipe")
 	}
 	if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
@@ -246,7 +268,7 @@ func TestPipeDisconnectedBeforeAcceptIsRetryable(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		windows.CloseHandle(h)
+		winhandle.Open(h, "early pipe disconnect probe open").HandleClose("early pipe disconnect probe close")
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		_, err = p.Accept(ctx)
 		cancel()
@@ -285,7 +307,7 @@ func TestPipeDisconnectedBeforeAcceptIsRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := os.NewFile(uintptr(h), EnginePipe)
+	client := winhandle.NewFile(winhandle.Open(h, "post-disconnect pipe regression open"), EnginePipe)
 	defer client.Close()
 	client.SetDeadline(time.Now().Add(time.Second))
 	var b [2]byte

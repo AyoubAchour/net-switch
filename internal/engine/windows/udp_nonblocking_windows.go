@@ -29,22 +29,34 @@ func (s *udpSocket) Watch(wake func()) (platform.Readiness, error) {
 	if s.pool == nil {
 		return nil, errors.New("UDP readiness service is not initialized")
 	}
+	if s.goOwner.IsZero() {
+		var err error
+		s.goOwner, err = ownGoDescriptor(s.conn, "UDP Go connection before transfer")
+		if err != nil {
+			return nil, err
+		}
+	}
 	file, err := s.conn.File()
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
-	h, err := duplicateForReadiness(file)
+	fileOwner, err := ownGoDescriptor(file, "UDP File duplicate")
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	defer fileOwner.CloseGo("UDP File duplicate close", file.Close)
+	h, err := duplicateForReadiness(file, fileOwner)
 	if err != nil {
 		return nil, err
 	}
 	watch, err := s.pool.watch(h, wake)
 	if err != nil {
-		windows.Closesocket(h)
+		h.SocketClose("UDP failed readiness registration")
 		return nil, err
 	}
 	s.handle, s.watch = h, watch
-	err = s.conn.Close()
+	err = s.goOwner.CloseGo("UDP source Go connection close", s.conn.Close)
 	s.conn, s.raw = nil, nil
 	if err != nil {
 		return nil, err // Close still owns the installed watch and native handle.
@@ -71,7 +83,7 @@ func (s *udpSocket) TryReadFrom(b []byte) (int, netip.AddrPort, error) {
 	var received, flags uint32
 	// NULL overlapped/completion routine selects documented synchronous usage.
 	// FIONBIO on the descriptor makes that usage nonblocking.
-	err := windows.WSARecvFrom(s.handle, &buf, 1, &received, &flags, source, &sourceLength, nil, nil)
+	err := windows.WSARecvFrom(s.handle.Handle("UDP nonblocking receive"), &buf, 1, &received, &flags, source, &sourceLength, nil, nil)
 	runtime.KeepAlive(b)
 	if errors.Is(err, windows.WSAEWOULDBLOCK) {
 		return 0, netip.AddrPort{}, platform.ErrWouldBlock
@@ -111,7 +123,7 @@ func (s *udpSocket) TryWriteTo(b []byte, destination netip.AddrPort, df bool) (i
 	if !destination.IsValid() {
 		return 0, errors.New("invalid UDP destination")
 	}
-	if err := s.fragmentation(s.handle, df); err != nil {
+	if err := s.fragmentation(s.handle.Handle("UDP fragmentation option"), df); err != nil {
 		return 0, err
 	}
 	// Use a full sockaddr allocation. x/sys's WSASendto convenience wrapper
@@ -143,7 +155,7 @@ func (s *udpSocket) TryWriteTo(b []byte, destination netip.AddrPort, df bool) (i
 		buf.Buf = &b[0]
 	}
 	var sent uint32
-	err := windows.WSASendTo(s.handle, &buf, 1, &sent, 0, to, length, nil, nil)
+	err := windows.WSASendTo(s.handle.Handle("UDP nonblocking send"), &buf, 1, &sent, 0, to, length, nil, nil)
 	runtime.KeepAlive(b)
 	if errors.Is(err, windows.WSAEWOULDBLOCK) {
 		return 0, platform.ErrWouldBlock

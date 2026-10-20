@@ -11,13 +11,17 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
-type nativeBindHandle struct{ handle windows.Handle }
+type nativeBindHandle struct{ handle winhandle.Owner }
 
-func (h nativeBindHandle) Control(fn func(uintptr)) error { fn(uintptr(h.handle)); return nil }
-func (nativeBindHandle) Read(func(uintptr) bool) error    { return errors.New("unused native probe read") }
+func (h nativeBindHandle) Control(fn func(uintptr)) error {
+	fn(uintptr(h.handle.Handle("native bind probe Control")))
+	return nil
+}
+func (nativeBindHandle) Read(func(uintptr) bool) error { return errors.New("unused native probe read") }
 func (nativeBindHandle) Write(func(uintptr) bool) error {
 	return errors.New("unused native probe write")
 }
@@ -35,14 +39,14 @@ func TestReturnedPortsBindWithoutReuse(t *testing.T) {
 	if err := json.Unmarshal([]byte(input), &groups); err != nil {
 		t.Fatal(err)
 	}
-	var handles []windows.Handle
+	var handles []winhandle.Owner
 	var occupied []tcpStateGroup
 	bound, checked := 0, 0
 	defer func() {
 		for _, h := range handles {
 			// These sockets never connected or carried data. Closing a bare
 			// bound descriptor sends neither FIN nor RST and creates no TIME_WAIT.
-			windows.Closesocket(h)
+			h.SocketClose("returned-port probe close")
 		}
 	}()
 	interfaces, err := net.Interfaces()
@@ -106,18 +110,19 @@ func TestReturnedPortsBindWithoutReuse(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			handles = append(handles, h)
-			if err := bindSocket(Adapter{Index4: index}, false)("tcp4", "", nativeBindHandle{h}); err != nil {
+			owner := winhandle.Open(h, "returned-port probe open")
+			handles = append(handles, owner)
+			if err := bindSocket(Adapter{Index4: index}, false)("tcp4", "", nativeBindHandle{owner}); err != nil {
 				t.Fatal(err)
 			}
 			// Do not use address reuse to bypass a live or TIME_WAIT owner.
-			if err := windows.SetsockoptInt(h, windows.SOL_SOCKET, 0x3007, 0); err != nil { // SO_REUSE_UNICASTPORT.
+			if err := windows.SetsockoptInt(owner.Handle("returned-port reuse disabled"), windows.SOL_SOCKET, 0x3007, 0); err != nil { // SO_REUSE_UNICASTPORT.
 				t.Fatal(err)
 			}
-			if err := windows.SetsockoptInt(h, windows.SOL_SOCKET, ^windows.SO_REUSEADDR, 1); err != nil { // SO_EXCLUSIVEADDRUSE.
+			if err := windows.SetsockoptInt(owner.Handle("returned-port exclusive bind"), windows.SOL_SOCKET, ^windows.SO_REUSEADDR, 1); err != nil { // SO_EXCLUSIVEADDRUSE.
 				t.Fatal(err)
 			}
-			if err := windows.Bind(h, &windows.SockaddrInet4{Addr: source.As4(), Port: int(port)}); err != nil {
+			if err := windows.Bind(owner.Handle("returned-port bind"), &windows.SockaddrInet4{Addr: source.As4(), Port: int(port)}); err != nil {
 				refresh() // Observe a racing allocation; never retry this bind.
 				if (errors.Is(err, windows.WSAEADDRINUSE) || errors.Is(err, windows.WSAEACCES)) && otherOwner() {
 					continue

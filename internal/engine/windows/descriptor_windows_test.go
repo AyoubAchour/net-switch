@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -78,16 +79,21 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 						t.Fatal(err)
 					}
 					defer file.Close()
-					source := file.Fd()
-					h, err := duplicateForReadiness(file)
+					fileOwner, err := ownGoDescriptor(file, "transfer regression File duplicate")
 					if err != nil {
 						t.Fatal(err)
 					}
-					defer windows.Closesocket(h)
+					source := fileOwner.Handle("transfer regression source identity")
+					h, err := duplicateForReadiness(file, fileOwner)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer h.SocketClose("transfer regression native close")
 					check := func(stage string) {
 						t.Helper()
-						gotKind, kindErr := windows.GetsockoptInt(h, windows.SOL_SOCKET, 0x1008)
-						addr, addrErr := windows.Getsockname(h)
+						value := h.Handle("transfer regression " + stage)
+						gotKind, kindErr := windows.GetsockoptInt(value, windows.SOL_SOCKET, 0x1008)
+						addr, addrErr := windows.Getsockname(value)
 						var port int
 						switch addr := addr.(type) {
 						case *windows.SockaddrInet4:
@@ -97,7 +103,7 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 						}
 						if kindErr != nil || gotKind != kind || addrErr != nil || port != wantPort {
 							t.Fatalf("round=%d stage=%s source=%d native=%d family=%d type=%d/%d type-error=%v address=%#v want-port=%d address-error=%v",
-								round, stage, source, h, family, gotKind, kind, kindErr, addr, wantPort, addrErr)
+								round, stage, source, value, family, gotKind, kind, kindErr, addr, wantPort, addrErr)
 						}
 					}
 					check("duplicated")
@@ -105,7 +111,7 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 						t.Fatal(err)
 					}
 					check("Go connection closed")
-					if err := file.Close(); err != nil {
+					if err := fileOwner.CloseGo("transfer regression File close", file.Close); err != nil {
 						t.Fatal(err)
 					}
 					check("Go file closed")
@@ -119,7 +125,7 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 							t.Fatalf("round=%d native send=%d/%d: %v", round, n, len(payload), err)
 						}
 						check("payload sent")
-						if err := windows.Shutdown(h, windows.SHUT_WR); err != nil {
+						if err := windows.Shutdown(h.Handle("transfer regression shutdown"), windows.SHUT_WR); err != nil {
 							t.Fatalf("round=%d native half-close without readiness: %v", round, err)
 						}
 						peer.SetReadDeadline(time.Now().Add(time.Second))
@@ -167,19 +173,23 @@ func TestDescriptorTransferHoldsSourceUntilNativeDuplicateExists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fileOwner, err := ownGoDescriptor(file, "concurrent-close regression File duplicate")
+	if err != nil {
+		t.Fatal(err)
+	}
 	borrow := pausedSocketBorrow{raw, make(chan struct{}), make(chan struct{})}
 	type result struct {
-		handle windows.Handle
+		handle winhandle.Owner
 		err    error
 	}
 	duplicated := make(chan result, 1)
 	go func() {
-		handle, err := duplicateBorrowedSocket(borrow)
+		handle, err := duplicateBorrowedSocket(borrow, fileOwner)
 		duplicated <- result{handle, err}
 	}()
 	<-borrow.entered
 	closed := make(chan error, 1)
-	go func() { closed <- file.Close() }()
+	go func() { closed <- fileOwner.CloseGo("concurrent-close regression source close", file.Close) }()
 	deadline := time.Now().Add(time.Second)
 	closing := false
 	for time.Now().Before(deadline) {
@@ -207,21 +217,22 @@ func TestDescriptorTransferHoldsSourceUntilNativeDuplicateExists(t *testing.T) {
 		close(borrow.resume)
 		t.Fatal(err)
 	}
-	defer windows.Closesocket(other)
+	otherOwner := winhandle.Open(other, "concurrent-close regression TCP socket")
+	defer otherOwner.SocketClose("concurrent-close regression TCP close")
 	close(borrow.resume)
 	copied := <-duplicated
 	if copied.err != nil {
 		t.Fatal(copied.err)
 	}
-	defer windows.Closesocket(copied.handle)
+	defer copied.handle.SocketClose("concurrent-close regression native close")
 	if err := <-closed; err != nil {
 		t.Fatal(err)
 	}
-	kind, err := windows.GetsockoptInt(copied.handle, windows.SOL_SOCKET, 0x1008) // SO_TYPE.
+	kind, err := windows.GetsockoptInt(copied.handle.Handle("concurrent-close regression socket type"), windows.SOL_SOCKET, 0x1008) // SO_TYPE.
 	if err != nil || kind != windows.SOCK_DGRAM {
 		t.Fatalf("native duplicate changed type: %d %v", kind, err)
 	}
-	address, err := windows.Getsockname(copied.handle)
+	address, err := windows.Getsockname(copied.handle.Handle("concurrent-close regression address"))
 	bound, ok := address.(*windows.SockaddrInet4)
 	if err != nil || !ok || bound.Port != want.Port || bound.Addr != [4]byte{127, 0, 0, 1} {
 		t.Fatalf("native duplicate lost source binding: %#v %v", address, err)

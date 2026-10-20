@@ -14,6 +14,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"github.com/AyoubAchour/net-switch/internal/winlock"
 	"golang.org/x/sys/windows"
 )
@@ -33,7 +34,7 @@ func security(sddl string) (*windows.SecurityAttributes, error) {
 // StateDirectory creates with the final ACL, rather than tightening a folder
 // after someone may already have obtained a WRITE_DAC handle. It returns a
 // handle which prevents replacement while the engine is using its files.
-func StateDirectory(path string) (*os.File, error) {
+func StateDirectory(path string) (*winhandle.File, error) {
 	f, err := openStateDirectory(path)
 	if !errors.Is(err, errUntrustedState) {
 		return f, err
@@ -61,7 +62,8 @@ func quarantineState(path string) error {
 	if err != nil {
 		return fmt.Errorf("move untrusted state aside without following it: %w", err)
 	}
-	defer windows.CloseHandle(h)
+	owner := winhandle.Open(h, "untrusted directory rename open")
+	defer owner.HandleClose("untrusted directory rename close")
 	var nonce [12]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return err
@@ -78,13 +80,13 @@ func quarantineState(path string) error {
 	for i, c := range target {
 		binary.LittleEndian.PutUint16(info[20+i*2:], c)
 	}
-	if err := windows.SetFileInformationByHandle(h, windows.FileRenameInfo, &info[0], uint32(len(info))); err != nil {
+	if err := windows.SetFileInformationByHandle(owner.Handle("untrusted directory rename"), windows.FileRenameInfo, &info[0], uint32(len(info))); err != nil {
 		return fmt.Errorf("rename untrusted engine state directory without following it: %w", err)
 	}
 	return nil
 }
 
-func openStateDirectory(path string) (*os.File, error) {
+func openStateDirectory(path string) (*winhandle.File, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
@@ -124,7 +126,8 @@ func openStateDirectory(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(h), path)
+	directoryOwner := winhandle.Open(h, "verified directory guard open")
+	f := winhandle.NewFile(directoryOwner, path)
 	ok := false
 	defer func() {
 		if !ok {
@@ -132,13 +135,13 @@ func openStateDirectory(path string) (*os.File, error) {
 		}
 	}()
 	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+	if err := windows.GetFileInformationByHandle(directoryOwner.Handle("directory guard metadata"), &info); err != nil {
 		return nil, err
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
 		return nil, fmt.Errorf("%w: not a regular directory", errUntrustedState)
 	}
-	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	sd, err := windows.GetSecurityInfo(directoryOwner.Handle("directory guard security"), windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return nil, err
 	}
@@ -178,9 +181,10 @@ func openStateDirectory(path string) (*os.File, error) {
 			if err != nil {
 				return nil, err
 			}
+			fileOwner := winhandle.Open(file, "state child inspection open")
 			var info windows.ByHandleFileInformation
-			err = windows.GetFileInformationByHandle(file, &info)
-			windows.CloseHandle(file)
+			err = windows.GetFileInformationByHandle(fileOwner.Handle("state child metadata"), &info)
+			fileOwner.HandleClose("state child inspection close")
 			if err != nil {
 				return nil, err
 			}
@@ -230,15 +234,18 @@ func (OwnershipLock) Acquire(ctx context.Context) (func() error, error) {
 		directory.Close()
 		return nil, err
 	}
-	closeHandles := func() error { return errors.Join(windows.CloseHandle(handle), directory.Close()) }
+	lockOwner := winhandle.Open(handle, "ownership lock file open")
+	closeHandles := func() error {
+		return errors.Join(lockOwner.HandleClose("ownership lock file close"), directory.Close())
+	}
 	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+	if err := windows.GetFileInformationByHandle(lockOwner.Handle("ownership lock metadata"), &info); err != nil {
 		return nil, errors.Join(err, closeHandles())
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.NumberOfLinks != 1 {
 		return nil, errors.Join(errors.New("ownership lock is not a private regular file"), closeHandles())
 	}
-	if err := winlock.Acquire(ctx, handle); err != nil {
+	if err := winlock.Acquire(ctx, lockOwner.Handle("ownership lock acquire")); err != nil {
 		return nil, errors.Join(err, closeHandles())
 	}
 	var once sync.Once

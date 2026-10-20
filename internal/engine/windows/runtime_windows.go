@@ -18,6 +18,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 )
 
 type Runtime struct {
@@ -32,6 +33,9 @@ func (r *Runtime) Stats() any {
 	stats["ownerLookup"] = r.owners.Stats()
 	stats["socketResources"] = r.dialer.ports.stats()
 	stats["udpSocketExhaustions"] = r.dialer.udpExhaustions.Load()
+	if winhandle.Enabled {
+		stats["handleOwnership"] = winhandle.Stats()
+	}
 	stats["bindings"] = r.routes.Bindings()
 	stats["wintun"] = r.routes.TunStats()
 	stats["lifecyclePhases"] = r.routes.timings.snapshot()

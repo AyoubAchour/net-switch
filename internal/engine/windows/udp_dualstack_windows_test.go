@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -33,18 +34,19 @@ func TestUDPDualStackSocketIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer windows.Closesocket(socket)
-			if err := windows.SetsockoptInt(socket, windows.IPPROTO_IPV6, windows.IPV6_V6ONLY, 0); err != nil {
+			socketOwner := winhandle.Open(socket, "dual-stack UDP regression open")
+			defer socketOwner.SocketClose("dual-stack UDP regression close")
+			if err := windows.SetsockoptInt(socketOwner.Handle("dual-stack UDP option"), windows.IPPROTO_IPV6, windows.IPV6_V6ONLY, 0); err != nil {
 				t.Fatal(err)
 			}
-			if err := windows.Bind(socket, &windows.SockaddrInet6{}); err != nil {
+			if err := windows.Bind(socketOwner.Handle("dual-stack UDP bind"), &windows.SockaddrInet6{}); err != nil {
 				t.Fatal(err)
 			}
 			destination := &windows.SockaddrInet6{
 				Addr: netip.MustParseAddr(scenario.remote).As16(),
 				Port: peer.LocalAddr().(*net.UDPAddr).Port,
 			}
-			if err := windows.Sendto(socket, []byte("native dual-stack UDP"), 0, destination); err != nil {
+			if err := windows.Sendto(socketOwner.Handle("dual-stack UDP send"), []byte("native dual-stack UDP"), 0, destination); err != nil {
 				t.Fatal(err)
 			}
 			if err := peer.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {

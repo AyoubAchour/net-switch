@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/winclock"
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -54,18 +55,19 @@ type Event struct {
 }
 
 type Session struct {
-	adapter            *Adapter
-	mu                 sync.RWMutex // keeps resources alive during native waits and packet copies
-	readMu, writeMu    sync.Mutex
-	rings              *rings
-	wake, cancelEvent  windows.Handle
-	changed            chan struct{}
-	err, closeErr      error
-	closed, recovering atomic.Bool
-	closeOnce          sync.Once
-	stop, stopped      chan struct{}
-	repair             chan error
-	events             chan Event
+	adapter                *Adapter
+	mu                     sync.RWMutex // keeps resources alive during native waits and packet copies
+	readMu, writeMu        sync.Mutex
+	rings                  *rings
+	wake, cancelEvent      windows.Handle
+	wakeOwner, cancelOwner winhandle.Owner
+	changed                chan struct{}
+	err, closeErr          error
+	closed, recovering     atomic.Bool
+	closeOnce              sync.Once
+	stop, stopped          chan struct{}
+	repair                 chan error
+	events                 chan Event
 
 	read, written, dropped            atomic.Uint64
 	corruptions, recoveries, failures atomic.Uint64
@@ -98,11 +100,13 @@ func (a *Adapter) StartSession() (*Session, error) {
 	if err != nil {
 		return nil, errors.Join(err, r.close())
 	}
+	wakeOwner := winhandle.Open(wake, "Wintun session wake open")
 	cancelEvent, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
-		return nil, errors.Join(err, windows.CloseHandle(wake), r.close())
+		return nil, errors.Join(err, wakeOwner.HandleClose("Wintun session setup failure close"), r.close())
 	}
 	s := &Session{adapter: a, rings: r, wake: wake, cancelEvent: cancelEvent, changed: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}), repair: make(chan error, 1), events: make(chan Event, 8)}
+	s.wakeOwner, s.cancelOwner = wakeOwner, winhandle.Open(cancelEvent, "Wintun cancellation event open")
 	a.session = s
 	go s.maintain()
 	return s, nil
@@ -152,7 +156,7 @@ func (s *Session) fail(err error) {
 	if errors.Is(err, ErrCorrupt) {
 		s.corruptions.Add(1)
 	}
-	windows.SetEvent(s.wake)
+	windows.SetEvent(s.wakeOwner.Handle("Wintun recovery wake"))
 	s.repair <- err
 }
 
@@ -191,7 +195,7 @@ func (s *Session) maintain() {
 				s.rings = nil
 			}
 			started = winclock.Now()
-			s.closeErr = errors.Join(s.closeErr, windows.CloseHandle(s.wake), windows.CloseHandle(s.cancelEvent))
+			s.closeErr = errors.Join(s.closeErr, s.wakeOwner.HandleClose("Wintun session wake close"), s.cancelOwner.HandleClose("Wintun cancellation event close"))
 			profile.EventsNanos += uint64(winclock.Since(started))
 			profile.QueueNanos, profile.ReadLockNanos, profile.StateLockNanos = queued, readLock, stateLock
 			s.closeDetails.Store(&profile)
@@ -244,7 +248,7 @@ func (s *Session) maintain() {
 				}
 			}
 			s.recovering.Store(false)
-			windows.ResetEvent(s.wake)
+			windows.ResetEvent(s.wakeOwner.Handle("Wintun recovery reset"))
 			close(s.changed)
 			s.changed = make(chan struct{})
 			s.mu.Unlock()
@@ -395,20 +399,20 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		// Install the callback only when parking, and join it before readMu is
 		// released so Close can safely destroy the event.
 		if cancelEvent == 0 && ctx.Done() != nil {
-			event := s.cancelEvent
+			event := s.cancelOwner.Handle("Wintun read cancellation")
 			cancelEvent = event
 			finished := make(chan struct{})
-			stop := context.AfterFunc(ctx, func() { windows.SetEvent(event); close(finished) })
+			stop := context.AfterFunc(ctx, func() { windows.SetEvent(s.cancelOwner.Handle("Wintun cancellation callback")); close(finished) })
 			defer func() {
 				if !stop() {
 					<-finished
-					windows.ResetEvent(event)
+					windows.ResetEvent(s.cancelOwner.Handle("Wintun cancellation reset"))
 				}
 			}()
 		}
-		handles := []windows.Handle{s.wake, s.rings.readEvent}
+		handles := []windows.Handle{s.wakeOwner.Handle("Wintun read wake"), s.rings.readHandle()}
 		if cancelEvent != 0 {
-			handles = append(handles, cancelEvent)
+			handles = append(handles, s.cancelOwner.Handle("Wintun cancellation wait"))
 		}
 		s.readWaits.Add(1)
 		_, err = windows.WaitForMultipleObjects(handles, false, windows.INFINITE)
@@ -448,7 +452,7 @@ func (s *Session) BeginClose() {
 		s.closed.Store(true)
 		// Close cannot wait for mu before signalling: a reader may be holding
 		// a read lock inside WaitForMultipleObjects.
-		windows.SetEvent(s.wake)
+		windows.SetEvent(s.wakeOwner.Handle("Wintun close wake"))
 		close(s.stop)
 	})
 }

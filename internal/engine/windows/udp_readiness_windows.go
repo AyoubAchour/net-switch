@@ -8,6 +8,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -18,7 +19,7 @@ import (
 // https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsapoll
 type udpReadiness struct {
 	mu      sync.Mutex
-	event   windows.Handle
+	event   winhandle.Owner
 	watches map[*udpWatch]struct{}
 	closed  bool
 	err     error
@@ -28,7 +29,7 @@ type udpReadiness struct {
 
 type udpWatch struct {
 	pool     *udpReadiness
-	socket   windows.Handle
+	socket   winhandle.Owner
 	wake     func()
 	events   int16
 	detached bool
@@ -40,20 +41,20 @@ func newUDPReadiness(onError func(error)) (*udpReadiness, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &udpReadiness{event: event, watches: map[*udpWatch]struct{}{}, done: make(chan struct{}), onError: onError}
+	p := &udpReadiness{event: winhandle.Open(event, "UDP readiness event open"), watches: map[*udpWatch]struct{}{}, done: make(chan struct{}), onError: onError}
 	go p.run()
 	return p, nil
 }
 
-func selectUDPEvents(socket, event windows.Handle, mask int32) error {
-	code, _, err := winsock.NewProc("WSAEventSelect").Call(uintptr(socket), uintptr(event), uintptr(mask))
+func selectUDPEvents(socket winhandle.Owner, event windows.Handle, mask int32) error {
+	code, _, err := winsock.NewProc("WSAEventSelect").Call(uintptr(socket.Handle("UDP event selection")), uintptr(event), uintptr(mask))
 	if int32(code) == -1 {
 		return err
 	}
 	return nil
 }
 
-func (p *udpReadiness) watch(socket windows.Handle, wake func()) (*udpWatch, error) {
+func (p *udpReadiness) watch(socket winhandle.Owner, wake func()) (*udpWatch, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.closed {
@@ -92,7 +93,7 @@ func (w *udpWatch) Arm(read, write bool) error {
 	}
 	// Replacing the event mask clears that socket's old event record. Windows
 	// also records already-readable/writable state, closing the rearm race.
-	if err := selectUDPEvents(w.socket, p.event, mask); err != nil {
+	if err := selectUDPEvents(w.socket, p.event.Handle("UDP event arm"), mask); err != nil {
 		return err
 	}
 	w.events = events
@@ -100,7 +101,7 @@ func (w *udpWatch) Arm(read, write bool) error {
 		// FD_WRITE is edge-triggered, and an unconnected UDP socket need not
 		// have had a connect event. Query current state once on every arm;
 		// later network changes wake the same event without a receive.
-		return windows.SetEvent(p.event)
+		return windows.SetEvent(p.event.Handle("UDP arm wake"))
 	}
 	return nil
 }
@@ -126,7 +127,7 @@ func (p *udpReadiness) run() {
 	var watches []*udpWatch
 	var callbacks []func()
 	for {
-		_, waitErr := windows.WaitForSingleObject(p.event, windows.INFINITE)
+		_, waitErr := windows.WaitForSingleObject(p.event.Handle("UDP event wait"), windows.INFINITE)
 		p.mu.Lock()
 		if p.closed {
 			p.mu.Unlock()
@@ -134,11 +135,11 @@ func (p *udpReadiness) run() {
 		}
 		// Reset before querying readiness. Arrivals after this point leave the
 		// event signalled for the next pass; those before it are in the query.
-		resetErr := windows.ResetEvent(p.event)
+		resetErr := windows.ResetEvent(p.event.Handle("UDP event reset"))
 		rows, watches, callbacks = rows[:0], watches[:0], callbacks[:0]
 		for w := range p.watches {
 			if w.events != 0 {
-				rows = append(rows, pollFD{Socket: w.socket, Events: w.events})
+				rows = append(rows, pollFD{Socket: w.socket.Handle("UDP readiness poll"), Events: w.events})
 				watches = append(watches, w)
 			}
 		}
@@ -185,8 +186,8 @@ func (p *udpReadiness) close() error {
 		return errors.New("cannot close UDP readiness with live sockets")
 	}
 	p.closed = true
-	windows.SetEvent(p.event)
+	windows.SetEvent(p.event.Handle("UDP readiness stop"))
 	p.mu.Unlock()
 	<-p.done
-	return errors.Join(p.err, windows.CloseHandle(p.event))
+	return errors.Join(p.err, p.event.HandleClose("UDP readiness event close"))
 }
