@@ -95,7 +95,7 @@ func TestOtherPIDNotificationCannotHideAConflictingHolder(t *testing.T) {
 	row.cgroup = 0
 	o := newTestOwners(t)
 	o.rememberPID(row.uid, b.pid)
-	pending := &descriptorBatch{key: key, done: make(chan struct{})}
+	pending := &descriptorBatch{key: key, done: make(chan struct{}), queued: time.Now(), deadline: time.Now().Add(2 * time.Second)}
 	o.batches.jobs = make(chan *descriptorBatch, 128)
 	o.batches.available = make(chan struct{})
 	o.batches.live = map[descriptorBatchKey]*descriptorBatch{key: pending}
@@ -338,6 +338,82 @@ func TestConflictScanAndCompletedCacheDoNotWaitForTheActiveJobMap(t *testing.T) 
 		}
 	case <-time.After(time.Second):
 		t.Fatal("completed snapshot waited for the active-job map")
+	}
+}
+
+func TestSharedConflictCancellationKeepsTheFollowersDeadline(t *testing.T) {
+	row, _, _, key, _ := sharedBatchSocket(t)
+	o := newTestOwners(t)
+	producer, cancelProducer := context.WithCancel(context.Background())
+	defer cancelProducer()
+	started := time.Now().Add(-time.Millisecond)
+	pending := &descriptorBatch{key: key, queued: started, deadline: time.Now().Add(time.Second), caller: producer, inline: true, registered: true, done: make(chan struct{})}
+	o.batches.jobs = make(chan *descriptorBatch, 128)
+	o.batches.available = make(chan struct{})
+	o.batches.live = map[descriptorBatchKey]*descriptorBatch{key: pending}
+	follower, cancelFollower := context.WithTimeout(context.Background(), time.Second)
+	defer cancelFollower()
+	deadline, _ := follower.Deadline()
+	requested := time.Now()
+	joined, err := o.descriptorBatch(follower, key, requested, true)
+	if err != nil || joined != pending {
+		t.Fatalf("concurrent conflict check did not join bounded live work: %v", err)
+	}
+	cancelProducer()
+	o.completeDescriptorBatch(pending)
+	select {
+	case <-joined.done:
+	default:
+		t.Fatal("cancelled producer did not wake its follower")
+	}
+	if !errors.Is(joined.result.err, context.DeadlineExceeded) || follower.Err() != nil {
+		t.Fatalf("producer cancellation became a negative result or cancelled its follower: %v %v", joined.result.err, follower.Err())
+	}
+	fresh, err := o.descriptorBatch(follower, key, requested, true)
+	if err != nil || fresh == pending || fresh.result.began.Before(requested) {
+		t.Fatalf("cancelled work replaced the follower's fresh pass: %v", err)
+	}
+	matched := false
+	for _, socket := range fresh.result.sockets {
+		matched = matched || socket.inode == row.inode
+	}
+	if !matched {
+		t.Fatal("fresh real scan lost the live inherited socket")
+	}
+	if after, _ := follower.Deadline(); !after.Equal(deadline) {
+		t.Fatal("sharing or retry extended the follower's original deadline")
+	}
+}
+
+func TestExpiredScannerCannotRemoveItsLiveReplacement(t *testing.T) {
+	_, _, _, key, _ := sharedBatchSocket(t)
+	o := newTestOwners(t)
+	old := &descriptorBatch{key: key, queued: time.Now().Add(-time.Second), deadline: time.Now().Add(-time.Millisecond), inline: true, registered: true, done: make(chan struct{})}
+	replacement := &descriptorBatch{key: key, queued: time.Now(), deadline: time.Now().Add(time.Second), inline: true, registered: true, done: make(chan struct{})}
+	o.batches.jobs = make(chan *descriptorBatch, 1)
+	o.batches.jobs <- &descriptorBatch{}
+	available := make(chan struct{})
+	o.batches.available = available
+	o.batches.live = map[descriptorBatchKey]*descriptorBatch{key: replacement}
+	// Joining existing work does not need a new queue slot. The expired
+	// producer can finish afterward, without deleting or notifying for it.
+	joined, err := o.descriptorBatch(context.Background(), key, time.Now(), true)
+	if err != nil || joined != replacement || o.batches.full.Load() != 0 {
+		t.Fatalf("a full queue prevented sharing already registered work: %v", err)
+	}
+	o.completeDescriptorBatch(old)
+	if o.batches.live[key] != replacement || o.batches.available != available {
+		t.Fatal("old inline completion changed the replacement or async queue notification")
+	}
+	select {
+	case <-available:
+		t.Fatal("inline completion announced an async queue slot")
+	default:
+	}
+	select {
+	case <-replacement.done:
+		t.Fatal("old completion closed the replacement")
+	default:
 	}
 }
 

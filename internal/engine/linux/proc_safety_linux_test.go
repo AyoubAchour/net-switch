@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -107,5 +108,27 @@ func TestLargeFlatpakEnvironmentKeepsCompleteIdentity(t *testing.T) {
 	}
 	if got, err := readFlatpakInfo(root, make([]byte, 64<<10)); !errors.Is(err, errKernelFileLimit) || len(got) != 0 {
 		t.Fatalf("truncated identity accepted: %d %v", len(got), err)
+	}
+}
+
+func TestDescriptorInspectionDoesNotTurnErrorsIntoAbsence(t *testing.T) {
+	dir, err := openProcDescriptors("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	if _, ok, err := socketInodeAtChecked(dir.fd, "2147483647"); ok || !errors.Is(err, unix.ENOENT) {
+		t.Fatalf("missing descriptor was not explicit: found=%t error=%v", ok, err)
+	}
+	if _, ok, err := socketInodeAtChecked(-999, "3"); ok || !errors.Is(err, unix.EBADF) {
+		t.Fatalf("failed inspection became an ordinary non-socket result: found=%t error=%v", ok, err)
+	}
+	file, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, ok, err := socketInodeAtChecked(dir.fd, strconv.FormatUint(uint64(file.Fd()), 10)); ok || err != nil {
+		t.Fatalf("readable non-socket descriptor was treated as an inspection failure: found=%t error=%v", ok, err)
 	}
 }
