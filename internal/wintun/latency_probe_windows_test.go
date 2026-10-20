@@ -20,7 +20,7 @@ func TestWintunLatencyClient(t *testing.T) {
 		t.Skip("latency client only")
 	}
 	requireRunner(t)
-	fmt.Printf("LATENCY_RESULT %.9f\n", shortLatency(t, mode))
+	fmt.Printf("LATENCY_RESULT %.9f\n", observedShortLatency(t, mode))
 }
 
 func latencyClient(t *testing.T, mode string) float64 {
@@ -71,7 +71,7 @@ func TestWintunLatencyProbe(t *testing.T) {
 					}
 					var latency float64
 					if placement == "same_process" {
-						latency = shortLatency(t, mode)
+						latency = observedShortLatency(t, mode)
 					} else {
 						latency = latencyClient(t, mode)
 					}

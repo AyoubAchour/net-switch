@@ -256,6 +256,54 @@ func TestWintunUDPClient(t *testing.T) {
 }
 
 func shortLatency(t *testing.T, mode string) float64 {
+	c := udpSocket(t)
+	defer c.Close()
+	samples := make([]time.Duration, 20000)
+	p := make([]byte, 64)
+	b := make([]byte, 128)
+	rescues := 0
+	// Prime this socket, then measure a full burst rather than a fraction of
+	// one scheduler time slice. The warm-up count is fixed for both paths.
+	for i := -1000; i < len(samples); i++ {
+		sequence := uint64(i + 1000)
+		binary.LittleEndian.PutUint64(p, sequence)
+		c.SetDeadline(time.Now().Add(250 * time.Millisecond))
+		start := ticks()
+		_, err := c.Write(p)
+		must(t, err)
+		rescued := false
+		for {
+			n, err := c.Read(b)
+			if err != nil {
+				var timeout net.Error
+				if mode == "dll" && !rescued && errors.As(err, &timeout) && timeout.Timeout() {
+					rescued = true
+					rescues++
+					c.SetDeadline(time.Now().Add(time.Second))
+					_, err = c.Write(p)
+					must(t, err)
+					continue
+				}
+				must(t, err)
+			}
+			if n >= 8 && binary.LittleEndian.Uint64(b[:8]) < sequence {
+				continue
+			}
+			if !bytes.Equal(b[:n], p) {
+				t.Fatal("latency payload mismatch")
+			}
+			break
+		}
+		if i >= 0 {
+			samples[i] = elapsed(start)
+		}
+	}
+	report(t, map[string]any{"test": "burst_latency_sample", "arch": runtime.GOARCH, "mode": mode, "measured_round_trips": len(samples), "warmup_round_trips": 1000, "timeout_rescues": rescues})
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	return float64(samples[len(samples)*95/100]) / 1000
+}
+
+func observedShortLatency(t *testing.T, mode string) float64 {
 	var monitor *pauseMonitor
 	if os.Getenv("NETSWITCH_WINTUN_LATENCY_DIAGNOSTICS") == "1" {
 		monitor = startPauseMonitor(t, nil)
@@ -265,8 +313,6 @@ func shortLatency(t *testing.T, mode string) float64 {
 		rescued    bool
 	}
 	var slow []slowTrip
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
 	totalStart := ticks()
 	c := udpSocket(t)
 	defer c.Close()
@@ -315,7 +361,6 @@ func shortLatency(t *testing.T, mode string) float64 {
 		}
 	}
 	seconds := elapsed(totalStart).Seconds()
-	runtime.ReadMemStats(&after)
 	if monitor != nil {
 		monitor.finish(t)
 		for _, trip := range slow {
@@ -325,7 +370,7 @@ func shortLatency(t *testing.T, mode string) float64 {
 		report(t, map[string]any{"test": "burst_pause_monitor", "mode": mode, "heartbeat_gaps": monitor.gaps[0], "scheduler_gaps": monitor.gaps[1]})
 	}
 	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
-	report(t, map[string]any{"test": "burst_latency_sample", "arch": runtime.GOARCH, "mode": mode, "measured_round_trips": len(samples), "warmup_round_trips": 1000, "timeout_rescues": rescues, "p50_us": float64(samples[len(samples)/2]) / 1000, "p95_us": float64(samples[len(samples)*95/100]) / 1000, "p99_us": float64(samples[len(samples)*99/100]) / 1000, "max_us": float64(samples[len(samples)-1]) / 1000, "seconds": seconds, "gc_count": after.NumGC - before.NumGC, "gc_pause_ns": after.PauseTotalNs - before.PauseTotalNs, "over_50_ms": len(slow)})
+	report(t, map[string]any{"test": "burst_latency_sample", "arch": runtime.GOARCH, "mode": mode, "measured_round_trips": len(samples), "warmup_round_trips": 1000, "timeout_rescues": rescues, "p50_us": float64(samples[len(samples)/2]) / 1000, "p95_us": float64(samples[len(samples)*95/100]) / 1000, "p99_us": float64(samples[len(samples)*99/100]) / 1000, "max_us": float64(samples[len(samples)-1]) / 1000, "seconds": seconds, "over_50_ms": len(slow)})
 	return float64(samples[len(samples)*95/100]) / 1000
 }
 

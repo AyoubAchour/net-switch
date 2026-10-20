@@ -86,7 +86,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.latency_probe
     name: ARM64 latency probe / monitor ${{ matrix.monitor }}
     runs-on: windows-11-arm
-    timeout-minutes: 15
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -114,8 +114,19 @@ jobs:
         with:
           artifact: wintun
       - run: ./scripts/prepare-wintun-tests.ps1
-      - name: Repeat the original full performance comparison
-        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.count=3' '-test.run=^TestWintunPerformance$'
+      - name: Run the same preceding ping-pong workload as the failed job
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintunPingPong$'
+      - name: Repeat the unchanged performance sampler in six fresh processes
+        if: ${{ !cancelled() }}
+        run: |
+          $failures = 0
+          for ($i = 1; $i -le 6; $i++) {
+            Write-Host "PERFORMANCE_PROCESS $i"
+            ./bin/wintun.test.exe '-test.v' '-test.timeout=3m' '-test.run=^TestWintunPerformance$'
+            if ($LASTEXITCODE -ne 0) { $failures++ }
+          }
+          Write-Host "PERFORMANCE_FAILURES $failures/6"
+          if ($failures) { exit 1 }
       - name: Compare client placement with the same ten-percent gate
         if: ${{ !cancelled() }}
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.count=3' '-test.run=^TestWintunLatencyProbe$'
