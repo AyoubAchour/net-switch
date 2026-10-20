@@ -112,7 +112,10 @@ func openStateDirectory(path string) (*os.File, error) {
 	if err := windows.CreateDirectory(p, sa); err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
 		return nil, err
 	}
-	h, err := windows.CreateFile(p, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+	// Attribute-only opens do not participate in Windows share-access checks.
+	// FILE_LIST_DIRECTORY is directory data-read access, so omitting SHARE_DELETE
+	// now genuinely excludes replacement until this lifetime handle is closed.
+	h, err := windows.CreateFile(p, windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES|windows.FILE_LIST_DIRECTORY, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
 		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 	if err != nil {
 		return nil, err
