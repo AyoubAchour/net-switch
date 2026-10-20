@@ -76,8 +76,9 @@ func (s *udpSocket) TryReadFrom(b []byte) (int, netip.AddrPort, error) {
 		return int(received), netip.AddrPort{}, &platform.TooBig{MTU: s.mtu}
 	}
 	if err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("UDP receive local=%s buffer=%d received=%d flags=%d address-length=%d family=%d: %w",
-			s.local, len(b), received, flags, sourceLength, source.Addr.Family, err)
+		return 0, netip.AddrPort{}, fmt.Errorf("UDP receive local=%s buffer=%d received=%d flags=%d address-length=%d address-mod8=%d buffer-mod8=%d family=%d: %w",
+			s.local, len(b), received, flags, sourceLength, uintptr(unsafe.Pointer(&source))&7,
+			uintptr(unsafe.Pointer(buf.Buf))&7, source.Addr.Family, err)
 	}
 	sa, err := source.Sockaddr()
 	if err != nil {

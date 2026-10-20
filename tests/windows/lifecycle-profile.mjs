@@ -71,7 +71,8 @@ try {
     const data = path.join(directory, name);
     await mkdir(data, { recursive: true });
     await writeFile(path.join(data, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
-    const variant = { name, executables: await recordLaunch(options), setup: {}, phases: {} };
+    const variant = { name, executables: await recordLaunch(options), setup: {}, phases: {},
+      nativeStopProfiled: name === '1.0' && process.env.NETSWITCH_ENGINE_STOP_TRACE === '1' };
     result.variants.push(variant);
     const nativeStart = output.events.length;
     active = await timedPhase(variant.setup, 'controllerLaunchMs', () => startServer(options, data, output));

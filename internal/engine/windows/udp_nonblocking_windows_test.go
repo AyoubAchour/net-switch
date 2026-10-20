@@ -15,7 +15,25 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
+	"golang.org/x/sys/windows"
 )
+
+func udpReceiveDiagnostic(t *testing.T, s *udpSocket) {
+	t.Helper()
+	local, localErr := windows.Getsockname(s.handle)
+	kind, kindErr := windows.GetsockoptInt(s.handle, windows.SOL_SOCKET, 0x1008) // SO_TYPE.
+	// Diagnostic only: the original test still fails. This independent
+	// documented nonblocking API distinguishes socket state from WSARecvFrom
+	// argument handling; it is never a production retry.
+	b := make([]byte, 65536)
+	n, peer, err := windows.Recvfrom(s.handle, b, 0)
+	var digest [32]byte
+	if n >= 0 && n <= len(b) {
+		digest = sha256.Sum256(b[:n])
+	}
+	t.Logf("UDP receive failure diagnostic: handle=%d cached=%s native=%#v native-error=%v type=%d type-error=%v recvfrom-n=%d peer=%#v hash=%x error=%v",
+		s.handle, s.local, local, localErr, kind, kindErr, n, peer, digest, err)
+}
 
 func nativeUDPPair(t *testing.T, network string) (*udpSocket, *net.UDPConn) {
 	t.Helper()
@@ -131,6 +149,7 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 					n, source, err := s.TryReadFrom(b)
 					wantSource := peer.LocalAddr().(*net.UDPAddr).AddrPort()
 					if err != nil || source != wantSource || !bytes.Equal(b[:n], payload) {
+						udpReceiveDiagnostic(t, s)
 						t.Fatalf("changed datagram: n=%d source=%s/%s err=%v", n, source, wantSource, err)
 					}
 					if n, source, err := s.TryReadFrom(b); n != 0 || source.IsValid() || !errors.Is(err, platform.ErrWouldBlock) {
@@ -271,6 +290,7 @@ func TestReadyUDPSharedEventAndIdleCost(t *testing.T) {
 			var b [16]byte
 			n, source, err := sockets[i].TryReadFrom(b[:])
 			if err != nil || source != wantSource || !bytes.Equal(b[:n], []byte{byte(i), byte(round), 0xa7}) {
+				udpReceiveDiagnostic(t, sockets[i])
 				t.Fatalf("shared event changed datagram: round=%d socket=%d n=%d source=%s err=%v", round, i, n, source, err)
 			}
 			if round == 0 && i%2 == 0 {
