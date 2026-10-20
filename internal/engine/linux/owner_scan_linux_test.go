@@ -160,6 +160,15 @@ func TestProcScratchSurvivesCollectionWithinItsBound(t *testing.T) {
 }
 
 func TestBusyHintedProcessGetsATargetedPassBeforeDeadline(t *testing.T) {
+	testBusyHintedProcess(t, false)
+}
+
+func TestTwoBusyScannersStillAllowABoundedTargetedProbe(t *testing.T) {
+	testBusyHintedProcess(t, true)
+}
+
+func testBusyHintedProcess(t *testing.T, both bool) {
+	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 	if err != nil {
 		t.Fatal(err)
@@ -195,6 +204,11 @@ func TestBusyHintedProcessGetsATargetedPassBeforeDeadline(t *testing.T) {
 	o.rememberPID(row.uid, pid)
 	o.mu.Lock()
 	o.windows[pid] = fdWindow{start: start, lastFD: -1, scanning: blocked}
+	if both {
+		window := o.windows[pid]
+		window.assisting = blocked
+		o.windows[pid] = window
+	}
 	o.mu.Unlock()
 	// The held scanner never completes during this lookup. A success must
 	// come from a real targeted fd pass, not from widening the time budget.
@@ -204,8 +218,11 @@ func TestBusyHintedProcessGetsATargetedPassBeforeDeadline(t *testing.T) {
 	if err != nil || owner.PID != pid || owner.Generation != row.generation() {
 		t.Fatalf("busy hinted process: %+v %v", owner, err)
 	}
-	if o.assistedScans.Load() == 0 {
+	if !both && o.assistedScans.Load() == 0 {
 		t.Fatal("fixture bypassed the blocked scanner instead of exercising assistance")
+	}
+	if both && o.targetedProbes.Load() == 0 {
+		t.Fatal("fixture did not probe past the two blocked scanner slots")
 	}
 	select {
 	case <-blocked:
