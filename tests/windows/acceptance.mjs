@@ -15,7 +15,7 @@ assert(['baseline', 'v1'].includes(options.profile), 'Use --profile baseline or 
 const dir = path.resolve('dist/windows-acceptance');
 const dataDir = path.join(dir, 'app');
 await mkdir(dataDir, { recursive: true });
-const report = new Report(options.profile);
+const report = new Report(options.profile, path.join(dir, 'report.json'));
 const output = createWriteStream(path.join(dir, 'server-output.log'));
 const clientExe = path.join(dir, 'acceptance-app.exe');
 await copyFile(process.execPath, clientExe);
