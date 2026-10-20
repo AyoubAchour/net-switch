@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { readFile, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
@@ -57,7 +58,7 @@ async function connect() {
     } catch (error) {
       if (engine?.exitCode !== null && engine?.exitCode !== undefined) throw new Error(`Engine exited ${engine.exitCode} before opening its pipe`);
       if (Date.now() >= deadline) throw error;
-      await delay(100);
+      await delay(10);
     }
   }
   let buffer = '';
@@ -193,10 +194,8 @@ async function stopEngine() {
   try {
     if (pipe && !pipe.destroyed) await command('stop');
     if (engine) {
-      const deadline = Date.now() + 20_000;
-      while (engine.exitCode === null && engine.signalCode === null) {
-        assert(Date.now() < deadline, 'Engine did not exit after acknowledging stop');
-        await delay(50);
+      if (engine.exitCode === null && engine.signalCode === null) {
+        await once(engine, 'exit', { signal: AbortSignal.timeout(20_000) });
       }
       assert.equal(engine.exitCode, 0, 'Engine cleanup failed');
     }

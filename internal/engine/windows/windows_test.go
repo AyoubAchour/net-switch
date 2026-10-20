@@ -225,6 +225,8 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 	var mu sync.Mutex
 	var durations, oldDurations []time.Duration
 	var dialErrors []string
+	var acceptError error
+	accepted := 0
 	misses := 0
 	work := make(chan int, 1000)
 	for i := range 1000 {
@@ -239,9 +241,13 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 		for range 1000 {
 			c, err := listener.Accept()
 			if err != nil {
+				mu.Lock()
+				acceptError = err
+				mu.Unlock()
 				return
 			}
 			mu.Lock()
+			accepted++
 			held = append(held, c)
 			mu.Unlock()
 		}
@@ -281,7 +287,7 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 	slices.Sort(durations)
 	slices.Sort(oldDurations)
 	if len(durations) != 1000 {
-		t.Fatalf("only %d/1000 cold socket lookups ran; dial failures: %v", len(durations), dialErrors)
+		t.Fatalf("only %d/1000 cold socket lookups ran; accepted=%d accept_error=%v; dial failures: %v", len(durations), accepted, acceptError, dialErrors)
 	}
 	p95 := durations[949]
 	oldP95 := oldDurations[949]
