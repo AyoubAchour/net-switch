@@ -434,7 +434,7 @@ func TestUDPReadinessDoesNotConsume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &udpSocket{conn: server, raw: raw}
+	s := &udpSocket{conn: server, raw: raw, local: server.LocalAddr().(*net.UDPAddr).AddrPort()}
 	client, err := net.DialUDP("udp4", nil, server.LocalAddr().(*net.UDPAddr))
 	if err != nil {
 		t.Fatal(err)

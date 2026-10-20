@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"runtime"
 	"sync"
@@ -24,14 +25,24 @@ var winsock = windows.NewLazySystemDLL("ws2_32.dll")
 // post a zero-byte overlapped receive to one completion port: no payload buffer
 // and no goroutine per socket. Only backpressured writers use WSAPoll.
 type readiness struct {
-	mu      sync.Mutex
-	port    windows.Handle
-	next    uintptr
-	watches map[uintptr]*socketWatch
-	writers map[uintptr]*socketWatch
-	stop    chan struct{}
-	wg      sync.WaitGroup
-	thread  atomic.Uint32
+	mu          sync.Mutex
+	port        windows.Handle
+	next        uintptr
+	watches     map[uintptr]*socketWatch
+	writers     map[uintptr]*socketWatch
+	stop        chan struct{}
+	wg          sync.WaitGroup
+	thread      atomic.Uint32
+	capture     bool
+	closes      [1024]nativeSocketClose
+	closedCount uint64
+}
+
+type nativeSocketClose struct {
+	Sequence uint64         `json:"sequence"`
+	Local    netip.AddrPort `json:"local"`
+	Handle   uint64         `json:"handle"`
+	Error    string         `json:"error,omitempty"`
 }
 
 type socketWatch struct {
@@ -53,7 +64,7 @@ func newReadiness() (*readiness, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &readiness{port: port, watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{}, stop: make(chan struct{})}
+	p := &readiness{port: port, watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{}, stop: make(chan struct{}), capture: hostedTraceEnabled()}
 	p.wg.Go(p.completions)
 	p.wg.Go(p.pollWrites)
 	return p, nil
@@ -111,7 +122,26 @@ func (p *readiness) stats() map[string]any {
 	for _, watch := range p.watches {
 		ports = append(ports, watch.localPort)
 	}
-	return map[string]any{"sockets": len(p.watches), "ports": ports, "blockedWriters": len(p.writers), "completionThread": p.thread.Load()}
+	closes := make([]nativeSocketClose, 0, min(p.closedCount, uint64(len(p.closes))))
+	for i := p.closedCount - uint64(cap(closes)); i < p.closedCount; i++ {
+		closes = append(closes, p.closes[i%uint64(len(p.closes))])
+	}
+	return map[string]any{"sockets": len(p.watches), "ports": ports, "blockedWriters": len(p.writers), "completionThread": p.thread.Load(), "closes": closes, "closedCount": p.closedCount}
+}
+
+func (p *readiness) recordClose(local netip.AddrPort, handle windows.Handle, err error) {
+	if !p.capture {
+		return
+	}
+	record := nativeSocketClose{Local: local, Handle: uint64(handle)}
+	if err != nil {
+		record.Error = err.Error()
+	}
+	p.mu.Lock()
+	record.Sequence = p.closedCount + 1
+	p.closes[p.closedCount%uint64(len(p.closes))] = record
+	p.closedCount++
+	p.mu.Unlock()
 }
 
 type pollFD struct {
@@ -276,19 +306,9 @@ func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
 		return nil, err
 	}
 	defer file.Close()
-	var info windows.WSAProtocolInfo
-	if err := windows.WSADuplicateSocket(windows.Handle(file.Fd()), uint32(os.Getpid()), &info); err != nil {
-		return nil, err
-	}
-	h, err := windows.WSASocket(-1, -1, -1, &info, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
+	h, err := duplicateForReadiness(file)
 	if err != nil {
 		return nil, err
-	}
-	var nonblocking uint32 = 1
-	code, _, callErr := winsock.NewProc("ioctlsocket").Call(uintptr(h), 0x8004667e, uintptr(unsafe.Pointer(&nonblocking)))
-	if int32(code) != 0 {
-		windows.Closesocket(h)
-		return nil, callErr
 	}
 	w, err := c.pool.watch(h, uint16(c.local.(*net.TCPAddr).Port), wake)
 	if err != nil {
@@ -299,6 +319,24 @@ func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
 	c.blocking.Close()
 	c.blocking = nil
 	return w, nil
+}
+
+func duplicateForReadiness(file *os.File) (windows.Handle, error) {
+	var info windows.WSAProtocolInfo
+	if err := windows.WSADuplicateSocket(windows.Handle(file.Fd()), uint32(os.Getpid()), &info); err != nil {
+		return windows.InvalidHandle, err
+	}
+	h, err := windows.WSASocket(-1, -1, -1, &info, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	var nonblocking uint32 = 1
+	code, _, callErr := winsock.NewProc("ioctlsocket").Call(uintptr(h), 0x8004667e, uintptr(unsafe.Pointer(&nonblocking)))
+	if int32(code) != 0 {
+		windows.Closesocket(h)
+		return windows.InvalidHandle, callErr
+	}
+	return h, nil
 }
 
 func socketIO(h windows.Handle, name string, b []byte) (int, error) {
@@ -423,7 +461,9 @@ func (c *readySocket) Close() error {
 		return c.blocking.Close()
 	}
 	c.watch.Detach()
-	return windows.Closesocket(c.handle)
+	err := windows.Closesocket(c.handle)
+	c.pool.recordClose(c.local.(*net.TCPAddr).AddrPort(), c.handle, err)
+	return err
 }
 
 // Used by probes before readiness transfer as well as the shared relay.
