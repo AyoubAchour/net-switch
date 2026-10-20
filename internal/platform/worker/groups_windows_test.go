@@ -122,6 +122,10 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 			t.Errorf("delete disposable account: %d", status)
 		}
 	})
+	accountSID, _, _, err := windows.LookupSID("", accountName)
+	if err != nil {
+		t.Fatal(err)
+	}
 	groupSIDs := []string{"S-1-5-32-544", "S-1-5-32-547", "S-1-5-32-551", "S-1-5-32-556", "S-1-5-32-569"}
 	for _, text := range groupSIDs {
 		sid, err := windows.StringToSid(text)
@@ -138,6 +142,26 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 		if status != 0 {
 			t.Fatalf("add membership %s: %d", text, status)
 		}
+		// Confirm the SAM membership independently of the later logon token.
+		// The hosted Windows logons can omit Crypto Operators entirely.
+		var members *byte
+		var count, total uint32
+		status, _, _ = netapi.NewProc("NetLocalGroupGetMembers").Call(0, uintptr(unsafe.Pointer(group)), 0,
+			uintptr(unsafe.Pointer(&members)), uintptr(^uint32(0)), uintptr(unsafe.Pointer(&count)), uintptr(unsafe.Pointer(&total)), 0)
+		if members != nil {
+			defer netapi.NewProc("NetApiBufferFree").Call(uintptr(unsafe.Pointer(members)))
+		}
+		if status != 0 || count != total || members == nil {
+			t.Fatalf("read membership %s: status=%d count=%d total=%d", text, status, count, total)
+		}
+		found := false
+		for _, memberSID := range unsafe.Slice((**windows.SID)(unsafe.Pointer(members)), int(count)) {
+			found = found || memberSID.Equals(accountSID)
+		}
+		if !found {
+			t.Fatal("SAM did not contain the requested account membership", text)
+		}
+		t.Log("verified SAM membership", text)
 	}
 	advapi := windows.NewLazySystemDLL("advapi32.dll")
 	domain, _ := windows.UTF16PtrFromString(".")
@@ -213,16 +237,18 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 		}
 		return out
 	}
-	before, after := attributes(control), attributes(filtered)
-	legacyControl, err := workerToken(source, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer legacyControl.Close()
-	t.Logf("Crypto membership: source=%x duplicate=%x administrative restricted=%x read=%x; source groups=%v",
-		attributes(source)["S-1-5-32-569"], before["S-1-5-32-569"], attributes(legacyControl)["S-1-5-32-569"], after["S-1-5-32-569"], attributes(source))
+	input, before, after := attributes(source), attributes(control), attributes(filtered)
+	_, cryptoPresent := input["S-1-5-32-569"]
+	t.Logf("Crypto membership in raw logon token: present=%t; source groups=%v", cryptoPresent, input)
 	for _, text := range groupSIDs {
 		afterAttrs, retained := after[text]
+		if text == "S-1-5-32-569" && !cryptoPresent {
+			if _, present := before[text]; present || retained {
+				t.Fatal("an absent Crypto membership appeared in a derived token")
+			}
+			t.Log("SAM membership exists, but Windows omitted Crypto Operators before production filtering; its fallback deny-list selection is covered separately")
+			continue
+		}
 		if before[text]&windows.SE_GROUP_ENABLED == 0 || (retained && (afterAttrs&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 || afterAttrs&(windows.SE_GROUP_ENABLED|windows.SE_GROUP_ENABLED_BY_DEFAULT) != 0)) {
 			t.Fatalf("membership was not exercised and disabled: %s before=%x after=%x", text, before[text], after[text])
 		}
@@ -261,13 +287,22 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 				}
 				return err
 			}
-			if err := attempt(control); err != nil {
-				t.Fatal("Medium control token did not exercise the group-only grant", err)
+			controlErr := attempt(control)
+			if text == "S-1-5-32-569" && !cryptoPresent {
+				if controlErr != windows.ERROR_ACCESS_DENIED {
+					t.Fatal("raw logon omitted Crypto Operators but its grant was available", controlErr)
+				}
+			} else if controlErr != nil {
+				t.Fatal("Medium control token did not exercise the group-only grant", controlErr)
 			}
 			if err := attempt(filtered); err != windows.ERROR_ACCESS_DENIED {
 				t.Fatal("read token retained the group-only grant", err)
 			}
-			t.Log("Medium control token allowed; production read token denied; source membership enabled and destination deny-only or removed")
+			if text == "S-1-5-32-569" && !cryptoPresent {
+				t.Log("both native tokens denied the Crypto-only grant; this logon cannot exercise an enabled Crypto membership")
+			} else {
+				t.Log("Medium control token allowed; production read token denied; source membership enabled and destination deny-only or removed")
+			}
 		})
 	}
 }
