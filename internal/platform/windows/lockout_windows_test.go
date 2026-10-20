@@ -68,8 +68,8 @@ func TestMachineFolderQuarantinesPlantedNames(t *testing.T) {
 				outside := lockoutOutside(t)
 				dirACL, fileACL := fileSecurity(t, outside), fileSecurity(t, filepath.Join(outside, "record"))
 				plantKind := kind
-				if kind == "trusted-children" {
-					plantKind = "children"
+				if kind == "children" || kind == "trusted-children" {
+					plantKind = "directory"
 				}
 				plantMachineOccupant(t, occupant, plantKind, outside)
 				if kind == "children" || kind == "trusted-children" {
@@ -87,10 +87,16 @@ func TestMachineFolderQuarantinesPlantedNames(t *testing.T) {
 					if err := windows.SetNamedSecurityInfo(occupant, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, sid, nil, acl, nil); err != nil {
 						t.Fatal(err)
 					}
+					// Establish the root's security before adding links:
+					// SetNamedSecurityInfo can propagate ACL changes to an
+					// existing hardlink's shared outside file.
+					plantMachineOccupant(t, filepath.Join(occupant, "junction"), "junction", outside)
+					plantMachineOccupant(t, filepath.Join(occupant, "hardlink"), "hardlink", outside)
 				}
 				if _, err := os.Lstat(occupant); err != nil {
 					t.Fatal("plant did not exist", err)
 				}
+				assertOutsideUnchanged(t, outside, dirACL, fileACL)
 				var logs []string
 				if err := protectDirectory(root, func(s string) { logs = append(logs, s) }, nil); err != nil {
 					t.Fatal("startup blocked by planted name", err)

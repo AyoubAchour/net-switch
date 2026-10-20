@@ -125,7 +125,7 @@ begin
         if ExitCode = 0 then begin
           ExitCode := -1;
           if Exec(ExpandConstant('{app}\runtime\node.exe'),
-            ExpandConstant('"{app}\tools\restore-windows.mjs"'),
+            ExpandConstant('"{app}\tools\restore-windows.mjs" --machine-data "{commonappdata}\Net Switch"'),
             ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
             DeleteMachineData := ExitCode = 0;
         end;

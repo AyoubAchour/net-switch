@@ -38,14 +38,15 @@ func TestElevatedGroupNamespaces(t *testing.T) {
 
 func TestWorkerGroupSelectionUsesFilteredToken(t *testing.T) {
 	admin, _ := windows.StringToSid("S-1-5-32-544")
+	crypto, _ := windows.StringToSid("S-1-5-32-569")
 	custom, _ := windows.StringToSid("S-1-5-21-1-2-3-1234")
-	groups := []windows.SIDAndAttributes{{Sid: admin, Attributes: windows.SE_GROUP_ENABLED}, {Sid: custom, Attributes: windows.SE_GROUP_ENABLED}}
-	filtered := []windows.SIDAndAttributes{{Sid: admin, Attributes: windows.SE_GROUP_USE_FOR_DENY_ONLY}, {Sid: custom, Attributes: windows.SE_GROUP_USE_FOR_DENY_ONLY}}
+	groups := []windows.SIDAndAttributes{{Sid: admin, Attributes: windows.SE_GROUP_ENABLED}, {Sid: crypto, Attributes: windows.SE_GROUP_ENABLED}, {Sid: custom, Attributes: windows.SE_GROUP_ENABLED}}
+	filtered := []windows.SIDAndAttributes{{Sid: admin, Attributes: windows.SE_GROUP_USE_FOR_DENY_ONLY}, {Sid: crypto, Attributes: windows.SE_GROUP_USE_FOR_DENY_ONLY}, {Sid: custom, Attributes: windows.SE_GROUP_USE_FOR_DENY_ONLY}}
 	for _, test := range []struct {
 		name     string
 		filtered []windows.SIDAndAttributes
 		count    int
-	}{{"linked-token-includes-nonstandard-group", filtered, 2}, {"unsplit-token-fallback", nil, 1}} {
+	}{{"linked-token-includes-nonstandard-group", filtered, 3}, {"unsplit-token-fallback-includes-crypto", nil, 2}} {
 		t.Run(test.name, func(t *testing.T) {
 			disabled, err := disabledWorkerGroups(groups, test.filtered)
 			if err != nil || len(disabled) != test.count {
@@ -186,8 +187,10 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 		t.Fatal("fixture did not exercise a filtered administrator token")
 	}
 	t.Logf("queried %d groups from the real filtered UAC token through the full token's linked handle", len(actual))
-	control, err := workerToken(source, true)
-	if err != nil {
+	// Use an unfiltered duplicate as the access control, so this proof
+	// does not depend on restrictions already applied to its comparison.
+	var control windows.Token
+	if err := windows.DuplicateTokenEx(source, windows.TOKEN_ALL_ACCESS, nil, windows.SecurityImpersonation, windows.TokenPrimary, &control); err != nil {
 		t.Fatal(err)
 	}
 	defer control.Close()
@@ -211,9 +214,20 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 		return out
 	}
 	before, after := attributes(control), attributes(filtered)
+	legacyControl, err := workerToken(source, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacyControl.Close()
+	t.Logf("Crypto membership: source=%x duplicate=%x administrative restricted=%x read=%x; source groups=%v",
+		attributes(source)["S-1-5-32-569"], before["S-1-5-32-569"], attributes(legacyControl)["S-1-5-32-569"], after["S-1-5-32-569"], attributes(source))
 	for _, text := range groupSIDs {
-		if before[text]&windows.SE_GROUP_ENABLED == 0 || after[text]&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 || after[text]&(windows.SE_GROUP_ENABLED|windows.SE_GROUP_ENABLED_BY_DEFAULT) != 0 {
+		afterAttrs, retained := after[text]
+		if before[text]&windows.SE_GROUP_ENABLED == 0 || (retained && (afterAttrs&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 || afterAttrs&(windows.SE_GROUP_ENABLED|windows.SE_GROUP_ENABLED_BY_DEFAULT) != 0)) {
 			t.Fatalf("membership was not exercised and disabled: %s before=%x after=%x", text, before[text], after[text])
+		}
+		if !retained {
+			t.Logf("Windows removed %s from the restricted token entirely", text)
 		}
 	}
 	for _, text := range groupSIDs[1:] {
@@ -253,7 +267,7 @@ func TestReadTokenDisablesAdditionalPrivilegedMemberships(t *testing.T) {
 			if err := attempt(filtered); err != windows.ERROR_ACCESS_DENIED {
 				t.Fatal("read token retained the group-only grant", err)
 			}
-			t.Log("Medium control token allowed; production read token denied; source membership enabled and destination deny-only")
+			t.Log("Medium control token allowed; production read token denied; source membership enabled and destination deny-only or removed")
 		})
 	}
 }
