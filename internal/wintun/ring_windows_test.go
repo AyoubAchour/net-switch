@@ -145,6 +145,27 @@ func TestRingReadRejectsDamagedPacket(t *testing.T) {
 	}
 }
 
+func TestRingRecoveryInjectionSurvivesPublication(t *testing.T) {
+	for _, publish := range []bool{false, true} {
+		t.Run(fmt.Sprint(publish), func(t *testing.T) {
+			r := &rings{send: ring{make([]byte, MinCapacity+ringHeader+ringSlack), MinCapacity}}
+			injectRecoveryFault(r)
+			if publish {
+				// An in-flight driver send can publish its reserved packet even
+				// while the test owns Session.mu. Reproduce that ordering.
+				p := testPacket()
+				binary.LittleEndian.PutUint32(r.send.data(), uint32(len(p)))
+				copy(r.send.data()[4:], p)
+				r.send.store(4, aligned(uint32(len(p))+4))
+			}
+			n, err := r.read([][]byte{make([]byte, MaxPacketSize)}, make([]int, 1))
+			if n != 0 || !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("driver publication erased the recovery injection: %d %v", n, err)
+			}
+		})
+	}
+}
+
 func TestRingDisconnectedHandleIsNotClosedTwice(t *testing.T) {
 	// Simulate the numeric device handle having been reused for a new event
 	// after the driver closed the original and published its disconnect marker.

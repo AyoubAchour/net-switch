@@ -8,21 +8,15 @@ $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
 $pin = $pins.nativeSources.wintun
 $arch = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64' } else { 'amd64' }
 $expected = if ($arch -eq 'arm64') { $pin.embeddedArm64Sha256 } else { $pin.embeddedAmd64Sha256 }
-Add-Type -AssemblyName System.IO.Compression
-$client = [System.Net.Http.HttpClient]::new()
+. "$PSScriptRoot/build-common.ps1"
+$cache = Get-BuildCache (Join-Path $PSScriptRoot '../dist')
+[IO.Directory]::CreateDirectory($cache) | Out-Null
+$archive = Get-Artifact $pin $cache
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zip = [IO.Compression.ZipFile]::OpenRead($archive)
 try {
-  $data = $client.GetByteArrayAsync($pin.url).GetAwaiter().GetResult()
-  $sha = [Security.Cryptography.SHA256]::Create()
-  try { $actual = [Convert]::ToHexString($sha.ComputeHash($data)).ToLowerInvariant() } finally { $sha.Dispose() }
-  if ($actual -ne $pin.sha256) { throw 'Wintun archive hash mismatch.' }
-  $memory = [IO.MemoryStream]::new($data, $false)
-  $zip = [IO.Compression.ZipArchive]::new($memory, [IO.Compression.ZipArchiveMode]::Read)
-  try {
-    $entry = $zip.GetEntry("wintun/bin/$arch/wintun.dll")
-    if (-not $entry) { throw "Missing $arch DLL" }
-    $source = $entry.Open()
-    $target = [IO.File]::Create((Join-Path $PWD 'bin/wintun.dll'))
-    try { $source.CopyTo($target) } finally { $target.Dispose(); $source.Dispose() }
-  } finally { $zip.Dispose(); $memory.Dispose() }
-  if ((Get-FileHash bin/wintun.dll -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'Wintun DLL hash mismatch.' }
-} finally { $client.Dispose() }
+  $entry = $zip.GetEntry("wintun/bin/$arch/wintun.dll")
+  if (-not $entry) { throw "Missing $arch DLL" }
+  [IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $PWD 'bin/wintun.dll'), $true)
+} finally { $zip.Dispose() }
+Assert-Hash 'bin/wintun.dll' $expected

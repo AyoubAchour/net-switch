@@ -979,6 +979,13 @@ func TestWintunCrashCleanupChild(t *testing.T) {
 	fmt.Println("PHANTOM_REMOVED_WITHOUT_DLL")
 }
 
+func injectRecoveryFault(r *rings) {
+	// Send.Head belongs to the reader. Unlike packet bytes and Send.Tail, the
+	// driver cannot overwrite it with discovery traffic after a reconnect.
+	// The normal ReadBatch corruption check must detect it and request recovery.
+	r.send.store(0, r.send.capacity)
+}
+
 func TestWintunRecoveryLeak(t *testing.T) {
 	requireRunner(t)
 	a := newAdapter(t, 0)
@@ -1008,10 +1015,7 @@ func TestWintunRecoveryLeak(t *testing.T) {
 		windows.SetEvent(s.wake)
 		s.mu.Lock()
 		r := s.rings
-		binary.LittleEndian.PutUint32(r.send.data()[r.head:], MaxPacketSize+1)
-		r.send.store(4, (r.head+8)&(r.send.capacity-1))
-		injectedHead := r.head
-		t.Logf("recovery %d injected: head=%d tail=%d size=%d stats=%+v", iteration, injectedHead, r.send.load(4), r.send.load(ringHeader+int(injectedHead)), before)
+		injectRecoveryFault(r)
 		windows.SetEvent(r.readEvent)
 		windows.ResetEvent(s.wake)
 		s.mu.Unlock()
@@ -1021,17 +1025,19 @@ func TestWintunRecoveryLeak(t *testing.T) {
 			select {
 			case e := <-s.Events():
 				if e.Kind == "recovered" {
-					t.Logf("recovery %d completed in %v: %+v", iteration, time.Since(started), s.Stats())
+					if stats := s.Stats(); stats.Corruptions != before.Corruptions+1 || stats.Recoveries != before.Recoveries+1 {
+						t.Fatalf("recovery %d: before=%+v after=%+v", iteration, before, stats)
+					}
 					return
 				}
 				if e.Kind == "failed" {
 					t.Fatal(e.Err)
 				}
 			case <-deadline.C:
-				t.Logf("recovery %d timed out after %v: recovering=%v closed=%v stats=%+v", iteration, time.Since(started), s.recovering.Load(), s.closed.Load(), s.Stats())
+				t.Logf("recovery %d timed out after %v: recovering=%v closed=%v before=%+v after=%+v", iteration, time.Since(started), s.recovering.Load(), s.closed.Load(), before, s.Stats())
 				if s.mu.TryRLock() {
 					if r := s.rings; r != nil {
-						t.Logf("current ring: head=%d tail=%d injected_slot_size=%d", r.send.load(0), r.send.load(4), r.send.load(ringHeader+int(injectedHead)))
+						t.Logf("current ring: head=%d tail=%d", r.send.load(0), r.send.load(4))
 					}
 					t.Logf("session error: %v", s.err)
 					s.mu.RUnlock()

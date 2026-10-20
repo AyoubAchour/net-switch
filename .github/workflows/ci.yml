@@ -88,9 +88,17 @@ jobs:
           go-version-file: go.mod
           cache: false
       - run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
       - run: ./scripts/prepare-wintun-tests.ps1
-      - name: Repeat the original recovery test ten times
-        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.count=10' '-test.run=^TestWintunRecoveryLeak$'
+      - name: Check downloads under both PowerShell versions
+        run: |
+          powershell.exe -NoProfile -File scripts/test-build-download.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/test-build-download.ps1
+      - name: Repeat recovery and the injection regression ten times
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.count=10' '-test.run=^TestWintunRecoveryLeak$|^TestRingRecoveryInjectionSurvivesPublication$'
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
@@ -128,6 +136,9 @@ jobs:
         with:
           node-version: '24.21.0'
           package-manager-cache: false
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
       - name: Build TestISP only
         run: |
           go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
@@ -193,6 +204,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/udpreject.exe ./tests/windows/udpreject
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: go
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
       - name: Build today's native helper
         # The helper has its own module and its own dependency policy.
         env:
@@ -255,6 +272,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
       - name: Fetch and verify the signed Wintun DLL
         run: ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Prove two observable paths and independent failures
@@ -313,6 +333,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
       - name: Build TestISP for the legacy TUN assertions
         env:
           GOTOOLCHAIN: local
@@ -505,6 +528,9 @@ jobs:
           cache: false
       - name: Compile the native test executable
         run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
       - name: Fetch the unchanged signed Wintun DLL beside the executable
         run: ./scripts/prepare-wintun-tests.ps1
       - name: Ring ABI, parser, cancellation, corruption recovery and parallel UDP
@@ -614,6 +640,17 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
+      - name: Test download retries and hash checks (PowerShell 5.1)
+        run: ./scripts/test-build-download.ps1
+      - name: Test download retries and hash checks (PowerShell 7)
+        shell: pwsh
+        run: ./scripts/test-build-download.ps1
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: go
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
       - name: Build and test the native helper with the pinned Go
         run: ./scripts/build-helper.ps1
       - name: Build the tray program with the C# compiler that comes with Windows
@@ -640,6 +677,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: go
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
       - name: Build the installer
         run: ./scripts/build-release.ps1
       - name: Install, upgrade and uninstall it
@@ -664,6 +707,12 @@ jobs:
           node-version: '24'
           architecture: arm64
           package-manager-cache: false
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: go
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
       - name: Confirm native Node and build and test the helper
         run: |
           node -e "if (process.arch !== 'arm64') process.exit(1)"
