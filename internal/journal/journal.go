@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sort"
 	"sync"
 )
 
@@ -28,6 +29,10 @@ type Store interface {
 	Records() ([]Record, error)
 	Append(Record) error
 }
+
+// Compactor atomically replaces the log with the supplied live records. The
+// old or the new complete log must survive a crash, including directory fsync.
+type Compactor interface{ Compact([]Record) error }
 
 // BatchStore returns only after every record in the batch is durable. A failed
 // append may leave a recoverable prefix, but callers must perform no mutations.
@@ -63,6 +68,10 @@ type Object interface {
 	Inspect(context.Context, Fingerprint) (live Fingerprint, found bool, err error)
 	Create(context.Context, Fingerprint) error
 	Remove(context.Context, Fingerprint) error
+}
+
+type Replacer interface {
+	Replace(context.Context, Fingerprint, Fingerprint) error
 }
 type Journal struct {
 	Store Store
@@ -211,12 +220,30 @@ func (s *Session) Cleanup(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
+	// Some platforms must remove selectors before the routes they select,
+	// even when reconciliation appended newer routes after capture began.
+	priority := func(r Record) int {
+		if d, ok := s.j.Kinds[r.Kind].(interface{ CleanupPriority() int }); ok {
+			return d.CleanupPriority()
+		}
+		return 0
+	}
+	sort.SliceStable(records, func(i, j int) bool { return priority(records[i]) > priority(records[j]) })
 	var removed []Record
 	// A crash before or during this mark batch leaves the original intents.
 	// Recovery repeats the same fingerprint checks and safely skips missing
 	// objects. On a mid-cleanup error, retain marks for the completed prefix.
 	defer func() {
-		err = errors.Join(err, appendRecords(s.j.Store, removed))
+		if store, compact := s.j.Store.(Compactor); compact {
+			// Until the entire cleanup succeeds, retain the original intents.
+			// A retry still checks every live fingerprint. Successful cleanup
+			// uses one atomic empty checkpoint instead of per-object marks.
+			if err == nil {
+				err = store.Compact(nil)
+			}
+		} else {
+			err = errors.Join(err, appendRecords(s.j.Store, removed))
+		}
 		if err == nil {
 			s.failed = false
 		}
@@ -248,6 +275,23 @@ func (s *Session) Cleanup(ctx context.Context) (err error) {
 	}
 	return nil
 }
+
+func (s *Session) Compact() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.failed {
+		return errors.New("journal session closed or requires recovery")
+	}
+	store, ok := s.j.Store.(Compactor)
+	if !ok {
+		return nil
+	}
+	live, err := s.j.live()
+	if err != nil {
+		return err
+	}
+	return store.Compact(live)
+}
 func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -256,6 +300,100 @@ func (s *Session) Close() error {
 	}
 	s.closed = true
 	return s.release()
+}
+
+// Remove retires one owned object during reconciliation, with the same
+// fingerprint check as shutdown. It never claims a replacement object.
+func (s *Session) Remove(ctx context.Context, kind string, fp Fingerprint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("journal session closed")
+	}
+	records, err := s.j.live()
+	if err != nil {
+		return err
+	}
+	for i := len(records) - 1; i >= 0; i-- {
+		r := records[i]
+		if r.Kind != kind || !maps.Equal(r.Fingerprint, fp) {
+			continue
+		}
+		d := s.j.Kinds[kind]
+		live, found, err := d.Inspect(ctx, maps.Clone(fp))
+		if err != nil {
+			return err
+		}
+		if found && maps.Equal(live, fp) {
+			if err := d.Remove(ctx, maps.Clone(fp)); err != nil {
+				return err
+			}
+		}
+		r.Phase = "removed"
+		return s.j.Store.Append(r)
+	}
+	return nil
+}
+
+// Replace preserves a live route while changing its gateway or attributes.
+// Both fingerprints remain recoverable if the process exits at any step.
+func (s *Session) Replace(ctx context.Context, kind string, before, after Fingerprint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed || s.failed {
+		return errors.New("journal session closed or requires recovery")
+	}
+	d := s.j.Kinds[kind]
+	replacer, ok := d.(Replacer)
+	if !ok {
+		return errors.New("object has no atomic replacement operation")
+	}
+	if err := d.Validate(after); err != nil {
+		return err
+	}
+	records, err := s.j.live()
+	if err != nil {
+		return err
+	}
+	var previous *Record
+	for i := range records {
+		if records[i].Kind == kind && maps.Equal(records[i].Fingerprint, before) {
+			r := records[i]
+			previous = &r
+			break
+		}
+	}
+	if previous == nil {
+		return errors.New("replacement has no owned original")
+	}
+	live, found, err := d.Inspect(ctx, maps.Clone(before))
+	if err != nil {
+		return err
+	}
+	if !found || !maps.Equal(live, before) {
+		return errors.New("original changed before replacement")
+	}
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return err
+	}
+	next := Record{ID: hex.EncodeToString(id[:]), Boot: s.boot, Instance: s.instance, Kind: kind, Fingerprint: maps.Clone(after), Phase: "intent"}
+	fail := func(err error) error { s.failed = true; return err }
+	if err := s.j.Store.Append(next); err != nil {
+		return fail(err)
+	}
+	if err := replacer.Replace(ctx, maps.Clone(before), maps.Clone(after)); err != nil {
+		return fail(err)
+	}
+	next.Phase = "created"
+	if err := s.j.Store.Append(next); err != nil {
+		return fail(err)
+	}
+	previous.Phase = "removed"
+	if err := s.j.Store.Append(*previous); err != nil {
+		return fail(err)
+	}
+	return nil
 }
 func (j *Journal) Cleanup(ctx context.Context) error {
 	s, err := j.Open(ctx, "cleanup", "cleanup")
