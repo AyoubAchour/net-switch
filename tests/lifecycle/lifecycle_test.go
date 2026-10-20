@@ -538,7 +538,7 @@ func TestRealServices(t *testing.T) {
 	first := getStatus(t, c)
 	if runtime.GOOS == "windows" {
 		t.Run("system-pipe-accept-race", func(t *testing.T) {
-			b, err := exec.Command(filepath.Join(dir, "ipc.test.exe"), "-test.v", "-test.run=^TestClientClosesBeforePipeAccept$", "-test.count=1").CombinedOutput()
+			b, err := exec.Command(filepath.Join(dir, "ipc.test.exe"), "-test.v", "-test.run=^(TestClientClosesBeforePipeAccept|TestPipeIdentityUsesEffectiveClientToken)$", "-test.count=1").CombinedOutput()
 			if err != nil || !strings.Contains(string(b), "--- PASS: TestClientClosesBeforePipeAccept") {
 				t.Fatal("SYSTEM pipe regression did not pass", err, string(b))
 			}
@@ -1070,6 +1070,7 @@ func TestRealServices(t *testing.T) {
 		wait(t, "clean engine exit", 10*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
 	})
 	t.Run("control-start-limit-fails-open", func(t *testing.T) { controlStartLimit(t, ctx, owner, echo) })
+	t.Run("CLI-activates-stopped-Control", func(t *testing.T) { cliActivation(t, owner) })
 	t.Run("real-tun-fail-open", func(t *testing.T) { tunServices(t, config, owner) })
 }
 func binary(name string) string {

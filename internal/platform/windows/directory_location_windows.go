@@ -45,6 +45,10 @@ func ResolveMachineDirectory(path string) (string, error) {
 }
 
 func PrepareMachineDirectory(path string) (string, error) {
+	return prepareMachineDirectory(path, nil)
+}
+
+func prepareMachineDirectory(path string, beforePublish func(string) error) (string, error) {
 	resolved, err := ResolveMachineDirectory(path)
 	if err != nil {
 		return "", err
@@ -65,18 +69,13 @@ func PrepareMachineDirectory(path string) (string, error) {
 			break
 		}
 	}
-	previous, err := directoryCertificate(path)
-	if err != nil {
-		return "", err
-	}
 	if err = ProtectDirectory(path); err == nil {
 		return path, nil
 	}
-	if previous != "" {
-		// Preserve a certified store or pending migration for administrator
-		// recovery. Never silently discard trusted user records.
-		return "", err
-	}
+	// A previous certificate may describe a staged migration whose rename
+	// was blocked by this very occupant. It must not turn a retry after a
+	// crash into a permanent lockout. Retain the original and any stage;
+	// never import their contents into the independently certified fallback.
 	var nonce [16]byte
 	if _, e := rand.Read(nonce[:]); e != nil {
 		return "", e
@@ -87,6 +86,11 @@ func PrepareMachineDirectory(path string) (string, error) {
 	}
 	if e := VerifyDirectory(fresh); e != nil {
 		return "", e
+	}
+	if beforePublish != nil {
+		if e := beforePublish(fresh); e != nil {
+			return "", e
+		}
 	}
 	key, e := openDirectoryCertificates(true)
 	if e != nil {

@@ -14,7 +14,7 @@ type engineHealth interface {
 }
 
 type healthWatch struct {
-	failedSince time.Time
+	failedFor time.Duration
 }
 
 func (w *healthWatch) check(ctx context.Context, engine engineHealth, now func() time.Time) error {
@@ -23,13 +23,14 @@ func (w *healthWatch) check(ctx context.Context, engine engineHealth, now func()
 	err := engine.Health(probe)
 	cancel()
 	if err == nil {
-		w.failedSince = time.Time{}
+		w.failedFor = 0
 		return nil
 	}
-	if w.failedSince.IsZero() {
-		w.failedSince = started
-	}
-	if now().Sub(w.failedSince) >= 20*time.Second {
+	// A single request that spans standby must not turn eight sleeping hours
+	// into a full failure window before queued resume notifications run. Count
+	// at most its three-second probe budget (at least one host watch tick).
+	w.failedFor += min(max(now().Sub(started), time.Second), 3*time.Second)
+	if w.failedFor >= 20*time.Second {
 		return fmt.Errorf("routing engine health check failed continuously for 20 seconds: %w", err)
 	}
 	return nil

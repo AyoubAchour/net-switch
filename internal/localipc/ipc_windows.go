@@ -2,6 +2,7 @@ package localipc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -14,6 +15,10 @@ import (
 
 const pipeClientRights = windows.FILE_READ_DATA | windows.FILE_WRITE_DATA |
 	windows.FILE_READ_ATTRIBUTES | windows.FILE_WRITE_ATTRIBUTES | windows.SYNCHRONIZE
+
+func Unavailable(err error) bool {
+	return errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PIPE_BUSY)
+}
 
 type listener struct {
 	mu        sync.Mutex
@@ -154,6 +159,10 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 		windows.CloseHandle(h)
 		return nil, fmt.Errorf("%w: client disconnected before accept", ErrPeer)
 	}
+	if err := readPipePreamble(ctx, h); err != nil {
+		windows.CloseHandle(h)
+		return nil, fmt.Errorf("%w: pipe identity handshake: %v", ErrPeer, err)
+	}
 	var pid uint32
 	if err := windows.GetNamedPipeClientProcessId(h, &pid); err != nil {
 		windows.CloseHandle(h)
@@ -165,6 +174,38 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 		return nil, fmt.Errorf("%w: %v", ErrPeer, err)
 	}
 	return &Conn{ReadWriteCloser: os.NewFile(uintptr(h), l.endpoint.Path), Peer: p}, nil
+}
+
+// NPFS exposes the effective client token only after a read. Consume a single
+// transport byte before impersonating; raw zero-access/idle opens get no owner
+// slot and can hold this handshake for at most 250ms.
+func readPipePreamble(ctx context.Context, h windows.Handle) error {
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(event)
+	over := windows.Overlapped{HEvent: event}
+	var data [1]byte
+	var read uint32
+	err = windows.ReadFile(h, data[:], &read, &over)
+	if err == windows.ERROR_IO_PENDING {
+		finished := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() { _ = windows.CancelIoEx(h, &over); close(finished) })
+		err = windows.GetOverlappedResult(h, &over, &read, true)
+		if !stop() {
+			<-finished
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if read != 1 || data[0] != 0 {
+		return fmt.Errorf("invalid pipe identity handshake")
+	}
+	return nil
 }
 
 var impersonatePipe = windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateNamedPipeClient")
@@ -292,5 +333,13 @@ func Dial(ctx context.Context, e Endpoint) (*Conn, error) {
 		return nil, fmt.Errorf("pipe PID %d is not the %s service PID %d", pid, e.Service, status.ProcessId)
 	}
 	trusted = true
-	return &Conn{ReadWriteCloser: os.NewFile(uintptr(h), e.Path), Peer: Peer{User: "S-1-5-18", PID: pid}}, nil
+	f := os.NewFile(uintptr(h), e.Path)
+	stop := context.AfterFunc(ctx, func() { f.Close() })
+	_, err = f.Write([]byte{0})
+	stop()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return &Conn{ReadWriteCloser: f, Peer: Peer{User: "S-1-5-18", PID: pid}}, nil
 }

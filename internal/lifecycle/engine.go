@@ -150,25 +150,25 @@ running:
 			}
 		}
 	}
-	if server.LeaseExpired() || result != nil {
-		runtime.mu.Lock()
-		runtime.state.ExitReason = "adapter-failed"
-		if server.LeaseExpired() {
-			runtime.state.ExitReason = "lease-expired"
-		}
-		err = Save(filepath.Join(c.Data, "engine-state.json"), runtime.state)
-		runtime.mu.Unlock()
-		if err != nil {
-			result = errors.Join(result, err)
-		}
-		if server.LeaseExpired() {
-			log("control lease expired; cleaning up without counting an engine failure")
-		}
-	}
 	stopCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
 	defer stop()
 	stopped := make(chan error, 1)
-	go func() { stopped <- runtime.Stop(stopCtx) }()
+	go func() {
+		var recordErr error
+		if server.LeaseExpired() || result != nil {
+			runtime.mu.Lock()
+			runtime.state.ExitReason = "adapter-failed"
+			if server.LeaseExpired() {
+				runtime.state.ExitReason = "lease-expired"
+			}
+			recordErr = Save(filepath.Join(c.Data, "engine-state.json"), runtime.state)
+			runtime.mu.Unlock()
+			if server.LeaseExpired() {
+				log("control lease expired; cleaning up without counting an engine failure")
+			}
+		}
+		stopped <- errors.Join(recordErr, runtime.Stop(stopCtx))
+	}()
 	select {
 	case err := <-stopped:
 		if err != nil {

@@ -38,11 +38,15 @@ func TestClientClosesBeforePipeAccept(t *testing.T) {
 	if _, err := l.Accept(ctx); !errors.Is(err, ErrPeer) {
 		t.Fatal("closed client became a fatal listener error", err)
 	}
-	h, err = windows.CreateFile(name, pipeClientRights, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
+	h, err = windows.CreateFile(name, pipeClientRights, 0, nil, windows.OPEN_EXISTING, 0, 0)
 	if err != nil {
 		t.Fatal("listener not replaced", err)
 	}
 	defer windows.CloseHandle(h)
+	var written uint32
+	if err := windows.WriteFile(h, []byte{0}, &written, nil); err != nil || written != 1 {
+		t.Fatal("identity handshake", written, err)
+	}
 	accepted, err := l.Accept(ctx)
 	if err != nil {
 		t.Fatal("legitimate client after disconnect was refused", err)

@@ -67,7 +67,13 @@ func RequestRestart(ctx context.Context, name string) error {
 
 // Connecting to netswitch.socket activates Control without granting the
 // desktop root or polkit privileges.
-func Activate(context.Context) error              { return nil }
+func Activate(ctx context.Context) error {
+	c, err := (&net.Dialer{}).DialContext(ctx, "unix", "/run/netswitch/desktop.sock")
+	if err != nil {
+		return err
+	}
+	return c.Close()
+}
 func Stop(ctx context.Context, name string) error { return systemctl(ctx, "stop", unit(name)) }
 func Query(name string) (Status, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

@@ -80,14 +80,52 @@ func prepareTUN(t *testing.T, dir, data string) tunFixture {
 			t.Logf("native TUN precondition: interface=%d routes=%d", index, routes)
 		},
 		clean: func(t *testing.T) {
+			var lastIndex uint32
+			var lastRoutes int
+			defer func() {
+				t.Logf("native cleanup inventory: index=%d routes=%d original_index=%d", lastIndex, lastRoutes, tunIndex)
+				logNativeTUNInventory(t, tunIndex)
+			}()
 			wait(t, "native adapter and routes gone", 10*time.Second, func() bool {
 				index, routes, err := nativeTUNState(tunIndex)
+				lastIndex, lastRoutes = index, routes
 				if err != nil {
 					t.Fatal(err)
 				}
 				return index == 0 && routes == 0
 			})
 		},
+		audit: func(t *testing.T) {
+			// Preserve the broader firewall assertion outside the native timed
+			// interval. ARM64 CIM inventory latency is not cleanup latency.
+			powershell(t, "$f=@(Get-NetFirewallRule | Where-Object DisplayName -like '*NetSwitch*'); if ($f.Count) {throw 'NetSwitch firewall leftovers'}")
+		},
+	}
+}
+
+func logNativeTUNInventory(t *testing.T, previous uint32) {
+	var table *windows.MibIfTable2
+	if err := windows.GetIfTable2Ex(windows.MibIfTableNormal, &table); err != nil {
+		t.Log("native interface inventory", err)
+		return
+	}
+	defer windows.FreeMibTable(unsafe.Pointer(table))
+	for _, row := range unsafe.Slice(&table.Table[0], table.NumEntries) {
+		if row.InterfaceIndex == previous || windows.UTF16ToString(row.Alias[:]) == "NetSwitch" {
+			t.Logf("native interface: index=%d alias=%q status=%d flags=%#x guid=%s", row.InterfaceIndex, windows.UTF16ToString(row.Alias[:]), row.OperStatus, row.InterfaceAndOperStatusFlags, row.InterfaceGuid.String())
+		}
+	}
+	words := make([]uint64, 16384)
+	size := uint32(len(words) * 8)
+	first := (*windows.IpAdapterAddresses)(unsafe.Pointer(&words[0]))
+	if err := windows.GetAdaptersAddresses(windows.AF_UNSPEC, 0x100, 0, first, &size); err != nil {
+		t.Log("native address inventory", err)
+		return
+	}
+	for a := first; a != nil; a = a.Next {
+		if a.IfIndex == previous || windows.UTF16PtrToString(a.FriendlyName) == "NetSwitch" {
+			t.Logf("native address adapter: index=%d alias=%q status=%d", a.IfIndex, windows.UTF16PtrToString(a.FriendlyName), a.OperStatus)
+		}
 	}
 }
 

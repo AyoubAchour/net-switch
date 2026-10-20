@@ -56,11 +56,20 @@ func TestHealthWatchBoundsConsecutiveFailureAndResetsOnAnswers(t *testing.T) {
 	if err := w.check(context.Background(), answer, clock); err != nil {
 		t.Fatal(err)
 	}
-	if !w.failedSince.IsZero() {
+	if w.failedFor != 0 {
 		t.Fatal("slow successful response did not reset the failure window")
 	}
 	if err := w.check(context.Background(), fail, clock); err != nil {
 		t.Fatal("old failures leaked into the new window")
+	}
+}
+
+func TestHealthProbeAcrossStandbyCannotConsumeFailureWindow(t *testing.T) {
+	now := time.Unix(100, 0)
+	var watch healthWatch
+	probe := healthFunc(func(context.Context) error { now = now.Add(8 * time.Hour); return context.DeadlineExceeded })
+	if err := watch.check(context.Background(), probe, func() time.Time { return now }); err != nil {
+		t.Fatal("standby was mistaken for a hung engine", err)
 	}
 }
 

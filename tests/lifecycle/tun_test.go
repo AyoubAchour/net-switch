@@ -24,6 +24,7 @@ type tunFixture struct {
 	exchange     func(*testing.T, net.Conn)
 	installed    func(*testing.T)
 	clean        func(*testing.T)
+	audit        func(*testing.T) // additional untimed OS inventory
 }
 
 func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
@@ -98,6 +99,9 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 			t.Logf("FAIL_OPEN fault=%s routes_and_adapter_gone=%s direct_traffic=%s bound=%s", failure, cleanAt, directAt, bound)
 			if cleanAt > bound || directAt > bound {
 				t.Fatal("fail-open exceeded bound")
+			}
+			if fixture.audit != nil {
+				fixture.audit(t)
 			}
 			t.Log("TUN captured a live stream; adapter/routes/rules returned to baseline; the same target works directly")
 		})

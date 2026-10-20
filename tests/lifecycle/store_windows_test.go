@@ -86,6 +86,19 @@ func blockedStoreInstallation(t *testing.T, dir, adapter string, other actor) {
 			t.Fatal(err)
 		}
 	}
+	child := filepath.Join(physical, "parent-acl-case")
+	if err := lifecycle.PrepareDirectory(child); err != nil {
+		t.Fatal(err)
+	}
+	restore := writableInstallPath(t, physical)
+	parentErr := lifecycle.CheckDirectory(child)
+	restore()
+	if parentErr == nil {
+		t.Fatal("writable --data parent was accepted")
+	}
+	if err := lifecycle.CheckDirectory(child); err != nil {
+		t.Fatal("trusted parent control failed", err)
+	}
 	b, err := os.ReadFile(filepath.Join(logical, "held.txt"))
 	if err != nil || string(b) != "attacker-owned original" {
 		t.Fatal("hostile original was modified", err)

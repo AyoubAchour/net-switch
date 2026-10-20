@@ -11,11 +11,24 @@ import (
 )
 
 func ConnectDesktop(ctx context.Context, status bool) (*RPC, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	kind := "desktop"
 	if status {
 		kind = "status"
 	}
 	conn, err := localipc.Dial(ctx, localipc.Endpoint{Path: localipc.DefaultPath(kind), Kind: kind, Service: service.Control})
+	if !status && localipc.Unavailable(err) {
+		if activateErr := service.Activate(ctx); activateErr != nil {
+			return nil, activateErr
+		}
+		for localipc.Unavailable(err) {
+			if pauseErr := localipc.Pause(ctx, 100*time.Millisecond); pauseErr != nil {
+				return nil, pauseErr
+			}
+			conn, err = localipc.Dial(ctx, localipc.Endpoint{Path: localipc.DefaultPath(kind), Kind: kind, Service: service.Control})
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

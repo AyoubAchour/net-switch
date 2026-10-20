@@ -39,7 +39,8 @@ func runSessionEvents(ctx context.Context, events <-chan service.Event, owner st
 	// State polling also covers delayed WTS updates and missed logind signals.
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
-	present, _ := query(owner, ^uint32(0))
+	present, initialErr := query(owner, ^uint32(0))
+	known := initialErr == nil
 	var recheckUntil time.Time
 	for {
 		select {
@@ -58,7 +59,7 @@ func runSessionEvents(ctx context.Context, events <-chan service.Event, owner st
 				log("owner session query unavailable; retaining routing state: " + err.Error())
 				continue
 			}
-			if !next && (present || time.Now().Before(recheckUntil)) {
+			if !next && (!known || present || time.Now().Before(recheckUntil)) {
 				if err := stop(); err != nil {
 					log("owner sign-out stop failed; retrying: " + err.Error())
 					continue
@@ -66,6 +67,7 @@ func runSessionEvents(ctx context.Context, events <-chan service.Event, owner st
 				recheckUntil = time.Time{}
 			}
 			present = next
+			known = true
 		}
 	}
 }

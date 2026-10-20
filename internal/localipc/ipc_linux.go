@@ -15,6 +15,10 @@ import (
 
 type listener struct{ *net.UnixListener }
 
+func Unavailable(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED)
+}
+
 func DefaultPath(kind string) string {
 	if kind == "status" {
 		kind = "desktop"
@@ -97,6 +101,12 @@ func Listen(e Endpoint) (Listener, error) {
 	}
 	if e.Kind == "desktop" {
 		mode = 0600
+		// Set mode while root still owns the socket. CAP_CHOWN permits
+		// handing it over; chmod afterwards would require CAP_FOWNER too.
+		if err := os.Chmod(e.Path, mode); err != nil {
+			u.Close()
+			return nil, err
+		}
 		if e.Owner != "" {
 			uid, err := strconv.Atoi(e.Owner)
 			if err != nil {
@@ -108,6 +118,7 @@ func Listen(e Endpoint) (Listener, error) {
 				return nil, err
 			}
 		}
+		return &listener{u}, nil
 	}
 	if err := os.Chmod(e.Path, mode); err != nil {
 		u.Close()
