@@ -44,7 +44,7 @@ func addOverload(r *registry) {
 		noLimits, "5.9", 4*time.Minute, tcpStorm)
 	r.defect("overload.tcp-handshakes-in-flight", "Three apps start 3,000 connections each to a host that never answers: at most 8,192 handshakes are in flight, the rest refused at once",
 		noLimits, "5.9", 3*time.Minute, tcpHandshakesCase)
-	r.defect("overload.tcp-flows-total", "Nine apps hold 7,600 connections each, all under their own limit: together at most 65,536 flows are admitted and the rest refused",
+	r.defect("overload.tcp-flows-total", "Ten apps offer 8,000 connections each, all under their own limit: together at most 65,536 flows are admitted and the rest refused",
 		noLimits, "5.9", 6*time.Minute, tcpFlowsTotalCase)
 	r.add("overload.tcp-buffer-budget", "64 downloads that each earn the 6 MiB send buffer and keep it: growth fills the 256 MiB budget, is refused beyond it, and every byte arrives intact",
 		harness.Requires10, "5.9", 4*time.Minute, tcpBufferBudgetCase)
@@ -442,14 +442,17 @@ func (e *Env) raiseConntrack(to int) {
 }
 
 func tcpFlowsTotalCase(e *Env) {
-	// Nine apps hold 7,600 connections each (68,400), every app under its
-	// own 8,192 and 100 at a time per app far under the handshake limit:
-	// only the total can refuse. All on line c, which isn't NATed, so no
-	// router keeps state for them.
-	const perApp = 7600
-	names := []string{"alpha", "bravo", "delta", "foxtrot", "golf", "hotel", "india", "juliett", "kilo"}
+	// Ten apps offer 8,000 connections each (80,000), still below 8,192
+	// even for charlie with its one survival stream. Keep 100 concurrent
+	// attempts per app. The old 68,400 attempts could run out of identified
+	// demand when the independent unknown pool filled; that cannot measure
+	// memory at 65,536. Increase offered work, never retry a refused socket
+	// or lower the exact cap assertion. Attribution is measured separately.
+	// All identified traffic uses c, which has no router connection tracking.
+	const perApp = 8000
+	names := []string{"alpha", "bravo", "charlie", "delta", "foxtrot", "golf", "hotel", "india", "juliett", "kilo"}
 	cfg := e.DefaultConfig()
-	cfg.Policy.Pins = []engine.Pin{{App: e.App("charlie"), Line: "c"}}
+	cfg.Policy.Pins = nil
 	for _, name := range names {
 		cfg.Policy.Pins = append(cfg.Policy.Pins, engine.Pin{App: e.App(name), Line: "c"})
 	}
