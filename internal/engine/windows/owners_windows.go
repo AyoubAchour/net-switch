@@ -41,13 +41,65 @@ type socketOwner struct {
 }
 type ownerSnapshot struct {
 	at      time.Time
-	rows    map[platform.Tuple]tcpCandidates
+	rows    tcpIndex
 	err     error
 	rawRows uint64
 }
 
 type tcpCandidates struct {
 	pid, count uint32
+}
+
+// Native tuples have no Go address-zone handles or struct padding. Keep the
+// snapshot keys equally compact: 12 bytes for IPv4, 36 for IPv6. In particular,
+// an IPv4 dump must not allocate a 64-byte platform.Tuple key for every row.
+type tcpIndex struct {
+	v4 map[[12]byte]tcpCandidates
+	v6 map[[36]byte]tcpCandidates
+}
+
+func tcp4Key(tuple platform.Tuple) [12]byte {
+	var key [12]byte
+	source, destination := tuple.Source.Addr().As4(), tuple.Destination.Addr().As4()
+	copy(key[:4], source[:])
+	copy(key[4:8], destination[:])
+	binary.BigEndian.PutUint16(key[8:10], tuple.Source.Port())
+	binary.BigEndian.PutUint16(key[10:12], tuple.Destination.Port())
+	return key
+}
+func tcp6Key(tuple platform.Tuple) [36]byte {
+	var key [36]byte
+	source, destination := tuple.Source.Addr().As16(), tuple.Destination.Addr().As16()
+	copy(key[:16], source[:])
+	copy(key[16:32], destination[:])
+	binary.BigEndian.PutUint16(key[32:34], tuple.Source.Port())
+	binary.BigEndian.PutUint16(key[34:36], tuple.Destination.Port())
+	return key
+}
+func (index tcpIndex) find(tuple platform.Tuple) tcpCandidates {
+	if tuple.Source.Addr().Is4() && tuple.Destination.Addr().Is4() {
+		return index.v4[tcp4Key(tuple)]
+	}
+	return index.v6[tcp6Key(tuple)]
+}
+func (index *tcpIndex) add(tuple platform.Tuple, pid uint32) {
+	if tuple.Source.Addr().Is4() && tuple.Destination.Addr().Is4() {
+		if index.v4 == nil {
+			index.v4 = make(map[[12]byte]tcpCandidates)
+		}
+		key := tcp4Key(tuple)
+		value := index.v4[key]
+		value.pid, value.count = pid, value.count+1
+		index.v4[key] = value
+	} else {
+		if index.v6 == nil {
+			index.v6 = make(map[[36]byte]tcpCandidates)
+		}
+		key := tcp6Key(tuple)
+		value := index.v6[key]
+		value.pid, value.count = pid, value.count+1
+		index.v6[key] = value
+	}
 }
 
 type tcpRefresh struct {
@@ -205,7 +257,7 @@ func ownerRows(b []byte, offset, stride int) ([][]byte, error) {
 	return rows, nil
 }
 
-func parseTCP(b []byte, v6 bool, rows map[platform.Tuple]tcpCandidates) error {
+func parseTCP(b []byte, v6 bool, rows *tcpIndex) error {
 	stride := 24
 	if v6 {
 		stride = 56
@@ -231,9 +283,7 @@ func parseTCP(b []byte, v6 bool, rows map[platform.Tuple]tcpCandidates) error {
 			continue
 		}
 		key := platform.Tuple{Source: netip.AddrPortFrom(src.Unmap(), sp), Destination: netip.AddrPortFrom(dst.Unmap(), dp)}
-		value := rows[key]
-		value.pid, value.count = pid, value.count+1
-		rows[key] = value
+		rows.add(key, pid)
 	}
 	return nil
 }
@@ -299,8 +349,12 @@ func (o *Owners) refreshTCP(pending *tcpRefresh, family int) {
 	if s.err == nil {
 		indexStart := time.Now()
 		// One scalar value per tuple avoids allocating a slice for every row.
-		s.rows = make(map[platform.Tuple]tcpCandidates, len(b)/stride)
-		s.err = parseTCP(b, family == 1, s.rows)
+		if family == 0 {
+			s.rows.v4 = make(map[[12]byte]tcpCandidates, len(b)/stride)
+		} else {
+			s.rows.v6 = make(map[[36]byte]tcpCandidates, len(b)/stride)
+		}
+		s.err = parseTCP(b, family == 1, &s.rows)
 		if s.err == nil {
 			s.rawRows = uint64(binary.LittleEndian.Uint32(b))
 		}
@@ -393,7 +447,7 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 				}
 				continue
 			}
-			candidates := s.rows[tuple]
+			candidates := s.rows.find(tuple)
 			// Cached absence predating this socket is not a native lookup
 			// miss. Refresh before spending one of the retry delays.
 			if candidates.count == 0 && s.at.Before(start) {
@@ -405,7 +459,7 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 					}
 					continue
 				}
-				candidates = s.rows[tuple]
+				candidates = s.rows.find(tuple)
 			}
 			if candidates.count > 1 {
 				return owner, platform.ErrAmbiguous
