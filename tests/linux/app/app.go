@@ -53,6 +53,14 @@ var modes = map[string]mode{
 
 // Main is "nsaccept app <mode> [flags]".
 func Main(args []string) int {
+	if os.Getenv("NETSWITCH_TEST_LARGE_FLATPAK") == "1" {
+		st, err := os.Stat("/.flatpak-info")
+		if err != nil || st.Size() <= 64<<10 {
+			fmt.Fprintln(os.Stderr, "large Flatpak metadata fixture did not exceed 64 KiB:", st, err)
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, "verified Flatpak metadata size:", st.Size())
+	}
 	if len(args) == 0 || modes[args[0]].run == nil {
 		names := make([]string, 0, len(modes))
 		for name, m := range modes {

@@ -14,6 +14,7 @@ import (
 type connection struct {
 	id               stack.TransportEndpointID
 	done             chan struct{}
+	ready            atomic.Pointer[readyRelay]
 	ep               tcpip.Endpoint
 	ticket           flowapi.Ticket
 	up, down         atomic.Uint64
@@ -48,6 +49,9 @@ func (f *Forwarder) startMaintenance() {
 		mu.Unlock()
 		for _, c := range f.connectionSnapshot() {
 			c.ticket.Retire()
+			if relay := c.ready.Load(); relay != nil {
+				relay.cancel()
+			}
 			c.ep.Abort()
 			<-c.done
 			c.ticket.Close()

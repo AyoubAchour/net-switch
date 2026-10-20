@@ -434,8 +434,15 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			}
 		}
 	}
-	if !layoutAvailable(p.base, 255, foreignRules, foreignRoutes) {
-		return errors.New("foreign rule or route now conflicts with the engine layout; restoring normal routing")
+	for _, rule := range foreignRules {
+		if !layoutAvailable(p.base, 255, []netlink.Rule{rule}, nil) {
+			return fmt.Errorf("foreign rule now conflicts with the engine layout; restoring normal routing: %s", ruleFP(p.objects, rule)["object"])
+		}
+	}
+	for _, route := range foreignRoutes {
+		if !layoutAvailable(p.base, 255, nil, []netlink.Route{route}) {
+			return fmt.Errorf("foreign route now conflicts with the engine layout; restoring normal routing: %s", routeFP(p.objects, route)["object"])
+		}
 	}
 	desired := map[string]ownedObject{}
 	keep := func(kind string, fp journal.Fingerprint) error {
@@ -623,6 +630,14 @@ func (p *Platform) Capture(ctx context.Context) error {
 	}
 	for _, fam := range p.families() {
 		r := netlink.Route{Family: fam, Table: 21000 + p.base, LinkIndex: p.tunSpec.Index, Dst: prefix(defaultCIDR(fam)), Type: unix.RTN_UNICAST, Protocol: routeProtocol, Scope: netlink.SCOPE_LINK}
+		// IPv6 substitutes IP6_RT_PRIO_USER (1024) for an omitted/zero
+		// metric. Persist the value that will actually identify this route.
+		if fam == unix.AF_INET6 {
+			r.Priority = 1024
+			// rt6_fill_node always reports RT_SCOPE_UNIVERSE. IPv6's
+			// on-link selection is represented by the missing gateway.
+			r.Scope = netlink.SCOPE_UNIVERSE
+		}
 		if err := create("route", routeFP(p.objects, r)); err != nil {
 			return err
 		}

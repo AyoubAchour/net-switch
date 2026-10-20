@@ -84,26 +84,35 @@ to Net Switch's code only, not to the installer as a whole.
 
 ## Net Switch 1.0 engine core (not yet shipped)
 
-The new engine's own code is MIT licensed. Its root Go module includes these
-dependencies; this does not replace the 0.3.x programs listed above.
+The new engine's own code is MIT licensed. The list below comes from the compiled
+Linux production binary, generated and checked by `scripts/engine-notices.mjs`.
+It does not replace the 0.3.x programs listed above. Windows uses the shared core
+and its native Windows platform implementation.
 
 - The unshipped `netswitch-cleanup` tool includes the Go runtime and golang.org/x/sys under the same BSD-3-Clause licenses as the helper.
-- gvisor.dev/gvisor `v0.0.0-20261017122056-1b7906fdee8c`, Apache-2.0.
-  Copyright The gVisor Authors. License and authors are preserved in
-  `third_party/gvisor/LICENSE` and `AUTHORS`, and in the generated vendor tree.
-  Net Switch modifies seven TCP files, each with a modification notice.
-  `third_party/gvisor-local-close.patch` contains the opt-in local-app close
-  admission, TIME_WAIT handling, retained-buffer budget and buffer accounting
-  hooks in five files. It also adds `dispatcher_netswitch_test.go`, marked
-  "Net Switch addition, not upstream".
-  `third_party/gvisor-rto-recovery.patch` changes `rack.go` and `snd.go` to
-  preserve TCP timeout recovery until its flight drains. This fix applies to
-  every user of the patched stack, independently of the opt-in close hooks.
-  The generator applies these reproducible patches in filename order.
-- github.com/google/btree v1.1.2, Apache-2.0; see
-  `vendor/github.com/google/btree/LICENSE`.
-- golang.org/x/exp `v0.0.0-20250711185948-6ae5c78190dc`,
-  golang.org/x/sys v0.49.0 and golang.org/x/time v0.15.0, BSD-3-Clause;
-  see each module's LICENSE and PATENTS in `vendor/golang.org/x/`.
-- Go 1.27.2 runtime and standard library, BSD-3-Clause;
-  see the Go toolchain's LICENSE and PATENTS.
+
+gVisor is copyright The gVisor Authors. Net Switch modifies seven TCP files,
+each with a modification notice. `third_party/gvisor-local-close.patch` contains
+the opt-in local-app close admission, TIME_WAIT handling, retained-buffer budget
+and buffer accounting hooks in five files. It also adds
+`dispatcher_netswitch_test.go`, marked "Net Switch addition, not upstream".
+`third_party/gvisor-rto-recovery.patch` changes `rack.go` and `snd.go` to preserve
+TCP timeout recovery until its flight drains, independently of the opt-in hooks.
+The generator applies the reproducible patches in filename order. License and
+authors are preserved in the generated source and vendor trees. wireguard-go is
+copyright WireGuard LLC and is used unmodified for Linux TUN I/O. netlink and
+netns are used unmodified for Linux routing and network namespaces.
+
+<!-- engine-modules:start -->
+Go 1.27.2 runtime and standard library: BSD-3-Clause (the toolchain's LICENSE and PATENTS).
+
+- github.com/google/btree `v1.1.2`, Apache-2.0; license: `vendor/github.com/google/btree/LICENSE`.
+- github.com/vishvananda/netlink `v1.3.1`, Apache-2.0; license: `vendor/github.com/vishvananda/netlink/LICENSE`.
+- github.com/vishvananda/netns `v0.0.5`, Apache-2.0; license: `vendor/github.com/vishvananda/netns/LICENSE`.
+- golang.org/x/exp `v0.0.0-20250711185948-6ae5c78190dc`, BSD-3-Clause; license: `vendor/golang.org/x/exp/LICENSE`.
+- golang.org/x/net `v0.59.0`, BSD-3-Clause; license: `vendor/golang.org/x/net/LICENSE`.
+- golang.org/x/sys `v0.49.0`, BSD-3-Clause; license: `vendor/golang.org/x/sys/LICENSE`.
+- golang.org/x/time `v0.15.0`, BSD-3-Clause; license: `vendor/golang.org/x/time/LICENSE`.
+- golang.zx2c4.com/wireguard `v0.0.0-20261006164505-2631ce99a06f`, MIT; license: `vendor/golang.zx2c4.com/wireguard/LICENSE`.
+- gvisor.dev/gvisor `v0.0.0-20261017122056-1b7906fdee8c`, Apache-2.0; license: `third_party/gvisor/LICENSE`.
+<!-- engine-modules:end -->

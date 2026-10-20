@@ -15,8 +15,30 @@ import (
 )
 
 func fault(e *Env, s engine.Controller, kind, mode string) {
+	if kind == "owner-lookups" && mode != "off" {
+		e.T.Require(e.ownerFaultStart == nil, "owner fault windows never overlap")
+		before := stats(e, s)
+		e.ownerFaultStart = &before
+	}
 	a, err := s.InjectFault(e.Ctx(), engine.Fault{Kind: kind, Mode: mode})
 	e.T.Require(err == nil && a.Active, "engine acknowledged %s %s (%+v, %v)", kind, mode, a, err)
+	if kind == "owner-lookups" && mode == "off" {
+		e.T.Require(e.ownerFaultStart != nil, "ending a known owner fault window")
+		deadline := time.Now().Add(10 * time.Second)
+		var after engine.Stats
+		for {
+			after = stats(e, s)
+			if after.PendingBytes == 0 && after.Handshakes == 0 {
+				break
+			}
+			e.T.Require(time.Now().Before(deadline), "injected pending lookups drain before measuring normal attribution")
+			e.Sleep(20 * time.Millisecond)
+		}
+		e.injectedLookups += after.LookupCount - e.ownerFaultStart.LookupCount
+		e.injectedMisses += after.LookupMisses - e.ownerFaultStart.LookupMisses
+		e.T.Logf("injected owner-fault window: %d lookups, %d misses", after.LookupCount-e.ownerFaultStart.LookupCount, after.LookupMisses-e.ownerFaultStart.LookupMisses)
+		e.ownerFaultStart = nil
+	}
 }
 func stats(e *Env, s engine.Controller) engine.Stats {
 	v, err := s.Stats(e.Ctx())
