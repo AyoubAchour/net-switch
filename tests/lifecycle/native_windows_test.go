@@ -140,7 +140,9 @@ func permissionProbe() error {
 		return fmt.Errorf("permission precondition: %v", err)
 	}
 	path, _ := windows.UTF16PtrFromString(localipc.DefaultPath("desktop"))
-	h, err := windows.CreateNamedPipe(path, windows.PIPE_ACCESS_DUPLEX, windows.PIPE_TYPE_BYTE, 32, 4096, 4096, 0, nil)
+	// Match the server's immutable pipe parameters so a mismatch cannot
+	// masquerade as the ACL denial this probe is intended to prove.
+	h, err := windows.CreateNamedPipe(path, windows.PIPE_ACCESS_DUPLEX, windows.PIPE_TYPE_BYTE, windows.PIPE_UNLIMITED_INSTANCES, 4096, 4096, 0, nil)
 	if err == nil {
 		windows.CloseHandle(h)
 		return errors.New("user created competing pipe instance")

@@ -132,11 +132,17 @@ func (a *Access) serve(ctx context.Context, c *localipc.Conn, statusOnly bool) {
 	cancel()
 }
 func accept(ctx context.Context, l localipc.Listener, serve func(*localipc.Conn), log func(string)) error {
+	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(ctx, func() { l.Close() })
 	defer stop()
 	slots := make(chan struct{}, 32)
 	var clients sync.WaitGroup
-	defer clients.Wait()
+	defer func() {
+		// A failed listener must reach service recovery even when clients
+		// have left their connections idle indefinitely.
+		cancel()
+		clients.Wait()
+	}()
 	var peerReport time.Time
 	for {
 		c, err := l.Accept(ctx)
@@ -155,7 +161,12 @@ func accept(ctx context.Context, l localipc.Listener, serve func(*localipc.Conn)
 		}
 		select {
 		case slots <- struct{}{}:
-			clients.Go(func() { defer func() { <-slots }(); serve(c) })
+			clients.Go(func() {
+				defer func() { <-slots }()
+				stop := context.AfterFunc(ctx, func() { c.Close() })
+				defer stop()
+				serve(c)
+			})
 		default:
 			c.Close()
 			log("IPC connection limit reached")

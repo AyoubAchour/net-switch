@@ -53,7 +53,10 @@ func (l *listener) create(first bool) (windows.Handle, error) {
 		flags |= windows.FILE_FLAG_FIRST_PIPE_INSTANCE
 	}
 	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: l.sd}
-	return windows.CreateNamedPipe(p, flags, windows.PIPE_TYPE_BYTE|windows.PIPE_READMODE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS, 32, 65536, 65536, 0, &sa)
+	// The accept loop bounds active clients. A kernel instance ceiling here
+	// would also count the next listener and client handles still held after
+	// we reject a connection, letting a client exhaust and disable listening.
+	return windows.CreateNamedPipe(p, flags, windows.PIPE_TYPE_BYTE|windows.PIPE_READMODE_BYTE|windows.PIPE_WAIT|windows.PIPE_REJECT_REMOTE_CLIENTS, windows.PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, &sa)
 }
 func Listen(e Endpoint) (Listener, error) {
 	sddl, err := pipeDACL(e)

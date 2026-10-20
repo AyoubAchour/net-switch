@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	assets "github.com/AyoubAchour/net-switch"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
@@ -92,5 +93,46 @@ func TestRemoteSnapshotRetainsFailureBeforeFirstAttachment(t *testing.T) {
 	state := remote.Snapshot()
 	if state.FailureID == "" || state.Status != "error" || state.Error == nil {
 		t.Fatal("failed-start identity was lost", state)
+	}
+}
+
+type failedListener struct {
+	conn *localipc.Conn
+	err  error
+}
+
+func (l *failedListener) Accept(context.Context) (*localipc.Conn, error) {
+	if l.conn != nil {
+		c := l.conn
+		l.conn = nil
+		return c, nil
+	}
+	return nil, l.err
+}
+func (*failedListener) Close() error { return nil }
+
+func TestListenerFailureReleasesIdleClients(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+	failure := errors.New("listener failed")
+	listener := &failedListener{conn: &localipc.Conn{ReadWriteCloser: server}, err: failure}
+	done := make(chan error, 1)
+	go func() {
+		done <- accept(context.Background(), listener, func(c *localipc.Conn) {
+			defer c.Close()
+			var b [1]byte
+			_, _ = c.Read(b[:])
+		}, func(string) {})
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, failure) {
+			t.Fatal("listener failure was hidden:", err)
+		}
+	case <-time.After(time.Second):
+		client.Close()
+		<-done
+		t.Fatal("idle client hid the listener failure from service recovery")
 	}
 }

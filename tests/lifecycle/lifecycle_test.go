@@ -380,9 +380,11 @@ func TestRealServices(t *testing.T) {
 			t.Fatal("non-owner desktop did not offer status only", err, string(output))
 		}
 		exe, _ := os.Executable()
-		if b, err := other.command(exe, "client", "status-capacity").CombinedOutput(); err != nil {
+		b, err := other.command(exe, "client", "status-capacity").CombinedOutput()
+		if err != nil {
 			t.Fatalf("status listener did not survive excess standard-user connections: %v: %s", err, b)
 		}
+		t.Log(strings.TrimSpace(string(b)))
 	})
 	t.Run("pairing-and-bearer", func(t *testing.T) {
 		var code string
