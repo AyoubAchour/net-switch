@@ -16,6 +16,13 @@ import (
 )
 
 func run(args []string) error {
+	if len(args) == 1 && args[0] == "firewall-state" {
+		state, err := winengine.FirewallState()
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(state)
+	}
 	if len(args) == 1 && args[0] == "interfaces" {
 		adapters, err := winengine.Discover()
 		if err != nil {
@@ -24,7 +31,7 @@ func run(args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(adapters)
 	}
 	if len(args) == 0 || (args[0] != "run" && args[0] != "cleanup") {
-		return errors.New("usage: netswitch-engine run|cleanup [--state-dir directory] [--standalone-admin], or interfaces")
+		return errors.New("usage: netswitch-engine run|cleanup [--state-dir directory] [--standalone-admin], or interfaces|firewall-state")
 	}
 	root, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
 	if err != nil {

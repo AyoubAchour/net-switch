@@ -114,6 +114,7 @@ func (s *measuredTun) WriteBatch(packets [][]byte) (int, error) {
 }
 
 func (s *measuredTun) Close() error {
-	defer s.timings.begin("tun.session.close")()
-	return s.Session.Close()
+	err := s.Session.Close()
+	s.timings.record("tun.session.close", time.Duration(s.Session.Stats().CloseNanos))
+	return err
 }

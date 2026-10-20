@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { copyFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { hostedOnly, until } from './testisp/harness.mjs';
+import { hostedOnly, run, until } from './testisp/harness.mjs';
 
 export async function capacity({ server, harness, directory, line }) {
   hostedOnly();
@@ -12,6 +12,9 @@ export async function capacity({ server, harness, directory, line }) {
   const children = [];
   const engineStats = async () => (await server.api('engine-command', { method: 'stats' })).engine;
   try {
+    const portConfiguration = JSON.parse((await run('powershell.exe', ['-NoProfile', '-Command',
+      'Get-NetTCPSetting | Select-Object SettingName,DynamicPortRangeStartPort,DynamicPortRangeNumberOfPorts,AutoReusePortRangeStartPort,AutoReusePortRangeNumberOfPorts | ConvertTo-Json -Compress'])).stdout);
+    console.log(`WINDOWS PORT CONFIGURATION ${JSON.stringify(portConfiguration)}`);
     // Earlier UDP cases and Windows' adapter-connectivity probes can leave
     // legitimate idle flows. Close that measured setup explicitly through the
     // real protocol; waiting 30 seconds cannot expire a five-minute UDP NAT.
@@ -83,7 +86,7 @@ export async function capacity({ server, harness, directory, line }) {
       await delay(1000);
     }
     const last = samples.at(-1);
-    const evidence = { preparation, before, samples, observed,
+    const evidence = { portConfiguration, preparation, before, samples, observed,
       heapPerFlow: last.heapBytes / 65536, stackPerFlow: last.stackBytes / 65536,
       privatePerFlow: last.processMemory.privateBytes / 65536,
       workingSetPerFlow: last.processMemory.workingSetBytes / 65536,

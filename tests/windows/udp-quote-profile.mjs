@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { createWriteStream } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { launchOptions, recordLaunch, startServer } from './launch.mjs';
+import { launchOptions, recordLaunch, startServer, verifyEngineProcess } from './launch.mjs';
 import { targets } from './targets.mjs';
 import { udpIdentity } from './udp-identity.mjs';
-import { hostedOnly, run, startHarness } from './testisp/harness.mjs';
+import { engineFirewall, plantUnrelatedFirewallRule } from './firewall.mjs';
+import { hostedOnly, run, startHarness, until } from './testisp/harness.mjs';
 
 hostedOnly();
 const options = launchOptions();
@@ -14,9 +15,11 @@ const directory = path.resolve('dist/windows-udp-quote');
 await mkdir(directory, { recursive: true });
 const log = createWriteStream(path.join(directory, 'server-output.log'));
 const result = { architecture: process.arch, complete: false, acceptanceSuite: false };
-let harness, responder, server, traceStarted = false, captureSince, lines;
+let harness, responder, server, traceStarted = false, captureSince, lines, unrelated;
 try {
   result.executables = await recordLaunch(options);
+  await engineFirewall(options.engine, false);
+  unrelated = await plantUnrelatedFirewallRule();
   harness = await startHarness(path.join(directory, 'testisp'));
   responder = await targets(harness.uplink.address);
   await harness.control('targets', { ports: [responder.direct.http, ...responder.direct.udp] });
@@ -25,6 +28,7 @@ try {
   await writeFile(path.join(data, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
   server = await startServer(options, data, (chunk) => log.write(chunk));
   const initial = await server.on();
+  result.runningFirewall = await engineFirewall(options.engine, true);
   const main = initial.lines[0];
   assert.equal(main.alias, harness.uplink.alias);
   await server.api('lines/add', { alias: 'TestISP' });
@@ -67,6 +71,32 @@ try {
     allQuotesMatch: true, tunDropped: stats.tunDropped, wintun: stats.wintun,
     droppedNotices: stats.flows?.DroppedNotices,
   };
+  await server.quit();
+  result.normalStopFirewall = await engineFirewall(options.engine, false);
+  await unrelated.check();
+  const crashData = path.join(directory, 'crash-app');
+  await mkdir(crashData, { recursive: true });
+  await writeFile(path.join(crashData, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
+  server = await startServer(options, crashData, (chunk) => log.write(chunk));
+  await server.on();
+  const processBeforeCrash = await verifyEngineProcess(options, crashData);
+  result.crashBefore = await engineFirewall(options.engine, true);
+  server.child.kill('SIGKILL');
+  await until(() => server.child.exitCode !== null || server.child.signalCode !== null, 'controller stopped before WFP crash test');
+  process.kill(processBeforeCrash.pid, 0); // Must outlive its controller.
+  process.kill(processBeforeCrash.pid, 'SIGKILL');
+  await until(() => {
+    try { process.kill(processBeforeCrash.pid, 0); return false; }
+    catch (error) { if (error.code !== 'ESRCH') throw error; return true; }
+  }, 'owned engine crashed');
+  result.crashLeftovers = await engineFirewall(options.engine, true, { live: false });
+  const recovery = path.resolve('dist/windows-test/recovery/netswitch-engine.exe');
+  await assert.rejects(readFile(path.join(path.dirname(recovery), 'wintun.dll')), { code: 'ENOENT' });
+  await run(recovery, ['cleanup', '--state-dir', path.join(crashData, 'native-state')]);
+  result.recoveredFirewall = await engineFirewall(options.engine, false);
+  await unrelated.check();
+  await run(recovery, ['cleanup', '--state-dir', path.join(crashData, 'native-state')]);
+  await engineFirewall(options.engine, false);
   result.complete = true;
   console.log(`WINDOWS UDP QUOTE ${JSON.stringify(result.summary)}`);
 } catch (error) {
@@ -106,6 +136,11 @@ try {
       .catch((error) => { result.firewallStateError = error.message; });
   }
   if (server) await server.quit().catch((error) => { result.quitError = error.stack; process.exitCode = 1; });
+  await engineFirewall(options.engine, false).catch((error) => { result.firewallCleanupError = error.stack; process.exitCode = 1; });
+  if (unrelated) {
+    await unrelated.check().catch((error) => { result.unrelatedRuleError = error.stack; process.exitCode = 1; });
+    await unrelated.close();
+  }
   if (responder) await responder.close();
   if (harness) await harness.close().catch((error) => { result.cleanupError = error.stack; process.exitCode = 1; });
   await writeFile(path.join(directory, 'report.json'), JSON.stringify(result, null, 2));

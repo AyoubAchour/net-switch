@@ -81,7 +81,7 @@ jobs:
       - name: Windows race checks
         if: ${{ !cancelled() && (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
         run: |
-          go test -race -count=1 -v ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp ./internal/winclock ./internal/journal
+          go test -race -count=1 -v ./internal/engine ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp ./internal/winclock ./internal/journal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Cold owner latency at 1950–2100 actual TCP rows
         if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
