@@ -8,6 +8,11 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      tray_experiment:
+        description: Temporary ARM64 tray startup measurement
+        type: choice
+        options: [off, profile, repeat]
+        default: off
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -24,9 +29,37 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  tray-experiment:
+    if: github.event_name == 'workflow_dispatch' && inputs.tray_experiment != 'off'
+    name: Tray ARM64 / ${{ inputs.tray_experiment }} / ${{ matrix.repeat }}
+    runs-on: windows-11-arm
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        repeat: ${{ fromJSON(inputs.tray_experiment == 'profile' && '[1,2]' || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]') }}
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          architecture: arm64
+          package-manager-cache: false
+      - run: ./scripts/build-tray.ps1
+      - if: inputs.tray_experiment == 'profile'
+        run: ./scripts/profile-tray-startup.ps1
+      - if: inputs.tray_experiment == 'repeat'
+        run: node --test --test-reporter=tap test/tray-program.test.mjs
+
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.tray_experiment != 'profile' && inputs.tray_experiment != 'repeat'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
