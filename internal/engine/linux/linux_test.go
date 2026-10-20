@@ -379,7 +379,10 @@ func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 	o.mu.Unlock()
 	t.Logf("reusing fd %d in pid %d, indexed through %d, observed extent %d, last matched fd %d", oldFD, os.Getpid(), window.high, window.extent, window.lastFD)
 	source := netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(reused.LocalAddr().(*net.UDPAddr).Port))
+	beforeFDs, beforeBatches := o.batches.fds.Load(), o.batches.started.Load()
+	startedReuse := time.Now()
 	newOwner, err := o.UDPFor(ctx, platform.Tuple{Source: source, Destination: netip.MustParseAddrPort("192.0.2.1:443")})
+	t.Logf("reused descriptor lookup: %s, %d scanned FDs in %d batches", time.Since(startedReuse), o.batches.fds.Load()-beforeFDs, o.batches.started.Load()-beforeBatches)
 	if err != nil || newOwner.PID != uint32(os.Getpid()) || newOwner.Generation == oldCookie {
 		t.Fatalf("reused descriptor inherited stale identity or wasn't found: %+v %v", newOwner, err)
 	}

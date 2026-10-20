@@ -566,9 +566,17 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 	}
 	requested := time.Now()
 	var timing lookupTiming
+	var validationTime, initialIndexTime, scopeTime time.Duration
+	var scannedPIDs, scannedFDs, hinted int
+	var lastPID, lastUID uint32
+	var lastIndexed bool
+	var lastPosition int64
 	defer func() {
 		if errors.Is(lookupErr, context.DeadlineExceeded) {
 			o.recordHolderTimeout(timing, time.Since(requested))
+			// Batch waits can return before finish. Keep the same search
+			// evidence on those early timeouts instead of a bare deadline.
+			lookupErr = fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d lastPID=%d fdUID=%d indexed=%t frontier=%d indexWait=%s validation=%s scope=%s)", lookupErr, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, lastPID, lastUID, lastIndexed, lastPosition, initialIndexTime, validationTime, scopeTime)
 		}
 	}()
 	deadline, timed := ctx.Deadline()
@@ -585,11 +593,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			unconfirmed = append(unconfirmed, pid)
 		}
 	}
-	var validationTime, initialIndexTime, scopeTime time.Duration
-	var scannedPIDs, scannedFDs, hinted int
-	var lastPID, lastUID uint32
-	var lastIndexed bool
-	var lastPosition int64
 	seen := map[uint32]bool{}
 	accept := func(h holder) error {
 		if expired() {
@@ -1022,9 +1025,16 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			// A burst of refused connections closes and reuses descriptors
 			// below the high-water mark. Inspect that recent range before a
 			// full fallback walk; a lone lastFD hint misses concurrent holes.
-			end := window.extent
-			if _, err := f.Seek(max(0, end-1023)+2, 0); err == nil {
-				_, _ = visitFDs(1024)
+			// The new-descriptor pass may already have examined part of this
+			// range. Finish its unvisited tail first, then revisit older holes;
+			// do not spend the deadline scanning the fresh overlap again.
+			for _, span := range recentDescriptorRanges(window.high, maxFD, window.extent) {
+				if span.count == 0 || matched || expired() {
+					continue
+				}
+				if _, err := f.Seek(span.first+2, 0); err == nil {
+					_, _ = visitFDs(span.count)
+				}
 			}
 			return nil
 		}
@@ -1164,7 +1174,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		// conflict checks. Metadata validation itself can cross the deadline,
 		// so guard the final result after visiting all available hints too.
 		if expired() {
-			return platform.Owner{}, fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d lastPID=%d fdUID=%d indexed=%t frontier=%d indexWait=%s validation=%s scope=%s)", context.DeadlineExceeded, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, lastPID, lastUID, lastIndexed, lastPosition, initialIndexTime, validationTime, scopeTime)
+			return platform.Owner{}, context.DeadlineExceeded
 		}
 		if result.AppID == "" {
 			return result, os.ErrNotExist

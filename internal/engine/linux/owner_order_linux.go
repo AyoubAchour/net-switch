@@ -10,6 +10,24 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type descriptorRange struct {
+	first int64
+	count int
+}
+
+// recentDescriptorRanges covers the recent 1,024-FD window, except the fresh
+// interval (previousHigh, scannedHigh] already visited by this lookup. A high
+// water mark is an ordering hint only: old descriptors still need fresh reads.
+func recentDescriptorRanges(previousHigh, scannedHigh, extent int64) [2]descriptorRange {
+	low := max(int64(0), extent-1023)
+	first := max(low, scannedHigh+1)
+	last := min(previousHigh, extent)
+	return [2]descriptorRange{
+		{first: first, count: int(max(int64(0), extent-first+1))},
+		{first: low, count: int(max(int64(0), last-low+1))},
+	}
+}
+
 // A large application scope can contain many children that have not opened
 // sockets yet. Rank changed descriptor sets ahead of unchanged old holders,
 // while retaining the strongest recent match. Counts never prove ownership

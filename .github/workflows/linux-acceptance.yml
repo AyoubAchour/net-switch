@@ -172,16 +172,20 @@ jobs:
           node scripts/engine-notices.mjs "$RUNNER_TEMP/netswitch-engine" --check
           go test -c -o "$RUNNER_TEMP/linux-platform.test" ./internal/engine/linux
       - name: Test Linux kernel interfaces and crash recovery in a private namespace
+        env:
+          COLD_REPEATS: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && '100' || '20' }}
         run: |
           sudo unshare --net -- env NETSWITCH_ISOLATED_NETNS=1 "$RUNNER_TEMP/linux-platform.test" -test.v
-          sudo unshare --net -- "$RUNNER_TEMP/linux-platform.test" -test.run '^TestConcurrentColdHoldersShareDescriptorScans$' -test.count 20 -test.v
+          sudo unshare --net -- "$RUNNER_TEMP/linux-platform.test" -test.run '^TestConcurrentColdHoldersShareDescriptorScans$' -test.count "$COLD_REPEATS" -test.v
       - name: Check shared TCP setup and lookup races
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && !cancelled() && steps.harness.outcome == 'success' }}
         env:
           CGO_ENABLED: '1'
           GOMAXPROCS: '4'
           GOFLAGS: -mod=vendor -p=2
-        run: go test -race -v -count=1 ./internal/engine/tcp ./internal/engine/linux ./internal/journal
+        run: |
+          go test -race -v -count=1 ./internal/engine/tcp ./internal/engine/linux ./internal/journal
+          go test -race -v -count=100 -run '^TestConcurrentColdHoldersShareDescriptorScans$' ./internal/engine/linux
       - name: Check repeated Wait and close admission at capacity
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && !cancelled() && steps.harness.outcome == 'success' }}
         env:
