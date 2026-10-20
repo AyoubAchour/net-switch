@@ -64,11 +64,13 @@ type Owners struct {
 	targetedProbes  atomic.Uint64
 	metadataPasses  atomic.Uint64
 	sharedMetadata  atomic.Uint64
+	sharedScopes    atomic.Uint64
 	lastLookupError atomic.Pointer[string]
 	mu              sync.Mutex
 	cgroupMu        sync.RWMutex
 	recentMu        sync.RWMutex
 	cgroups         map[uint64]string
+	scopeReads      [64]atomic.Pointer[scopePIDSnapshot]
 	recent          map[uint32]*recentOwners
 	index           [ownerIndexShards]ownerIndex
 	indexSeed       maphash.Seed
@@ -89,6 +91,7 @@ type lookupStats struct {
 	AssistedScans                                uint64
 	TargetedProbes                               uint64
 	MetadataPasses, SharedMetadata               uint64
+	SharedScopes                                 uint64
 }
 
 func (o *Owners) Stats() any {
@@ -99,6 +102,7 @@ func (o *Owners) Stats() any {
 	s.AssistedScans = o.assistedScans.Load()
 	s.TargetedProbes = o.targetedProbes.Load()
 	s.MetadataPasses, s.SharedMetadata = o.metadataPasses.Load(), o.sharedMetadata.Load()
+	s.SharedScopes = o.sharedScopes.Load()
 	if p := lastRejectedMetadata.Load(); p != nil {
 		s.LastMetadataError = *p
 	}
@@ -402,11 +406,26 @@ func processOwnerAt(pid uint32, start uint64) (platform.Owner, error) {
 	return platform.Owner{PID: pid, StartTime: start, Path: exe, AppID: id}, nil
 }
 
-func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
+type scopePIDSnapshot struct {
+	id    uint64
+	began time.Time
+	pids  []uint32
+}
+
+func (o *Owners) cgroupPIDs(ctx context.Context, id uint64, requested time.Time) []uint32 {
 	if id == 0 || ctx.Err() != nil {
 		return nil
 	}
 	o.cgroupStats[0].Add(1)
+	cache := &o.scopeReads[maphash.Comparable(o.indexSeed, id)%uint64(len(o.scopeReads))]
+	if previous := cache.Load(); previous != nil && previous.id == id && !previous.began.Before(requested) {
+		o.cgroupStats[1].Add(1)
+		if len(previous.pids) > 0 {
+			o.cgroupStats[2].Add(1)
+		}
+		o.sharedScopes.Add(1)
+		return previous.pids
+	}
 	o.cgroupMu.RLock()
 	dir := o.cgroups[id]
 	o.cgroupMu.RUnlock()
@@ -420,6 +439,7 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 		return nil
 	}
 	o.cgroupStats[1].Add(1)
+	began := time.Now()
 	storage := processBuffers.Get()
 	defer processBuffers.Put(storage)
 	path := filepath.Join(dir, "cgroup.procs")
@@ -444,6 +464,9 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64) []uint32 {
 	if len(pids) > 0 {
 		o.cgroupStats[2].Add(1)
 	}
+	// This is an immutable search hint read during this operation, not a
+	// membership TTL. No request that began after the read may reuse it.
+	cache.Store(&scopePIDSnapshot{id: id, began: began, pids: pids})
 	return pids
 }
 
@@ -1024,7 +1047,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	// Search each tier for actual holders, then fall back only if it found
 	// none. A matching scope never supplies identity by itself.
 	scopeStarted := time.Now()
-	groups := o.cgroupPIDs(ctx, r.cgroup)
+	groups := o.cgroupPIDs(ctx, r.cgroup, requested)
 	scopeTime = time.Since(scopeStarted)
 	if expired() {
 		return finish()
