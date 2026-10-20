@@ -46,7 +46,15 @@ type Totals struct {
 	Lines map[string]Bytes `json:"lines"`
 }
 type Gauges struct {
+	PeakUnknown, PeakUnknownUDP                                   int
+	AdmittedUnknown, AdmittedUnknownUDP                           uint64
+	PeakFlows, PeakHandshakes, PeakUDP, PeakPerApp, PeakUDPPerApp int
+	PendingPeakBytes                                              int64
+	// Non-cumulative buckets: 100 us wide through 20 ms, then overflow.
+	// Histograms can be subtracted across a cold-socket test phase.
+	LookupHistogram                                                                                   [201]uint64
 	UDPReadBytes                                                                                      int64
+	UDPAdapterBytes                                                                                   int64
 	DoubleReleases                                                                                    uint64
 	TimeWait                                                                                          int
 	TimeWaitSkipped                                                                                   uint64
@@ -80,6 +88,8 @@ type Table struct {
 	events               chan flowapi.Event
 	eventsDropped        atomic.Uint64
 	pendingBytes         atomic.Int64
+	udpReadBytes         atomic.Int64
+	pendingPeakBytes     atomic.Int64
 	doubleReleases       atomic.Uint64
 }
 
@@ -186,13 +196,16 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	t.nextID++
 	f := &ticket{table: t, record: Record{ID: t.nextID, Epoch: t.epoch, Start: t.now(), Protocol: protocol, Source: tuple.Source, Destination: tuple.Destination}}
 	t.gauges.Flows++
+	t.gauges.PeakFlows = max(t.gauges.PeakFlows, t.gauges.Flows)
 	if protocol == "udp" {
 		t.gauges.UDP++
-		t.gauges.UDPReadBytes += flowapi.UDPReadBuffer
+		t.gauges.PeakUDP = max(t.gauges.PeakUDP, t.gauges.UDP)
+		t.gauges.UDPAdapterBytes += flowapi.UDPAdapterBuffer
 	} else {
 		f.handshake = true
 		f.receive, f.send = 64<<10, 64<<10
 		t.gauges.Handshakes++
+		t.gauges.PeakHandshakes = max(t.gauges.PeakHandshakes, t.gauges.Handshakes)
 	}
 	t.flows[f.record.ID] = f
 	return f, nil
@@ -239,14 +252,20 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 		return flowapi.Decision{}, ErrBudget
 	}
 	c.flows++
+	t.gauges.PeakPerApp = max(t.gauges.PeakPerApp, c.flows)
 	if udp {
 		c.udp++
+		t.gauges.PeakUDPPerApp = max(t.gauges.PeakUDPPerApp, c.udp)
 	}
 	t.apps[owner.AppID] = c
 	if unknown {
 		t.gauges.Unknown++
+		t.gauges.AdmittedUnknown++
+		t.gauges.PeakUnknown = max(t.gauges.PeakUnknown, t.gauges.Unknown)
 		if udp {
 			t.gauges.UnknownUDP++
+			t.gauges.AdmittedUnknownUDP++
+			t.gauges.PeakUnknownUDP = max(t.gauges.PeakUnknownUDP, t.gauges.UnknownUDP)
 		}
 	}
 	t.point++
@@ -387,7 +406,7 @@ func (f *ticket) retireLocked() {
 	udp := f.record.Protocol == "udp"
 	if udp {
 		t.gauges.UDP--
-		t.gauges.UDPReadBytes -= flowapi.UDPReadBuffer
+		t.gauges.UDPAdapterBytes -= flowapi.UDPAdapterBuffer
 	}
 	if f.resolved {
 		app := f.record.Owner.AppID
@@ -470,6 +489,8 @@ func (t *Table) ReservePending(n int) bool {
 			return false
 		}
 		if t.pendingBytes.CompareAndSwap(old, old+int64(n)) {
+			for peak := t.pendingPeakBytes.Load(); old+int64(n) > peak && !t.pendingPeakBytes.CompareAndSwap(peak, old+int64(n)); peak = t.pendingPeakBytes.Load() {
+			}
 			return true
 		}
 	}
@@ -496,12 +517,17 @@ func (t *Table) AllowReject(app string) bool {
 		t.rejectTotal = 0
 		clear(t.rejectApps)
 	}
-	if t.rejectTotal >= 5000 || t.rejectApps[app] >= 1000 {
+	// Before attribution there is no app bucket: empty is not one shared
+	// application. Otherwise five apps at 800/s are incorrectly throttled
+	// together to 1,000/s when the total flow/session cap is reached.
+	if t.rejectTotal >= 5000 || (app != "" && t.rejectApps[app] >= 1000) {
 		t.gauges.DroppedNotices++
 		return false
 	}
 	t.rejectTotal++
-	t.rejectApps[app]++
+	if app != "" {
+		t.rejectApps[app]++
+	}
 	t.Emit(flowapi.Event{Type: "log", Message: "flow rejected", App: app})
 	return true
 }
@@ -510,10 +536,16 @@ func (t *Table) Stats() Gauges {
 	defer t.mu.Unlock()
 	g := t.gauges
 	g.PendingBytes = t.pendingBytes.Load()
+	g.UDPReadBytes = t.udpReadBytes.Load()
+	g.PendingPeakBytes = t.pendingPeakBytes.Load()
 	g.DoubleReleases = t.doubleReleases.Load()
 	g.EventsDropped = t.eventsDropped.Load()
 	return g
 }
+
+// Receive storage is borrowed only after readability and is already charged
+// to PendingBytes. This gauge distinguishes it from per-socket adapter state.
+func (t *Table) ObserveUDPRead(delta int) { t.udpReadBytes.Add(int64(delta)) }
 
 func (t *Table) Events() <-chan flowapi.Event { return t.events }
 
@@ -537,6 +569,7 @@ func (t *Table) Lookup(d time.Duration, err error, owner platform.Owner) {
 	defer t.mu.Unlock()
 	t.gauges.LookupCount++
 	t.gauges.LookupNanoseconds += uint64(max(d, 0))
+	t.gauges.LookupHistogram[min(int(max(d, 0)/(100*time.Microsecond)), 200)]++
 	if err != nil || owner.AppID == "" {
 		t.gauges.LookupMisses++
 	}

@@ -37,6 +37,10 @@ func main() {
 	address := flag.String("address", "", "Controlled UDP target")
 	count := flag.Int("count", 100, "Concurrent UDP sockets")
 	timeout := flag.Duration("timeout", 5*time.Second, "Per-socket refusal deadline")
+	stream := flag.Bool("stream", false, "Continuously send from one port for socket identity acceptance")
+	port := flag.Int("local-port", 0, "Source port for the identity stream")
+	duration := flag.Duration("duration", 3*time.Second, "Identity stream duration")
+	token := flag.String("token", "", "Identity stream token")
 	flag.Parse()
 	if *count < 1 || *count > 100 || *timeout <= 0 || *timeout > 5*time.Second {
 		fmt.Fprintln(os.Stderr, "count must be between 1 and 100, timeout between 0 and 5s")
@@ -46,6 +50,13 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+	if *stream {
+		if err := streamProbe(peer, *port, *duration, *token); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
 	}
 	results, failures := make([]sample, *count), make([]error, *count)
 	var work sync.WaitGroup

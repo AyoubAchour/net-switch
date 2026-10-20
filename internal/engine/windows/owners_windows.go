@@ -50,23 +50,29 @@ type LookupHistogram struct {
 	Misses    uint64 `json:"misses"`
 	Ambiguous uint64 `json:"ambiguous"`
 	// Non-cumulative buckets, upper bounds in microseconds, last = infinity.
-	UpperUS []uint64 `json:"upperUS"`
-	Buckets []uint64 `json:"buckets"`
-	MaxUS   uint64   `json:"maxUS"`
+	UpperUS            []uint64 `json:"upperUS"`
+	Buckets            []uint64 `json:"buckets"`
+	MaxUS              uint64   `json:"maxUS"`
+	TCPRefreshes       uint64   `json:"tcpRefreshes"`
+	TCPReadNanos       uint64   `json:"tcpReadNanos"`
+	TCPIndexNanos      uint64   `json:"tcpIndexNanos"`
+	CacheMissRefreshes uint64   `json:"cacheMissRefreshes"`
 }
 
 var lookupBounds = [...]uint64{100, 250, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, ^uint64(0)}
 
 type Owners struct {
-	mu                              sync.Mutex
-	snapshot                        ownerSnapshot
-	refresh                         chan struct{}
-	paths                           map[processKey]string
-	hist                            [len(lookupBounds)]atomic.Uint64
-	count, misses, ambiguous, maxUS atomic.Uint64
+	mu                                                            sync.Mutex
+	snapshot                                                      ownerSnapshot
+	refresh                                                       chan struct{}
+	paths                                                         map[processKey]platform.Owner
+	tcpBuffers                                                    [2][]byte
+	hist                                                          [len(lookupBounds)]atomic.Uint64
+	count, misses, ambiguous, maxUS                               atomic.Uint64
+	tcpRefreshes, tcpReadNanos, tcpIndexNanos, cacheMissRefreshes atomic.Uint64
 }
 
-func NewOwners() *Owners { return &Owners{paths: make(map[processKey]string)} }
+func NewOwners() *Owners { return &Owners{paths: make(map[processKey]platform.Owner)} }
 
 func (o *Owners) measure(start time.Time, err error) {
 	us := uint64(max(0, time.Since(start).Microseconds()))
@@ -93,6 +99,7 @@ func (o *Owners) measure(start time.Time, err error) {
 func (o *Owners) Stats() LookupHistogram {
 	h := LookupHistogram{Count: o.count.Load(), Misses: o.misses.Load(), Ambiguous: o.ambiguous.Load(), MaxUS: o.maxUS.Load(),
 		UpperUS: append([]uint64(nil), lookupBounds[:]...), Buckets: make([]uint64, len(lookupBounds))}
+	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
 	for i := range h.Buckets {
 		h.Buckets[i] = o.hist[i].Load()
 	}
@@ -100,7 +107,12 @@ func (o *Owners) Stats() LookupHistogram {
 }
 
 func readOwnerTable(ctx context.Context, proc *windows.LazyProc, family, class uint32) ([]byte, error) {
-	size := uint32(32 << 10)
+	var scratch []byte
+	return readOwnerTableInto(ctx, proc, family, class, &scratch)
+}
+
+func readOwnerTableInto(ctx context.Context, proc *windows.LazyProc, family, class uint32, scratch *[]byte) ([]byte, error) {
+	size := uint32(max(32<<10, cap(*scratch)))
 	for attempt := 0; attempt < 8; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -108,9 +120,17 @@ func readOwnerTable(ctx context.Context, proc *windows.LazyProc, family, class u
 		if size < 4 || size > 64<<20 {
 			return nil, errors.New("IP Helper table size outside budget")
 		}
-		b := make([]byte, size)
+		if cap(*scratch) < int(size) {
+			*scratch = make([]byte, size)
+		}
+		b := (*scratch)[:size]
 		code, _, _ := proc.Call(uintptr(unsafe.Pointer(&b[0])), uintptr(unsafe.Pointer(&size)), 0, uintptr(family), uintptr(class), 0)
 		if code == uintptr(windows.ERROR_INSUFFICIENT_BUFFER) {
+			// Leave room for endpoints admitted between the sizing call and
+			// the read, rather than reallocating for each row in a burst.
+			if size <= 48<<20 {
+				size = (size + size/4 + 4095) &^ 4095
+			}
 			continue
 		}
 		if code != 0 {
@@ -175,47 +195,63 @@ func parseTCP(b []byte, v6 bool, rows map[platform.Tuple][]uint32) error {
 
 // One refresh is shared by all callers. Waiting for it remains cancellable;
 // process image queries never hold the snapshot mutex.
-func (o *Owners) tcpSnapshot(ctx context.Context) (ownerSnapshot, error) {
+func (o *Owners) tcpSnapshot(ctx context.Context, after time.Time) (ownerSnapshot, error) {
 	for {
 		o.mu.Lock()
-		if !o.snapshot.at.IsZero() && time.Since(o.snapshot.at) < 5*time.Millisecond {
+		if !o.snapshot.at.IsZero() && o.snapshot.at.After(after) && time.Since(o.snapshot.at) < 5*time.Millisecond {
 			s := o.snapshot
 			o.mu.Unlock()
 			return s, s.err
 		}
-		if done := o.refresh; done != nil {
+		done := o.refresh
+		if done == nil {
+			done = make(chan struct{})
+			o.refresh = done
+			go o.refreshTCP(done)
+		}
+		o.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ownerSnapshot{}, ctx.Err()
+		case <-done:
+			o.mu.Lock()
+			s := o.snapshot
 			o.mu.Unlock()
-			select {
-			case <-ctx.Done():
-				return ownerSnapshot{}, ctx.Err()
-			case <-done:
-				o.mu.Lock()
-				s := o.snapshot
-				o.mu.Unlock()
-				return s, s.err
+			if !s.at.After(after) {
+				continue
 			}
+			return s, s.err
 		}
-		done := make(chan struct{})
-		o.refresh = done
-		o.mu.Unlock()
-		s := ownerSnapshot{at: time.Now(), rows: make(map[platform.Tuple][]uint32)}
-		for _, family := range []uint32{windows.AF_INET, windows.AF_INET6} {
-			b, err := readOwnerTable(ctx, tcpTable, family, tcpOwnerPIDAll)
-			if err == nil {
-				err = parseTCP(b, family == windows.AF_INET6, s.rows)
-			}
-			if err != nil {
-				s.err = err
-				break
-			}
-		}
-		o.mu.Lock()
-		o.snapshot = s
-		o.refresh = nil
-		close(done)
-		o.mu.Unlock()
-		return s, s.err
 	}
+}
+
+func (o *Owners) refreshTCP(done chan struct{}) {
+	// The IP Helper call is synchronous and cannot be cancelled. Keep at
+	// most one native read in flight, while every lookup can still leave at
+	// its own 50 ms deadline. One caller's cancellation cannot poison peers.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	s := ownerSnapshot{at: time.Now(), rows: make(map[platform.Tuple][]uint32)}
+	o.tcpRefreshes.Add(1)
+	for i, family := range []uint32{windows.AF_INET, windows.AF_INET6} {
+		readStart := time.Now()
+		b, err := readOwnerTableInto(ctx, tcpTable, family, tcpOwnerPIDAll, &o.tcpBuffers[i])
+		o.tcpReadNanos.Add(uint64(time.Since(readStart)))
+		indexStart := time.Now()
+		if err == nil {
+			err = parseTCP(b, family == windows.AF_INET6, s.rows)
+		}
+		o.tcpIndexNanos.Add(uint64(time.Since(indexStart)))
+		if err != nil {
+			s.err = err
+			break
+		}
+	}
+	o.mu.Lock()
+	o.snapshot = s
+	o.refresh = nil
+	close(done)
+	o.mu.Unlock()
 }
 
 func (o *Owners) process(pid uint32) (platform.Owner, error) {
@@ -237,24 +273,25 @@ func (o *Owners) process(pid uint32) (platform.Owner, error) {
 	start := uint64(creation.HighDateTime)<<32 | uint64(creation.LowDateTime)
 	key := processKey{pid, start}
 	o.mu.Lock()
-	path := o.paths[key]
+	cached := o.paths[key]
 	o.mu.Unlock()
-	if path == "" {
+	if cached.Path == "" {
 		b := make([]uint16, 32768)
 		n := uint32(len(b))
 		if err := windows.QueryFullProcessImageName(h, 0, &b[0], &n); err != nil {
 			return platform.Owner{}, err
 		}
-		path = windows.UTF16ToString(b[:n])
+		path := windows.UTF16ToString(b[:n])
+		cached = platform.Owner{PID: pid, StartTime: start, Path: path, AppID: apppath.Key(path)}
 		o.mu.Lock()
 		// Bounded cache: a PID is always revalidated by its open process handle.
 		if len(o.paths) >= 4096 {
 			clear(o.paths)
 		}
-		o.paths[key] = path
+		o.paths[key] = cached
 		o.mu.Unlock()
 	}
-	return platform.Owner{PID: pid, StartTime: start, Path: path, AppID: apppath.Key(path)}, nil
+	return cached, nil
 }
 
 func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.Owner, err error) {
@@ -262,25 +299,38 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 	defer func() { o.measure(start, err) }()
 	ctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
+	var after time.Time
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt != 0 {
 			select {
-			case <-time.After(3 * time.Millisecond):
+			case <-time.After(2 * time.Millisecond):
 			case <-ctx.Done():
 				return owner, ctx.Err()
 			}
 		}
-		s, e := o.tcpSnapshot(ctx)
+		s, e := o.tcpSnapshot(ctx, after)
 		if e != nil {
 			return owner, e
 		}
 		pids := s.rows[tuple]
+		// A cached snapshot may predate this socket. Its absence is not an
+		// OS lookup miss and must not burn two backoff intervals while the
+		// same old table remains inside its five-millisecond cache window.
+		if len(pids) == 0 && s.at.Before(start) {
+			o.cacheMissRefreshes.Add(1)
+			s, e = o.tcpSnapshot(ctx, s.at)
+			if e != nil {
+				return owner, e
+			}
+			pids = s.rows[tuple]
+		}
 		if len(pids) > 1 {
 			return owner, platform.ErrAmbiguous
 		}
 		if len(pids) == 1 {
 			return o.process(pids[0])
 		}
+		after = s.at
 	}
 	return owner, errOwnerMissing
 }

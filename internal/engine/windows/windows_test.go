@@ -65,6 +65,13 @@ func TestRouteInitializationMatchesFingerprint(t *testing.T) {
 	}
 }
 
+func TestIPPathABI(t *testing.T) {
+	var row pathRow
+	if unsafe.Sizeof(row) != 136 || unsafe.Offsetof(row.LUID) != 56 || unsafe.Offsetof(row.MTU) != 96 {
+		t.Fatalf("unexpected MIB_IPPATH_ROW layout: size=%d luid=%d mtu=%d", unsafe.Sizeof(row), unsafe.Offsetof(row.LUID), unsafe.Offsetof(row.MTU))
+	}
+}
+
 func TestTCPTableIncludesSYNSentAndSkipsZeroPID(t *testing.T) {
 	raw := make([]byte, 4+2*24)
 	binary.LittleEndian.PutUint32(raw, 2)
@@ -402,4 +409,64 @@ func TestPrivateStateDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
+}
+
+func TestStateDoesNotSalvageUntrustedRecords(t *testing.T) {
+	hosted(t)
+	parent := t.TempDir()
+	state := filepath.Join(parent, "occupied")
+	if err := os.Mkdir(state, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(state, "engine-journal.json"), []byte("untrusted ownership records"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(state, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+	f, err := StateDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := os.Stat(filepath.Join(state, "engine-journal.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("untrusted records were imported: %v", err)
+	}
+	moved, err := filepath.Glob(state + ".untrusted-*")
+	if err != nil || len(moved) != 1 {
+		t.Fatalf("%v %v", moved, err)
+	}
+	b, err := os.ReadFile(filepath.Join(moved[0], "engine-journal.json"))
+	if err != nil || string(b) != "untrusted ownership records" {
+		t.Fatalf("quarantine changed data: %q %v", b, err)
+	}
+}
+
+func TestStateMovesHardLinkWithoutChangingTarget(t *testing.T) {
+	hosted(t)
+	parent := t.TempDir()
+	victim, state := filepath.Join(parent, "victim"), filepath.Join(parent, "occupied")
+	if err := os.WriteFile(victim, []byte("unchanged target"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(victim, state); err != nil {
+		t.Fatal(err)
+	}
+	f, err := StateDirectory(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	b, err := os.ReadFile(victim)
+	if err != nil || string(b) != "unchanged target" {
+		t.Fatalf("%q %v", b, err)
+	}
 }

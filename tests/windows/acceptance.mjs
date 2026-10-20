@@ -337,8 +337,8 @@ try {
   });
   if (options.profile === 'v1') {
     for (const size of [12000, 65000]) {
-      await report.test(`IPv6 fragmented UDP baseline ${size} bytes`, 'harness-baseline',
-        () => client('udp', { target: ipv6Target, localAddress: '2001:db8:19::1', size }));
+      await report.test(`IPv6 fragmented UDP reply baseline ${size} bytes`, 'harness-baseline',
+        () => client('udp', { target: ipv6Target, localAddress: '2001:db8:19::1', replySize: size }));
     }
   }
   const mtuBaselines = {};
@@ -444,6 +444,14 @@ try {
     assert(result.unsolicited, 'The app lost the third, uncontacted STUN sender');
     return result;
   });
+  if (options.profile === 'v1') {
+    await client('close');
+    const { udpIdentity } = await import('./udp-identity.mjs');
+    for (const blocked of [false, true]) {
+      await report.test(`UDP source-port reuse by an app with ${blocked ? 'a blocked pin' : 'the opposite pin'} changes policy within 1 second`, 'parity',
+        () => udpIdentity({ server, responder, directory: dir, main, second, blocked }));
+    }
+  }
   await observe('real QUIC v1 through TUN has the right payload hash', 'parity', async () => {
     await pinApp(quicExe, second.id);
     const before = await harness.control('stats');
@@ -461,8 +469,8 @@ try {
   });
   if (options.profile === 'v1') {
     for (const size of [12000, 65000]) {
-      await report.test(`IPv6 fragmented UDP through TUN ${size} bytes`, 'parity',
-        () => client('udp', { target: ipv6Target, size }));
+      await report.test(`IPv6 fragmented UDP reply through TUN ${size} bytes`, 'parity',
+        () => client('udp', { target: ipv6Target, replySize: size }));
     }
   }
   await pinApp(mtuExe, second.id);
@@ -699,6 +707,28 @@ try {
     await recordOrphanPnP('PnP cleanup after automatic engine restart', 'parity', { engine, restarted }, devices.filter((device) => !device.present));
     return { engine, restarted, response };
   });
+  if (options.profile === 'v1') {
+    await report.test('a restarted controller reattaches within the lease without closing held flows', 'parity', async () => {
+      await client('close');
+      await pin(second.id);
+      const held = await client('open', { count: 2, target: responder.virtual });
+      const before = await server.api('engine-command', { method: 'hello' });
+      const processBefore = await verifyEngineProcess(options, dataDir);
+      server.child.kill('SIGKILL');
+      await until(() => server.child.exitCode !== null || server.child.signalCode !== null, 'old controller exits');
+      await start();
+      const processAfter = await verifyEngineProcess(options, dataDir);
+      const after = await server.api('engine-command', { method: 'hello' });
+      assert.equal(processAfter.pid, processBefore.pid, 'Reattach restarted the live engine');
+      assert.equal(after.engineInstanceId, before.engineInstanceId);
+      assert(after.epoch > before.epoch, 'The engine did not issue a newer attach epoch');
+      await assert.rejects(server.api('engine-command', { method: 'renew',
+        fields: { engineInstanceId: before.engineInstanceId, epoch: before.epoch } }), /fenced/);
+      const refreshed = await client('refresh', { ids: held.map((item) => item.id) });
+      await client('close');
+      return { before, after, processBefore, processAfter, held, refreshed };
+    });
+  }
   await report.test('crash without a restart restores direct connectivity', 'parity', async () => {
     const engine = await verifyEngineProcess(options, dataDir);
     server.child.kill('SIGKILL');

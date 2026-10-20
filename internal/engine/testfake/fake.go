@@ -44,6 +44,7 @@ type Controller struct {
 	Line                              string
 	Begun, Closed, Resolved, Up, Down atomic.Uint64
 	Pending                           atomic.Int64
+	ReadBytes                         atomic.Int64
 	Limit                             int64
 }
 
@@ -67,6 +68,7 @@ func (c *Controller) ReservePending(n int) bool {
 	}
 }
 func (c *Controller) ReleasePending(n int) { c.Pending.Add(-int64(n)) }
+func (c *Controller) ObserveUDPRead(n int) { c.ReadBytes.Add(int64(n)) }
 
 type Ticket struct {
 	c    *Controller
@@ -145,13 +147,32 @@ func (d Dialer) OpenUDP(c context.Context, l string, v6 bool) (platform.UDPConn,
 
 type Output struct{ Packets chan []byte }
 
+var outputMu sync.Mutex
+
 func (o Output) Send(b []byte) bool {
+	outputMu.Lock()
+	defer outputMu.Unlock()
 	select {
 	case o.Packets <- append([]byte(nil), b...):
 		return true
 	default:
 		return false
 	}
+}
+
+func (o Output) SendBatch(packets [][]byte, release func()) bool {
+	if release != nil {
+		defer release()
+	}
+	outputMu.Lock()
+	defer outputMu.Unlock()
+	if len(packets) == 0 || len(packets) > cap(o.Packets)-len(o.Packets) {
+		return false
+	}
+	for _, p := range packets {
+		o.Packets <- append([]byte(nil), p...)
+	}
+	return true
 }
 
 type Tun struct {
