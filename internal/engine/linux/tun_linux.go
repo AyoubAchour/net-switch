@@ -21,19 +21,20 @@ import (
 // specifies. We create the descriptor ourselves to reserve its exact index
 // in the ownership journal before TUNSETIFF.
 type Tun struct {
-	index            int
-	writeBuffer      [9010]byte
-	device           tun.Device
-	readMu, writeMu  sync.Mutex
-	bufs             [][]byte
-	sizes            []int
-	next, count, mtu int
-	readErrors       atomic.Uint64
-	closedRead       error
-	ioDone           <-chan struct{}
-	ioStop           func() bool
-	writeBatch       [][]byte
-	writeStorage     []byte
+	index              int
+	writeBuffer        [9010]byte
+	device             tun.Device
+	readMu, writeMu    sync.Mutex
+	bufs               [][]byte
+	sizes              []int
+	next, count, mtu   int
+	readErrors         atomic.Uint64
+	closedRead         error
+	ioDone             <-chan struct{}
+	ioStop             func() bool
+	beforeContextClose func()
+	writeBatch         [][]byte
+	writeStorage       []byte
 }
 
 const tunWriteBatch = 64
@@ -129,7 +130,7 @@ func (t *Tun) Stats() any {
 func (t *Tun) BindIOContext(ctx context.Context) {
 	t.ioDone = ctx.Done()
 	if t.ioDone != nil {
-		t.ioStop = context.AfterFunc(ctx, func() { t.device.Close() })
+		t.ioStop = context.AfterFunc(ctx, t.closeOnCancellation)
 	}
 }
 
@@ -137,7 +138,14 @@ func (t *Tun) interrupt(ctx context.Context) func() bool {
 	if ctx.Done() == nil || ctx.Done() == t.ioDone {
 		return nil
 	}
-	return context.AfterFunc(ctx, func() { t.device.Close() })
+	return context.AfterFunc(ctx, t.closeOnCancellation)
+}
+
+func (t *Tun) closeOnCancellation() {
+	if t.beforeContextClose != nil {
+		t.beforeContextClose()
+	}
+	t.device.Close()
 }
 
 func (t *Tun) Close() error {

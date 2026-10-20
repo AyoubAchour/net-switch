@@ -244,6 +244,9 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return e.stopLocked(ctx)
 }
 func (e *Engine) stopLocked(ctx context.Context) error {
+	if routes, ok := e.deps.Routes.(platform.RouteQuiescer); ok {
+		routes.Quiesce()
+	}
 	if e.cancel != nil {
 		e.cancel()
 	}
