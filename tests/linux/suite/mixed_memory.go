@@ -46,8 +46,11 @@ func mixedCaps(e *Env) {
 	_, s := e.v1()
 	baseline := e.memorySample(s, "MIXED BASELINE")
 	release := e.NewRelease("mixed")
-	udpNames := AppNames[:6]
-	udpApps, udpResults := e.udpFlood(udpNames, 5000, release)
+	// Match the proven UDP-total fixture: 20,000 offered sockets, each app
+	// below its own cap. 30,000 exceeds the DUT's native ephemeral port pool.
+	udpNames := AppNames[:5]
+	e.T.Logf("MIXED OFFER: 20,000 UDP sockets; native ephemeral range %s", e.SysctlDUT("net.ipv4.ip_local_port_range"))
+	udpApps, udpResults := e.udpFlood(udpNames, 4000, release)
 	udpStats := e.memorySample(s, "MIXED UDP HELD")
 	e.T.Require(udpStats.UDP == udpSessionsTotal && udpStats.Flows == udpSessionsTotal,
 		"the UDP cap is held before adding TCP (%d sessions, %d flows)", udpStats.UDP, udpStats.Flows)
@@ -62,7 +65,11 @@ func mixedCaps(e *Env) {
 	tw := e.TCP("kilo", AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "5000", "--concurrency", "8", "--timeout", "5000")
 	e.T.Require(tw.OK == 5000, "all TIME_WAIT fixture connections completed (%d, %v)", tw.OK, tw.Errors)
 	deadline := time.Now().Add(5 * time.Second)
-	for stats(e, s).TimeWait != 4096 && time.Now().Before(deadline) {
+	for {
+		st := stats(e, s)
+		if (st.TimeWait == 4096 && st.Flows == udpSessionsTotal) || !time.Now().Before(deadline) {
+			break
+		}
 		e.Sleep(20 * time.Millisecond)
 	}
 	withTW := e.memorySample(s, "MIXED UDP AND TIME_WAIT HELD")
@@ -78,8 +85,11 @@ func mixedCaps(e *Env) {
 		tcpApps[name].WaitHeld(e, "held", 3*time.Minute, &list)
 		held[name] = list
 		total += list.Established
+		e.T.Logf("MIXED TCP OFFER %s: held=%d errors=%v failure-ms=%+v", name, list.Established, list.Errors, list.FailedMS)
 	}
-	e.T.Require(total == tcpFlowsTotal-udpSessionsTotal, "the TCP holders fill exactly the remaining 49,152 slots (%d)", total)
+	// Still fail unless the exact cap is held, but preserve the profile and
+	// live accounting when a holder is missing so the failure is diagnosable.
+	e.T.Check(total == tcpFlowsTotal-udpSessionsTotal, "the TCP holders fill exactly the remaining 49,152 slots (%d)", total)
 	for name, bg := range udpApps {
 		e.T.Require(bg.Running(), "%s still holds its UDP sockets at the mixed cap", name)
 	}

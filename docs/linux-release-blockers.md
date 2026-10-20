@@ -56,9 +56,25 @@ Wrong nonempty identities and wrong lines still fail; unknown flows must use the
 main lane. Stream identities are captured before the load, and every answer,
 survival and silence limit remains mandatory afterward.
 
-The probe/stream owner-known condition is a release blocker. Each split check
+The probe/stream owner-known condition during load is a release blocker. Each split check
 also reports whether its result would pass the original all-on-the-pinned-line
 assertion. No server observation is discarded or silently retried.
+
+Post-fault recovery is different: the three sequential probes after pending
+overload, unknown-owner overload and a stalled TUN writer must all identify
+bravo and use line b. Their identity and per-connection server checks are hard
+PR failures, even though the enclosing overload case retains its declaration.
+The DNS-change survival precondition now also requires zero discarded streams;
+its original no-retry verdict is an assertion, not only a diagnostic line.
+
+The separate `capacity.mixed-caps` case has no attribution deferral. It fills the
+shared 65,536-flow cap with 49,152 TCP flows and 16,384 UDP sessions, alongside
+4,096 retained TIME_WAIT endpoints. It requires at most 512 MiB of Go-managed
+memory (`Sys - HeapReleased`) throughout the held plateau. This includes stacks,
+GC metadata and allocator slack, but excludes kernel socket memory. Capacity,
+survival and each held TCP tuple's identity/route/server correlation are hard.
+It reports baseline, UDP-only, UDP-plus-TIME_WAIT and mixed memory samples, so
+the incremental cost per session, per flow and per retained endpoint is visible.
 
 The total TCP cap fixture now offers ten apps' 8,000 attempts, with the same
 100 concurrent attempts per app. Even the app with the survival stream stays

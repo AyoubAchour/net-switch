@@ -37,6 +37,9 @@ func (s *udpSocket) TryReadFrom(b []byte) (int, netip.AddrPort, error) {
 		return 0, netip.AddrPort{}, err
 	}
 	if readErr == unix.EAGAIN {
+		// EPOLLERR remains level-ready while error-queue entries remain,
+		// even after the ordinary socket error has been consumed.
+		s.drainErrors()
 		return 0, netip.AddrPort{}, platform.ErrWouldBlock
 	}
 	if readErr != nil {
