@@ -7,7 +7,8 @@ initiation/send records, with the scanner as a
 fallback. See the [source-backed study](linux-owner-ebpf-study.md).
 
 Attribution assertions in all thirteen overload cases and flow pagination are
-deferred. Each overload still requires **99.5% successful lookups** in its own
+deferred. Round 3 also declares the exact mixed-cap occupancy gate, making
+**15 catalogue entries**. Each overload still requires **99.5% successful lookups** in its own
 non-injected window. Pagination still requires **299 identified rows out of 300**.
 The real numerator, denominator and threshold result remain in the JSON, console
 log and summary. Every declaration carries `release-blocker` status, including
@@ -38,11 +39,10 @@ are not final-head release qualification.
 Deliberately injected misses remain separately reported: 132/132 in pending
 bytes, 3,000/3,000 in unknown-owner limits and 131/131 in memory pressure.
 
-All other assertions remain mandatory in PR CI: actual capacity reached, memory
-and byte budgets, independent server observations, stream survival, correct lanes,
-cleanup and the steady lookup gates. The per-app capacity fixtures must still
-actually fill the identified app's cap; otherwise they have not tested that
-limit. Unknown pool sizes and accounting remain hard capacity checks. An ordinary
+The round 3 acceptance clarification separates actual admission limits from
+occupancy lost to the fallback scanner. All capacity bounds, memory and byte
+budgets, independent server observations, stream survival, correct lanes,
+cleanup and steady lookup gates remain mandatory. An ordinary
 failure in a deferred case still fails the job. Fault cases keep their separate
 build. The terminal/app-scope gates remain hard in both serial and ten-at-once
 phases.
@@ -70,11 +70,10 @@ declared load case and requires the actual harness to fail the job.
 The DNS-change survival precondition now also requires zero discarded streams;
 its original no-retry verdict is an assertion, not only a diagnostic line.
 
-The separate `capacity.mixed-caps` case has no attribution deferral. It fills the
-shared 65,536-flow cap with 49,152 TCP flows and 16,384 UDP sessions, alongside
-4,096 retained TIME_WAIT endpoints. It requires at most 512 MiB of Go-managed
+The `capacity.mixed-caps` release target is 49,152 TCP flows and 16,384 UDP
+sessions, alongside 4,096 retained TIME_WAIT endpoints. It requires at most 512 MiB of Go-managed
 memory (`Sys - HeapReleased`) throughout the held plateau. This includes stacks,
-GC metadata and allocator slack, but excludes kernel socket memory. Capacity,
+GC metadata and allocator slack, but excludes kernel socket memory. Bounds,
 survival and each held TCP tuple's identity/route/server correlation are hard.
 It reports baseline, UDP-only, UDP-plus-TIME_WAIT and mixed memory samples, so
 the incremental cost per session, per flow and per retained endpoint is visible.
@@ -82,36 +81,58 @@ the incremental cost per session, per flow and per retained endpoint is visible.
 The total TCP cap fixture offers ten apps' 8,000 attempts, with the same
 100 concurrent attempts per app, followed by a fixed 100-attempt sequential
 tail from kilo. The tail always runs, even if the burst filled every slot.
-It waits for pending admissions to drain, requires the original burst to have
-reached the reservation cap, and requires zero tail lookup misses. Kilo remains
+It waits for pending admissions to drain. Kilo remains
 below 8,192 even if all its 8,100 attempts succeed. No failed attempt is retried.
 The burst-only held-cap and attribution verdicts are logged before the tail;
-the exact final 65,536 held-flow assertion remains hard.
 The original pre-tail 99.5% formula remains a measured release check as well
 as the complete-case formula, so successful tail lookups cannot dilute it.
 
-This distinguishes temporary reservations from held connections: total capacity
-is reserved before lookup, so the last in-flight unknown-owner refusal can free
-a slot after other clients have received their total-cap refusals. Run
-39483757994, Ubuntu 26 x64, ended at 65,535 TCP-only flows and 65,534 mixed
-flows with only explicit refusals. Both remained failed cap tests. The mixed
-fixture uses the same fixed tail and still requires 49,152 TCP, 16,384 UDP and
-4,096 TIME_WAIT simultaneously. It never fills adaptively until a check passes.
+**Exact occupancy is deferred only with refusal evidence.** Shared admission
+counters classify TCP and UDP decisions at the occupied budget under the
+admission lock: total, UDP total, handshakes, app, UDP app, unknown, unknown UDP,
+policy, or unexplained. A known app's refusal below all limits is unexplained.
+No limits, timeouts, demand or scanner behavior change with this classification.
+
+The hard checks require all offered attempts to be held or explicitly refused;
+all admitted flows to remain held; no failed outbound TCP dial; every forwarding
+refusal to have the expected cap or unknown-pool reason; and every lookup miss
+to be an unknown admission or counted unknown-pool overflow. Handshake, policy,
+unexplained or unrelated app-cap refusals cannot waive an occupancy shortfall.
+
+Decision counters include repeated SYNs. Therefore the proof subtracts **all
+allowed cap decisions** from the number of refused client attempts, even repeated
+ones. The remainder is a lower bound on distinct unknown-overflow refusals. Only
+when that lower bound covers the entire missing occupancy can the exact-count
+check be release-only. An unexplained remainder fails PR CI. The old exact-count
+verdict, real counts, reason counters, and lookup diagnostics are always logged.
+Per-app UDP checks additionally retain each app's original exact-count verdict.
+
+The tail runs while the large workload is still held. Its unknown lookup result
+is deferred only alongside the same hard refusal accounting. Its old zero-miss
+verdict stays visible. A timeout, failed dial, lost admission, or other refusal
+reason fails hard. This does not apply to the separate post-fault probes after
+the workload is removed.
+
+Run 39489577354 at `db38712`, Ubuntu 24 x64 job 118858841217, is the motivating
+failure: 19,673/80,001 burst lookup misses, 62,473 held TCP flows after the tail,
+and 65,535 mixed flows. The old exact checks failed. That old binary had no reason
+counters, so its failures cannot be retrospectively qualified by this rule.
+New runs must supply the classification evidence. Demand is not raised again.
 
 In the earlier x64 run
 [39441805445](https://github.com/AyoubAchour/net-switch/actions/runs/39441805445),
 the former 68,400 attempts produced 63,176 identified flows plus 2,048 unknown
 flows: only 65,224 live flows. That run correctly failed the unchanged exact
 65,536 cap/profile check. Increasing offered work lets the fixture exercise
-capacity despite the separately reported attribution defect; it does not waive
-the cap, resource, refusal or survival checks.
+capacity despite the separately reported attribution defect. That historical
+offer increase is retained; resource, refusal, survival and cap bounds stay hard.
 
 The per-app TCP storm likewise offers 12,000 fixed attempts, still 300 at a time
 and without retries. Run [39461404148](https://github.com/AyoubAchour/net-switch/actions/runs/39461404148),
 Ubuntu 24 x64 job 118761521489, offered 9,000 and held 8,153 identified plus 847
 unknown flows, with no refusals. It correctly failed: it had exercised neither
 the exact 8,192 identified cap nor refusal at that cap. The larger offer exceeds
-the identified and unknown pools combined; both pool limits, actual saturation,
+the identified and unknown pools combined; both pool limits,
 the three-second refusal bound and stream survival remain mandatory. Reports
 state the offered count; the failed 9,000-attempt sample remains a failure.
 

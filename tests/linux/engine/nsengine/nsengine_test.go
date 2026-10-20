@@ -365,6 +365,14 @@ func TestStatsShapes(t *testing.T) {
 	}
 }
 
+func TestRefusalReasonsSurviveStatsDecoding(t *testing.T) {
+	s, err := decodeStats([]byte(`{"engine":{"flows":{"Rejected":17,"RefusedTCP":{"Total":5,"Unknown":7,"Unexplained":1},"RefusedUDP":{"UDPPerApp":3,"UnknownUDP":1}}}}`))
+	if err != nil || s.RefusedTCP.Total != 5 || s.RefusedTCP.Unknown != 7 || s.RefusedTCP.Unexplained != 1 ||
+		s.RefusedUDP.UDPPerApp != 3 || s.RefusedUDP.UnknownUDP != 1 || s.RefusedTCP.Count()+s.RefusedUDP.Count() != s.Rejected {
+		t.Fatalf("lost refusal evidence: %+v, %v", s, err)
+	}
+}
+
 func TestUnconnectedDriverRefusesCommands(t *testing.T) {
 	d := New("netswitch-engine")
 	if _, err := d.Hello(context.Background()); !errors.Is(err, errNoSession) {

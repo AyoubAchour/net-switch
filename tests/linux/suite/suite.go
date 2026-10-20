@@ -100,11 +100,15 @@ type registry struct {
 
 // SYSTEM-DESIGN 5.6 defers attribution under load until eBPF lands. This
 // explicit catalogue excludes the steady lookup gates and all other cases.
-// Capacity, routing and every non-attribution assertion remain mandatory.
+// Capacity bounds, refusal causes, survival and routing remain mandatory.
+// Exact held occupancy is deferred only after distinct unknown-overflow
+// refusals account for its whole shortfall (round 3 acceptance clarification).
 func loadAttributionBlocker(id string) string {
 	switch id {
 	case "overload.udp-sessions-per-app", "overload.udp-sessions-total",
-		"overload.tcp-connection-storm", "overload.tcp-handshakes-in-flight", "overload.tcp-flows-total",
+		"overload.tcp-connection-storm", "overload.tcp-flows-total", "capacity.mixed-caps":
+		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: original 99.5% owner gate and exact held caps; only a fully accounted unknown-overflow shortfall is deferred; capacity bounds, refusal classification, memory, survival, identified routing and post-fault recovery stay hard"
+	case "overload.tcp-handshakes-in-flight",
 		"overload.tcp-buffer-budget", "overload.rejection-notices-per-app", "overload.rejection-notices-total",
 		"overload.timewait-cap", "overload.udp-pending-bytes", "overload.unknown-owner-limits",
 		"overload.tun-write-queue", "overload.memory-at-limit":

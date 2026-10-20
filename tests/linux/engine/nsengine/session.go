@@ -326,6 +326,7 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		return engine.Stats{}, fmt.Errorf("stats gauges: %w", err)
 	}
 	return engine.Stats{
+		RefusedTCP: g.RefusedTCP, RefusedUDP: g.RefusedUDP,
 		PeakUnknown: g.PeakUnknown, PeakUnknownUDP: g.PeakUnknownUDP,
 		AdmittedUnknown: g.AdmittedUnknown, AdmittedUnknownUDP: g.AdmittedUnknownUDP,
 		OwnerLookup: nested["ownerLookup"],

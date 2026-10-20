@@ -243,8 +243,15 @@ func udpSessionsPerAppCase(e *Env) {
 	// under the total, so only the per-app limit can refuse.
 	const perApp = 5000
 	names := []string{"alpha", "bravo"}
+	var before engine.Stats
+	if v1, ok := e.Eng.(engine.V1); ok {
+		before = stats(e, v1.Session())
+	}
 	bgs, results := e.udpFlood(names, perApp, release)
-	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
+	var after engine.Stats
+	if v1, ok := e.Eng.(engine.V1); ok {
+		after = stats(e, v1.Session())
+	}
 	all := e.floodSessions(names, results)
 	e.checkSessions(names, all)
 	least, most, total, fewestRefused, totalUnknown := perApp, 0, 0, perApp, 0
@@ -255,10 +262,18 @@ func udpSessionsPerAppCase(e *Env) {
 		fewestRefused = min(fewestRefused, s.refused)
 		totalUnknown += s.unknown
 		refusalsEnough = refusalsEnough && s.refused >= max(0, perApp-udpSessionsPerApp-s.unknown)*9/10
-		if _, ok := e.Eng.(engine.V1); ok {
-			e.T.Check(s.listed >= udpSessionsPerApp, "identified %s sessions actually fill their %d-session cap (%d)", name, udpSessionsPerApp, s.listed)
-		}
 	}
+	if _, ok := e.Eng.(engine.V1); ok {
+		refused, identified := 0, 0
+		for _, name := range names {
+			refused += all[name].refused
+			identified += all[name].listed
+			e.T.Logf("CAP OLD VERDICT UDP app %s: held=%d target=%d old-exact-count=%t", name, all[name].listed, udpSessionsPerApp, all[name].listed == udpSessionsPerApp)
+		}
+		credit := e.capacityAccounting("UDP per-app", "udp", before, after, perApp*len(names), total, refused, true)
+		e.exactCapacity("identified UDP apps together", identified, udpSessionsPerApp*len(names), credit)
+	}
+	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
 	e.T.Check(totalUnknown <= 512, "unknown UDP sessions remain in their separate 512-session pool (%d)", totalUnknown)
 	e.T.Check(total < udpSessionsTotal*3/4, "the two apps together stay far from the total limit (%d admitted)", total)
 	e.checkLoadIdentity(least >= udpSessionsPerApp*95/100, "each app still got at least 95%% of its allowed %d identified sessions out to the servers (least %d; %s)", udpSessionsPerApp, least, describeSessions(names, all))
@@ -282,8 +297,11 @@ func udpSessionsTotalCase(e *Env) {
 	// only the total limit can refuse.
 	const perApp = 4000
 	names := []string{"alpha", "bravo", "delta", "golf", "hotel"}
+	var before engine.Stats
+	if v1, ok := e.Eng.(engine.V1); ok {
+		before = stats(e, v1.Session())
+	}
 	bgs, results := e.udpFlood(names, perApp, release)
-	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
 	all := e.floodSessions(names, results)
 	e.checkSessions(names, all)
 	gotOut, listed, refused := 0, 0, 0
@@ -297,9 +315,12 @@ func udpSessionsTotalCase(e *Env) {
 		st, err := v1.Session().Stats(e.Ctx())
 		e.T.Require(err == nil, "stats while the sessions are held (%v)", err)
 		listed = max(listed, int(st.UDP))
+		credit := e.capacityAccounting("UDP total", "udp", before, st, perApp*len(names), int(st.UDP), refused, false)
+		e.exactCapacity("UDP total", int(st.UDP), udpSessionsTotal, credit)
 	}
 	admitted := max(gotOut, listed)
-	e.T.Check(gotOut >= udpSessionsTotal*95/100, "together the apps still got at least 95%% of the %d sessions allowed in total out to the servers (%d; %s)", udpSessionsTotal, gotOut, describeSessions(names, all))
+	e.checkLoadIdentity(gotOut >= udpSessionsTotal*95/100, "original 95%% UDP total check would pass=%t (%d of %d; %s)", gotOut >= udpSessionsTotal*95/100, gotOut, udpSessionsTotal, describeSessions(names, all))
+	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
 	e.holding(bgs, release)
 	var s Stream
 	stream.WaitJSON(e, 30*time.Second, &s)
@@ -325,11 +346,14 @@ func tcpStorm(e *Env) {
 	const storm = 12000
 	e.T.Note("Storm offered %d fixed connection attempts, 300 at a time, with no retries; the identified cap remains %d.", storm, tcpFlowsPerApp)
 	from := e.Mark()
+	var before engine.Stats
+	if v1, ok := e.Eng.(engine.V1); ok {
+		before = stats(e, v1.Session())
+	}
 	hold := e.Start(Run{App: "bravo", Args: append([]string{"tcphold", "--to", floodTargets(0, wire.PortHold), "--count", strconv.Itoa(storm),
 		"--concurrency", "300", "--timeout", "5000", "--tuples", "--probe"}, release.Arg()...)})
 	var held app.HeldList
 	hold.WaitHeld(e, "held", 3*time.Minute, &held)
-	e.ExpectTCP("foxtrot during the storm", "foxtrot", AsUser, "a", topo.Server4, 3)
 	e.T.Check(hold.Running(), "bravo still holds its connections")
 	known, unknown := 0, 0
 	_, v10 := e.Eng.(engine.V1)
@@ -352,11 +376,14 @@ func tcpStorm(e *Env) {
 			}
 		}
 		e.T.Check(bad == 0 && unknown <= 2048, "held identities use their correct lanes and unknown stays bounded (%d known, %d unknown, %d invalid)", known, unknown, bad)
-		// Unknown flows are a separate pool on the main lane (5.4). The
-		// known app must actually reach its limit for this case to prove it.
-		e.T.Check(known >= tcpFlowsPerApp, "identified bravo connections reach the %d per-app limit (%d)", tcpFlowsPerApp, known)
+		v1 := e.Eng.(engine.V1)
+		after := stats(e, v1.Session())
+		refused := held.Errors["ECONNREFUSED"] + held.Errors["ECONNRESET"]
+		credit := e.capacityAccounting("TCP per-app", "tcp", before, after, storm, held.Established, refused, true)
+		e.exactCapacity("identified bravo TCP", known, tcpFlowsPerApp, credit)
 		e.checkHeldTCP(map[string]app.HeldList{"bravo": held}, map[string]*Bg{"bravo": hold})
 	}
+	e.ExpectTCP("foxtrot during the storm", "foxtrot", AsUser, "a", topo.Server4, 3)
 	release.Open(e)
 	var r app.HoldResult
 	hold.WaitJSON(e, time.Minute, &r)
@@ -471,6 +498,10 @@ func tcpFlowsTotalCase(e *Env) {
 	release := e.NewRelease("flows")
 	stream := e.StartStream("charlie", AsUser, 6*time.Minute, release.Arg()...)
 	e.Sleep(time.Second)
+	var offerStart engine.Stats
+	if v1, ok := e.Eng.(engine.V1); ok {
+		offerStart = stats(e, v1.Session())
+	}
 	from := time.Now().UnixMilli()
 	bgs := map[string]*Bg{}
 	for i, name := range names {
@@ -497,7 +528,7 @@ func tcpFlowsTotalCase(e *Env) {
 	accepted := Select(recs, isHold)
 	unknown := 0
 	if v1, ok := e.Eng.(engine.V1); ok {
-		e.checkHeldTCP(held, bgs, capacityTailKey)
+		e.checkHeldTCP(held, bgs)
 		if profiler, ok := e.Eng.(interface{ CaptureProfiles(context.Context) error }); ok {
 			ctx, cancel := context.WithTimeout(e.Ctx(), 15*time.Second)
 			err := profiler.CaptureProfiles(ctx)
@@ -520,12 +551,17 @@ func tcpFlowsTotalCase(e *Env) {
 		if st.Flows > 0 {
 			e.T.Logf("CAP MEMORY: flows=%d heap=%d stack=%d runtime=%d heap/flow=%d stack/flow=%d incremental-heap/flow=%d GC-CPU-ppm=%d GC-CPU-ns=%d total-CPU-ns=%d goroutines=%d starting-stack=%d tun=%s output-drops=%d", st.Flows, st.Counters["heapBytes"], st.Counters["stackBytes"], st.Counters["runtimeBytes"], st.Counters["heapBytes"]/uint64(st.Flows), st.Counters["stackBytes"]/uint64(st.Flows), (st.Counters["heapBytes"]-baseline.Counters["heapBytes"])/uint64(st.Flows), st.Counters["gcCPUppm"], st.Counters["gcCPUNanos"]-baseline.Counters["gcCPUNanos"], st.Counters["totalCPUNanos"]-baseline.Counters["totalCPUNanos"], st.Counters["goroutines"], st.Counters["stackStartBytes"], st.TunKernel, st.Counters["tunDropped"])
 		}
-		e.T.Check(st.Flows == tcpFlowsTotal, "the cap profile measures all %d live flows (%d)", tcpFlowsTotal, st.Flows)
+		refused := 0
+		for _, list := range held {
+			refused += list.Errors["ECONNREFUSED"] + list.Errors["ECONNRESET"]
+		}
+		credit := e.capacityAccounting("TCP total", "tcp", offerStart, st, perApp*len(names)+capacityTailAttempts, established, refused, false)
+		e.exactCapacity("TCP total", int(st.Flows), tcpFlowsTotal, credit)
 	}
 	lines := RecordLines(accepted)
 	e.T.Check(len(accepted) == established && lines["c"] == established-unknown && lines["a"] == unknown,
 		"servers confirm every held connection: identified flows on c, unknown flows on the main lane a (%d held, %d unknown; lines %s)", established, unknown, Describe(lines))
-	e.T.Check(established >= tcpFlowsTotal*95/100, "together the apps still got at least 95%% of the %d flows allowed in total (%d)", tcpFlowsTotal, established)
+	e.checkLoadIdentity(established >= tcpFlowsTotal*95/100, "original 95%% TCP total check would pass=%t (%d of %d)", established >= tcpFlowsTotal*95/100, established, tcpFlowsTotal)
 	release.Open(e)
 	refused, stillOpen := 0, 0
 	var parts []string

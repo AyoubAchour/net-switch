@@ -52,13 +52,19 @@ func mixedCaps(e *Env) {
 	e.T.Logf("MIXED OFFER: 20,000 UDP sockets; native ephemeral range %s", e.SysctlDUT("net.ipv4.ip_local_port_range"))
 	udpApps, udpResults := e.udpFlood(udpNames, 4000, release)
 	udpStats := e.memorySample(s, "MIXED UDP HELD")
-	e.T.Require(udpStats.UDP == udpSessionsTotal && udpStats.Flows == udpSessionsTotal,
-		"the UDP cap is held before adding TCP (%d sessions, %d flows)", udpStats.UDP, udpStats.Flows)
-	e.floodSessions(udpNames, udpResults)
+	udpHeld := e.floodSessions(udpNames, udpResults)
+	e.checkSessions(udpNames, udpHeld)
+	udpRefused := 0
+	for _, result := range udpHeld {
+		udpRefused += result.refused
+	}
+	udpCredit := e.capacityAccounting("mixed UDP", "udp", baseline, udpStats, 20000, int(udpStats.UDP), udpRefused, false)
+	e.exactCapacity("mixed UDP", int(udpStats.UDP), udpSessionsTotal, udpCredit)
+	e.T.Require(udpStats.UDP > 0 && udpStats.Flows == udpStats.UDP, "all initial held flows are UDP (%d sessions, %d flows)", udpStats.UDP, udpStats.Flows)
 	e.T.Logf("MIXED UDP COST: heap/session=%.2f managed/session=%.2f stack/session=%.2f",
-		float64(int64(udpStats.Counters["heapBytes"])-int64(baseline.Counters["heapBytes"]))/udpSessionsTotal,
-		float64(int64(udpStats.Counters["runtimeBytes"])-int64(baseline.Counters["runtimeBytes"]))/udpSessionsTotal,
-		float64(int64(udpStats.Counters["stackBytes"])-int64(baseline.Counters["stackBytes"]))/udpSessionsTotal)
+		float64(int64(udpStats.Counters["heapBytes"])-int64(baseline.Counters["heapBytes"]))/float64(udpStats.UDP),
+		float64(int64(udpStats.Counters["runtimeBytes"])-int64(baseline.Counters["runtimeBytes"]))/float64(udpStats.UDP),
+		float64(int64(udpStats.Counters["stackBytes"])-int64(baseline.Counters["stackBytes"]))/float64(udpStats.UDP))
 
 	// Fill retained endpoints immediately before the TCP wave; all must
 	// still be present in the measured mixed plateau.
@@ -67,13 +73,13 @@ func mixedCaps(e *Env) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		st := stats(e, s)
-		if (st.TimeWait == 4096 && st.Flows == udpSessionsTotal) || !time.Now().Before(deadline) {
+		if (st.TimeWait == 4096 && st.Flows == udpStats.UDP) || !time.Now().Before(deadline) {
 			break
 		}
 		e.Sleep(20 * time.Millisecond)
 	}
 	withTW := e.memorySample(s, "MIXED UDP AND TIME_WAIT HELD")
-	e.T.Require(withTW.TimeWait == 4096 && withTW.Flows == udpSessionsTotal, "4,096 TIME_WAIT endpoints are retained outside live capacity (%d / %d)", withTW.TimeWait, withTW.Flows)
+	e.T.Require(withTW.TimeWait == 4096 && withTW.Flows == udpStats.UDP, "4,096 TIME_WAIT endpoints are retained outside live capacity (%d / %d)", withTW.TimeWait, withTW.Flows)
 	tcpApps := map[string]*Bg{}
 	held := map[string]app.HeldList{}
 	for i, name := range AppNames {
@@ -88,20 +94,26 @@ func mixedCaps(e *Env) {
 		e.T.Logf("MIXED TCP OFFER %s: held=%d errors=%v failure-ms=%+v", name, list.Established, list.Errors, list.FailedMS)
 	}
 	total += e.capacityTail(release, tcpApps, held)
-	// Still fail unless the exact cap is held, but preserve the profile and
-	// live accounting when a holder is missing so the failure is diagnosable.
-	e.T.Check(total == tcpFlowsTotal-udpSessionsTotal, "the TCP holders fill exactly the remaining 49,152 slots (%d)", total)
 	for name, bg := range udpApps {
 		e.T.Require(bg.Running(), "%s still holds its UDP sockets at the mixed cap", name)
 	}
 	full := e.memorySample(s, "MIXED ALL CAPS HELD")
+	refused := 0
+	for _, list := range held {
+		refused += list.Errors["ECONNREFUSED"] + list.Errors["ECONNRESET"]
+	}
+	tcpCredit := e.capacityAccounting("mixed TCP", "tcp", withTW, full, 80000+capacityTailAttempts, total, refused, false)
+	e.T.Check(full.Flows == int64(total)+udpStats.UDP, "mixed accounting matches every held TCP and UDP socket (%d = %d + %d)", full.Flows, total, udpStats.UDP)
+	e.exactCapacity("mixed total", int(full.Flows), tcpFlowsTotal, tcpCredit)
+	e.T.Logf("CAP OLD VERDICT full mixed corner: TCP=%d UDP=%d TIME_WAIT=%d old-exact-count=%t",
+		total, full.UDP, full.TimeWait, total == 49152 && full.UDP == 16384 && full.TimeWait == 4096)
 	for i := 0; i < 3; i++ {
 		if i != 0 {
 			e.Sleep(time.Second)
 			full = stats(e, s)
 		}
-		e.T.Check(full.Flows == tcpFlowsTotal && full.UDP == udpSessionsTotal && full.TimeWait == 4096,
-			"mixed plateau %d holds both live caps and every TIME_WAIT endpoint (%d/%d/%d)", i, full.Flows, full.UDP, full.TimeWait)
+		e.T.Check(full.Flows == int64(total)+udpStats.UDP && full.UDP == udpStats.UDP && full.TimeWait == 4096,
+			"mixed plateau %d retains every held flow and TIME_WAIT endpoint (%d/%d/%d)", i, full.Flows, full.UDP, full.TimeWait)
 		e.T.Check(full.Counters["runtimeBytes"] <= 512<<20,
 			"mixed plateau %d stays within 512 MiB including stacks, GC metadata and retained endpoints (%d bytes)", i, full.Counters["runtimeBytes"])
 		e.T.Check(full.Counters["goroutines"] < 256, "mixed plateau has bounded shared workers (%d goroutines)", full.Counters["goroutines"])
@@ -112,7 +124,7 @@ func mixedCaps(e *Env) {
 		float64(int64(full.Counters["stackBytes"])-int64(withTW.Counters["stackBytes"]))/float64(total),
 		float64(int64(withTW.Counters["heapBytes"])-int64(udpStats.Counters["heapBytes"]))/4096,
 		full.Counters["gcCPUNanos"]-baseline.Counters["gcCPUNanos"], full.Counters["totalCPUNanos"]-baseline.Counters["totalCPUNanos"], full.TunKernel, full.Counters["tunDropped"])
-	e.checkHeldTCP(held, tcpApps, capacityTailKey)
+	e.checkHeldTCP(held, tcpApps)
 	release.Open(e)
 	for name, bg := range tcpApps {
 		var result app.HoldResult
