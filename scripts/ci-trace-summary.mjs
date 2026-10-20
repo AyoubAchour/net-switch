@@ -30,8 +30,10 @@ for(let i=0;i<count;i++) {
   if(method!==0 && method!==8) throw Error('unsupported ZIP method');
   const trace=method===0?raw:inflateRawSync(raw,{maxOutputLength:64*1024*1024});
   for(const kind of ['sched','syscall']) {
-    const result=spawnSync('go',['tool','trace','-pprof='+kind,'/dev/stdin'],{input:trace,maxBuffer:32*1024*1024,timeout:60000});
-    if(result.error || result.status!==0) throw Error('trace conversion failed: '+(result.error||result.stderr.toString()));
+    // Node's child stdin is a socket pair, which cannot be reopened through
+    // /dev/stdin. cat supplies a real pipe to the Go tool's file-based reader.
+    const result=spawnSync('sh',['-c','cat | go tool trace -pprof="$1" /dev/stdin','trace-summary',kind],{input:trace,maxBuffer:32*1024*1024,timeout:60000});
+    if(result.error || result.status!==0) throw Error('trace conversion failed: '+(result.error||result.status)+'; '+result.stderr.toString());
     console.log(JSON.stringify({name,kind,traceBytes:trace.length,profileBytes:result.stdout.length,...summarizeProfile(result.stdout)}));
   }
   found++;

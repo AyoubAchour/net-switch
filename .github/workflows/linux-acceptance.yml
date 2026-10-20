@@ -41,7 +41,7 @@ concurrency:
 
 jobs:
   trace-analysis:
-    if: ${{ inputs.trace_artifact != '' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.trace_artifact != '' }}
     name: Analyse saved runtime trace
     runs-on: ubuntu-26.04-arm
     timeout-minutes: 10
