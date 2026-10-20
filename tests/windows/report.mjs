@@ -5,10 +5,13 @@ export class BaselineDefect extends Error {
 }
 
 export class Report {
-  constructor(profile) { this.profile = profile; this.results = []; }
+  constructor(profile, progressFile) { this.profile = profile; this.results = []; this.progressFile = progressFile; }
   async test(name, label, fn) {
     if (!['harness-baseline', 'parity', 'baseline-defect'].includes(label)) throw new Error(`Missing label: ${name}`);
     const started = performance.now();
+    const parent = this.running;
+    this.running = { name, label, startedAt: new Date().toISOString() };
+    await this.checkpoint();
     try {
       const evidence = await fn();
       if (label === 'baseline-defect' && this.profile === 'baseline') {
@@ -26,6 +29,9 @@ export class Report {
         error: error.stack, evidence: error.evidence });
       console.error(`${known ? 'BASELINE DEFECT' : 'FAIL'} [${label}] ${name}: ${error.message}`);
       if (!known || this.profile !== 'baseline') throw error;
+    } finally {
+      this.running = parent;
+      await this.checkpoint();
     }
   }
   deferred(name, milestone, reason) { this.results.push({ name, label: 'parity', status: 'deferred', milestone, reason }); }
@@ -40,8 +46,13 @@ export class Report {
       return all;
     }, {});
     console.log(`CASE COUNTS ${JSON.stringify({ architecture: process.arch, counts })}`);
-    const releaseReady = !this.results.some(({ status }) => status !== 'pass');
-    const oldV1WouldPass = !this.results.some(({ status }) => status !== 'pass');
-    await writeFile(file, JSON.stringify({ profile: this.profile, architecture: process.arch, releaseReady, oldV1WouldPass, results: this.results }, null, 2));
+    await this.checkpoint(file, true);
+  }
+  async checkpoint(file = this.progressFile, complete = false) {
+    if (!file) return;
+    const releaseReady = complete && !this.results.some(({ status }) => status !== 'pass');
+    const oldV1WouldPass = releaseReady;
+    await writeFile(file, JSON.stringify({ profile: this.profile, architecture: process.arch, complete, running: this.running,
+      releaseReady, oldV1WouldPass, results: this.results }, null, 2));
   }
 }
