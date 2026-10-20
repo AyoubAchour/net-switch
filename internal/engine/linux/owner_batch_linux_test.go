@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -108,6 +109,9 @@ func TestOtherPIDNotificationCannotHideAConflictingHolder(t *testing.T) {
 		t.Fatalf("first PID's publication ended the second PID's unfinished search: %v", err)
 	case <-time.After(10 * time.Millisecond):
 	}
+	if o.batches.shared.Load() != 1 || o.batches.started.Load() != 0 {
+		t.Fatal("an unrelated publication reacquired the already pending child batch")
+	}
 	pending.result = result
 	o.publish(map[uint32]holder{row.inode: b})
 	o.batches.mu.Lock()
@@ -121,6 +125,75 @@ func TestOtherPIDNotificationCannotHideAConflictingHolder(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("lookup did not finish after both real holders were published")
+	}
+}
+
+func TestCompletedDescriptorBatchOnlyServesOverlappingLookups(t *testing.T) {
+	o := newTestOwners(t)
+	pid := uint32(os.Getpid())
+	start, err := processStart(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var directory unix.Stat_t
+	if err := unix.Stat(fmt.Sprintf("/proc/%d/fd", pid), &directory); err != nil {
+		t.Fatal(err)
+	}
+	key := descriptorBatchKey{pid: pid, uid: uint32(os.Getuid()), start: start, directory: directory.Ino, limit: 1024}
+	requested := time.Now()
+	first, err := o.descriptorBatch(key, requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-first.done:
+	case <-time.After(time.Second):
+		t.Fatal("first batch never completed")
+	}
+	if first.result.err != nil && !errors.Is(first.result.err, io.EOF) {
+		t.Fatal(first.result.err)
+	}
+	// The original operation reaches this process after shared work finished.
+	again, err := o.descriptorBatch(key, requested)
+	if err != nil || again != first || o.batches.started.Load() != 1 {
+		t.Fatal("overlapping lookup repeated completed fresh work", err)
+	}
+
+	// A later lookup cannot reuse that negative: this live socket did not
+	// even exist during the first scan. Verify the replacement reads it.
+	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	raw, err := c.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inode uint32
+	if err := raw.Control(func(fd uintptr) { inode, _ = socketInodeAt(unix.AT_FDCWD, fmt.Sprintf("/proc/%d/fd/%d", pid, fd)) }); err != nil || inode == 0 {
+		t.Fatal("could not verify new socket", err)
+	}
+	for _, socket := range first.result.sockets {
+		if socket.inode == inode {
+			t.Fatal("fixture reused a socket already in the first batch")
+		}
+	}
+	later, err := o.descriptorBatch(key, time.Now())
+	if err != nil || later == first {
+		t.Fatal("later lookup reused an old negative", err)
+	}
+	select {
+	case <-later.done:
+	case <-time.After(time.Second):
+		t.Fatal("replacement batch never completed")
+	}
+	found := false
+	for _, socket := range later.result.sockets {
+		found = found || socket.inode == inode
+	}
+	if !found {
+		t.Fatalf("new socket absent from fresh descriptor scan: %v", later.result.err)
 	}
 }
 
