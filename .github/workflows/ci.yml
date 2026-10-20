@@ -113,9 +113,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     name: Windows acceptance / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    # ARM's network/PnP checks make each cycle take about 74 seconds.
-    # Keep all 20 cycles plus crash/lease/cap cases within the job allowance.
-    timeout-minutes: 60
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
