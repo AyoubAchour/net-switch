@@ -987,23 +987,31 @@ func TestWintunRecoveryLeak(t *testing.T) {
 	defer s.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	readerErr := make(chan error, 1)
 	go func() {
 		defer close(done)
 		buf := make([]byte, MaxPacketSize)
 		for ctx.Err() == nil {
 			if _, err := s.ReadPacket(ctx, buf); err != nil {
+				readerErr <- err
 				return
 			}
 		}
 	}()
 	defer func() { cancel(); <-done }()
+	iteration := 0
 	recoverOne := func() {
+		iteration++
+		started := time.Now()
+		before := s.Stats()
 		// A native read wait holds mu.RLock; wake it before taking the writer lock.
 		windows.SetEvent(s.wake)
 		s.mu.Lock()
 		r := s.rings
 		binary.LittleEndian.PutUint32(r.send.data()[r.head:], MaxPacketSize+1)
 		r.send.store(4, (r.head+8)&(r.send.capacity-1))
+		injectedHead := r.head
+		t.Logf("recovery %d injected: head=%d tail=%d size=%d stats=%+v", iteration, injectedHead, r.send.load(4), r.send.load(ringHeader+int(injectedHead)), before)
 		windows.SetEvent(r.readEvent)
 		windows.ResetEvent(s.wake)
 		s.mu.Unlock()
@@ -1013,12 +1021,30 @@ func TestWintunRecoveryLeak(t *testing.T) {
 			select {
 			case e := <-s.Events():
 				if e.Kind == "recovered" {
+					t.Logf("recovery %d completed in %v: %+v", iteration, time.Since(started), s.Stats())
 					return
 				}
 				if e.Kind == "failed" {
 					t.Fatal(e.Err)
 				}
 			case <-deadline.C:
+				t.Logf("recovery %d timed out after %v: recovering=%v closed=%v stats=%+v", iteration, time.Since(started), s.recovering.Load(), s.closed.Load(), s.Stats())
+				if s.mu.TryRLock() {
+					if r := s.rings; r != nil {
+						t.Logf("current ring: head=%d tail=%d injected_slot_size=%d", r.send.load(0), r.send.load(4), r.send.load(ringHeader+int(injectedHead)))
+					}
+					t.Logf("session error: %v", s.err)
+					s.mu.RUnlock()
+				} else {
+					t.Log("session mutex held exclusively")
+				}
+				select {
+				case err := <-readerErr:
+					t.Logf("reader exited: %v", err)
+				default:
+				}
+				stacks := make([]byte, 64<<10)
+				t.Logf("goroutines:\n%s", stacks[:runtime.Stack(stacks, true)])
 				t.Fatal("injected recovery did not complete")
 			}
 		}
