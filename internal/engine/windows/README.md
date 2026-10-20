@@ -86,6 +86,7 @@ keeps both measurements and applies its unchanged 5 ms limit to QPC.
 | TCP snapshots | QPC publication age expires at 5 ms. Atomic single-flight ownership and cancellation do not depend on a clock tick. |
 | Backpressured TCP writes | QPC checks each 2 ms poll wait; a queued coarse timer wake cannot cause immediate repeated polling. |
 | UDP read errors | Windows' 1 ms retry helper uses the same precise wait. The other-platform helper retains the original timer behavior. |
+| ReadyUDP receive backoff | The shared timer and its `readAfter` deadline use the same Go monotonic source. Positive 1–100 ms timer delays trigger work; the read loop never polls while waiting. The Windows regression forces four errors with no later traffic and requires timer-only recovery and byte release on both architectures. |
 | Wintun registration/release | Registration backoff starts at 10 ms. Release polls at 1 ms with a precise 250 ms deadline. The deliberate first recovery attempt remains immediate. |
 | Netstack | Windows supplies QPC monotonic time and precise timers with the specified 500 µs resolution. Wall-clock timestamps and long idle checks retain ordinary time. |
 | UDP receive cancellation | `SetReadDeadline(time.Now())` deliberately sets an immediate/past deadline; it is not used as a positive short wait. |
