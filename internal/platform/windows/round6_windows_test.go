@@ -137,7 +137,9 @@ func TestMachineFolderBlockedStageRequiresCertifiedLiveRoot(t *testing.T) {
 				t.Fatal(err)
 			}
 			p, _ := windows.UTF16PtrFromString(stage)
-			held, err := windows.CreateFile(p, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+			// Attribute-only handles do not participate in sharing checks.
+			// Directory read access makes the withheld DELETE sharing real.
+			held, err := windows.CreateFile(p, windows.FILE_READ_DATA|windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
