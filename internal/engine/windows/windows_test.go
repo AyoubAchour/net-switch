@@ -262,6 +262,50 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 	}
 }
 
+func TestOwnerConcurrentSnapshots(t *testing.T) {
+	hosted(t)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	var clients, servers []net.Conn
+	defer func() {
+		for _, c := range append(clients, servers...) {
+			c.Close()
+		}
+	}()
+	for range 64 {
+		client, err := net.Dial("tcp4", listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients = append(clients, client)
+		server, err := listener.Accept()
+		if err != nil {
+			t.Fatal(err)
+		}
+		servers = append(servers, server)
+	}
+	owners := NewOwners()
+	var work sync.WaitGroup
+	for _, client := range clients {
+		work.Go(func() {
+			tuple := platform.Tuple{Source: client.LocalAddr().(*net.TCPAddr).AddrPort(), Destination: client.RemoteAddr().(*net.TCPAddr).AddrPort()}
+			owner, err := owners.TCP(context.Background(), tuple)
+			if err != nil || owner.PID != uint32(os.Getpid()) {
+				t.Errorf("concurrent native snapshot: %+v %v", owner, err)
+			}
+		})
+	}
+	work.Wait()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := owners.tcpSnapshot(ctx, time.Time{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled snapshot returned %v", err)
+	}
+}
+
 func TestUDPReadinessDoesNotConsume(t *testing.T) {
 	hosted(t)
 	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})

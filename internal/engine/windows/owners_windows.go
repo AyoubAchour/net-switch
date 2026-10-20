@@ -49,6 +49,11 @@ type tcpCandidates struct {
 	pid, count uint32
 }
 
+type tcpRefresh struct {
+	done   chan struct{}
+	result *ownerSnapshot
+}
+
 type LookupHistogram struct {
 	Count     uint64 `json:"count"`
 	Misses    uint64 `json:"misses"`
@@ -64,18 +69,20 @@ type LookupHistogram struct {
 	TCPRetries         uint64   `json:"tcpRetries"`
 	SnapshotBuckets    []uint64 `json:"snapshotBuckets"`
 	ProcessBuckets     []uint64 `json:"processBuckets"`
+	RefreshBuckets     []uint64 `json:"refreshBuckets"`
 }
 
 var lookupBounds = [...]uint64{100, 250, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, ^uint64(0)}
 
 type Owners struct {
 	mu                                                            sync.Mutex
-	snapshot                                                      ownerSnapshot
-	refresh                                                       chan struct{}
+	snapshot                                                      atomic.Pointer[ownerSnapshot]
+	refresh                                                       atomic.Pointer[tcpRefresh]
 	paths                                                         map[processKey]platform.Owner
 	tcpBuffers                                                    [2][]byte
 	hist                                                          [len(lookupBounds)]atomic.Uint64
 	snapshotHist, processHist                                     [len(lookupBounds)]atomic.Uint64
+	refreshHist                                                   [len(lookupBounds)]atomic.Uint64
 	count, misses, ambiguous, maxUS                               atomic.Uint64
 	tcpRefreshes, tcpReadNanos, tcpIndexNanos, cacheMissRefreshes atomic.Uint64
 	tcpRetries                                                    atomic.Uint64
@@ -118,11 +125,12 @@ func (o *Owners) measure(start time.Time, err error) {
 func (o *Owners) Stats() LookupHistogram {
 	h := LookupHistogram{Count: o.count.Load(), Misses: o.misses.Load(), Ambiguous: o.ambiguous.Load(), MaxUS: o.maxUS.Load(),
 		UpperUS: append([]uint64(nil), lookupBounds[:]...), Buckets: make([]uint64, len(lookupBounds)),
-		TCPRetries: o.tcpRetries.Load(), SnapshotBuckets: make([]uint64, len(lookupBounds)), ProcessBuckets: make([]uint64, len(lookupBounds))}
+		TCPRetries: o.tcpRetries.Load(), SnapshotBuckets: make([]uint64, len(lookupBounds)), ProcessBuckets: make([]uint64, len(lookupBounds)), RefreshBuckets: make([]uint64, len(lookupBounds))}
 	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
 	for i := range h.Buckets {
 		h.Buckets[i] = o.hist[i].Load()
 		h.SnapshotBuckets[i], h.ProcessBuckets[i] = o.snapshotHist[i].Load(), o.processHist[i].Load()
+		h.RefreshBuckets[i] = o.refreshHist[i].Load()
 	}
 	return h
 }
@@ -222,35 +230,42 @@ func (o *Owners) tcpSnapshot(ctx context.Context, after time.Time) (ownerSnapsho
 	start := time.Now()
 	defer measureStage(&o.snapshotHist, start)
 	for {
-		o.mu.Lock()
-		if !o.snapshot.at.IsZero() && o.snapshot.at.After(after) && time.Since(o.snapshot.at) < 5*time.Millisecond {
-			s := o.snapshot
-			o.mu.Unlock()
-			return s, s.err
+		if err := ctx.Err(); err != nil {
+			return ownerSnapshot{}, err
 		}
-		done := o.refresh
-		if done == nil {
-			done = make(chan struct{})
-			o.refresh = done
-			go o.refreshTCP(done)
+		if s := o.snapshot.Load(); s != nil && s.at.After(after) && time.Since(s.at) < 5*time.Millisecond {
+			return *s, s.err
 		}
-		o.mu.Unlock()
+		pending := o.refresh.Load()
+		if pending == nil {
+			pending = &tcpRefresh{done: make(chan struct{})}
+			if !o.refresh.CompareAndSwap(nil, pending) {
+				continue
+			}
+			// A different refresh may have published between our two loads.
+			// Reuse it rather than starting another dump after winning the slot.
+			if s := o.snapshot.Load(); s != nil && s.at.After(after) && time.Since(s.at) < 5*time.Millisecond {
+				pending.result = s
+				o.refresh.Store(nil)
+				close(pending.done)
+				return *s, s.err
+			}
+			go o.refreshTCP(pending)
+		}
 		select {
 		case <-ctx.Done():
 			return ownerSnapshot{}, ctx.Err()
-		case <-done:
-			o.mu.Lock()
-			s := o.snapshot
-			o.mu.Unlock()
+		case <-pending.done:
+			s := pending.result
 			if !s.at.After(after) {
 				continue
 			}
-			return s, s.err
+			return *s, s.err
 		}
 	}
 }
 
-func (o *Owners) refreshTCP(done chan struct{}) {
+func (o *Owners) refreshTCP(pending *tcpRefresh) {
 	// The IP Helper call is synchronous and cannot be cancelled. Keep at
 	// most one snapshot in flight, while every lookup can still leave at
 	// its own 50 ms deadline. One caller's cancellation cannot poison peers.
@@ -286,11 +301,13 @@ func (o *Owners) refreshTCP(done chan struct{}) {
 		}
 		o.tcpIndexNanos.Add(uint64(time.Since(indexStart)))
 	}
-	o.mu.Lock()
-	o.snapshot = s
-	o.refresh = nil
-	close(done)
-	o.mu.Unlock()
+	measureStage(&o.refreshHist, s.at)
+	// The map and result never change after publication. Wake-up readers
+	// need no shared mutex, including the burst immediately after a dump.
+	pending.result = &s
+	o.snapshot.Store(&s)
+	o.refresh.Store(nil)
+	close(pending.done)
 }
 
 func (o *Owners) process(pid uint32) (platform.Owner, error) {
