@@ -121,12 +121,50 @@ func (o *objects) firewall() (windows.Handle, error) {
 	return o.wfp, nil
 }
 func (o *objects) closeFirewall() error {
+	abortErr := o.abortFirewallBatch()
 	if o.wfp == 0 {
-		return nil
+		return abortErr
 	}
 	h := o.wfp
 	o.wfp = 0
-	return wfpCall("FwpmEngineClose0", uintptr(h))
+	return errors.Join(abortErr, wfpCall("FwpmEngineClose0", uintptr(h)))
+}
+
+func (o *objects) beginFirewallBatch() error {
+	if o.wfpBatch {
+		return nil
+	}
+	h, err := o.firewall()
+	if err != nil {
+		return err
+	}
+	if err := wfpCall("FwpmTransactionBegin0", uintptr(h), 0); err != nil {
+		return err
+	}
+	o.wfpBatch = true
+	return nil
+}
+
+func (o *objects) abortFirewallBatch() error {
+	o.wfpCreates = 0
+	if !o.wfpBatch {
+		return nil
+	}
+	o.wfpBatch = false
+	return wfpCall("FwpmTransactionAbort0", uintptr(o.wfp))
+}
+
+func (o *objects) commitFirewallBatch() error {
+	if !o.wfpBatch {
+		return nil
+	}
+	defer o.timings.begin("wfp.batch.commit")()
+	err := wfpCall("FwpmTransactionCommit0", uintptr(o.wfp))
+	if err != nil {
+		return errors.Join(err, o.abortFirewallBatch())
+	}
+	o.wfpBatch, o.wfpCreates = false, 0
+	return nil
 }
 
 func wfpLayerFingerprint(owner string) journal.Fingerprint {
@@ -192,10 +230,25 @@ func makeWFPFilter(fp journal.Fingerprint) *wfpInput {
 	return input
 }
 
-func createWFP(o *objects, kind string, fp journal.Fingerprint) error {
+func createWFP(o *objects, kind string, fp journal.Fingerprint) (err error) {
 	h, err := o.firewall()
 	if err != nil {
 		return err
+	}
+	if o.wfpCreates != 0 {
+		if err := o.beginFirewallBatch(); err != nil {
+			return err
+		}
+		defer func() {
+			if err == nil {
+				o.wfpCreates--
+				if o.wfpCreates == 0 {
+					// All intents are already durable. Commit the OS group
+					// before the journal can persist its created marks.
+					err = o.commitFirewallBatch()
+				}
+			}
+		}()
 	}
 	if kind == "wfp-sublayer" {
 		display, blob, marker := wfpMetadata(fp["owner"])
@@ -297,19 +350,13 @@ func inspectWFP(o *objects, kind string, fp journal.Fingerprint) (journal.Finger
 }
 
 func removeWFP(o *objects, kind string, fp journal.Fingerprint) error {
-	h, err := o.firewall()
-	if err != nil {
+	if err := o.beginFirewallBatch(); err != nil {
 		return err
 	}
-	if err := wfpCall("FwpmTransactionBegin0", uintptr(h), 0); err != nil {
-		return err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			wfpCall("FwpmTransactionAbort0", uintptr(h))
-		}
-	}()
+	// Every fingerprint check and delete share this transaction. The Windows
+	// store commits it before accepting the journal's removed-mark batch.
+	// Thus a crash leaves either the original OS objects/intents or committed
+	// deletions whose still-live intents can safely be replayed.
 	live, found, err := inspectWFP(o, kind, fp)
 	if err != nil || !found || !maps.Equal(live, fp) {
 		return err
@@ -326,9 +373,7 @@ func removeWFP(o *objects, kind string, fp journal.Fingerprint) error {
 	if err != nil {
 		return err
 	}
-	err = wfpCall("FwpmTransactionCommit0", uintptr(h))
-	committed = err == nil
-	return err
+	return nil
 }
 
 // FirewallState is a read-only inspection of our fixed namespace. It loads no
