@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,12 +25,14 @@ func TestTimeWaitSameTupleUnderLoad(t *testing.T) {
 			limits.TimeWait, limits.Flows, limits.PerApp = cap, 1, 1
 			p := newPeerOptions(t, false, limits, ns.DefaultOptions())
 			const n = 2000
+			var relays []<-chan struct{}
 			start := time.Now()
 			for i := range n {
 				if i%100 == 0 {
 					time.Sleep(time.Until(start.Add(time.Duration(i) * time.Millisecond)))
 				}
 				p.open(1000) // The same port and overlapping sequence space every time.
+				relays = append(relays, p.current.relayClosed)
 				p.upload([]byte("reuse"))
 				p.closeActive()
 			}
@@ -51,6 +54,7 @@ func TestTimeWaitSameTupleUnderLoad(t *testing.T) {
 			if p.stack.Stats().TCP.ResetsSent.Value() != 0 || p.forward.Rejected.Load() != 0 || len(p.stack.RegisteredEndpoints()) != cap {
 				t.Fatal("same-tuple load reset, rejected or retained an extra endpoint")
 			}
+			waitLoadRelays(t, relays)
 			if got := p.table.Totals().Apps["peer"].Up; got != 5*n {
 				t.Fatalf("payload accounting = %d, want %d", got, 5*n)
 			}
@@ -68,6 +72,7 @@ func TestTimeWaitThousandPerSecondSuccess(t *testing.T) {
 	limits := flows.Defaults()
 	p := newPeer(t, false)
 	n := max(10_000, limits.TimeWait+1024)
+	var relays []<-chan struct{}
 	start := time.Now()
 	for i := range n {
 		// Offer 100 connections every 100 ms, for at least ten seconds and
@@ -77,6 +82,7 @@ func TestTimeWaitThousandPerSecondSuccess(t *testing.T) {
 		}
 		p.port = uint16(20000 + i)
 		p.open(1000)
+		relays = append(relays, p.current.relayClosed)
 		p.upload([]byte("load"))
 		p.closeActive()
 		if g := p.table.Stats(); g.TimeWait > limits.TimeWait || g.Rejected != 0 {
@@ -102,6 +108,7 @@ func TestTimeWaitThousandPerSecondSuccess(t *testing.T) {
 	if page, err := p.table.Page(""); err != nil || len(page.Flows) != 0 {
 		t.Fatal("closed connections appeared live", page, err)
 	}
+	waitLoadRelays(t, relays)
 	if got := p.table.Totals().Apps["peer"].Up; got != uint64(4*n) {
 		t.Fatalf("relay accounting = %d, want %d", got, 4*n)
 	}
@@ -112,6 +119,54 @@ func TestTimeWaitThousandPerSecondSuccess(t *testing.T) {
 		t.Fatalf("unexpected trailing packet: %v", h.Flags())
 	}
 	t.Logf("%d/%d successful connections in %s; TIME_WAIT=%d cap=%d skipped=%d; RST=0; payloads hash-checked", n, n, elapsed, g.TimeWait, limits.TimeWait, g.TimeWaitSkipped)
+}
+
+// The wire close releases admission immediately, as required for reuse. A
+// remote reader can receive its bytes before the relay's Write returns to add
+// them to totals. Join only after the timed load and all reuse assertions;
+// never delay a reopen or accept a smaller final byte count.
+func waitLoadRelays(t *testing.T, relays []<-chan struct{}) {
+	t.Helper()
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	for _, closed := range relays {
+		select {
+		case <-closed:
+		case <-deadline.C:
+			t.Fatal("load relays did not finish their final accounting")
+		}
+	}
+}
+
+func TestTimeWaitAdmissionReleasePrecedesWriteAccounting(t *testing.T) {
+	p := newPeer(t, false)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	p.afterWrite = func() { close(entered); <-release }
+	p.open(1000)
+	p.upload([]byte("reuse"))
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("write-return fixture was not entered")
+	}
+	p.closeActive()
+	deadline := time.Now().Add(time.Second)
+	for p.table.Stats().Flows != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if p.table.Stats().Flows != 0 {
+		t.Fatal("wire closure did not release admission")
+	}
+	if got := p.table.Totals().Apps["peer"].Up; got != 0 {
+		t.Fatalf("fixture did not delay accounting: %d", got)
+	}
+	once.Do(func() { close(release) })
+	waitLoadRelays(t, []<-chan struct{}{p.current.relayClosed})
+	if got := p.table.Totals().Apps["peer"].Up; got != 5 {
+		t.Fatalf("final accounting = %d, want 5", got)
+	}
 }
 
 // The profile includes the endpoint's retained graph, not unsafe.Sizeof alone.
