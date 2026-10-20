@@ -58,3 +58,42 @@ func TestLinkBatchFIFOAndLonePacket(t *testing.T) {
 		t.Fatal("closed read did not finish")
 	}
 }
+
+func TestOwnedOutputSurvivesConcurrentQueueUseAndClose(t *testing.T) {
+	l := ns.NewLink()
+	var held [1]ns.OutputPacket
+	input := []byte("held packet")
+	if !l.Send(input) || l.ReadOwnedBatch(context.Background(), held[:]) != 1 {
+		t.Fatal("missing held packet")
+	}
+	input[0] = 'X'
+	for i := 0; i < ns.QueuePackets; i++ {
+		if !l.Send([]byte("other")) {
+			t.Fatal("queue filled early")
+		}
+	}
+	if l.Send([]byte("overflow")) {
+		t.Fatal("queue did not preserve its bound")
+	}
+	l.Close()
+	if string(held[0].Bytes) != "held packet" {
+		t.Fatal("writer's borrowed packet changed before release")
+	}
+	held[0].Release()
+	if held[0].Bytes != nil {
+		t.Fatal("released packet retained its view")
+	}
+	// Read's independently owned bytes must also survive subsequent reuse.
+	l = ns.NewLink()
+	defer l.Close()
+	l.Send([]byte("independent"))
+	copy := l.Read(context.Background())
+	for range 100 {
+		l.Send([]byte("replacement"))
+		l.ReadOwnedBatch(context.Background(), held[:])
+		held[0].Release()
+	}
+	if string(copy) != "independent" {
+		t.Fatal("compatibility reader shared returned storage")
+	}
+}

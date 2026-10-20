@@ -30,6 +30,8 @@ type Tun struct {
 	next, count, mtu int
 	readErrors       atomic.Uint64
 	closedRead       error
+	ioDone           <-chan struct{}
+	ioStop           func() bool
 }
 
 func openTun(v tunObject) (*Tun, error) {
@@ -110,7 +112,26 @@ func (t *Tun) Stats() any {
 	}
 	return map[string]uint64{"ingressPackets": s.TxPackets, "ingressDropped": s.TxDropped, "egressPackets": s.RxPackets, "egressDropped": s.RxDropped, "readDrops": t.readErrors.Load()}
 }
-func (t *Tun) Close() error { return t.device.Close() }
+func (t *Tun) BindIOContext(ctx context.Context) {
+	t.ioDone = ctx.Done()
+	if t.ioDone != nil {
+		t.ioStop = context.AfterFunc(ctx, func() { t.device.Close() })
+	}
+}
+
+func (t *Tun) interrupt(ctx context.Context) func() bool {
+	if ctx.Done() == nil || ctx.Done() == t.ioDone {
+		return nil
+	}
+	return context.AfterFunc(ctx, func() { t.device.Close() })
+}
+
+func (t *Tun) Close() error {
+	if t.ioStop != nil {
+		t.ioStop()
+	}
+	return t.device.Close()
+}
 func (t *Tun) ReadPacket(ctx context.Context, out []byte) (int, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
@@ -121,8 +142,9 @@ func (t *Tun) ReadPacket(ctx context.Context, out []byte) (int, error) {
 		if t.closedRead != nil {
 			return 0, t.closedRead
 		}
-		stop := context.AfterFunc(ctx, func() { t.device.Close() })
-		defer stop()
+		if stop := t.interrupt(ctx); stop != nil {
+			defer stop()
+		}
 		n, err := t.device.Read(t.bufs, t.sizes, 0)
 		if err != nil {
 			if errors.Is(err, os.ErrClosed) || errors.Is(err, unix.EBADF) || errors.Is(err, unix.EBADFD) {
@@ -164,8 +186,9 @@ func (t *Tun) WritePacket(ctx context.Context, packet []byte) error {
 	b := t.writeBuffer[:10+len(packet)]
 	clear(b[:10])
 	copy(b[10:], packet)
-	stop := context.AfterFunc(ctx, func() { t.device.Close() })
-	defer stop()
+	if stop := t.interrupt(ctx); stop != nil {
+		defer stop()
+	}
 	n, err := t.device.Write([][]byte{b}, 10)
 	// The pinned Linux implementation returns bytes (including virtio's
 	// header), despite Device.Write's comment saying packets. Treat a real

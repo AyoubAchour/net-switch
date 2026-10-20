@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -196,4 +197,18 @@ func readProcLink(path string) (string, error) {
 		return "", errKernelFileLimit
 	}
 	return string(b[:n]), nil
+}
+
+// Descriptor links need only the kernel's short socket:[inode] form. Reading
+// relative to an already opened fd directory avoids resolving /proc/PID/fd
+// again for every descriptor in a shared scan. Long ordinary-file links are
+// deliberately ignored; they can never be socket identities.
+func socketInodeAt(dir int, name string) (uint32, bool) {
+	var b [64]byte
+	n, err := unix.Readlinkat(dir, name, b[:])
+	if err != nil || n >= len(b) || n < 10 || !bytes.HasPrefix(b[:n], []byte("socket:[")) || b[n-1] != ']' {
+		return 0, false
+	}
+	inode, err := strconv.ParseUint(string(b[8:n-1]), 10, 32)
+	return uint32(inode), err == nil
 }

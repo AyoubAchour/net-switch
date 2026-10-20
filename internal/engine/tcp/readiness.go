@@ -115,6 +115,10 @@ func (w *relayWorkers) run() {
 				r.scheduled = false
 			}
 			w.mu.Unlock()
+			// A continuously readable connection must not keep every P until
+			// Go's preemption interval (longer than the owner lookup budget).
+			// Yield between bounded I/O quanta so admission and TUN ingress run.
+			runtime.Gosched()
 		}
 	}
 }
@@ -212,7 +216,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool) (bool, error) {
 	}
 	// A busy flow yields after a bounded amount of work, so it cannot starve
 	// other readiness events, the ordered TUN reader, or process lookups.
-	for moved := 0; moved < 256<<10; {
+	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
 		if d.buffer == nil && !d.eof {
 			buffer := relayBuffers.Get().(*[]byte)
 			n, err := r.read(up, *buffer)
@@ -266,13 +270,19 @@ func (r *readyRelay) direction(d *relayDirection, up bool) (bool, error) {
 				if err := r.remote.CloseWrite(); err != nil {
 					return false, err
 				}
-				return false, stackError(r.c.ep.Shutdown(tcpip.ShutdownRead))
+				// Receive shutdown is cleanup, as in Splice. A peer's FIN can
+				// already have moved the endpoint into TIME_WAIT, where another
+				// ShutdownRead reports not-connected. It must not abort the
+				// lost-final-ACK protection we just established.
+				r.c.ep.Shutdown(tcpip.ShutdownRead)
+				return false, nil
 			}
 			if err := stackError(r.c.ep.Shutdown(tcpip.ShutdownWrite)); err != nil {
 				return false, err
 			}
 			r.c.releaseAdmission()
-			return false, r.remote.CloseRead()
+			r.remote.CloseRead()
+			return false, nil
 		}
 	}
 	return true, nil
