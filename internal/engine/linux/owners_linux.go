@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -55,50 +56,55 @@ type fdWindow struct {
 	identity   *ownerValidation
 }
 type Owners struct {
-	queries              diagPool
-	warmed               bool
-	lookupErrors         [4]atomic.Uint64
-	cgroupStats          [3]atomic.Uint64
-	sharedScans          atomic.Uint64
-	assistedScans        atomic.Uint64
-	targetedProbes       atomic.Uint64
-	metadataPasses       atomic.Uint64
-	sharedMetadata       atomic.Uint64
-	sharedScopes         atomic.Uint64
-	holderTimeouts       atomic.Uint64
-	timeoutPhases        [lookupPhases]lookupPhaseCounter
-	timeoutWaitRequested atomic.Uint64
-	timeoutWaitMaximum   atomic.Uint64
-	lastLookupError      atomic.Pointer[string]
-	mu                   sync.Mutex
-	cgroupMu             sync.RWMutex
-	recentMu             sync.RWMutex
-	cgroups              map[uint64]string
-	scopeReads           [64]atomic.Pointer[scopePIDSnapshot]
-	recent               map[uint32]*recentOwners
-	index                [ownerIndexShards]ownerIndex
-	indexSeed            maphash.Seed
-	windows              map[uint32]fdWindow
-	ambiguousPorts       map[uint16]time.Time
+	queries                           diagPool
+	scanSlots                         chan struct{}
+	scanQueueWaits, scanQueueTimeouts atomic.Uint64
+	scanQueueNanos, scanQueueMaximum  atomic.Uint64
+	warmed                            bool
+	lookupErrors                      [4]atomic.Uint64
+	cgroupStats                       [3]atomic.Uint64
+	sharedScans                       atomic.Uint64
+	assistedScans                     atomic.Uint64
+	targetedProbes                    atomic.Uint64
+	metadataPasses                    atomic.Uint64
+	sharedMetadata                    atomic.Uint64
+	sharedScopes                      atomic.Uint64
+	holderTimeouts                    atomic.Uint64
+	timeoutPhases                     [lookupPhases]lookupPhaseCounter
+	timeoutWaitRequested              atomic.Uint64
+	timeoutWaitMaximum                atomic.Uint64
+	lastLookupError                   atomic.Pointer[string]
+	mu                                sync.Mutex
+	cgroupMu                          sync.RWMutex
+	recentMu                          sync.RWMutex
+	cgroups                           map[uint64]string
+	scopeReads                        [64]atomic.Pointer[scopePIDSnapshot]
+	recent                            map[uint32]*recentOwners
+	index                             [ownerIndexShards]ownerIndex
+	indexSeed                         maphash.Seed
+	windows                           map[uint32]fdWindow
+	ambiguousPorts                    map[uint16]time.Time
 	// Fault callbacks are assigned only by the acceptance build.
 	fault        func(context.Context) error
 	destroyFault func(context.Context, socketRow, func())
 }
 
 type lookupStats struct {
-	Timeout, Missing, Ambiguous, Other             uint64
-	CgroupHints, CgroupResolved, CgroupPopulated   uint64
-	LastError                                      string
-	MetadataRejected                               uint64
-	LastMetadataError                              string
-	SharedScans                                    uint64
-	AssistedScans                                  uint64
-	TargetedProbes                                 uint64
-	MetadataPasses, SharedMetadata                 uint64
-	SharedScopes                                   uint64
-	HolderTimeouts                                 uint64
-	TimeoutStages                                  map[string]lookupPhaseStat
-	TimeoutWaitRequestedNanos, TimeoutMaxWaitNanos uint64
+	Timeout, Missing, Ambiguous, Other                                   uint64
+	CgroupHints, CgroupResolved, CgroupPopulated                         uint64
+	LastError                                                            string
+	MetadataRejected                                                     uint64
+	LastMetadataError                                                    string
+	SharedScans                                                          uint64
+	AssistedScans                                                        uint64
+	TargetedProbes                                                       uint64
+	MetadataPasses, SharedMetadata                                       uint64
+	SharedScopes                                                         uint64
+	HolderTimeouts                                                       uint64
+	TimeoutStages                                                        map[string]lookupPhaseStat
+	TimeoutWaitRequestedNanos, TimeoutMaxWaitNanos                       uint64
+	ScanConcurrency                                                      int
+	ScanQueueWaits, ScanQueueTimeouts, ScanQueueNanos, ScanQueueMaxNanos uint64
 }
 
 func (o *Owners) Stats() any {
@@ -110,6 +116,9 @@ func (o *Owners) Stats() any {
 	s.TargetedProbes = o.targetedProbes.Load()
 	s.MetadataPasses, s.SharedMetadata = o.metadataPasses.Load(), o.sharedMetadata.Load()
 	s.SharedScopes = o.sharedScopes.Load()
+	s.ScanConcurrency = cap(o.scanSlots)
+	s.ScanQueueWaits, s.ScanQueueTimeouts = o.scanQueueWaits.Load(), o.scanQueueTimeouts.Load()
+	s.ScanQueueNanos, s.ScanQueueMaxNanos = o.scanQueueNanos.Load(), o.scanQueueMaximum.Load()
 	s.HolderTimeouts = o.holderTimeouts.Load()
 	s.TimeoutWaitRequestedNanos = o.timeoutWaitRequested.Load()
 	s.TimeoutMaxWaitNanos = o.timeoutWaitMaximum.Load()
@@ -187,6 +196,7 @@ func NewOwners() *Owners {
 	// lock. Small workloads need not retain and scan tens of MiB of empty
 	// index space, and a growing shard cannot stall every other lookup.
 	o := &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32]*recentOwners, 64), windows: make(map[uint32]fdWindow, 256), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
+	o.scanSlots = make(chan struct{}, max(2, min(16, runtime.GOMAXPROCS(0)*2)))
 	for i := range o.index {
 		o.index[i].inodes = make(map[uint32]inodeHolders, 16)
 		o.index[i].waiters = make(map[uint32]*inodeWaiter, 16)
@@ -741,6 +751,54 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 				return nil
 			}
 		}
+		slotHeld := false
+		releaseSlot := func() {
+			if slotHeld {
+				o.endScan()
+				slotHeld = false
+			}
+		}
+		defer releaseSlot()
+		takeSlot := func() error {
+			for {
+				// Once an owner is validated, do not queue behind unrelated
+				// scans. finish still rechecks every published conflicting hint.
+				if result.AppID != "" {
+					select {
+					case o.scanSlots <- struct{}{}:
+						slotHeld = true
+					default:
+					}
+					return nil
+				}
+				var ready <-chan struct{}
+				if notice != nil {
+					ready = notice.ready
+				}
+				started := time.Now()
+				acquired, err := o.beginScan(ctx, ready)
+				timing.add(phaseScanQueue, time.Since(started))
+				if err != nil {
+					return err
+				}
+				if acquired {
+					slotHeld = true
+					return nil
+				}
+				if err := checkHints(); err != nil {
+					return err
+				}
+				if result.AppID != "" {
+					return nil
+				}
+			}
+		}
+		if err := takeSlot(); err != nil {
+			return err
+		}
+		if !slotHeld {
+			return nil
+		}
 		o.mu.Lock()
 		if len(o.windows) > 4096 {
 			for old, state := range o.windows {
@@ -759,6 +817,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		if shared() {
 			o.mu.Unlock()
 			o.sharedScans.Add(1)
+			releaseSlot()
 			return o.indexed(r.inode).visit(accept)
 		}
 		assist := false
@@ -766,6 +825,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		for current.scanning != nil {
 			if result.AppID != "" {
 				o.mu.Unlock()
+				releaseSlot()
 				return o.indexed(r.inode).visit(accept)
 			}
 			// Keep enough of the caller's budget for a targeted pass. At most
@@ -799,10 +859,17 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			scanWait += elapsed
 			timing.add(phaseScannerWait, elapsed)
 			timing.waitMaximum = max(timing.waitMaximum, elapsed)
+			releaseSlot()
 			if err := checkHints(); err != nil {
 				return err
 			}
 			if result.AppID != "" || expired() {
+				return nil
+			}
+			if err := takeSlot(); err != nil {
+				return err
+			}
+			if !slotHeld {
 				return nil
 			}
 			o.mu.Lock()
@@ -810,6 +877,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			if shared() {
 				o.mu.Unlock()
 				o.sharedScans.Add(1)
+				releaseSlot()
 				return o.indexed(r.inode).visit(accept)
 			}
 			if current.scanning != nil && current.assisting != nil && !time.Now().Before(assistAfter) {
@@ -856,6 +924,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 				}
 				timing.add(phaseDescriptors, time.Since(probeStarted))
 				o.publish(remember)
+				releaseSlot()
 				if err := checkHints(); err != nil {
 					return err
 				}
@@ -890,6 +959,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 				scanErr = o.indexed(r.inode).visit(accept)
 			}
 		}()
+		// Process-root metadata can involve a foreign filesystem. It must
+		// never retain one of the bounded kernel-descriptor scanner slots.
+		defer releaseSlot()
 		// Defer order: publish, release the scanner slot, close the directory,
 		// then validate identity. The first defer also covers unclaimed slots.
 		defer closeDirectory()

@@ -27,6 +27,7 @@ const (
 	phaseScannerWait
 	phaseDescriptors
 	phaseValidation
+	phaseScanQueue
 	phaseOther
 	lookupPhases
 )
@@ -34,7 +35,7 @@ const (
 var lookupPhaseNames = [lookupPhases]string{
 	"index", "scope-map", "scope-scratch", "scope-open", "scope-stat",
 	"scope-read", "scope-close", "scope-parse", "scope-rank", "process-open",
-	"process-start", "process-close", "scanner-wait", "descriptors", "validation", "other",
+	"process-start", "process-close", "scanner-wait", "descriptors", "validation", "scan-queue", "other",
 }
 
 type lookupTiming struct {
