@@ -213,6 +213,9 @@ func (s *Session) Cleanup(ctx context.Context) (err error) {
 	if s.closed {
 		return errors.New("journal session closed")
 	}
+	// A failed read or validation also makes ownership uncertain. Keep Create
+	// fenced until a complete recovery succeeds, including this initial read.
+	s.failed = true
 	records, err := s.j.live()
 	if err != nil {
 		return err
@@ -230,7 +233,6 @@ func (s *Session) Cleanup(ctx context.Context) (err error) {
 	// A crash before or during this mark batch leaves the original intents.
 	// Recovery repeats the same fingerprint checks and safely skips missing
 	// objects. On a mid-cleanup error, retain marks for the completed prefix.
-	s.failed = true
 	defer func() {
 		if store, compact := s.j.Store.(Compactor); compact {
 			// Until the entire cleanup succeeds, retain the original intents.
