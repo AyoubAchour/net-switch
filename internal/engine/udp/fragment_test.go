@@ -3,6 +3,7 @@ package udp
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"net/netip"
 	"testing"
 
@@ -105,4 +106,35 @@ func TestReorderedIPv4FragmentsValidateAfterReassembly(t *testing.T) {
 		t.Fatal("checksum checked before reassembly")
 	}
 	n.Reconcile(context.Background())
+}
+
+func TestRejectedReassembledIPv4KeepsItsIDAndValidHeader(t *testing.T) {
+	n, c, _, out, _, _ := setup(t, &testfake.Owners{Value: owner})
+	c.ResolveErr = errors.New("blocked line")
+	link := ns.NewLink()
+	s, err := ns.New(link, ns.DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Wait()
+	defer s.Close()
+	s.SetTransportProtocolHandler(gu.ProtocolNumber, n.Handle)
+	want := packet.UDP(local, dest, []byte("0123456789abcdef"))
+	binary.BigEndian.PutUint16(want[4:], 13264)
+	want[10], want[11] = 0, 0
+	binary.BigEndian.PutUint16(want[10:], ^packet.Sum(want[:20], 0))
+	fragment := func(from, to, flags int) []byte {
+		b := append(append([]byte(nil), want[:20]...), want[20+from:20+to]...)
+		binary.BigEndian.PutUint16(b[2:], uint16(len(b)))
+		binary.BigEndian.PutUint16(b[6:], uint16(flags))
+		b[10], b[11] = 0, 0
+		binary.BigEndian.PutUint16(b[10:], ^packet.Sum(b[:20], 0))
+		return b
+	}
+	for _, b := range [][]byte{fragment(16, 24, 2), fragment(0, 16, 0x2000)} {
+		p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b)})
+		link.InjectInbound(header.IPv4ProtocolNumber, p)
+		p.DecRef()
+	}
+	checkExactQuote(t, await(t, out), want, 20, false)
 }
