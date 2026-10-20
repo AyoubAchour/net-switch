@@ -60,6 +60,10 @@ type Options struct {
 	CheckUpdate            func(context.Context) (*updates.Offer, error)
 	Tracker                AppTracker
 	Crash                  *crashnet.Net
+	// ServiceMode changes durability and lifetime, while the old CI launcher
+	// remains a behavior oracle until the engine swap.
+	ServiceMode bool
+	BootID      string
 }
 type AppTracker interface {
 	Reset()
@@ -143,6 +147,7 @@ type Core struct {
 	closureRetries                               map[string]closureRetry
 	applyMu                                      sync.Mutex
 	saveMu                                       sync.Mutex
+	failureTimes                                 []int64
 }
 
 func New(ctx context.Context, o Options) (*Core, error) {
@@ -182,6 +187,9 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	c := &Core{op: o, ctx: ctx, cancel: cancel, values: o.Settings.Values(), lanes: map[string]*lane{}, adapters: []map[string]any{}, routes: []map[string]any{}, meters: map[string]meter{}, tracker: apps.NewTracker(), outside: apps.NewOutsideTracker(), usage: usage.New(o.Location), exhausted: map[string]bool{}, closePending: map[string]bool{}, connections: map[string]int{}, info: map[string]map[string]any{}, events: []map[string]any{}, wanted: true, lastStatus: "off"}
+	if o.ServiceMode {
+		c.wanted = false
+	}
 	if o.Tracker != nil {
 		c.tracker = o.Tracker
 	}
@@ -229,6 +237,38 @@ func New(ctx context.Context, o Options) (*Core, error) {
 			cancel()
 			return nil, fmt.Errorf("read pending closures: %w", err)
 		}
+		if o.ServiceMode {
+			c.wanted = o.Journal.Values()["bootId"] == o.BootID && o.BootID != "" && o.Journal.Values()["wanted"] == true
+			raw := o.Journal.RawValues()
+			if b := raw["desired"]; len(b) != 0 && string(b) != "null" {
+				var desired engine.Revision
+				if err := json.Unmarshal(b, &desired); err != nil {
+					cancel()
+					return nil, err
+				}
+				c.pendingRevision = &desired
+				c.pendingInstance = js.Text(o.Journal.Values()["engineInstanceId"])
+				if restore, ok := o.Engine.(interface{ Restore(*engine.Revision) }); ok {
+					restore.Restore(&desired)
+				}
+			}
+			if b := raw["settings"]; len(b) != 0 && string(b) != "null" {
+				var saved map[string]json.RawMessage
+				if err := json.Unmarshal(b, &saved); err != nil {
+					cancel()
+					return nil, err
+				}
+				changes := map[string]any{}
+				for k, v := range saved {
+					changes[k] = v
+				}
+				if c.values, err = o.Settings.Update(changes); err != nil {
+					cancel()
+					return nil, err
+				}
+			}
+			_ = json.Unmarshal(raw["failures"], &c.failureTimes)
+		}
 	}
 	c.syncLanesLocked()
 	return c, nil
@@ -250,6 +290,10 @@ func (c *Core) pinsLocked() apps.Pins {
 	return p
 }
 func (c *Core) save(changes map[string]any, remove ...string) error {
+	if c.op.ServiceMode {
+		c.applyMu.Lock()
+		defer c.applyMu.Unlock()
+	}
 	c.saveMu.Lock()
 	defer c.saveMu.Unlock()
 	if changes == nil {
@@ -257,6 +301,31 @@ func (c *Core) save(changes map[string]any, remove ...string) error {
 	}
 	for _, k := range remove {
 		changes[k] = settings.Delete
+	}
+	if c.op.ServiceMode {
+		c.mu.Lock()
+		old := c.values
+		next := map[string]any{}
+		for k, v := range old {
+			next[k] = v
+		}
+		for k, v := range changes {
+			if _, deleted := v.(struct{}); deleted {
+				delete(next, k)
+			} else {
+				next[k] = v
+			}
+		}
+		c.values = next
+		p := c.policyLocked()
+		intents := append([]closureIntent{}, c.closures...)
+		c.mu.Unlock()
+		if _, err := c.persistRevision(p, intents); err != nil {
+			c.mu.Lock()
+			c.values = old
+			c.mu.Unlock()
+			return err
+		}
 	}
 	v, err := c.op.Settings.Update(changes)
 	if err != nil {
@@ -433,6 +502,16 @@ func (c *Core) statusLocked(s engine.Snapshot) {
 	}
 	if s.Status == "error" && c.wanted && !c.quitting {
 		d := []int64{5000, 15000, 30000, 60000}
+		if c.op.ServiceMode {
+			d = []int64{1000, 2000, 5000, 30000}
+			recent := c.failureTimes[:0]
+			for _, at := range c.failureTimes {
+				if at > c.now()-10*60000 {
+					recent = append(recent, at)
+				}
+			}
+			c.failureTimes = append(recent, c.now())
+		}
 		c.retryAt = c.now() + d[min(c.retryAttempts, len(d)-1)]
 		c.retryAttempts++
 	}
@@ -528,6 +607,17 @@ func (c *Core) CheckElevation(ctx context.Context) {
 func (c *Core) Start(ctx context.Context) error {
 	ctx = c.ctx
 	return c.startQueue.Do(ctx, func() error {
+		if c.op.ServiceMode {
+			c.mu.Lock()
+			blocked := len(c.failureTimes) >= 5
+			c.mu.Unlock()
+			if blocked {
+				return nil
+			}
+			if err := c.ApplyPolicy(ctx); err != nil {
+				return err
+			}
+		}
 		c.mu.Lock()
 		if !c.wanted || c.quitting {
 			c.mu.Unlock()
@@ -549,6 +639,11 @@ func (c *Core) Start(ctx context.Context) error {
 			c.mu.Lock()
 			c.statusLocked(c.op.Engine.Snapshot())
 			c.mu.Unlock()
+			if c.op.ServiceMode {
+				c.applyMu.Lock()
+				_ = c.persistJournal()
+				c.applyMu.Unlock()
+			}
 			return err
 		}
 		c.mu.Lock()
@@ -578,8 +673,17 @@ func (c *Core) Routing(ctx context.Context, on bool) error {
 	if on {
 		c.retryAttempts = 0
 		c.retryAt = 0
+		c.failureTimes = nil
 	}
 	c.mu.Unlock()
+	if c.op.ServiceMode {
+		c.applyMu.Lock()
+		err := c.persistJournal()
+		c.applyMu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
 	if on {
 		return c.Start(ctx)
 	}
@@ -595,6 +699,14 @@ func (c *Core) Routing(ctx context.Context, on bool) error {
 		c.mu.Unlock()
 		return err
 	})
+}
+
+// ResumeRouting preserves the crash budget when SCM restarts Control.
+func (c *Core) ResumeRouting(ctx context.Context) error {
+	c.mu.Lock()
+	c.wanted = true
+	c.mu.Unlock()
+	return c.Start(ctx)
 }
 func (c *Core) restart(ctx context.Context) error {
 	ctx = c.ctx
@@ -797,6 +909,9 @@ func (c *Core) Supervise(ctx context.Context) error {
 		return nil
 	}
 	ready := (s.Status == "off" || s.Status == "error") && now >= c.retryAt
+	if c.op.ServiceMode && len(c.failureTimes) >= 5 {
+		ready = false
+	}
 	c.mu.Unlock()
 	if ready {
 		return c.Start(ctx)
@@ -830,7 +945,18 @@ func (c *Core) SaveUsage() error {
 func (c *Core) Shutdown(ctx context.Context) error {
 	c.mu.Lock()
 	c.quitting = true
+	if c.op.ServiceMode {
+		c.wanted = false
+	}
 	c.mu.Unlock()
+	if c.op.ServiceMode {
+		c.applyMu.Lock()
+		err := c.persistJournal()
+		c.applyMu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
 	err := c.startQueue.Do(ctx, func() error {
 		c.mu.Lock()
 		if s := c.op.Engine.Snapshot(); s.Status == "on" || s.PID != 0 {

@@ -27,6 +27,10 @@ type Runtime interface {
 	Apply(context.Context, policy.Revision) (policy.Applied, error)
 	Stop(context.Context) error
 }
+type AdapterRuntime interface {
+	AdapterSnapshot() any
+	AdapterRequest(context.Context, Request) (any, error)
+}
 type operation struct {
 	hash   [32]byte
 	result any
@@ -47,6 +51,8 @@ type Server struct {
 	order                       []string
 	clients                     map[*connection]struct{}
 	EventsDropped               atomic.Uint64
+	done                        chan struct{}
+	doneOnce                    sync.Once
 }
 
 func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
@@ -54,7 +60,21 @@ func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
 	if _, err := rand.Read(id[:]); err != nil {
 		panic(err)
 	}
-	return &Server{Instance: hex.EncodeToString(id[:]), now: time.Now, runtime: runtime, table: table, prober: prober, operations: map[string]*operation{}, clients: map[*connection]struct{}{}}
+	s := &Server{Instance: hex.EncodeToString(id[:]), now: time.Now, runtime: runtime, table: table, prober: prober, operations: map[string]*operation{}, clients: map[*connection]struct{}{}, done: make(chan struct{})}
+	if counter, ok := runtime.(interface{ InitialEpoch() uint64 }); ok {
+		s.epoch = counter.InitialEpoch()
+	}
+	return s
+}
+func (s *Server) Done() <-chan struct{} { return s.done }
+func (s *Server) finish()               { s.doneOnce.Do(func() { close(s.done) }) }
+func (s *Server) finishStopped() {
+	s.mu.Lock()
+	stopped := s.stopped
+	s.mu.Unlock()
+	if stopped {
+		s.finish()
+	}
 }
 func (s *Server) fence(r Request) error {
 	if r.Instance != s.Instance || !s.attached || r.Epoch != s.epoch {
@@ -69,6 +89,7 @@ func (s *Server) fence(r Request) error {
 func (s *Server) Handle(ctx context.Context, r Request) Reply {
 	result, err := s.execute(ctx, r)
 	reply := Reply{ID: r.ID, Result: result}
+	reply.stop = r.Method == "stop" && err == nil
 	if err != nil {
 		reply.Result = nil
 		reply.Error = err.Error()
@@ -79,6 +100,10 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 	s.mu.Lock()
 	if r.Method == "hello" {
 		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks"}}
+		if adapter, ok := s.runtime.(AdapterRuntime); ok {
+			v["capabilities"] = []string{"singbox-adapter-v1", "revisions", "lease"}
+			v["adapterSnapshot"] = adapter.AdapterSnapshot()
+		}
 		s.mu.Unlock()
 		return v, nil
 	}
@@ -87,7 +112,14 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 			s.mu.Unlock()
 			return nil, errors.New("attach refused")
 		}
-		s.epoch++
+		next := s.epoch + 1
+		if store, ok := s.runtime.(interface{ SaveEpoch(uint64) error }); ok {
+			if err := store.SaveEpoch(next); err != nil {
+				s.mu.Unlock()
+				return nil, err
+			}
+		}
+		s.epoch = next
 		s.expires = s.now().Add(Lease)
 		s.attached = true
 		s.table.SetEpoch(s.epoch)
@@ -114,6 +146,12 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 	if r.Method == "probe" {
 		s.mu.Unlock()
 		return s.effect(ctx, r, func() (any, error) {
+			if r.Adapter != nil {
+				if adapter, ok := s.runtime.(AdapterRuntime); ok {
+					return adapter.AdapterRequest(ctx, r)
+				}
+				return nil, errors.New("adapter payload is not supported")
+			}
 			if s.prober == nil {
 				return nil, platform.ErrNotYet
 			}
@@ -123,6 +161,12 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		})
 	}
 	defer s.mu.Unlock()
+	if r.Adapter != nil && r.Method != "stop" && r.Method != "renew" {
+		if adapter, ok := s.runtime.(AdapterRuntime); ok {
+			return adapter.AdapterRequest(ctx, r)
+		}
+		return nil, errors.New("adapter payload is not supported")
+	}
 	switch r.Method {
 	case "renew":
 		s.expires = s.now().Add(Lease)
@@ -259,6 +303,7 @@ func (s *Server) CheckLease(ctx context.Context) error {
 	err := s.runtime.Stop(ctx)
 	if err == nil {
 		s.stopped = true
+		s.finish()
 	}
 	return err
 }

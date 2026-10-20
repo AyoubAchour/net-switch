@@ -21,13 +21,22 @@ func (e *ClientError) Error() string { return e.Message }
 func bad(message string) error       { return &ClientError{message} }
 
 type HTTP struct {
-	Core  *Core
-	Port  int
-	Token string
-	Quit  func()
+	Core       *Core
+	Port       int
+	Token      string
+	Quit       func()
+	ValidToken func(string) bool
+	Pair       func(string) (string, error)
+	Asset      func(string, []byte) []byte
 }
 
 func (h *HTTP) sameToken(s string) bool {
+	if h.ValidToken != nil {
+		return h.ValidToken(s)
+	}
+	if s == "" {
+		return false
+	}
 	return len(s) == len(h.Token) && subtle.ConstantTimeCompare([]byte(s), []byte(h.Token)) == 1
 }
 func sendJSON(w http.ResponseWriter, status int, v any) {
@@ -59,9 +68,30 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Path
+	if path == "/api/pair" && r.Method == "POST" && h.Pair != nil {
+		b, err := io.ReadAll(io.LimitReader(r.Body, 129))
+		var input struct {
+			Code string `json:"code"`
+		}
+		if err != nil || len(b) > 128 || json.Unmarshal(b, &input) != nil {
+			sendJSON(w, 400, map[string]any{"error": "Enter the six-digit code shown by Net Switch."})
+			return
+		}
+		token, err := h.Pair(input.Code)
+		if err != nil {
+			sendJSON(w, 401, map[string]any{"error": "The code is invalid or expired. Open Net Switch again for a new code."})
+			return
+		}
+		sendJSON(w, 200, map[string]any{"token": token})
+		return
+	}
 	if path == "/api/icon" {
 		var icon []byte
-		if h.sameToken(r.URL.Query().Get("token")) {
+		token := r.Header.Get("X-Token")
+		if h.ValidToken == nil {
+			token = r.URL.Query().Get("token")
+		}
+		if h.sameToken(token) {
 			h.Core.mu.Lock()
 			info := h.Core.info[apps.AppKey(r.URL.Query().Get("key"))]
 			icon, _ = base64.StdEncoding.DecodeString(js.Text(info["icon"]))
@@ -146,9 +176,15 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, 500, map[string]any{"error": "Something went wrong. Try again."})
 		return
 	}
+	if h.Asset != nil {
+		b = h.Asset(f[0], b)
+	}
 	w.Header().Set("Content-Type", f[1])
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+	if h.ValidToken != nil {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'")
+	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	_, _ = w.Write(b)
 }

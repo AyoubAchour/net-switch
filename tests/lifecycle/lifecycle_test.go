@@ -1,0 +1,522 @@
+// These tests install real services and kill processes. They are deliberately
+// gated to disposable hosted runners, never a developer's live router.
+package lifecycle_test
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/AyoubAchour/net-switch/internal/lifecycle"
+	"github.com/AyoubAchour/net-switch/internal/localipc"
+	"github.com/AyoubAchour/net-switch/internal/service"
+	linuxbox "github.com/AyoubAchour/net-switch/tests/linux/engine/singbox"
+)
+
+func hosted() bool {
+	return os.Getenv("GITHUB_ACTIONS") == "true" && os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted" && os.Getenv("NETSWITCH_LIFECYCLE_CI") == "1"
+}
+func TestMain(m *testing.M) {
+	if handled, code := hostedMain(m); handled {
+		os.Exit(code)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "client" {
+		if !hosted() {
+			os.Exit(2)
+		}
+		os.Exit(clientMain(os.Args[2:]))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "engine-probe" {
+		if !hosted() {
+			os.Exit(2)
+		}
+		os.Exit(probeMain(os.Args[2:]))
+	}
+	os.Exit(m.Run())
+}
+func clientMain(args []string) int {
+	if len(args) > 0 && args[0] == "permissions" {
+		if err := permissionProbe(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if len(args) > 0 && args[0] == "desktop-denied" {
+		if err := desktopDenied(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	statusOnly := len(args) > 0 && args[0] == "status"
+	rpc, err := lifecycle.ConnectDesktop(ctx, statusOnly)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer rpc.Close()
+	scan := bufio.NewScanner(os.Stdin)
+	scan.Buffer(make([]byte, 4096), 1<<20)
+	for scan.Scan() {
+		var request map[string]any
+		if json.Unmarshal(scan.Bytes(), &request) != nil {
+			return 2
+		}
+		var result any
+		err := rpc.Call(ctx, request, &result)
+		out := map[string]any{"result": result}
+		if err != nil {
+			out["error"] = err.Error()
+		}
+		if json.NewEncoder(os.Stdout).Encode(out) != nil {
+			return 1
+		}
+	}
+	return 0
+}
+
+type actor interface {
+	command(string, ...string) *exec.Cmd
+	id() string
+	close()
+}
+type client struct {
+	cmd    *exec.Cmd
+	input  io.WriteCloser
+	output *bufio.Reader
+	stderr bytes.Buffer
+}
+
+func openClient(t *testing.T, user actor, status bool) *client {
+	t.Helper()
+	exe, _ := os.Executable()
+	args := []string{"client"}
+	if status {
+		args = append(args, "status")
+	}
+	c := &client{cmd: user.command(exe, args...)}
+	var err error
+	c.input, err = c.cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := c.cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.output = bufio.NewReader(out)
+	c.cmd.Stderr = &c.stderr
+	if err = c.cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.input.Close(); _ = c.cmd.Process.Kill(); _ = c.cmd.Wait() })
+	return c
+}
+func (c *client) call(t *testing.T, method string, extra map[string]any) (json.RawMessage, error) {
+	t.Helper()
+	if extra == nil {
+		extra = map[string]any{}
+	}
+	extra["method"] = method
+	if err := json.NewEncoder(c.input).Encode(extra); err != nil {
+		return nil, err
+	}
+	line, err := c.output.ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("client exited: %w: %s", err, c.stderr.String())
+	}
+	var reply struct {
+		Result json.RawMessage `json:"result"`
+		Error  string          `json:"error"`
+	}
+	if err = json.Unmarshal(line, &reply); err != nil {
+		return nil, err
+	}
+	if reply.Error != "" {
+		return nil, fmt.Errorf("%s", reply.Error)
+	}
+	return reply.Result, nil
+}
+func (c *client) must(t *testing.T, method string, extra map[string]any, out any) {
+	t.Helper()
+	b, err := c.call(t, method, extra)
+	if err != nil {
+		t.Fatal(method, err)
+	}
+	if out != nil {
+		if err := json.Unmarshal(b, out); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type status struct {
+	Routing    string  `json:"routing"`
+	Instance   string  `json:"engineInstanceId"`
+	ControlPID uint32  `json:"controlPID"`
+	Error      *string `json:"error"`
+}
+
+func getStatus(t *testing.T, c *client) status {
+	t.Helper()
+	var s status
+	c.must(t, "status", nil, &s)
+	return s
+}
+func wait(t *testing.T, label string, duration time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(duration)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatal("timeout: " + label)
+}
+func api(t *testing.T, url, token, method, route, body string) (int, []byte) {
+	t.Helper()
+	r, err := http.NewRequest(method, url+strings.TrimPrefix(route, "/"), strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("X-Token", token)
+	r.Header.Set("Content-Type", "application/json")
+	response, err := (&http.Client{Timeout: 20 * time.Second}).Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if len(response.Cookies()) != 0 {
+		t.Fatal("HTTP emitted a cookie")
+	}
+	b, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode, b
+}
+func fixture(t *testing.T, dir string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		path, err := filepath.Abs("../../engine/sing-box.exe")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	version, err := linuxbox.PinnedVersion("../../packaging/versions.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, err := linuxbox.LookupPin("../../tests/linux/sing-box-linux.json", version, runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	b, err := linuxbox.Download(ctx, pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = linuxbox.Extract(b, filepath.Join(dir, "adapter")); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "adapter", "sing-box")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(content)
+	if err = os.WriteFile(filepath.Join(dir, "adapter", "SHA256SUMS.txt"), []byte(hex.EncodeToString(hash[:])+"  sing-box\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+func TestRealServices(t *testing.T) {
+	if !hosted() {
+		t.Skip("real services run only on disposable hosted runners")
+	}
+	if !lifecycle.Administrator() {
+		t.Fatal("lifecycle harness must be elevated")
+	}
+	dir := os.Getenv("NETSWITCH_LIFECYCLE_DIR")
+	if !filepath.IsAbs(dir) {
+		t.Fatal("missing executable directory")
+	}
+	data := testData()
+	if err := lifecycle.PrepareDirectory(data); err != nil {
+		t.Fatal(err)
+	}
+	owner, other := newActor(t, "NSLifecycleOwner"), newActor(t, "NSLifecycleOther")
+	defer owner.close()
+	defer other.close()
+	adapter := fixture(t, dir)
+	config := lifecycle.Config{Directory: dir, Data: data, Adapter: adapter, Mode: "proxy"}
+	if err := lifecycle.Save(filepath.Join(data, "service-config.json"), config); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Install(service.Config{Directory: dir, Data: data}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	defer cancel()
+	t.Cleanup(func() {
+		cleanup, stop := context.WithTimeout(context.Background(), 45*time.Second)
+		defer stop()
+		if err := service.Uninstall(cleanup); err != nil {
+			t.Log("service cleanup:", err)
+		}
+		for _, name := range []string{"NetSwitch.log", "NetSwitchEngine.log"} {
+			if b, err := os.ReadFile(filepath.Join(data, name)); err == nil {
+				t.Logf("%s:\n%s", name, b)
+			}
+		}
+	})
+	if err := service.Start(ctx, service.Control); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("pending-enrollment-and-sign-in", func(t *testing.T) {
+		readonly := openClient(t, other, true)
+		s := getStatus(t, readonly)
+		if s.Routing != "off" {
+			t.Fatal("routing started before owner enrollment", s)
+		}
+		if _, err := readonly.call(t, "routing", map[string]any{"on": true}); err == nil {
+			t.Fatal("pending status client controlled routing")
+		}
+	})
+	if err := service.Stop(ctx, service.Control); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lifecycle.Enroll(ctx, data, owner.id()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.SetOwner(owner.id()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx, service.Control); err != nil {
+		t.Fatal(err)
+	}
+	c := openClient(t, owner, false)
+	var session struct {
+		Token string `json:"token"`
+		URL   string `json:"url"`
+	}
+	c.must(t, "session", nil, &session)
+	t.Run("non-owner-and-native-permissions", func(t *testing.T) {
+		readonly := openClient(t, other, true)
+		_ = getStatus(t, readonly)
+		for _, method := range []string{"session", "pair", "routing", "signin"} {
+			if _, err := readonly.call(t, method, nil); err == nil {
+				t.Fatal("status client accepted", method)
+			}
+		}
+		verifyPermissions(t, owner, other)
+	})
+	t.Run("pairing-and-bearer", func(t *testing.T) {
+		var code string
+		c.must(t, "pair", nil, &code)
+		status, _ := api(t, session.URL, "", "GET", "/api/state", "")
+		if status != 401 {
+			t.Fatal("anonymous API accepted", status)
+		}
+		status, b := api(t, session.URL, "", "POST", "/api/pair", `{"code":"`+code+`"}`)
+		if status != 200 {
+			t.Fatalf("pairing failed %d", status)
+		}
+		var paired struct {
+			Token string `json:"token"`
+		}
+		if err := json.Unmarshal(b, &paired); err != nil {
+			t.Fatal(err)
+		}
+		if len(paired.Token) != 64 {
+			t.Fatal("token is not 256 bits")
+		}
+		status, _ = api(t, session.URL, "", "POST", "/api/pair", `{"code":"`+code+`"}`)
+		if status != 401 {
+			t.Fatal("code reused")
+		}
+		status, _ = api(t, session.URL, paired.Token, "GET", "/api/state", "")
+		if status != 200 {
+			t.Fatal("paired bearer refused")
+		}
+	})
+	c.must(t, "signin", nil, nil)
+	wait(t, "routing on", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+	first := getStatus(t, c)
+	t.Run("desktop-death-keeps-routing", func(t *testing.T) {
+		desktop := owner.command(filepath.Join(dir, binary("netswitch-desktop")), "--background")
+		if err := desktop.Start(); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(2 * time.Second)
+		if err := desktop.Process.Kill(); err != nil {
+			t.Fatal(err)
+		}
+		_ = desktop.Wait()
+		if s := getStatus(t, c); s.Routing != "on" || s.Instance != first.Instance {
+			t.Fatal("desktop death changed engine", s)
+		}
+	})
+	t.Run("control-crash-reattaches", func(t *testing.T) {
+		old, err := service.Query(service.Control)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engine, err := service.Query(service.Engine)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kill(t, old.PID)
+		wait(t, "SCM/systemd Control recovery", 25*time.Second, func() bool {
+			s, err := service.Query(service.Control)
+			return err == nil && s.Running && s.PID != old.PID
+		})
+		c = openClient(t, owner, false)
+		c.must(t, "session", nil, &session)
+		wait(t, "engine reattach", 10*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+		s := getStatus(t, c)
+		engineAfter, err := service.Query(service.Engine)
+		if err != nil || s.Instance != first.Instance || engineAfter.PID != engine.PID {
+			t.Fatal("Control restart replaced engine", s, err)
+		}
+	})
+	t.Run("stale-controller-fenced", func(t *testing.T) { engineProbe(t, dir, data, "fence") })
+	wait(t, "Control reattaches after fencing", 15*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+	t.Run("engine-crash-recovers", func(t *testing.T) {
+		engine, err := service.Query(service.Engine)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := getStatus(t, c)
+		kill(t, engine.PID)
+		wait(t, "new engine instance", 40*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
+	})
+	t.Run("explicit-stop-acknowledged", func(t *testing.T) {
+		c.must(t, "routing", map[string]any{"on": false}, nil)
+		wait(t, "engine service stopped", 10*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
+		if getStatus(t, c).Routing != "off" {
+			t.Fatal("off was not published")
+		}
+		c.must(t, "routing", map[string]any{"on": true}, nil)
+		wait(t, "restart after explicit stop", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+	})
+	t.Run("lease-lapse-fails-open", func(t *testing.T) {
+		restore := disableRecovery(t)
+		defer restore()
+		control, err := service.Query(service.Control)
+		if err != nil {
+			t.Fatal(err)
+		}
+		engine, err := service.Query(service.Engine)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kill(t, control.PID)
+		time.Sleep(2 * time.Second)
+		still, err := service.Query(service.Engine)
+		if err != nil || still.PID != engine.PID || !still.Running {
+			t.Fatal("engine died immediately with Control", err)
+		}
+		wait(t, "30-second lease cleanup", 40*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
+	})
+	t.Run("reboot-like-restart-waits-for-sign-in", func(t *testing.T) {
+		// Model a new boot while keeping both durable journals, rather than
+		// confusing an ordinary same-boot Control recovery with a reboot.
+		var journal map[string]any
+		if err := lifecycle.Read(filepath.Join(data, "control-journal.json"), &journal); err != nil {
+			t.Fatal(err)
+		}
+		journal["bootId"] = "previous-boot"
+		if err := lifecycle.Save(filepath.Join(data, "control-journal.json"), journal); err != nil {
+			t.Fatal(err)
+		}
+		if err := service.Start(ctx, service.Control); err != nil {
+			t.Fatal(err)
+		}
+		c = openClient(t, owner, false)
+		if getStatus(t, c).Routing != "off" {
+			t.Fatal("routing started without sign-in")
+		}
+		c.must(t, "signin", nil, nil)
+		wait(t, "sign-in restores routing", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+	})
+	t.Run("clean-service-stop", func(t *testing.T) {
+		if err := service.Stop(ctx, service.Control); err != nil {
+			t.Fatal(err)
+		}
+		wait(t, "clean engine exit", 10*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
+	})
+}
+func binary(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
+func kill(t *testing.T, pid uint32) {
+	t.Helper()
+	if pid == 0 {
+		t.Fatal("refusing to kill PID 0")
+	}
+	p, err := os.FindProcess(int(pid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = p.Kill(); err != nil {
+		t.Fatal(err)
+	}
+}
+func probe(ctx context.Context) error {
+	endpoint := localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine}
+	c, err := localipc.Dial(ctx, endpoint)
+	if err != nil {
+		return err
+	}
+	rpc := lifecycle.NewRPC(c)
+	defer rpc.Close()
+	var hello struct {
+		Instance string `json:"engineInstanceId"`
+	}
+	if err = rpc.Call(ctx, map[string]any{"method": "hello"}, &hello); err != nil {
+		return err
+	}
+	var first, second struct {
+		Epoch uint64 `json:"epoch"`
+	}
+	for _, out := range []any{&first, &second} {
+		if err = rpc.Call(ctx, map[string]any{"method": "attach", "engineInstanceId": hello.Instance}, out); err != nil {
+			return err
+		}
+	}
+	if second.Epoch != first.Epoch+1 {
+		return fmt.Errorf("engine did not issue consecutive epochs")
+	}
+	for _, method := range []string{"renew", "start", "apply", "stop", "closeFlows"} {
+		if err = rpc.Call(ctx, map[string]any{"method": method, "engineInstanceId": hello.Instance, "epoch": first.Epoch}, nil); err == nil {
+			return fmt.Errorf("stale %s accepted", method)
+		}
+	}
+	if err = rpc.Call(ctx, map[string]any{"method": "renew", "engineInstanceId": "wrong-instance", "epoch": second.Epoch}, nil); err == nil {
+		return fmt.Errorf("wrong instance accepted")
+	}
+	return rpc.Call(ctx, map[string]any{"method": "renew", "engineInstanceId": hello.Instance, "epoch": second.Epoch}, nil)
+}

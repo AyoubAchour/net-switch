@@ -1,0 +1,19 @@
+:root { color-scheme: light dark; font-family: "Segoe UI", system-ui, sans-serif; color: #282a2d; background: #f7f8fa; }
+body { margin: 0; min-height: 100svh; display: grid; place-items: center; }
+main { width: min(24rem, calc(100% - 3rem)); padding-block: 3rem; }
+h1 { font-size: 1.6rem; line-height: 1.25; margin-block: 1rem; font-weight: 600; }
+p { line-height: 1.5; }
+form { margin-block: 2rem; }
+label { display: block; font-weight: 600; margin-bottom: .5rem; }
+input { display: block; box-sizing: border-box; width: 100%; padding: .75rem; font: inherit; font-size: 1.5rem; letter-spacing: .25em; border: 1px solid #737780; border-radius: .4rem; background: #fff; color: inherit; }
+button { font: inherit; font-weight: 600; padding: .75rem 1.25rem; border: 0; border-radius: .4rem; background: #285ba8; color: #fff; cursor: pointer; }
+button:disabled { opacity: .65; cursor: wait; }
+:focus-visible { outline: 3px solid #497ccb; outline-offset: 3px; }
+#help, .footnote { color: #555b65; font-size: .9rem; }
+#error { color: #a32525; min-height: 1.5em; }
+@media (prefers-color-scheme: dark) {
+  :root { color: #eeeef0; background: #202124; }
+  input { background: #292b2e; border-color: #868b96; }
+  #help, .footnote { color: #b8bcc5; }
+  #error { color: #ffabab; }
+}

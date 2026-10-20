@@ -31,21 +31,37 @@ type closureRetry struct {
 // All journal writes happen under applyMu, only when a revision or intent
 // changes. Memory remains authoritative if the recovery disk is unavailable;
 // stopping a lane switch would leave traffic on a dead or exhausted line.
-func (c *Core) persistJournal() {
+func (c *Core) persistJournal() error {
 	if c.op.Journal == nil {
-		return
+		return nil
 	}
 	c.mu.Lock()
 	number := c.revision
 	intents := append([]closureIntent{}, c.closures...)
+	desired, instance := c.pendingRevision, c.pendingInstance
+	values := map[string]any{}
+	for k, v := range c.values {
+		values[k] = v
+	}
+	failures := append([]int64{}, c.failureTimes...)
+	wanted := c.wanted
 	c.mu.Unlock()
-	_, err := c.op.Journal.Update(map[string]any{
+	record := map[string]any{
 		"revision": number, "closures": intents,
 		"desired": settings.Delete, "settings": settings.Delete,
-	})
+	}
+	if c.op.ServiceMode {
+		record["desired"], record["settings"], record["engineInstanceId"], record["failures"] = desired, values, instance, failures
+		record["wanted"], record["bootId"] = wanted, c.op.BootID
+	}
+	_, err := c.op.Journal.Update(record)
 	if err != nil {
+		if c.op.ServiceMode {
+			return fmt.Errorf("control journal was not committed; engine unchanged: %w", err)
+		}
 		c.log("CONTROL JOURNAL WRITE FAILED: %v; routing continues, crash recovery is incomplete", err)
 	}
+	return nil
 }
 
 func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine.Revision, error) {
@@ -63,6 +79,9 @@ func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine
 		return *previous, nil
 	}
 	number := c.revision + 1
+	if c.op.ServiceMode {
+		number = max(c.revision, snapshot.AppliedRevision) + 1
+	}
 	c.mu.Unlock()
 	revision := engine.Revision{Number: number, Hash: hash, Policy: p}
 	applied := snapshot.AppliedRevision
@@ -73,11 +92,17 @@ func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine
 		}
 	}
 	c.mu.Lock()
+	oldNumber, oldPending, oldInstance, oldClosures := c.revision, c.pendingRevision, c.pendingInstance, c.closures
 	c.revision = number
 	c.pendingRevision, c.pendingInstance = &revision, snapshot.Instance
 	c.closures = append([]closureIntent{}, intents...)
 	c.mu.Unlock()
-	c.persistJournal()
+	if err := c.persistJournal(); err != nil {
+		c.mu.Lock()
+		c.revision, c.pendingRevision, c.pendingInstance, c.closures = oldNumber, oldPending, oldInstance, oldClosures
+		c.mu.Unlock()
+		return engine.Revision{}, err
+	}
 	return revision, nil
 }
 
@@ -113,8 +138,7 @@ func (c *Core) completeIntent(id string) error {
 	delete(c.closureRetries, id)
 	delete(c.deferClosures, id)
 	c.mu.Unlock()
-	c.persistJournal()
-	return nil
+	return c.persistJournal()
 }
 func (c *Core) saveIntent(intent closureIntent) error {
 	c.mu.Lock()
@@ -130,8 +154,7 @@ func (c *Core) saveIntent(intent closureIntent) error {
 		c.closures = append(c.closures, intent)
 	}
 	c.mu.Unlock()
-	c.persistJournal()
-	return nil
+	return c.persistJournal()
 }
 
 func closureNeeded(p engine.Policy, line string) bool {

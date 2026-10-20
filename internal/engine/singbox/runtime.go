@@ -632,7 +632,7 @@ func (a *Adapter) verify() error {
 		}
 	}
 	required := []string{filepath.Base(a.o.Executable)}
-	if arch != "arm64" {
+	if runtime.GOOS == "windows" && arch != "arm64" {
 		required = append(required, "libcronet.dll")
 	}
 	for _, name := range required {

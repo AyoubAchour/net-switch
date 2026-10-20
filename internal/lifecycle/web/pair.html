@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect to Net Switch</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="stylesheet" href="/pair.css">
+  <script src="/pair.js" defer></script>
+</head>
+<body>
+  <main>
+    <img src="/favicon.svg" alt="" width="40" height="40">
+    <h1>Connect to Net Switch</h1>
+    <p>Enter the code shown by Net Switch on this computer.</p>
+    <form>
+      <label for="code">Six-digit code</label>
+      <input id="code" name="code" type="text" inputmode="numeric"
+        autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"
+        aria-describedby="help error" required autofocus>
+      <p id="help">The code expires after two minutes.</p>
+      <p id="error" role="alert"></p>
+      <button type="submit">Connect</button>
+    </form>
+    <p class="footnote">Need a new code? Open Net Switch from its shortcut.</p>
+  </main>
+</body>
+</html>

@@ -29,8 +29,10 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/crashnet"
 	"github.com/AyoubAchour/net-switch/internal/engine/singbox"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	"github.com/AyoubAchour/net-switch/internal/lifecycle"
 	win "github.com/AyoubAchour/net-switch/internal/platform/windows"
 	"github.com/AyoubAchour/net-switch/internal/platform/worker"
+	"github.com/AyoubAchour/net-switch/internal/service"
 	"github.com/AyoubAchour/net-switch/internal/settings"
 	"github.com/AyoubAchour/net-switch/internal/updates"
 )
@@ -63,6 +65,13 @@ func (l *logger) append(s string) {
 	_, _ = fmt.Fprintf(f, "%s %s\n", time.Now().UTC().Format(time.RFC3339Nano), s)
 }
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "service" {
+		if err := lifecycle.ServiceCommand(service.Control, os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "worker" {
 		os.Exit(win.Run(os.Args[2:]))
 	}

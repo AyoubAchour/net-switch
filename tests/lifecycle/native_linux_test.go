@@ -1,0 +1,107 @@
+package lifecycle_test
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/AyoubAchour/net-switch/internal/localipc"
+)
+
+type linuxActor struct {
+	name, uid string
+	number    uint32
+}
+
+func (a *linuxActor) id() string { return a.uid }
+func (a *linuxActor) command(exe string, args ...string) *exec.Cmd {
+	cmd := exec.Command(exe, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: a.number, Gid: a.number, NoSetGroups: false}}
+	return cmd
+}
+func (a *linuxActor) close() { _ = exec.Command("userdel", a.name).Run() }
+func newActor(t *testing.T, name string) actor {
+	t.Helper()
+	if b, err := exec.Command("useradd", "--no-create-home", name).CombinedOutput(); err != nil {
+		t.Fatal(err, string(b))
+	}
+	u, err := user.Lookup(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &linuxActor{name: name, uid: u.Uid, number: uint32(n)}
+}
+func testData() string { return "/var/lib/netswitch-lifecycle-ci" }
+func verifyPermissions(t *testing.T, owner, other actor) {
+	t.Helper()
+	exe, _ := os.Executable()
+	for _, actor := range []actor{owner, other} {
+		if b, err := actor.command(exe, "client", "permissions").CombinedOutput(); err != nil {
+			t.Fatal(err, string(b))
+		}
+	}
+	c := openClient(t, other, false)
+	if _, err := c.call(t, "routing", map[string]any{"on": true}); err == nil {
+		t.Fatal("SO_PEERCRED accepted another UID")
+	}
+}
+func permissionProbe() error {
+	if os.Geteuid() == 0 {
+		return errors.New("permission probe ran as root")
+	}
+	info, err := os.Stat(localipc.DefaultPath("desktop"))
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm() != 0666 {
+		return fmt.Errorf("desktop socket mode is %o", info.Mode().Perm())
+	}
+	if _, err := os.ReadFile(filepath.Join(testData(), "owner.json")); err == nil {
+		return errors.New("user read owner store")
+	}
+	fmt.Println("standard-user store access denied; desktop socket permits status")
+	return nil
+}
+func desktopDenied() error { return nil }
+func engineProbe(t *testing.T, _, _, _ string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := probe(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+func probeMain([]string) int            { return 2 }
+func hostedMain(*testing.M) (bool, int) { return false, 0 }
+func disableRecovery(t *testing.T) func() {
+	t.Helper()
+	dir := "/run/systemd/system/netswitch.service.d"
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "lifecycle-test.conf")
+	if err := os.WriteFile(path, []byte("[Service]\nRestart=no\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+		t.Fatal(err, string(b))
+	}
+	return func() {
+		_ = os.Remove(path)
+		if b, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+			t.Error(err, string(b))
+		}
+	}
+}

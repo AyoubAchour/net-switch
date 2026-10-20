@@ -1,0 +1,82 @@
+name: Service lifecycle
+
+on:
+  pull_request:
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  services:
+    name: Lifecycle / ${{ matrix.os }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - runner: windows-latest
+            os: Windows
+            arch: x64
+          - runner: windows-11-arm
+            os: Windows
+            arch: ARM64
+          - runner: ubuntu-24.04
+            os: Linux
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            os: Linux
+            arch: ARM64
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_LIFECYCLE_CI: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Offline contracts
+        shell: bash
+        run: go test -count=1 ./internal/control ./internal/lifecycle ./internal/engine/protocol ./internal/localipc ./internal/service
+      - name: Build and run disposable Windows services
+        if: matrix.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          ./scripts/fetch-engine.ps1
+          $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles 'NetSwitch-Lifecycle-CI'
+          foreach ($name in @('netswitch', 'netswitch-engine', 'netswitch-desktop', 'netswitchctl')) {
+            go build -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') ./tests/lifecycle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Set-Location tests/lifecycle
+          & (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') run-hosted
+          exit $LASTEXITCODE
+      - name: Build and run disposable Linux services
+        if: matrix.os == 'Linux'
+        shell: bash
+        env:
+          NETSWITCH_LIFECYCLE_DIR: /usr/lib/netswitch-lifecycle-ci
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" "$NETSWITCH_LIFECYCLE_DIR"
+          for name in netswitch netswitch-engine netswitch-desktop netswitchctl; do
+            go build -o "$NETSWITCH_LIFECYCLE_DIR/$name" "./cmd/$name"
+          done
+          go test -c -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" ./tests/lifecycle
+          sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"
+          cd tests/lifecycle
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v -test.timeout=8m
+      - name: Linux service diagnostics
+        if: always() && matrix.os == 'Linux'
+        shell: bash
+        run: sudo journalctl -u netswitch.service -u netswitch-engine.service --no-pager --lines=150
