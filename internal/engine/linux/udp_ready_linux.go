@@ -18,7 +18,9 @@ func (s *udpSocket) Watch(wake func()) (platform.Readiness, error) {
 	}
 	// RawConn.Control pins the nonblocking fd against concurrent Close. No
 	// RawConn.Read/Write: those would park the shared worker in Go's poller.
-	return p.watch(s.raw.Control, wake), nil
+	w := p.watch(s.raw.Control, wake)
+	w.errorReady = func() { s.errorReady.Store(true) }
+	return w, nil
 }
 
 func (s *udpSocket) TryReadFrom(b []byte) (int, netip.AddrPort, error) {
@@ -39,7 +41,9 @@ func (s *udpSocket) TryReadFrom(b []byte) (int, netip.AddrPort, error) {
 	if readErr == unix.EAGAIN {
 		// EPOLLERR remains level-ready while error-queue entries remain,
 		// even after the ordinary socket error has been consumed.
-		s.drainErrors()
+		if s.errorReady.Swap(false) {
+			s.drainErrors()
+		}
 		return 0, netip.AddrPort{}, platform.ErrWouldBlock
 	}
 	if readErr != nil {
@@ -84,12 +88,14 @@ func (s *udpSocket) TryWriteTo(b []byte, dst netip.AddrPort, df bool) (int, erro
 		if sendErr != nil {
 			return
 		}
-		for {
-			sendErr = unix.Sendto(int(fd), b, unix.MSG_DONTWAIT, to)
-			if sendErr != unix.EINTR {
-				break
+		sendErr = sendDatagram(func() error {
+			for {
+				err := unix.Sendto(int(fd), b, unix.MSG_DONTWAIT, to)
+				if err != unix.EINTR {
+					return err
+				}
 			}
-		}
+		}, s.drainErrors)
 	})
 	if err != nil {
 		return 0, err

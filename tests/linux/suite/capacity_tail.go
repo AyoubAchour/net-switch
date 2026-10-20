@@ -45,7 +45,7 @@ func (e *Env) capacityTail(release Release, apps map[string]*Bg, held map[string
 	apps[capacityTailKey], held[capacityTailKey] = bg, list
 	refused := list.Errors["ECONNREFUSED"] + list.Errors["ECONNRESET"]
 	e.T.Check(list.Established+refused == capacityTailAttempts, "every fixed tail attempt either stays open or is explicitly refused (%d held, %d refused, errors %v)", list.Established, refused, list.Errors)
-	after := stats(e, s)
+	after := e.memorySample(s, "TCP FIXED TAIL")
 	e.capacityAccounting("fixed new-process tail", "tcp", before, after, capacityTailAttempts, list.Established, refused, capacityTotal)
 	// These sockets arrive while the large held workload still exists.
 	// Only proved unknown-pool failures are covered by its load declaration;

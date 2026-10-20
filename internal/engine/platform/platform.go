@@ -98,13 +98,27 @@ type TCPConn interface {
 // deadlines. An adapter may release its original Go poll descriptor at transfer.
 var ErrWouldBlock = errors.New("socket would block")
 
+// ErrDatagramDropped is a local resource drop or an asynchronous error already
+// handled using its original destination. Count it without inventing an ICMP
+// unreachable for the datagram currently being sent.
+var ErrDatagramDropped = errors.New("datagram dropped")
+
 type ReadyTCP interface {
 	TCPConn
 	TryRead([]byte) (int, error)
+	// TryPeek leaves bytes in the source socket. TryDiscard consumes at most
+	// len(scratch) bytes already peeked and accepted by the destination. Both
+	// are nonblocking; the relay exclusively owns reads between these calls.
+	// Linux can discard with MSG_TRUNC; Windows may read into scratch.
+	TryPeek([]byte) (int, error)
+	TryDiscard(scratch []byte) (int, error)
 	TryWrite([]byte) (int, error)
 	Watch(func()) (Readiness, error)
 }
 type Readiness interface {
+	// Re-arm is level triggered: already-ready data, EOF, or write space
+	// must wake the caller again without requiring a new edge. Watch and Arm
+	// must not wait for I/O or worker progress; callbacks only enqueue work.
 	Arm(read, write bool) error
 	Detach()
 }

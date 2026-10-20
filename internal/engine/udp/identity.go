@@ -35,6 +35,18 @@ func (n *NAT) Reconcile(ctx context.Context) {
 	sessions := n.sessions()
 	keys := make([]netip.AddrPort, 0, len(sessions))
 	active := make([]*session, 0, len(sessions))
+	for i := range n.table {
+		b := &n.table[i]
+		b.Lock()
+		for key, entry := range b.negative {
+			if started.Sub(entry.at) >= RejectLifetime {
+				delete(b.negative, key)
+			} else {
+				keys = append(keys, key)
+			}
+		}
+		b.Unlock()
+	}
 	for _, s := range sessions {
 		s.mu.Lock()
 		closed := s.closed
@@ -73,6 +85,16 @@ func (n *NAT) Reconcile(ctx context.Context) {
 		n.IdentityErrors.Add(1)
 		return
 	}
+	for i := range n.table {
+		b := &n.table[i]
+		b.Lock()
+		for key, entry := range b.negative {
+			if !entry.at.After(started) && !same(entry.owner, owners[key]) {
+				delete(b.negative, key)
+			}
+		}
+		b.Unlock()
+	}
 	for _, s := range active {
 		s.mu.Lock()
 		owner, ok := owners[s.source]
@@ -99,6 +121,11 @@ func (n *NAT) Destroy(source netip.AddrPort, generation string) {
 				keys = append(keys, key)
 			}
 		}
+		for key, entry := range b.negative {
+			if key.Port() == source.Port() && entry.owner.Generation == generation {
+				delete(b.negative, key)
+			}
+		}
 		b.Unlock()
 		for _, key := range keys {
 			n.Destroy(key, generation)
@@ -108,6 +135,9 @@ func (n *NAT) Destroy(source netip.AddrPort, generation string) {
 	b := n.bucket(source)
 	b.Lock()
 	s := b.m[source]
+	if entry, ok := b.negative[source]; ok && entry.owner.Generation == generation && generation != "" {
+		delete(b.negative, source)
+	}
 	b.Unlock()
 	if s == nil {
 		return

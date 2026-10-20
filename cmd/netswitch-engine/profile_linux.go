@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"runtime/trace"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -123,6 +125,9 @@ func startProfiles(dir string, cpu, execution bool) (func(), error) {
 
 func writeProfiles(dir string) error {
 	runtime.GC()
+	// Read immediately after GC, before profile serialization allocates.
+	var stats runtime.MemStats
+	runtime.ReadMemStats(&stats)
 	for _, name := range []string{"heap", "goroutine"} {
 		f, err := os.OpenFile(filepath.Join(dir, name+".pprof"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
@@ -134,11 +139,36 @@ func writeProfiles(dir string) error {
 			return err
 		}
 	}
-	var stats runtime.MemStats
-	runtime.ReadMemStats(&stats)
 	f, err := os.OpenFile(filepath.Join(dir, "memory.json"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
-	return errors.Join(json.NewEncoder(f).Encode(stats), f.Close())
+	rss, socketBytes := profileOSMemory()
+	return errors.Join(json.NewEncoder(f).Encode(struct {
+		runtime.MemStats
+		RSS, KernelSocketBytes uint64
+	}{stats, rss, socketBytes}), f.Close())
+}
+
+func profileOSMemory() (rss, sockets uint64) {
+	if data, err := os.ReadFile("/proc/self/statm"); err == nil {
+		fields := strings.Fields(string(data))
+		if len(fields) > 1 {
+			pages, _ := strconv.ParseUint(fields[1], 10, 64)
+			rss = pages * uint64(os.Getpagesize())
+		}
+	}
+	// sockstat's TCP/UDP mem fields are pages and include both families.
+	if data, err := os.ReadFile("/proc/net/sockstat"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			fields := strings.Fields(line)
+			for i := 1; i+1 < len(fields); i += 2 {
+				if fields[i] == "mem" {
+					pages, _ := strconv.ParseUint(fields[i+1], 10, 64)
+					sockets += pages * uint64(os.Getpagesize())
+				}
+			}
+		}
+	}
+	return
 }

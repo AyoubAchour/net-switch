@@ -26,6 +26,7 @@ type socketWatch struct {
 	control    func(func(uintptr)) error
 	id         uint64
 	wake       func()
+	errorReady func()
 	attached   bool // protected by mu
 	registered bool
 }
@@ -56,6 +57,9 @@ func (p *socketPoller) run() {
 			w := p.entries[id]
 			p.mu.Unlock()
 			if w != nil {
+				if event.Events&unix.EPOLLERR != 0 && w.errorReady != nil {
+					w.errorReady()
+				}
 				w.wake()
 			}
 		}
@@ -135,11 +139,23 @@ func (w *socketWatch) Detach() {
 }
 
 func (s *tcpSocket) TryRead(b []byte) (int, error) {
+	return s.receive(b, 0)
+}
+
+func (s *tcpSocket) TryPeek(b []byte) (int, error) {
+	return s.receive(b, unix.MSG_PEEK)
+}
+
+func (s *tcpSocket) TryDiscard(b []byte) (int, error) {
+	return s.receive(b, unix.MSG_TRUNC)
+}
+
+func (s *tcpSocket) receive(b []byte, flags int) (int, error) {
 	var n int
 	var readErr error
 	err := s.control(func(fd uintptr) {
 		for {
-			n, readErr = unix.Read(int(fd), b)
+			n, _, readErr = unix.Recvfrom(int(fd), b, flags|unix.MSG_DONTWAIT)
 			if readErr != unix.EINTR {
 				break
 			}

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
@@ -135,6 +136,7 @@ type udpSocket struct {
 	mtus             [8]mtuEntry
 	mtuCursor        int
 	handler          func(platform.DatagramError)
+	errorReady       atomic.Bool
 }
 
 func (s *udpSocket) LocalAddr() netip.AddrPort { return s.conn.LocalAddr().(*net.UDPAddr).AddrPort() }
@@ -185,7 +187,12 @@ func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) 
 	if err = errors.Join(e, err); err != nil {
 		return 0, err
 	}
-	n, err := s.conn.WriteToUDPAddrPort(b, dst)
+	var n int
+	err = sendDatagram(func() error {
+		var sendErr error
+		n, sendErr = s.conn.WriteToUDPAddrPort(b, dst)
+		return sendErr
+	}, s.drainErrors)
 	if errors.Is(err, unix.EMSGSIZE) {
 		return n, s.tooBig(dst)
 	}
@@ -226,9 +233,10 @@ func (s *udpSocket) drainErrors() {
 			handler(*pending)
 		}
 	}()
+	scratch := errorBuffers.Get().(*errorScratch)
+	defer errorBuffers.Put(scratch)
+	data, control := scratch.data[:], scratch.control[:]
 	for i := 0; i < 16; i++ {
-		var data [2048]byte
-		var control [256]byte
 		var n, oob int
 		var from unix.Sockaddr
 		var err error
@@ -272,8 +280,10 @@ func (s *udpSocket) drainErrors() {
 					s.mtus[index] = mtuEntry{dst.Addr(), info}
 					s.mtuCursor++
 				}
-			} else {
+			} else if errno == uint32(unix.ECONNREFUSED) || errno == uint32(unix.EHOSTUNREACH) || errno == uint32(unix.ENETUNREACH) {
 				message.Unreachable = true
+			} else {
+				continue
 			}
 			// LOCAL errors belong to the synchronous WriteTo failure. Linux
 			// may supply no UDP port or payload there. Keep the MTU above, but
@@ -296,6 +306,31 @@ func (s *udpSocket) drainErrors() {
 			}
 		}
 	}
+}
+
+type errorScratch struct {
+	data    [2048]byte
+	control [256]byte
+}
+
+var errorBuffers = sync.Pool{New: func() any { return new(errorScratch) }}
+
+func sendDatagram(send func() error, drain func()) error {
+	err := send()
+	if errors.Is(err, unix.ECONNREFUSED) {
+		// A previous destination's ICMP can fail this send. Its quotation,
+		// not this datagram, names the peer to notify. Retry this send once.
+		drain()
+		err = send()
+		if errors.Is(err, unix.ECONNREFUSED) {
+			drain()
+			return platform.ErrDatagramDropped
+		}
+	}
+	if errors.Is(err, unix.ENOBUFS) {
+		return platform.ErrDatagramDropped
+	}
+	return err
 }
 func (s *udpSocket) ReadError(ctx context.Context) (platform.DatagramError, error) {
 	select {

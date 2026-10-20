@@ -311,7 +311,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	if ready, ok := remote.(platform.ReadyTCP); ok {
 		stopRemote()
 		stopApp()
-		if err := f.startReadyRelay(ctx, c, &wq, ready, closeEndpoint); err != nil {
+		if err := f.startReadyRelay(ctx, c, &wq, ready, closeEndpoint, owner.AppID); err != nil {
 			abort()
 			close(c.done)
 			return

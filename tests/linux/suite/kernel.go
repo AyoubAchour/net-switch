@@ -370,8 +370,11 @@ func handshakes(r app.TCPResult) int {
 // checks a few in a row do.
 func (e *Env) retryLine(label, name string, want engine.LineID, within time.Duration) {
 	deadline := time.Now().Add(within)
+	attempt := 0
 	for time.Now().Before(deadline) {
+		attempt++
 		r := e.TCP(name, AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "1", "--timeout", "2000")
+		e.T.Logf("%s convergence attempt %d: OK=%d lines=%s errors=%v; this attempt does not count toward the hard owner probes", label, attempt, r.OK, Describe(Lines(r.Seen)), r.Errors)
 		if r.OK == 1 && Lines(r.Seen)[want] == 1 {
 			break
 		}

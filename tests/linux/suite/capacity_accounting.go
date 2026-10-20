@@ -34,7 +34,7 @@ func unknownRefusalFloor(clientRefused int, r flows.Refusals, capDecisions uint6
 // Every caller takes the two samples around exactly its offered traffic,
 // before releasing any holder. A different reason, lost attempt, failed dial
 // or admitted-then-lost flow fails hard even inside a declared load case.
-func (e *Env) capacityAccounting(label, protocol string, before, after engine.Stats, offered, held, refused int, scope capacityScope) uint64 {
+func (e *Env) capacityAccounting(label, protocol string, before, after engine.Stats, offered, held, refused int, scope capacityScope, fullCombinedApp ...bool) uint64 {
 	r := after.RefusedTCP.Sub(before.RefusedTCP)
 	forward := after.Counters["tcpRejected"] - before.Counters["tcpRejected"]
 	capDecisions := r.Total
@@ -63,7 +63,9 @@ func (e *Env) capacityAccounting(label, protocol string, before, after engine.St
 		(r.UDPPerApp == 0 || after.PeakUDPPerApp == udpSessionsPerApp) &&
 		(r.Unknown == 0 || after.PeakUnknown == 2048) &&
 		(r.UnknownUDP == 0 || after.PeakUnknownUDP == 512)
-	e.T.Check(occupied, "%s: every reported cap refusal has an independently observed full pool", label)
+	e.T.Check(occupied, "%s: every reported cap refusal has a matching engine peak", label)
+	independentApp := scope != capacityMixed || r.PerApp == 0 || (len(fullCombinedApp) == 1 && fullCombinedApp[0])
+	e.T.Check(independentApp, "%s: mixed per-app refusals require a UDP-holding client app with exactly 8192 held TCP plus UDP sockets", label)
 	// The UDP fixture sends exactly one datagram from each fresh socket.
 	// Unlike SYNs it has no transport retransmission that can repeat a decision.
 	if protocol == "udp" {
@@ -85,11 +87,14 @@ func (e *Env) capacityAccounting(label, protocol string, before, after engine.St
 		after.PeakUnknown <= 2048 && after.PeakUnknownUDP <= 512,
 		"%s: total, per-app and unknown pools never exceed their caps (%d/%d TCP+UDP, %d/%d UDP, %d/%d unknown)",
 		label, after.PeakFlows, after.PeakPerApp, after.PeakUDP, after.PeakUDPPerApp, after.PeakUnknown, after.PeakUnknownUDP)
-	e.T.Check(after.Counters["runtimeBytes"] > 0 && after.Counters["runtimeBytes"] <= 512<<20,
-		"%s: held memory stays within 512 MiB (%d bytes)", label, after.Counters["runtimeBytes"])
+	e.checkCapacityMemory(label, after)
+	e.T.Check(after.Flows-before.Flows == int64(held), "%s: engine flow delta equals independently held clients (%d = %d)", label, after.Flows-before.Flows, held)
+	if protocol == "udp" {
+		e.T.Check(after.UDP-before.UDP == int64(held), "%s: engine UDP delta equals independently held clients (%d = %d)", label, after.UDP-before.UDP, held)
+	}
 	e.T.Logf("CAP ACCOUNTING %s: offered=%d held=%d client-refused=%d decisions=%+v unknown-refusal-floor=%d lookup-misses=%d unknown-admitted=%d owner-details=%s",
 		label, offered, held, refused, r, floor, misses, unknownAdmitted, after.OwnerLookup)
-	if !classified || !occupied || forward != r.Count() || offered != held+refused || after.Admitted-before.Admitted != uint64(held) ||
+	if !classified || !occupied || !independentApp || after.Flows-before.Flows != int64(held) || (protocol == "udp" && after.UDP-before.UDP != int64(held)) || forward != r.Count() || offered != held+refused || after.Admitted-before.Admitted != uint64(held) ||
 		misses != unknownAdmitted+r.Unknown+r.UnknownUDP {
 		return 0
 	}

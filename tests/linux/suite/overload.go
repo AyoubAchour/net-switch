@@ -3,7 +3,6 @@
 package suite
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strconv"
@@ -158,6 +157,8 @@ func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) 
 							bad++
 						}
 					}
+				} else if seen[i] {
+					bad++ // a server-observed session cannot disappear from the engine
 				}
 			}
 			e.T.Check(len(unique) == r.Opened && bad == 0, "%s's UDP endpoints match their own identified or unknown sessions (%d unique, %d unknown, %d invalid)", name, len(unique), s.unknown, bad)
@@ -250,7 +251,7 @@ func udpSessionsPerAppCase(e *Env) {
 	bgs, results := e.udpFlood(names, perApp, release)
 	var after engine.Stats
 	if v1, ok := e.Eng.(engine.V1); ok {
-		after = stats(e, v1.Session())
+		after = e.memorySample(v1.Session(), "UDP PER APP")
 	}
 	all := e.floodSessions(names, results)
 	e.checkSessions(names, all)
@@ -270,7 +271,13 @@ func udpSessionsPerAppCase(e *Env) {
 			identified += all[name].listed
 			e.T.Logf("CAP OLD VERDICT UDP app %s: held=%d target=%d old-exact-count=%t", name, all[name].listed, udpSessionsPerApp, all[name].listed == udpSessionsPerApp)
 		}
-		credit := e.capacityAccounting("UDP per-app", "udp", before, after, perApp*len(names), total, refused, capacityPerApp)
+		serverHeld := 0
+		for _, name := range names {
+			serverHeld += all[name].gotOut
+		}
+		e.T.Check(after.UDP-before.UDP == int64(serverHeld), "UDP per-app count equals client/server-held sessions (%d = %d)", after.UDP-before.UDP, serverHeld)
+		total = int(after.UDP - before.UDP)
+		credit := e.capacityAccounting("UDP per-app", "udp", before, after, perApp*len(names), serverHeld, refused, capacityPerApp)
 		e.exactCapacity("identified UDP apps together", identified, udpSessionsPerApp*len(names), credit)
 	}
 	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
@@ -312,11 +319,10 @@ func udpSessionsTotalCase(e *Env) {
 	}
 	// 1.0 also counts its live UDP sessions itself.
 	if v1, ok := e.Eng.(engine.V1); ok && v1.Session() != nil {
-		st, err := v1.Session().Stats(e.Ctx())
-		e.T.Require(err == nil, "stats while the sessions are held (%v)", err)
+		st := e.memorySample(v1.Session(), "UDP TOTAL")
 		listed = max(listed, int(st.UDP))
-		credit := e.capacityAccounting("UDP total", "udp", before, st, perApp*len(names), int(st.UDP), refused, capacityTotal)
-		e.exactCapacity("UDP total", int(st.UDP), udpSessionsTotal, credit)
+		credit := e.capacityAccounting("UDP total", "udp", before, st, perApp*len(names), gotOut, refused, capacityTotal)
+		e.exactCapacity("UDP total", gotOut, udpSessionsTotal, credit)
 	}
 	admitted := max(gotOut, listed)
 	e.checkLoadIdentity(gotOut >= udpSessionsTotal*95/100, "original 95%% UDP total check would pass=%t (%d of %d; %s)", gotOut >= udpSessionsTotal*95/100, gotOut, udpSessionsTotal, describeSessions(names, all))
@@ -377,7 +383,7 @@ func tcpStorm(e *Env) {
 		}
 		e.T.Check(bad == 0 && unknown <= 2048, "held identities use their correct lanes and unknown stays bounded (%d known, %d unknown, %d invalid)", known, unknown, bad)
 		v1 := e.Eng.(engine.V1)
-		after := stats(e, v1.Session())
+		after := e.memorySample(v1.Session(), "TCP PER APP")
 		refused := held.Errors["ECONNREFUSED"] + held.Errors["ECONNRESET"]
 		credit := e.capacityAccounting("TCP per-app", "tcp", before, after, storm, held.Established, refused, capacityPerApp)
 		e.exactCapacity("identified bravo TCP", known, tcpFlowsPerApp, credit)
@@ -529,14 +535,7 @@ func tcpFlowsTotalCase(e *Env) {
 	unknown := 0
 	if v1, ok := e.Eng.(engine.V1); ok {
 		e.checkHeldTCP(held, bgs)
-		if profiler, ok := e.Eng.(interface{ CaptureProfiles(context.Context) error }); ok {
-			ctx, cancel := context.WithTimeout(e.Ctx(), 15*time.Second)
-			err := profiler.CaptureProfiles(ctx)
-			cancel()
-			e.T.Check(err == nil, "heap and goroutine profiles captured while the flows remain held (%v)", err)
-		}
-		st, err := v1.Session().Stats(e.Ctx())
-		e.T.Require(err == nil, "stats while all TCP flows are held (%v)", err)
+		st := e.memorySample(v1.Session(), "TCP TOTAL")
 		unknown = int(st.Unknown)
 		e.T.Check(unknown <= 2048 && st.PeakUnknown <= 2048, "unknown TCP admission never exceeds its separate 2048-flow budget (%d held, %d peak)", unknown, st.PeakUnknown)
 		// Server hold records exclude the separate survival stream. Its
@@ -556,7 +555,8 @@ func tcpFlowsTotalCase(e *Env) {
 			refused += list.Errors["ECONNREFUSED"] + list.Errors["ECONNRESET"]
 		}
 		credit := e.capacityAccounting("TCP total", "tcp", offerStart, st, perApp*len(names)+capacityTailAttempts, established, refused, capacityTotal)
-		e.exactCapacity("TCP total", int(st.Flows), tcpFlowsTotal, credit)
+		e.T.Check(st.Flows == int64(established+1), "TCP total count equals independently held clients plus stream (%d = %d + 1)", st.Flows, established)
+		e.exactCapacity("TCP total", established+1, tcpFlowsTotal, credit)
 	}
 	lines := RecordLines(accepted)
 	e.T.Check(len(accepted) == established && lines["c"] == established-unknown && lines["a"] == unknown,
@@ -873,6 +873,6 @@ func timeWaitCap(e *Env) {
 	}
 	e.T.Check(len(live) == 0 && after.Flows <= 2, "waiting endpoints aren't live flows: none of alpha's is listed and the engine counts %d flows beside %d waiting (%s)",
 		after.Flows, after.TimeWait, strings.Join(upTo(live, 3), "; "))
-	e.ExpectTCP("alpha's new connections with TIME_WAIT full", "alpha", AsUser, "a", topo.Server4, 50)
-	e.ExpectTCP("bravo's new connections with TIME_WAIT full", "bravo", AsUser, "b", topo.Server4, 10)
+	e.expectSteadyTCP("alpha's new connections with TIME_WAIT full", "alpha", "a", topo.Server4, 50)
+	e.expectSteadyTCP("bravo's new connections with TIME_WAIT full", "bravo", "b", topo.Server4, 10)
 }

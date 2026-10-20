@@ -27,18 +27,18 @@ type relayWorkers struct {
 	bufferMu   sync.Mutex
 	loans      int
 	bufferPeak int
-	waiting    map[*readyRelay]struct{}
+	waiting    []*readyRelay
+	appLoans   map[string]int
 }
 
-// Stalled writes retain at most 16 MiB across both directions of every flow.
-// Reserve before reading: when full, leave bytes on their original socket and
-// wake a waiting relay when a loan returns. No flow is cut to reclaim storage.
+// Loans cover only a synchronous peek/write/discard operation. A stalled
+// destination leaves its bytes in the source socket and returns the loan.
+// FIFO reservations prevent a previous holder overtaking a waiting relay.
 const RelayHeldBudget = 16 << 20
+const RelayAppLoans = 32
 
 type relayDirection struct {
-	buffer        *[]byte
-	start, end    int
-	eof, finished bool
+	blocked, finished bool
 }
 
 // Endpoint I/O consumes these adapters synchronously. Reuse them per worker
@@ -64,6 +64,8 @@ type readyRelay struct {
 	up, down                       relayDirection
 	finish                         func()
 	waitBuffer                     bool // worker only
+	app                            string
+	queued, granted                bool // workers.bufferMu
 }
 
 func newRelayWorkers() *relayWorkers {
@@ -71,7 +73,7 @@ func newRelayWorkers() *relayWorkers {
 	// ACK processing. Relay work alone must not occupy every processor while
 	// its writes wait for those same consumers to make progress.
 	n := min(8, max(1, (runtime.GOMAXPROCS(0)+1)/2))
-	w := &relayWorkers{wake: make(chan struct{}, n), stop: make(chan struct{}), waiting: make(map[*readyRelay]struct{})}
+	w := &relayWorkers{wake: make(chan struct{}, n), stop: make(chan struct{}), appLoans: make(map[string]int)}
 	for range n {
 		w.wg.Go(w.run)
 	}
@@ -81,44 +83,64 @@ func newRelayWorkers() *relayWorkers {
 func (w *relayWorkers) borrow(r *readyRelay) bool {
 	w.bufferMu.Lock()
 	defer w.bufferMu.Unlock()
-	if w.loans == RelayHeldBudget/RelayBuffer {
-		w.waiting[r] = struct{}{}
+	if r.granted {
+		r.granted = false
+		return true
+	}
+	if r.queued || len(w.waiting) != 0 || w.loans == RelayHeldBudget/RelayBuffer || w.appLoans[r.app] == RelayAppLoans {
+		if !r.queued {
+			r.queued = true
+			w.waiting = append(w.waiting, r)
+		}
 		r.waitBuffer = true
+		w.grantLocked()
 		return false
 	}
-	// The other direction may already be waiting in this same step. A
-	// successful borrow here must not erase that direction's only wakeup.
-	if !r.waitBuffer {
-		delete(w.waiting, r)
-	}
-	w.loans++
-	w.bufferPeak = max(w.bufferPeak, w.loans)
+	w.reserveLocked(r)
 	return true
 }
 
-func (w *relayWorkers) giveBack() {
-	w.bufferMu.Lock()
-	w.loans--
-	w.bufferMu.Unlock()
-	w.kickWaiting()
+func (w *relayWorkers) reserveLocked(r *readyRelay) {
+	if w.appLoans == nil {
+		w.appLoans = make(map[string]int)
+	}
+	w.appLoans[r.app]++
+	w.loans++
+	w.bufferPeak = max(w.bufferPeak, w.loans)
 }
 
-func (w *relayWorkers) kickWaiting() {
+func (w *relayWorkers) giveBack(r *readyRelay) {
 	w.bufferMu.Lock()
-	var next *readyRelay
-	if w.loans < RelayHeldBudget/RelayBuffer {
-		for r := range w.waiting {
-			delete(w.waiting, r)
-			if !r.closed.Load() {
-				next = r
-				break
-			}
+	w.returnLocked(r)
+	w.grantLocked()
+	w.bufferMu.Unlock()
+}
+
+func (w *relayWorkers) returnLocked(r *readyRelay) {
+	w.loans--
+	w.appLoans[r.app]--
+	if w.appLoans[r.app] == 0 {
+		delete(w.appLoans, r.app)
+	}
+}
+
+func (w *relayWorkers) grantLocked() {
+	kept := w.waiting[:0]
+	for _, r := range w.waiting {
+		if r.closed.Load() {
+			r.queued = false
+			continue
+		}
+		if w.loans < RelayHeldBudget/RelayBuffer && w.appLoans[r.app] < RelayAppLoans {
+			w.reserveLocked(r)
+			r.queued, r.granted = false, true
+			r.notify()
+		} else {
+			kept = append(kept, r)
 		}
 	}
-	w.bufferMu.Unlock()
-	if next != nil {
-		next.notify()
-	}
+	clear(w.waiting[len(kept):])
+	w.waiting = kept
 }
 
 func (f *Forwarder) RelayBufferBytes() (int, int) {
@@ -201,8 +223,8 @@ func (w *relayWorkers) close() {
 	w.wg.Wait()
 }
 
-func (f *Forwarder) startReadyRelay(ctx context.Context, c *connection, wq *waiter.Queue, remote platform.ReadyTCP, closeApp func()) error {
-	r := &readyRelay{workers: f.relays, initializing: true, ctx: f.ctx, c: c, remote: remote, wq: wq}
+func (f *Forwarder) startReadyRelay(ctx context.Context, c *connection, wq *waiter.Queue, remote platform.ReadyTCP, closeApp func(), app string) error {
+	r := &readyRelay{workers: f.relays, initializing: true, ctx: f.ctx, c: c, remote: remote, wq: wq, app: app}
 	r.cancelled.Store(ctx.Err() != nil)
 	watch, err := remote.Watch(r.notify)
 	if err != nil {
@@ -240,24 +262,18 @@ func (r *readyRelay) close(abort bool) {
 	r.watch.Detach()
 	r.wq.EventUnregister(&r.entry)
 	r.workers.bufferMu.Lock()
-	delete(r.workers.waiting, r)
+	if r.granted {
+		r.granted = false
+		r.workers.returnLocked(r)
+	}
+	r.workers.grantLocked()
 	r.workers.bufferMu.Unlock()
-	// A previously selected waiter may be cancelled before consuming its
-	// available slot. Pass the wakeup on even if this relay owns no buffer.
-	r.workers.kickWaiting()
 	if abort {
 		r.remote.SetLinger(0)
 		if closeAdmissionEnabled {
 			r.c.ticket.Retire()
 		}
 		r.c.ep.Abort()
-	}
-	for _, d := range []*relayDirection{&r.up, &r.down} {
-		if d.buffer != nil {
-			relayBuffers.Put(d.buffer)
-			d.buffer = nil
-			r.workers.giveBack()
-		}
 	}
 	r.finish()
 }
@@ -277,12 +293,41 @@ func stackError(err tcpip.Error) error {
 
 func (r *readyRelay) read(up bool, b []byte, scratch *relayScratch) (int, error) {
 	if !up {
-		return r.remote.TryRead(b)
+		return r.remote.TryPeek(b)
 	}
 	scratch.receive = tcpip.SliceWriter(b)
-	result, err := r.c.ep.Read(&scratch.receive, tcpip.ReadOptions{})
+	result, err := r.c.ep.Read(&scratch.receive, tcpip.ReadOptions{Peek: true})
 	scratch.receive = nil
 	return result.Count, stackError(err)
+}
+
+func (r *readyRelay) discard(up bool, b []byte, scratch *relayScratch) error {
+	for len(b) > 0 {
+		var n int
+		var err error
+		if up {
+			scratch.receive = tcpip.SliceWriter(b)
+			result, e := r.c.ep.Read(&scratch.receive, tcpip.ReadOptions{})
+			scratch.receive = nil
+			n, err = result.Count, stackError(e)
+		} else {
+			n, err = r.remote.TryDiscard(b)
+		}
+		if n < 0 || n > len(b) {
+			return io.ErrShortBuffer
+		}
+		b = b[n:]
+		if len(b) == 0 {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	return nil
 }
 
 func (r *readyRelay) write(up bool, b []byte, scratch *relayScratch) (int, error) {
@@ -299,41 +344,29 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 	if d.finished {
 		return false, nil
 	}
+	d.blocked = false
 	// A busy flow yields after a bounded amount of work, so it cannot starve
 	// other readiness events, the ordered TUN reader, or process lookups.
 	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
-		var pending []byte
-		borrowed := false
-		if d.buffer != nil {
-			pending = (*d.buffer)[d.start:d.end]
-		} else if !d.eof {
-			if !r.workers.borrow(r) {
-				return false, nil
-			}
-			borrowed = true
-			// A worker owns this scratch until step returns. The usual full
-			// write needs no pool access or allocation, even during repeated
-			// collections. Only blocked/short writes retain a private buffer.
-			n, err := r.read(up, scratch.buffer[:], scratch)
-			if n == 0 || (err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, platform.ErrWouldBlock)) {
-				r.workers.giveBack()
-				borrowed = false
-			}
-			pending = scratch.buffer[:n]
-			if errors.Is(err, io.EOF) {
-				d.eof = true
-			} else if errors.Is(err, platform.ErrWouldBlock) {
-				if n == 0 {
-					return false, nil
-				}
-			} else if err != nil {
-				return false, err
-			} else if n == 0 {
-				return false, io.ErrNoProgress
-			}
+		if !r.workers.borrow(r) {
+			return false, nil
 		}
-		if len(pending) != 0 {
-			n, err := r.write(up, pending, scratch)
+		peeked, readErr := r.read(up, scratch.buffer[:], scratch)
+		if peeked < 0 || peeked > len(scratch.buffer) {
+			r.workers.giveBack(r)
+			return false, io.ErrShortBuffer
+		}
+		if peeked > 0 {
+			n, err := r.write(up, scratch.buffer[:peeked], scratch)
+			if n < 0 || n > peeked {
+				r.workers.giveBack(r)
+				return false, io.ErrShortWrite
+			}
+			if consumeErr := r.discard(up, scratch.buffer[:n], scratch); consumeErr != nil {
+				r.workers.giveBack(r)
+				return false, consumeErr
+			}
+			r.workers.giveBack(r)
 			if n > 0 {
 				moved += n
 				if up {
@@ -344,20 +377,8 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 					r.c.ticket.Add(0, uint64(n))
 				}
 			}
-			if d.buffer != nil {
-				d.start += n
-				if d.start == d.end {
-					relayBuffers.Put(d.buffer)
-					d.buffer = nil
-					r.workers.giveBack()
-				}
-			} else if n < len(pending) {
-				d.buffer = relayBuffers.Get().(*[]byte)
-				d.start, d.end = 0, copy(*d.buffer, pending[n:])
-			} else if borrowed {
-				r.workers.giveBack()
-			}
 			if errors.Is(err, platform.ErrWouldBlock) {
+				d.blocked = true
 				return false, nil
 			}
 			if err != nil {
@@ -366,8 +387,15 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 			if n == 0 {
 				return false, io.ErrNoProgress
 			}
+			// Re-peek even after a short successful write. EOF is propagated
+			// only once every byte before it has actually been consumed.
+			continue
 		}
-		if d.eof && d.buffer == nil {
+		r.workers.giveBack(r)
+		if errors.Is(readErr, platform.ErrWouldBlock) {
+			return false, nil
+		}
+		if errors.Is(readErr, io.EOF) {
 			d.finished = true
 			if up {
 				if err := r.remote.CloseWrite(); err != nil {
@@ -387,6 +415,10 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 			r.remote.CloseRead()
 			return false, nil
 		}
+		if readErr != nil {
+			return false, readErr
+		}
+		return false, io.ErrNoProgress
 	}
 	return true, nil
 }
@@ -411,7 +443,7 @@ func (r *readyRelay) step(scratch *relayScratch) {
 		r.close(false)
 		return
 	}
-	if err := r.watch.Arm(!r.waitBuffer && !r.down.finished && r.down.buffer == nil, r.up.buffer != nil); err != nil {
+	if err := r.watch.Arm(!r.waitBuffer && !r.down.finished && !r.down.blocked, r.up.blocked); err != nil {
 		r.close(true)
 		return
 	}

@@ -196,7 +196,7 @@ func (e *Env) observeLoadStream(name string, bg *Bg, port uint16) {
 	e.T.Require(present && bg.Running(), "%s's stream is live with answers flowing before the load", name)
 	_, known, err := loadFlowLine(f, AppPath(name), bg.Pid(), e.loadLine(name))
 	e.T.Check(err == nil, "%s's stream has a correct identified or unknown route (%v)", name, err)
-	e.T.ReleaseCheck(known, "%s's stream owner is identified (%t)", name, known)
+	e.T.Check(known, "%s's stream owner is identified before load (%t)", name, known)
 	if e.streamFlows == nil {
 		e.streamFlows = map[string]engine.Flow{}
 	}

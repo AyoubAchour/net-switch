@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -29,6 +30,7 @@ type engineProcess struct {
 	socket, temporary, state, netns, log string
 	profiles                             string
 	captures                             int
+	memory                               map[string]uint64
 }
 
 func (d *Driver) launch(ctx context.Context, env engine.Env) error {
@@ -199,6 +201,14 @@ func (d *Driver) CaptureProfiles(ctx context.Context) error {
 	defer tick.Stop()
 	for {
 		if data, err := os.ReadFile(path); err == nil && json.Valid(data) {
+			var sample struct {
+				goruntime.MemStats
+				RSS, KernelSocketBytes uint64
+			}
+			if err := json.Unmarshal(data, &sample); err != nil {
+				return err
+			}
+			d.process.memory = map[string]uint64{"forcedGCHeapBytes": sample.HeapAlloc, "forcedGCManagedBytes": sample.Sys - sample.HeapReleased, "forcedGCStackBytes": sample.StackInuse, "rssBytes": sample.RSS, "kernelSocketBytes": sample.KernelSocketBytes}
 			return nil
 		}
 		select {
@@ -209,6 +219,19 @@ func (d *Driver) CaptureProfiles(ctx context.Context) error {
 		case <-tick.C:
 		}
 	}
+}
+
+func (d *Driver) CaptureMemory(ctx context.Context) (map[string]uint64, error) {
+	if err := d.CaptureProfiles(ctx); err != nil {
+		return nil, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make(map[string]uint64, len(d.process.memory))
+	for key, value := range d.process.memory {
+		out[key] = value
+	}
+	return out, nil
 }
 
 func (d *Driver) ResolverContents() (string, error) {

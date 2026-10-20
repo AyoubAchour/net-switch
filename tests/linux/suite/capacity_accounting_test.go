@@ -5,6 +5,7 @@ package suite
 import (
 	"context"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
@@ -12,77 +13,150 @@ import (
 	"github.com/AyoubAchour/net-switch/tests/linux/harness"
 )
 
+func runCapacityCheck(t *testing.T, run func(*Env)) *harness.Report {
+	t.Helper()
+	c := &harness.Case{ID: "capacity.mixed-caps", Title: "capacity evidence", Label: harness.Requires10, ReleaseBlocker: loadAttributionBlocker("capacity.mixed-caps")}
+	c.Run = func(check *harness.T) { run(&Env{T: check, deferAttribution: true}) }
+	return harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
+}
+func requireFailure(t *testing.T, report *harness.Report, message string) {
+	t.Helper()
+	if !report.JobFailed {
+		t.Fatalf("missing hard failure %q: %+v", message, report)
+	}
+	for _, check := range report.Cases[0].Checks {
+		if !check.OK && !check.ReleaseBlocker && strings.Contains(check.Message, message) {
+			return
+		}
+	}
+	t.Fatalf("failed for the wrong reason, wanted %q: %+v", message, report.Cases[0])
+}
+
 func TestCapacityShortfallNeedsCompleteRefusalEvidence(t *testing.T) {
-	for _, test := range []struct {
-		name string
-		edit func(*engine.Stats, *int)
-		fail bool
-	}{
-		{"proved unknown overflow", func(*engine.Stats, *int) {}, false},
-		{"repeated cap refusals cannot hide a gap", func(s *engine.Stats, _ *int) {
-			s.RefusedTCP.Total = 70
-			s.Counters["tcpRejected"] = 80
-		}, true},
-		{"handshake refusal", func(s *engine.Stats, _ *int) { s.RefusedTCP.Total--; s.RefusedTCP.Handshakes++ }, true},
-		{"policy refusal", func(s *engine.Stats, _ *int) { s.RefusedTCP.Total--; s.RefusedTCP.Policy++ }, true},
-		{"unexplained refusal", func(s *engine.Stats, _ *int) { s.RefusedTCP.Total--; s.RefusedTCP.Unexplained++ }, true},
-		{"other app cap", func(s *engine.Stats, _ *int) { s.RefusedTCP.Total--; s.RefusedTCP.PerApp++ }, true},
-		{"outbound failure", func(s *engine.Stats, _ *int) { s.Counters["tcpDialFailed"] = 1 }, true},
-		{"lost admitted flow", func(s *engine.Stats, _ *int) { s.Admitted++ }, true},
-		{"client timeout", func(_ *engine.Stats, refused *int) { *refused = *refused - 1 }, true},
-		{"missing forwarding decision", func(s *engine.Stats, _ *int) { s.Counters["tcpRejected"]++ }, true},
-		{"no observed total cap", func(s *engine.Stats, _ *int) { s.PeakFlows-- }, true},
-		{"no observed unknown cap", func(s *engine.Stats, _ *int) { s.PeakUnknown-- }, true},
-		{"unclassified lookup miss", func(s *engine.Stats, _ *int) { s.LookupMisses++ }, true},
-		{"memory exceeded", func(s *engine.Stats, _ *int) { s.Counters["runtimeBytes"] = 513 << 20 }, true},
-		{"memory missing", func(s *engine.Stats, _ *int) { delete(s.Counters, "runtimeBytes") }, true},
-		{"unknown pool exceeded", func(s *engine.Stats, _ *int) { s.PeakUnknown = 2049 }, true},
-		{"per-app cap exceeded", func(s *engine.Stats, _ *int) { s.PeakPerApp = 8193 }, true},
-		{"total cap exceeded", func(s *engine.Stats, _ *int) { s.PeakFlows = 65537 }, true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			s := engine.Stats{
-				Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{Total: 50, Unknown: 10},
-				PeakFlows: tcpFlowsTotal, PeakUnknown: 2048,
-				Counters: map[string]uint64{"tcpRejected": 60, "runtimeBytes": 400 << 20},
+	for _, protocol := range []string{"tcp", "udp"} {
+		for _, scope := range []capacityScope{capacityTotal, capacityPerApp} {
+			for _, test := range []struct {
+				name, failure string
+				edit          func(*engine.Stats, *flows.Refusals, *int)
+			}{
+				{"proved unknown overflow", "", func(*engine.Stats, *flows.Refusals, *int) {}},
+				{"wrong transport cap", "every refusal decision", func(_ *engine.Stats, r *flows.Refusals, _ *int) {
+					if protocol == "tcp" {
+						r.UDP++
+					} else {
+						r.Total++
+					}
+				}},
+				{"wrong scope cap", "every refusal decision", func(_ *engine.Stats, r *flows.Refusals, _ *int) {
+					if scope == capacityTotal {
+						r.PerApp++
+					} else {
+						r.Total++
+					}
+				}},
+				{"policy refusal", "every refusal decision", func(_ *engine.Stats, r *flows.Refusals, _ *int) { r.Policy++ }},
+				{"handshake refusal", "every refusal decision", func(_ *engine.Stats, r *flows.Refusals, _ *int) { r.Handshakes++ }},
+				{"unexplained refusal", "every refusal decision", func(_ *engine.Stats, r *flows.Refusals, _ *int) { r.Unexplained++ }},
+				{"lost admitted flow", "every admitted flow", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.Admitted++ }},
+				{"phantom flow", "engine flow delta", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.Flows++ }},
+				{"lost client attempt", "every offered attempt", func(_ *engine.Stats, _ *flows.Refusals, r *int) { *r-- }},
+				{"missing forwarding decision", "every refusal decision", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.Counters[protocol+"Rejected"]++ }},
+				{"no observed cap", "matching engine peak", func(s *engine.Stats, _ *flows.Refusals, _ *int) {
+					s.PeakFlows = 0
+					s.PeakUDP = 0
+					s.PeakPerApp = 0
+					s.PeakUDPPerApp = 0
+				}},
+				{"unclassified miss", "every missed lookup", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.LookupMisses++ }},
+				{"heap exceeded", "forced-GC live heap", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.Counters["forcedGCHeapBytes"] = liveHeapLimit + 1 }},
+				{"heap missing", "forced-GC live heap", func(s *engine.Stats, _ *flows.Refusals, _ *int) { delete(s.Counters, "forcedGCHeapBytes") }},
+				{"managed above old limit", "", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.Counters["runtimeBytes"] = 600 << 20 }},
+				{"pool exceeded", "never exceed their caps", func(s *engine.Stats, _ *flows.Refusals, _ *int) { s.PeakUnknown = 2049 }},
+			} {
+				t.Run(protocol+"/"+string(rune('0'+scope))+"/"+test.name, func(t *testing.T) {
+					s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, PeakFlows: tcpFlowsTotal, PeakUDP: udpSessionsTotal, PeakPerApp: tcpFlowsPerApp, PeakUDPPerApp: udpSessionsPerApp, PeakUnknown: 2048, PeakUnknownUDP: 512, Counters: map[string]uint64{protocol + "Rejected": 60, "forcedGCHeapBytes": 400 << 20, "runtimeBytes": 400 << 20}}
+					r := flows.Refusals{Unknown: 10}
+					if protocol == "udp" {
+						s.UDP = 90
+						r = flows.Refusals{UnknownUDP: 10}
+						if scope == capacityTotal {
+							r.UDP = 50
+						} else {
+							r.UDPPerApp = 50
+						}
+					} else if scope == capacityTotal {
+						r.Total = 50
+					} else {
+						r.PerApp = 50
+					}
+					refused := 60
+					test.edit(&s, &r, &refused)
+					if protocol == "udp" {
+						s.RefusedUDP = r
+					} else {
+						s.RefusedTCP = r
+					}
+					report := runCapacityCheck(t, func(e *Env) {
+						credit := e.capacityAccounting("test", protocol, engine.Stats{}, s, 150, 90, refused, scope)
+						e.exactCapacity("test", 90, 100, credit)
+					})
+					if test.failure != "" {
+						requireFailure(t, report, test.failure)
+					} else if report.JobFailed || report.Cases[0].Outcome != harness.ReleaseBlocked {
+						t.Fatalf("valid attribution evidence: %+v", report)
+					}
+				})
 			}
-			refused := 60
-			test.edit(&s, &refused)
-			c := &harness.Case{ID: "capacity.mixed-caps", Title: "classified capacity", Label: harness.Requires10, ReleaseBlocker: loadAttributionBlocker("capacity.mixed-caps")}
-			c.Run = func(check *harness.T) {
-				e := &Env{T: check, deferAttribution: true}
-				credit := e.capacityAccounting("test", "tcp", engine.Stats{}, s, 150, 90, refused, capacityTotal)
-				e.exactCapacity("test", 90, 100, credit)
-			}
-			report := harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
-			if report.JobFailed != test.fail {
-				t.Fatalf("classification escaped hard checks: %+v", report)
-			}
-			if !test.fail && report.Cases[0].Outcome != harness.ReleaseBlocked {
-				t.Fatalf("short occupancy was called a release pass: %+v", report)
-			}
+		}
+	}
+}
+
+func TestUDPAccountingRequiresExactDecisionCountAndRealSessions(t *testing.T) {
+	for _, variant := range []string{"exact", "extra decision", "phantom UDP"} {
+		s := engine.Stats{Flows: 90, UDP: 90, Admitted: 90, PeakUDP: udpSessionsTotal, RefusedUDP: flows.Refusals{UDP: 60}, Counters: map[string]uint64{"udpRejected": 60, "forcedGCHeapBytes": 400 << 20}}
+		if variant == "extra decision" {
+			s.RefusedUDP.UDP++
+			s.Counters["udpRejected"]++
+		}
+		if variant == "phantom UDP" {
+			s.UDP++
+		}
+		report := runCapacityCheck(t, func(e *Env) {
+			e.capacityAccounting("udp", "udp", engine.Stats{}, s, 150, 90, 60, capacityTotal)
+			e.exactCapacity("udp", 90, 90, 0)
 		})
+		switch variant {
+		case "exact":
+			if report.JobFailed {
+				t.Fatal(report)
+			}
+		case "extra decision":
+			requireFailure(t, report, "every refusal decision")
+		case "phantom UDP":
+			requireFailure(t, report, "engine UDP delta")
+		}
 	}
 }
 
 func TestMixedCapacityAcceptsOnlyAnActuallyFullCombinedAppPool(t *testing.T) {
-	for _, scope := range []capacityScope{capacityTotal, capacityMixed} {
-		for _, peak := range []int{8191, 8192} {
-			c := &harness.Case{ID: "capacity.mixed-caps", Title: "combined app cap", Label: harness.Requires10, ReleaseBlocker: loadAttributionBlocker("capacity.mixed-caps")}
-			c.Run = func(check *harness.T) {
-				e := &Env{T: check, deferAttribution: true}
-				s := engine.Stats{
-					Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{PerApp: 50, Unknown: 10},
-					PeakPerApp: peak, PeakUnknown: 2048,
-					Counters: map[string]uint64{"tcpRejected": 60, "runtimeBytes": 400 << 20},
-				}
-				credit := e.capacityAccounting("mixed", "tcp", engine.Stats{}, s, 150, 90, 60, scope)
-				e.exactCapacity("mixed", 90, 100, credit)
-			}
-			report := harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
-			if report.JobFailed != (scope != capacityMixed || peak != 8192) {
-				t.Fatalf("scope %d peak %d: %+v", scope, peak, report)
-			}
+	for _, independent := range []bool{false, true} {
+		s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{PerApp: 50, Unknown: 10}, PeakPerApp: 8192, PeakUnknown: 2048, Counters: map[string]uint64{"tcpRejected": 60, "forcedGCHeapBytes": 400 << 20}}
+		report := runCapacityCheck(t, func(e *Env) {
+			e.capacityAccounting("mixed", "tcp", engine.Stats{}, s, 150, 90, 60, capacityMixed, independent)
+		})
+		if !independent {
+			requireFailure(t, report, "UDP-holding client app")
+		} else if report.JobFailed {
+			t.Fatal(report)
 		}
 	}
+}
+
+func TestTCPRepeatedCapDecisionsCannotHideShortfall(t *testing.T) {
+	s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{Total: 70, Unknown: 10}, PeakFlows: 65536, PeakUnknown: 2048, Counters: map[string]uint64{"tcpRejected": 80, "forcedGCHeapBytes": 400 << 20}}
+	report := runCapacityCheck(t, func(e *Env) {
+		credit := e.capacityAccounting("tcp", "tcp", engine.Stats{}, s, 150, 90, 60, capacityTotal)
+		e.exactCapacity("tcp", 90, 100, credit)
+	})
+	requireFailure(t, report, "whole exact-cap shortfall")
 }
