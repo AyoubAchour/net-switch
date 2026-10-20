@@ -104,6 +104,7 @@ jobs:
         if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
         env:
           NETSWITCH_ENGINE_TEST_TRACE: '1'
+          NETSWITCH_ENGINE_HEAP_CAPTURE: '1'
         run: |
           node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -118,6 +119,7 @@ jobs:
         if: ${{ !cancelled() && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
         env:
           NETSWITCH_ENGINE_TEST_TRACE: '1'
+          NETSWITCH_ENGINE_HEAP_CAPTURE: '1'
         run: |
           node tests/windows/capacity-profile.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

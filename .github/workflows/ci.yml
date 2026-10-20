@@ -125,7 +125,8 @@ jobs:
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
-      GOFLAGS: -mod=vendor -p=2
+      GOFLAGS: -mod=vendor -p=2 -tags=netswitch_handlecheck
+      NETSWITCH_EXPECT_HANDLECHECK: '1'
     defaults:
       run:
         shell: powershell
@@ -150,7 +151,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -c -o dist/windows-test/windows-platform.test.exe ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go test -v ./internal/engine/...
+          go test -v ./internal/engine/... ./internal/winhandle
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./tests/windows/testisp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -200,6 +201,7 @@ jobs:
         if: ${{ !cancelled() && steps.native-build.outcome == 'success' && steps.native-dll.outcome == 'success' }}
         env:
           NETSWITCH_ENGINE_TEST_TRACE: '1'
+          NETSWITCH_ENGINE_HEAP_CAPTURE: '1'
         run: |
           node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

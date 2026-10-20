@@ -25,6 +25,14 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "CI required netswitch_handlecheck but it was not compiled")
 		os.Exit(1)
 	}
+	if name := os.Getenv("NETSWITCH_HEAP_EVENT_DENIED"); name != "" {
+		if err := deniedHeapEventClient(name); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("Medium integrity, Administrators deny-only: heap event denied EVENT_MODIFY_STATE")
+		os.Exit(0)
+	}
 	if len(os.Args) == 4 && os.Args[1] == "worker" && os.Args[2] == "query" && os.Args[3] == "tcp-port-configuration" {
 		os.Exit(winplatform.Run(os.Args[2:]))
 	}
