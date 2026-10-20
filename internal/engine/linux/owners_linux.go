@@ -642,6 +642,22 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		if hasHolder(pid) {
 			return nil
 		}
+		// A proc-directory inode scopes this cached search generation. Read
+		// a new incarnation before acquiring its scanner gate: proc stat I/O
+		// and a runtime syscall handoff must not strand all followers.
+		var start uint64
+		o.mu.Lock()
+		previous := o.windows[pid]
+		if previous.directory == metadata.Ino {
+			start = previous.start
+		}
+		o.mu.Unlock()
+		if start == 0 {
+			start, err = processStart(pid)
+			if err != nil || expired() {
+				return nil
+			}
+		}
 		o.mu.Lock()
 		if len(o.windows) > 4096 {
 			for old, state := range o.windows {
@@ -717,9 +733,10 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}
 		scanStarted := time.Now()
-		if current.directory != metadata.Ino {
-			current = fdWindow{directory: metadata.Ino, lastFD: -1, scanning: current.scanning, assisting: current.assisting}
+		if current.directory != metadata.Ino || (current.start != 0 && current.start != start) {
+			current = fdWindow{directory: metadata.Ino, start: start, lastFD: -1, scanning: current.scanning, assisting: current.assisting}
 		}
+		current.start = start
 		if assist {
 			current.assisting = gate
 			o.assistedScans.Add(1)
@@ -736,6 +753,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				scanErr = o.indexed(r.inode).visit(accept)
 			}
 		}()
+		// Defer order: publish, release the scanner slot, close the directory,
+		// then validate identity. The first defer also covers unclaimed slots.
+		defer f.Close()
 		defer func() {
 			o.mu.Lock()
 			window := o.windows[pid]
@@ -749,12 +769,8 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			close(gate)
 			o.mu.Unlock()
 		}()
-		// Close before releasing the gate and validating metadata; the early
-		// defer also covers paths that never acquired a scanner slot.
-		defer f.Close()
 		o.mu.Lock()
 		window := o.windows[pid]
-		start := window.start
 		// Once a live holder is known, reuse other processes' very recent
 		// search windows. A burst must not rescan the same 64 descriptors in
 		// every concurrent lookup. Positive hints are always revalidated above.
@@ -793,26 +809,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				return true
 			}
 			if canIndex || uint32(inode) == r.inode {
-				// Processes without socket descriptors need no stat read.
-				// A directory inode only scopes search hints; accept still
-				// validates the live fd and the PID incarnation before use.
-				if start == 0 {
-					var err error
-					start, err = processStart(pid)
-					if err != nil {
-						return true
-					}
-					o.mu.Lock()
-					current := o.windows[pid]
-					if current.directory == metadata.Ino {
-						if current.start != start {
-							current.identity = nil
-						}
-						current.start = start
-						o.windows[pid] = current
-					}
-					o.mu.Unlock()
-				}
 				remember[uint32(inode)] = holder{pid, start, string(fd)}
 				if len(remember) >= 32 {
 					o.publish(remember)
