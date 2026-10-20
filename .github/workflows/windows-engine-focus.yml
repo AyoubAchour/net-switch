@@ -82,7 +82,14 @@ jobs:
         run: |
           go test -race -count=1 -v ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Cold owner attribution and timing
+      - name: Cold owner latency at 1950–2100 actual TCP rows
+        if: ${{ !cancelled() && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
+        env:
+          NETSWITCH_LOOKUP_GATE: '1'
+        run: |
+          go test -count=1 -v -run '^TestOwnerSteadyColdTiming$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Attribute at least 995 of 1000 cold burst sockets
         if: ${{ !cancelled() && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
         env:
           NETSWITCH_LOOKUP_GATE: '1'
@@ -100,7 +107,7 @@ jobs:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
           $env:GOMAXPROCS = ''
-          go test -count=1 -v -run '^TestOwnerColdBurstTiming$' ./internal/engine/windows
+          go test -count=1 -v -run '^TestOwner(SteadyColdTiming|ColdBurstTiming)$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep every observed result
         if: ${{ always() && !contains(github.ref, 'windows-platform-native') }}
