@@ -46,11 +46,13 @@ func TestCloseRetainedHalfCloseRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	ackGate, gotFIN := make(chan struct{}), make(chan struct{})
+	ackGate, gotFIN, lateReset := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	releaseACK := sync.OnceFunc(func() { close(ackGate) })
 	notifyFIN := sync.OnceFunc(func() { close(gotFIN) })
+	notifyLateReset := sync.OnceFunc(func() { close(lateReset) })
 	var finalACK atomic.Uint32
 	var fins atomic.Uint32
+	var readComplete atomic.Bool
 	var wg sync.WaitGroup
 	t.Cleanup(func() {
 		releaseACK()
@@ -69,6 +71,15 @@ func TestCloseRetainedHalfCloseRead(t *testing.T) {
 			}
 			ip := header.IPv4(raw)
 			h := header.TCP(raw[ip.HeaderLength():])
+			if toApp && h.Flags().Contains(header.TCPFlagRst) {
+				// A duplicate FIN creates a late ACK after clean removal.
+				// That ACK must still get upstream's pure RST, but only
+				// after the app has read its reply and the ACK gate opens.
+				if !readComplete.Load() || h.DestinationPort() != p.port || h.Flags() != header.TCPFlagRst || h.SequenceNumber() != finalACK.Load() {
+					t.Errorf("reset could discard unread reply: %s", segmentDescription(h))
+				}
+				notifyLateReset()
+			}
 			fin := toApp && h.Flags().Contains(header.TCPFlagFin)
 			if fin {
 				ack := h.SequenceNumber() + uint32(len(h)-int(h.DataOffset())) + 1
@@ -89,6 +100,14 @@ func TestCloseRetainedHalfCloseRead(t *testing.T) {
 			pkt := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(raw)})
 			to.InjectInbound(header.IPv4ProtocolNumber, pkt)
 			pkt.DecRef()
+			if fin && fins.Load() == 1 {
+				// Deliberately duplicate the FIN so late-ACK behavior is
+				// exercised on every run, not only during fast recovery.
+				if !from.Send(raw) {
+					t.Error("could not enqueue the duplicate FIN")
+					return
+				}
+			}
 			if fin {
 				// TCP may send the same FIN again without a clock advance
 				// (for example during fast recovery). Deliver every copy;
@@ -155,17 +174,15 @@ func TestCloseRetainedHalfCloseRead(t *testing.T) {
 	if err != nil || len(reply) != len(payload) || sha256.Sum256(reply) != sha256.Sum256(payload) {
 		t.Fatalf("half-close read: %d/%d bytes, err=%v", len(reply), len(payload), err)
 	}
+	readComplete.Store(true)
 	releaseACK()
-	// The ingress fence handles the final ACK; observe its completion via a
-	// condition, without advancing time or giving the timeout credit.
-	deadline := time.Now().Add(time.Second)
-	for !closedEndpoint(ep) && time.Now().Before(deadline) {
-		runtime.Gosched()
-	}
-	if !closedEndpoint(ep) || p.table.Stats().ClosingOverflow != 0 || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
+	// Both ACKs pass through the real ingress fence. The first closes cleanly;
+	// the extra ACK then gets the exact upstream response checked above.
+	closeSignal(t, lateReset, "upstream reset for duplicate final ACK")
+	if !closedEndpoint(ep) || p.table.Stats().ClosingOverflow != 0 || p.table.Stats().Rejected != 0 {
 		t.Fatal("final ACK did not close cleanly", p.diagnostics())
 	}
-	t.Logf("app half-closed, left %d reply bytes unread through FIN at full cap, then read every byte with matching SHA-256; FIN packets=%d; RST=0", len(reply), fins.Load())
+	t.Logf("app half-closed, left %d reply bytes unread through FIN at full cap, then read every byte with matching SHA-256; FIN packets=%d; RST before/during read=0; duplicate final ACK gets exact upstream RST after read", len(reply), fins.Load())
 }
 
 func closedEndpoint(ep *tcp.Endpoint) bool {
