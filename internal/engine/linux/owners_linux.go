@@ -576,6 +576,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 	}
 	var result platform.Owner
 	var found []holder
+	var unconfirmed []uint32
+	uncertainHolder := func(pid uint32) {
+		if !slices.Contains(unconfirmed, pid) {
+			unconfirmed = append(unconfirmed, pid)
+		}
+	}
 	var validationTime, initialIndexTime, scopeTime time.Duration
 	var scannedPIDs, scannedFDs, hinted int
 	var lastPID, lastUID uint32
@@ -603,6 +609,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		path := fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd)
 		got, ok := socketInodeAt(unix.AT_FDCWD, path)
 		if !ok || got != r.inode {
+			uncertainHolder(h.pid)
 			return nil
 		}
 		// A shared metadata read must begin after this descriptor check.
@@ -610,12 +617,14 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		checked := time.Now()
 		live, err := o.validationFor(h).resolveTimed(ctx, checked, o, &timing)
 		if err != nil || live.StartTime != h.start {
+			uncertainHolder(h.pid)
 			if errors.Is(err, os.ErrNotExist) {
 				o.invalidateStart(h)
 			}
 			return nil
 		}
 		if got, ok := socketInodeAt(unix.AT_FDCWD, path); !ok || got != r.inode {
+			uncertainHolder(h.pid)
 			return nil
 		}
 		if result.AppID != "" && result.AppID != live.AppID {
@@ -706,14 +715,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		}
 		seen[pid] = true
 		scannedPIDs++
-		if !complete && result.AppID != "" {
-			o.mu.Lock()
-			observed := o.windows[pid].observed
-			o.mu.Unlock()
-			if time.Since(observed) < 5*time.Millisecond {
-				return nil
-			}
-		}
 		dir := fmt.Sprintf("/proc/%d/fd", pid)
 		opened := time.Now()
 		f, err := openProcDescriptors(dir)
@@ -806,7 +807,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 		}
 		maxFD := window.high
 		maxSeen := window.extent
-		remember := make(map[uint32]holder, 32)
 		advancing := false
 		whole := false
 		matched := false
@@ -826,11 +826,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 				return true
 			}
 			if canIndex || uint32(inode) == r.inode {
-				remember[uint32(inode)] = holder{pid, start, string(fd)}
-				if len(remember) >= 32 {
-					o.publish(remember)
-					clear(remember)
-				}
+				o.publishHolder(inode, holder{pid, start, string(fd)})
 			}
 			if uint32(inode) == r.inode {
 				matched = true
@@ -913,7 +909,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 								// A foreign-process scan may have read this inode before
 								// our subscription. Publish its exact FD, then use the
 								// same live identity validation as every other hint.
-								o.publish(map[uint32]holder{r.inode: {pid: pid, start: start, fd: strconv.FormatInt(socket.fd, 10)}})
+								o.publishHolder(r.inode, holder{pid: pid, start: start, fd: strconv.FormatUint(uint64(socket.fd), 10)})
 								matched = true
 								break
 							}
@@ -947,7 +943,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			return 0, context.DeadlineExceeded
 		}
 		defer func() {
-			o.publish(remember)
 			o.mu.Lock()
 			defer o.mu.Unlock()
 			if current := o.windows[pid]; current.directory == metadata.Ino {
@@ -957,6 +952,31 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 				o.windows[pid] = current
 			}
 		}()
+		if slices.Contains(unconfirmed, pid) {
+			// A representative FD can close while another duplicate remains.
+			// A recent observation is not a negative result for this process.
+			// Search its live directory before choosing a different holder;
+			// expiry still makes the entire lookup unknown, never partial.
+			started := time.Now()
+			defer func() { timing.add(phaseDescriptors, time.Since(started)) }()
+			if _, err := f.Seek(0, 0); err != nil {
+				return err
+			}
+			advancing = true
+			for !expired() {
+				n, err := f.Visit(128, visit)
+				if matched || errors.Is(err, io.EOF) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				if n == 0 {
+					return nil
+				}
+			}
+			return context.DeadlineExceeded
+		}
 		recentRange := func() error {
 			// A burst of refused connections closes and reuses descriptors
 			// below the high-water mark. Inspect that recent range before a
@@ -1101,6 +1121,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 	}
 	// Search each tier for actual holders, then fall back only if it found
 	// none. A matching scope never supplies identity by itself.
+	// A failed positive hint remains a candidate even if the process moved
+	// out of the socket's original cgroup. Resolve it before choosing peers.
+	for _, pid := range unconfirmed {
+		if err := scan(pid, true); err != nil {
+			return platform.Owner{}, err
+		}
+	}
 	scopeStarted := time.Now()
 	groups := o.cgroupPIDsTimed(ctx, r.cgroup, requested, &timing)
 	scopeTime = time.Since(scopeStarted)

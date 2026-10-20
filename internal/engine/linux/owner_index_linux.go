@@ -202,34 +202,47 @@ func (o *Owners) unsubscribe(inode uint32, w *inodeWaiter) {
 }
 
 func (o *Owners) publish(found map[uint32]holder) {
-	if len(found) == 0 {
-		return
-	}
 	for inode, h := range found {
-		s := o.indexFor(inode)
-		s.mu.Lock()
-		old := s.inodes[inode]
-		if old.first.pid == 0 && len(s.inodes) >= ownerIndexEntries {
-			clear(s.inodes)
-		}
-		changed := false
-		if old.first.pid == 0 {
-			old.first = h
-			changed = true
-		} else if old.first != h && !slices.Contains(old.more, h) && len(old.more) < 7 {
+		o.publishHolder(inode, h)
+	}
+}
+
+func (o *Owners) publishHolder(inode uint32, h holder) {
+	s := o.indexFor(inode)
+	s.mu.Lock()
+	old := s.inodes[inode]
+	if old.first.pid == 0 && len(s.inodes) >= ownerIndexEntries {
+		clear(s.inodes)
+	}
+	changed := false
+	if old.first.pid == 0 {
+		old.first, changed = h, true
+	} else if old.first.pid == h.pid && old.first.start == h.start {
+		// A process may duplicate a socket many times. Retain a current FD
+		// hint in that process's slot, leaving space for distinct holders.
+		changed = old.first != h
+		old.first = h
+	} else {
+		at := slices.IndexFunc(old.more, func(previous holder) bool { return previous.pid == h.pid && previous.start == h.start })
+		if at >= 0 {
+			if old.more[at] != h {
+				// Readers keep immutable snapshots after releasing this lock.
+				old.more = slices.Clone(old.more)
+				old.more[at], changed = h, true
+			}
+		} else if len(old.more) < 7 {
 			old.more = append(old.more, h)
 			changed = true
 		}
-		if changed {
-			s.inodes[inode] = old
-		}
-		// Wake only lookups for this inode, while the rest of the descriptor
-		// batch is still being indexed. A 512-entry batch must not hold every
-		// new connection's result until its last readlink completes.
-		for w := s.waiters[inode]; w != nil; w = w.next {
-			close(w.ready)
-		}
-		delete(s.waiters, inode)
-		s.mu.Unlock()
 	}
+	if changed {
+		s.inodes[inode] = old
+	}
+	// A fresh observation wakes its exact subscribers even if the stored
+	// representative did not change. Never wait for unrelated descriptors.
+	for w := s.waiters[inode]; w != nil; w = w.next {
+		close(w.ready)
+	}
+	delete(s.waiters, inode)
+	s.mu.Unlock()
 }
