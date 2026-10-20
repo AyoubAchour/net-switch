@@ -31,6 +31,11 @@ func TestCompletedSmallScanDoesNotHideLaterSocket(t *testing.T) {
 		// targeted lookup may stop at its match without reaching directory EOF.
 		pid := uint32(os.Getpid())
 		o.rememberPID(uint32(os.Getuid()), pid)
+		o.mu.Lock()
+		window := o.windows[pid]
+		window.next = 0 // establish a full pass, not EOF after a retained cursor
+		o.windows[pid] = window
+		o.mu.Unlock()
 		began := time.Now()
 		prime, stop := context.WithTimeout(ctx, 100*time.Millisecond)
 		_, primeErr := o.holders(prime, socketRow{inode: 1, uid: uint32(os.Getuid())})
