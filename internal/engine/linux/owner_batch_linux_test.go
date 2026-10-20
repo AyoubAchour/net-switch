@@ -141,7 +141,7 @@ func TestCompletedDescriptorBatchOnlyServesOverlappingLookups(t *testing.T) {
 	}
 	key := descriptorBatchKey{pid: pid, uid: uint32(os.Getuid()), start: start, directory: directory.Ino, limit: 1024}
 	requested := time.Now()
-	first, err := o.descriptorBatch(key, requested)
+	first, err := o.descriptorBatch(context.Background(), key, requested, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestCompletedDescriptorBatchOnlyServesOverlappingLookups(t *testing.T) {
 		t.Fatal(first.result.err)
 	}
 	// The original operation reaches this process after shared work finished.
-	again, err := o.descriptorBatch(key, requested)
+	again, err := o.descriptorBatch(context.Background(), key, requested, false)
 	if err != nil || again != first || o.batches.started.Load() != 1 {
 		t.Fatal("overlapping lookup repeated completed fresh work", err)
 	}
@@ -179,7 +179,7 @@ func TestCompletedDescriptorBatchOnlyServesOverlappingLookups(t *testing.T) {
 			t.Fatal("fixture reused a socket already in the first batch")
 		}
 	}
-	later, err := o.descriptorBatch(key, time.Now())
+	later, err := o.descriptorBatch(context.Background(), key, time.Now(), false)
 	if err != nil || later == first {
 		t.Fatal("later lookup reused an old negative", err)
 	}
@@ -233,5 +233,64 @@ func TestFullBatchQueueCannotChooseOneConflictingHolder(t *testing.T) {
 	defer stop()
 	if _, err := control.holders(ctx2, row); !errors.Is(err, platform.ErrAmbiguous) {
 		t.Fatalf("unblocked real shared-socket control: %v", err)
+	}
+}
+
+func TestCallerOwnedDescriptorBatchHonorsCancellation(t *testing.T) {
+	row, _, _, key, _ := sharedBatchSocket(t)
+	o := newTestOwners(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	job, err := o.descriptorBatch(ctx, key, time.Now(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-job.done:
+	default:
+		t.Fatal("caller-owned batch did not complete before returning")
+	}
+	if !errors.Is(job.result.err, context.DeadlineExceeded) || job.result.count != 0 || o.indexed(row.inode).count() != 0 {
+		t.Fatal("cancelled batch read or published descriptors")
+	}
+	fresh, err := o.descriptorBatch(context.Background(), key, time.Now(), true)
+	if err != nil || fresh == job {
+		t.Fatal("cancelled result was reused", err)
+	}
+	if o.indexed(row.inode).count() == 0 || o.batches.inline.Load() != 2 {
+		t.Fatal("fresh caller-owned scan did not find the real inherited socket")
+	}
+}
+
+type cancelAfterHolderContext struct {
+	context.Context
+	o      *Owners
+	pid    uint32
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterHolderContext) Err() error {
+	c.o.mu.Lock()
+	validated := !c.o.windows[c.pid].observed.IsZero()
+	c.o.mu.Unlock()
+	if validated {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+func TestExpiryAfterFirstHolderCannotChooseAPartialOwner(t *testing.T) {
+	row, first, _, _, _ := sharedBatchSocket(t)
+	o := newTestOwners(t)
+	o.publish(map[uint32]holder{row.inode: first})
+	base, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := cancelAfterHolderContext{Context: base, o: o, pid: first.pid, cancel: cancel}
+	owner, err := o.holders(ctx, row)
+	if base.Err() == nil || o.metadataPasses.Load() != 1 {
+		t.Fatal("fixture did not cancel after validating exactly one real holder")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) || owner.AppID != "" {
+		t.Fatalf("expired conflict search selected a partial owner: %+v %v", owner, err)
 	}
 }
