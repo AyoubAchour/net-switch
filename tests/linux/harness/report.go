@@ -55,14 +55,18 @@ func (r CaseResult) Detail() string {
 			return check.Message
 		}
 	}
+	var release []string
 	for _, check := range r.Checks {
 		if check.ReleaseBlocker {
 			measurement := "threshold failed: "
 			if check.OK {
 				measurement = "threshold met: "
 			}
-			return measurement + check.Message + "; " + r.ReleaseBlocker
+			release = append(release, measurement+check.Message)
 		}
+	}
+	if len(release) != 0 {
+		return strings.Join(release, "; ") + "; " + r.ReleaseBlocker
 	}
 	return ""
 }

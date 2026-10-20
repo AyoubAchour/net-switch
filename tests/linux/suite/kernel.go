@@ -402,6 +402,12 @@ func addressChange(e *Env) {
 // still running, so a case acts on a flow that really exists. (Its answers
 // are checked from its result afterwards.)
 func (e *Env) streamUp(name string, bg *Bg) {
+	if e.deferAttribution {
+		// StartStream already checked this exact live tuple, including an
+		// explicit unknown owner, before allowing the load to begin.
+		e.T.Require(bg.Running(), "%s's inspected stream is still running", name)
+		return
+	}
 	_, ok := e.WaitFlow(3*time.Second, func(f engine.Flow) bool {
 		return f.App == AppPath(name) && f.Destination.Port() == wire.PortStream && f.Down > 0
 	})

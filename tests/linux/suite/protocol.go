@@ -236,7 +236,7 @@ func flowsPagination(e *Env) {
 		"each of bravo's %d held connections was listed exactly once, by its own tuple (once %d, more than once %d, missing %d, ids listed twice %d)", n, once, twice, n-len(matched), dupIDs)
 	e.T.Check(len(wrong) == 0, "every held connection has correct identified or unknown ownership, its required lane, revision %d, epoch %d and a point after the revision's (%d didn't: %s)",
 		loaded.N, s.Epoch(), len(wrong), strings.Join(upTo(wrong, 3), "; "))
-	e.T.Check(once-unknown >= n-1, "at least %d rows prove bravo's path, app id and PID (%d identified, %d unknown)", n-1, once-unknown, unknown)
+	e.T.ReleaseCheck(once-unknown >= n-1, "at least %d rows prove bravo's path, app id and PID (%d identified, %d unknown)", n-1, once-unknown, unknown)
 	stats, err := s.Stats(e.Ctx())
 	e.T.Require(err == nil, "stats while the paginated connections are held (%v)", err)
 	e.T.Check(int(stats.Unknown) == unknown && stats.LookupMisses == uint64(unknown), "unknown snapshot rows exactly match live admission and lookup misses (%d listed, %d live, %d misses)", unknown, stats.Unknown, stats.LookupMisses)

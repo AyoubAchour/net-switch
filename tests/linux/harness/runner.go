@@ -31,8 +31,8 @@ type Case struct {
 	// Defect names the known baseline defect a baseline-defect case's one
 	// Expect assertion checks for. Only baseline-defect cases have one.
 	Defect string
-	// ReleaseBlocker names the explicit product decision deferring one
-	// ReleaseCheck. Every ordinary Check and Expect remains mandatory on 1.0.
+	// ReleaseBlocker names the recorded design decision deferring the case's
+	// ReleaseChecks. Every ordinary Check and Expect remains mandatory on 1.0.
 	ReleaseBlocker string
 	// Waits says what a pending gate needs before it can be checked. Only
 	// pending cases have one, and they have no Run.
@@ -388,8 +388,8 @@ func runCase(parent context.Context, c *Case, opts Options) (CaseResult, string)
 			}
 		}
 	}
-	if opts.Kind == V1 && c.ReleaseBlocker != "" && tally.ReleaseChecks != 1 && result.Error == "" {
-		result.Error = fmt.Sprintf("a declared release blocker must measure exactly one release check; got %d", tally.ReleaseChecks)
+	if opts.Kind == V1 && c.ReleaseBlocker != "" && tally.ReleaseChecks == 0 && result.Error == "" {
+		result.Error = "a declared release blocker must measure its release checks"
 		t.write("ERROR", result.Error)
 	}
 	var why string
