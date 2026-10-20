@@ -55,43 +55,50 @@ type fdWindow struct {
 	identity   *ownerValidation
 }
 type Owners struct {
-	queries         diagPool
-	warmed          bool
-	lookupErrors    [4]atomic.Uint64
-	cgroupStats     [3]atomic.Uint64
-	sharedScans     atomic.Uint64
-	assistedScans   atomic.Uint64
-	targetedProbes  atomic.Uint64
-	metadataPasses  atomic.Uint64
-	sharedMetadata  atomic.Uint64
-	sharedScopes    atomic.Uint64
-	lastLookupError atomic.Pointer[string]
-	mu              sync.Mutex
-	cgroupMu        sync.RWMutex
-	recentMu        sync.RWMutex
-	cgroups         map[uint64]string
-	scopeReads      [64]atomic.Pointer[scopePIDSnapshot]
-	recent          map[uint32]*recentOwners
-	index           [ownerIndexShards]ownerIndex
-	indexSeed       maphash.Seed
-	windows         map[uint32]fdWindow
-	ambiguousPorts  map[uint16]time.Time
+	queries              diagPool
+	warmed               bool
+	lookupErrors         [4]atomic.Uint64
+	cgroupStats          [3]atomic.Uint64
+	sharedScans          atomic.Uint64
+	assistedScans        atomic.Uint64
+	targetedProbes       atomic.Uint64
+	metadataPasses       atomic.Uint64
+	sharedMetadata       atomic.Uint64
+	sharedScopes         atomic.Uint64
+	holderTimeouts       atomic.Uint64
+	timeoutPhases        [lookupPhases]lookupPhaseCounter
+	timeoutWaitRequested atomic.Uint64
+	timeoutWaitMaximum   atomic.Uint64
+	lastLookupError      atomic.Pointer[string]
+	mu                   sync.Mutex
+	cgroupMu             sync.RWMutex
+	recentMu             sync.RWMutex
+	cgroups              map[uint64]string
+	scopeReads           [64]atomic.Pointer[scopePIDSnapshot]
+	recent               map[uint32]*recentOwners
+	index                [ownerIndexShards]ownerIndex
+	indexSeed            maphash.Seed
+	windows              map[uint32]fdWindow
+	ambiguousPorts       map[uint16]time.Time
 	// Fault callbacks are assigned only by the acceptance build.
 	fault        func(context.Context) error
 	destroyFault func(context.Context, socketRow, func())
 }
 
 type lookupStats struct {
-	Timeout, Missing, Ambiguous, Other           uint64
-	CgroupHints, CgroupResolved, CgroupPopulated uint64
-	LastError                                    string
-	MetadataRejected                             uint64
-	LastMetadataError                            string
-	SharedScans                                  uint64
-	AssistedScans                                uint64
-	TargetedProbes                               uint64
-	MetadataPasses, SharedMetadata               uint64
-	SharedScopes                                 uint64
+	Timeout, Missing, Ambiguous, Other             uint64
+	CgroupHints, CgroupResolved, CgroupPopulated   uint64
+	LastError                                      string
+	MetadataRejected                               uint64
+	LastMetadataError                              string
+	SharedScans                                    uint64
+	AssistedScans                                  uint64
+	TargetedProbes                                 uint64
+	MetadataPasses, SharedMetadata                 uint64
+	SharedScopes                                   uint64
+	HolderTimeouts                                 uint64
+	TimeoutStages                                  map[string]lookupPhaseStat
+	TimeoutWaitRequestedNanos, TimeoutMaxWaitNanos uint64
 }
 
 func (o *Owners) Stats() any {
@@ -103,6 +110,18 @@ func (o *Owners) Stats() any {
 	s.TargetedProbes = o.targetedProbes.Load()
 	s.MetadataPasses, s.SharedMetadata = o.metadataPasses.Load(), o.sharedMetadata.Load()
 	s.SharedScopes = o.sharedScopes.Load()
+	s.HolderTimeouts = o.holderTimeouts.Load()
+	s.TimeoutWaitRequestedNanos = o.timeoutWaitRequested.Load()
+	s.TimeoutMaxWaitNanos = o.timeoutWaitMaximum.Load()
+	for phase := range o.timeoutPhases {
+		counter := &o.timeoutPhases[phase]
+		if count := counter.count.Load(); count != 0 {
+			if s.TimeoutStages == nil {
+				s.TimeoutStages = make(map[string]lookupPhaseStat)
+			}
+			s.TimeoutStages[lookupPhaseNames[phase]] = lookupPhaseStat{Count: count, Largest: counter.largest.Load(), TotalNanos: counter.total.Load(), MaxNanos: counter.maximum.Load()}
+		}
+	}
 	if p := lastRejectedMetadata.Load(); p != nil {
 		s.LastMetadataError = *p
 	}
@@ -413,6 +432,10 @@ type scopePIDSnapshot struct {
 }
 
 func (o *Owners) cgroupPIDs(ctx context.Context, id uint64, requested time.Time) []uint32 {
+	return o.cgroupPIDsTimed(ctx, id, requested, nil)
+}
+
+func (o *Owners) cgroupPIDsTimed(ctx context.Context, id uint64, requested time.Time, timing *lookupTiming) []uint32 {
 	if id == 0 || ctx.Err() != nil {
 		return nil
 	}
@@ -426,6 +449,7 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64, requested time.Time)
 		o.sharedScopes.Add(1)
 		return previous.pids
 	}
+	started := time.Now()
 	o.cgroupMu.RLock()
 	dir := o.cgroups[id]
 	o.cgroupMu.RUnlock()
@@ -435,21 +459,30 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64, requested time.Time)
 		dir = o.cgroups[id]
 		o.cgroupMu.RUnlock()
 	}
+	timing.add(phaseScopeMap, time.Since(started))
 	if dir == "" {
 		return nil
 	}
 	o.cgroupStats[1].Add(1)
 	began := time.Now()
 	storage := processBuffers.Get()
-	defer processBuffers.Put(storage)
+	timing.add(phaseScopeScratch, time.Since(began))
+	defer func() {
+		started := time.Now()
+		processBuffers.Put(storage)
+		timing.add(phaseScopeScratch, time.Since(started))
+	}()
 	path := filepath.Join(dir, "cgroup.procs")
-	b, err := readInto(path, storage[:])
+	b, err := readScopeInto(path, storage[:], timing)
 	if errors.Is(err, errKernelFileLimit) {
+		started = time.Now()
 		b, err = readKernelFile(path, 1<<20)
+		timing.add(phaseScopeRead, time.Since(started))
 	}
 	if err != nil {
 		return nil
 	}
+	started = time.Now()
 	pids := make([]uint32, 0, 32)
 	for len(b) > 0 {
 		line, rest, _ := bytes.Cut(b, []byte{'\n'})
@@ -467,6 +500,7 @@ func (o *Owners) cgroupPIDs(ctx context.Context, id uint64, requested time.Time)
 	// This is an immutable search hint read during this operation, not a
 	// membership TTL. No request that began after the read may reuse it.
 	cache.Store(&scopePIDSnapshot{id: id, began: began, pids: pids})
+	timing.add(phaseScopeParse, time.Since(started))
 	return pids
 }
 
@@ -499,11 +533,17 @@ func (o *Owners) refreshCgroups(ctx context.Context) error {
 	return err
 }
 
-func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, error) {
+func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner, lookupErr error) {
 	if r.inode == 0 {
 		return platform.Owner{}, os.ErrNotExist
 	}
 	requested := time.Now()
+	var timing lookupTiming
+	defer func() {
+		if errors.Is(lookupErr, context.DeadlineExceeded) {
+			o.recordHolderTimeout(timing, time.Since(requested))
+		}
+	}()
 	deadline, timed := ctx.Deadline()
 	expired := func() bool { return ctx.Err() != nil || (timed && !time.Now().Before(deadline)) }
 	if expired() {
@@ -528,7 +568,11 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}
 		validationStarted := time.Now()
-		defer func() { validationTime += time.Since(validationStarted) }()
+		defer func() {
+			elapsed := time.Since(validationStarted)
+			validationTime += elapsed
+			timing.add(phaseValidation, elapsed)
+		}()
 		path := fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd)
 		got, ok := socketInodeAt(unix.AT_FDCWD, path)
 		if !ok || got != r.inode {
@@ -585,6 +629,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	recent := o.recentPIDs(r.uid)
 	indexed := o.indexed(r.inode)
 	initialIndexTime = time.Since(indexStarted)
+	timing.add(phaseIndex, initialIndexTime)
 	hinted += len(cached) + indexed.count()
 	for _, h := range cached {
 		if err := accept(h); err != nil {
@@ -643,14 +688,23 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}
 		dir := fmt.Sprintf("/proc/%d/fd", pid)
+		opened := time.Now()
 		f, err := openProcDescriptors(dir)
 		if err != nil {
+			timing.add(phaseProcessOpen, time.Since(opened))
 			return nil
 		}
-		defer f.Close()
+		closeDirectory := func() {
+			started := time.Now()
+			f.Close()
+			timing.add(phaseProcessClose, time.Since(started))
+		}
+		defer closeDirectory()
 		descriptor := f.fd
 		var metadata unix.Stat_t
-		if unix.Fstat(descriptor, &metadata) != nil {
+		statErr := unix.Fstat(descriptor, &metadata)
+		timing.add(phaseProcessOpen, time.Since(opened))
+		if statErr != nil {
 			return nil
 		}
 		canIndex := metadata.Uid == r.uid || slices.Contains(recent, pid)
@@ -680,7 +734,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 		o.mu.Unlock()
 		if start == 0 {
+			started := time.Now()
 			start, err = processStart(pid)
+			timing.add(phaseProcessStart, time.Since(started))
 			if err != nil || expired() {
 				return nil
 			}
@@ -724,7 +780,13 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			if notice != nil && result.AppID == "" {
 				ready = notice.ready
 			}
-			timer := time.NewTimer(max(0, time.Until(assistAfter)))
+			waitBudget := max(0, time.Until(assistAfter))
+			effectiveWait := waitBudget
+			if timed {
+				effectiveWait = min(effectiveWait, max(0, time.Until(deadline)))
+			}
+			timing.waitRequested += effectiveWait
+			timer := time.NewTimer(waitBudget)
 			select {
 			case <-busy:
 			case <-assisting:
@@ -733,7 +795,10 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			case <-ctx.Done():
 			}
 			timer.Stop()
-			scanWait += time.Since(waiting)
+			elapsed := time.Since(waiting)
+			scanWait += elapsed
+			timing.add(phaseScannerWait, elapsed)
+			timing.waitMaximum = max(timing.waitMaximum, elapsed)
 			if err := checkHints(); err != nil {
 				return err
 			}
@@ -762,6 +827,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				}
 				o.mu.Unlock()
 				o.targetedProbes.Add(1)
+				probeStarted := time.Now()
 				if _, err := f.Seek(position, 0); err == nil {
 					_, probeErr := f.Visit(64, func(fd []byte) bool {
 						if expired() {
@@ -788,6 +854,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 						o.mu.Unlock()
 					}
 				}
+				timing.add(phaseDescriptors, time.Since(probeStarted))
 				o.publish(remember)
 				if err := checkHints(); err != nil {
 					return err
@@ -825,7 +892,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}()
 		// Defer order: publish, release the scanner slot, close the directory,
 		// then validate identity. The first defer also covers unclaimed slots.
-		defer f.Close()
+		defer closeDirectory()
 		defer func() {
 			o.mu.Lock()
 			window := o.windows[pid]
@@ -894,6 +961,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 			return true
 		}
+		visitFDs := func(limit int) (int, error) {
+			started := time.Now()
+			count, err := f.Visit(limit, visit)
+			timing.add(phaseDescriptors, time.Since(started))
+			return count, err
+		}
 		defer func() {
 			o.publish(remember)
 			o.mu.Lock()
@@ -915,7 +988,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			// full fallback walk; a lone lastFD hint misses concurrent holes.
 			end := window.extent
 			if _, err := f.Seek(max(0, end-1023)+2, 0); err == nil {
-				_, _ = f.Visit(1024, visit)
+				_, _ = visitFDs(1024)
 			}
 			return nil
 		}
@@ -933,7 +1006,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			if window.extent < 128 || (window.lastFD >= 0 && window.lastFD < 128) {
 				if _, err := f.Seek(0, 0); err == nil {
 					advancing = true
-					_, readErr := f.Visit(128, visit)
+					_, readErr := visitFDs(128)
 					advancing = false
 					whole = errors.Is(readErr, io.EOF) && !expired()
 					if whole {
@@ -962,7 +1035,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					count = 512
 				}
 				advancing = true
-				_, _ = f.Visit(count, visit)
+				_, _ = visitFDs(count)
 				advancing = false
 				if matched {
 					return nil
@@ -991,7 +1064,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					}
 					o.mu.Unlock()
 					if _, err := f.Seek(max(0, tail-255)+2, 0); err == nil {
-						_, _ = f.Visit(256, visit)
+						_, _ = visitFDs(256)
 						if matched {
 							return nil
 						}
@@ -1003,7 +1076,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			return nil
 		}
 		for !expired() {
-			names, readErr := f.Visit(64, visit)
+			names, readErr := visitFDs(64)
 			whole = position == 0 && errors.Is(readErr, io.EOF) && !expired()
 			if matched {
 				return nil
@@ -1051,7 +1124,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 	// Search each tier for actual holders, then fall back only if it found
 	// none. A matching scope never supplies identity by itself.
 	scopeStarted := time.Now()
-	groups := o.cgroupPIDs(ctx, r.cgroup, requested)
+	groups := o.cgroupPIDsTimed(ctx, r.cgroup, requested, &timing)
 	scopeTime = time.Since(scopeStarted)
 	if expired() {
 		return finish()
@@ -1068,7 +1141,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 	}
 	if result.AppID == "" {
+		started := time.Now()
 		o.prioritizeScope(ctx, ordered, recent, r.uid)
+		timing.add(phaseRank, time.Since(started))
 	}
 	for _, pid := range ordered {
 		if err := scan(pid, false); err != nil {
