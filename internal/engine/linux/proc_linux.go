@@ -139,9 +139,9 @@ func readInto(path string, b []byte) ([]byte, error) {
 	if err := regularKernelFile(fd, len(b), direct); err != nil {
 		return nil, err
 	}
-	if direct && procLeaf(path) == "stat" {
-		return readBoundedWith(fd, b, readKernelData)
-	}
+	// Even proc stat can release the last mm reference of an exiting task
+	// and wait for its AIO/mapping cleanup. Its small size is not a bound on
+	// syscall duration; let the runtime schedule other work during the read.
 	return readBounded(fd, b)
 }
 
@@ -266,11 +266,10 @@ func socketInodeAt(dir int, name string) (uint32, bool) {
 	var n int
 	var err error
 	if dir >= 0 {
-		// This descriptor pins a kernel /proc/PID/fd directory. Its numeric
-		// children return link text from the kernel's file table; this never
-		// opens a target or invokes a filesystem read. Keep these tiny calls
-		// on the scanner's P instead of handing it off at every descriptor
-		// while hundreds of followers wait for this same scanner's batch.
+		// Pin the kernel directory and keep the numeric path on the stack.
+		// Although readlink never opens the target, its temporary reference
+		// can become the last one after a concurrent close. Final socket
+		// cleanup may linger, so this must be an ordinary scheduling syscall.
 		var entry [16]byte
 		if len(name) == 0 || len(name) >= len(entry) {
 			return 0, false
@@ -281,14 +280,13 @@ func socketInodeAt(dir int, name string) (uint32, bool) {
 			}
 			entry[i] = name[i]
 		}
-		count, _, errno := syscall.RawSyscall6(unix.SYS_READLINKAT, uintptr(dir), uintptr(unsafe.Pointer(&entry[0])), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0)
+		count, _, errno := syscall.Syscall6(unix.SYS_READLINKAT, uintptr(dir), uintptr(unsafe.Pointer(&entry[0])), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0)
 		n = int(count)
 		if errno != 0 {
 			err = errno
 		}
 	} else if dir == unix.AT_FDCWD {
-		// This helper admits only a literal proc PID/fd/number path to the
-		// kernel-only fast path; arbitrary paths keep ordinary syscalls.
+		// Short literal proc paths avoid allocating their NUL terminator.
 		n, err = readKernelLink(name, b[:])
 	} else {
 		n, err = unix.Readlinkat(dir, name, b[:])
