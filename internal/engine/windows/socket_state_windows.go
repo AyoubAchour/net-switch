@@ -61,9 +61,9 @@ func nativeSocketState() map[string]any {
 				k.pid, k.state = binary.LittleEndian.Uint32(row[52:]), binary.LittleEndian.Uint32(row[48:])
 			}
 			used[port] = true
-			if k.pid == uint32(os.Getpid()) || k.destination == netip.AddrFrom4([4]byte{198, 19, 128, 2}) {
-				groups[k] = append(groups[k], port)
-			}
+			// Include other processes too: a port freed by our fixture can be
+			// reused by Windows before the native bindability probe reaches it.
+			groups[k] = append(groups[k], port)
 		}
 	}
 	var rows []tcpStateGroup
