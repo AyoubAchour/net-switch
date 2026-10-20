@@ -30,6 +30,7 @@ import (
 const routeProtocol = 186
 
 var netlinkTimeoutOnce sync.Once
+var errAmbiguousLine = errors.New("address matches multiple interfaces")
 
 var bypass = []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "255.255.255.255/32", "::1/128", "fc00::/7", "fe80::/10", "ff00::/8"}
 
@@ -42,6 +43,7 @@ type lineState struct {
 	Addresses          []netip.Addr
 	Up                 bool
 	Default4, Default6 bool
+	Unavailable        string
 }
 type Platform struct {
 	testClose func()
@@ -221,7 +223,7 @@ func resolveLine(ctx context.Context, links []netlink.Link, name string, address
 			ip, _ := netip.AddrFromSlice(a.IP)
 			if slices.Contains(addresses, ip.Unmap()) {
 				if match != nil && match.Attrs().Index != link.Attrs().Index {
-					return nil, errors.New("ambiguous line interface")
+					return nil, errAmbiguousLine
 				}
 				match = link
 			}
@@ -430,12 +432,20 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 		return err
 	}
 	resolved := make(map[string]netlink.Link, len(p.lines))
+	unavailable := make(map[string]string)
 	for id, line := range p.lines {
 		name := line.Interface
 		if name == "" && len(line.MatchAddresses) == 0 {
 			name = line.Name
 		}
 		link, err := resolveLine(ctx, links, name, line.MatchAddresses)
+		if errors.Is(err, errAmbiguousLine) {
+			unavailable[id] = err.Error()
+			if line.Unavailable != err.Error() {
+				log.Printf("Linux line %s unavailable: %v", id, err)
+			}
+			continue
+		}
 		if err != nil {
 			return err
 		}
@@ -528,6 +538,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 		l.Default4 = false
 		l.Default6 = false
 		l.Addresses = nil
+		l.Unavailable = unavailable[id]
 		if link != nil {
 			l.Index = link.Attrs().Index
 			l.Name = link.Attrs().Name
@@ -599,6 +610,15 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			}
 		}
 		p.lines[id] = l
+	}
+	if len(unavailable) > 0 {
+		usable := false
+		for _, line := range p.lines {
+			usable = usable || (line.Up && (line.Default4 || line.Default6))
+		}
+		if !usable {
+			return fmt.Errorf("no usable line remains after ambiguous address selection: %v", unavailable)
+		}
 	}
 	// New addresses select their table before old address selectors disappear.
 	for _, kind := range []string{"rule", "route", "binding"} {
@@ -853,6 +873,9 @@ func (p *Platform) binding(id string, v6 bool) (lineState, error) {
 		return lineState{}, errors.New("line bindings are unavailable")
 	}
 	l, ok := view.lines[id]
+	if ok && l.Unavailable != "" {
+		return l, fmt.Errorf("line %s unavailable: %s", id, l.Unavailable)
+	}
 	if !ok || !l.Up || (!v6 && !l.Default4) || (v6 && !l.Default6) {
 		return l, fmt.Errorf("line %s has no usable default route", id)
 	}

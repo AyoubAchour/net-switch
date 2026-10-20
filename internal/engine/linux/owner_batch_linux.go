@@ -48,6 +48,8 @@ type descriptorBatch struct {
 	done       chan struct{}
 	completed  time.Time
 	result     descriptorBatchResult // immutable after done closes
+	stage      atomic.Uint32
+	visited    atomic.Int64
 }
 
 type descriptorBatches struct {
@@ -66,6 +68,7 @@ type descriptorBatches struct {
 	inline                                                 atomic.Uint64
 	completionNanos, resumeNanos, maxCompletion, maxResume atomic.Uint64
 	lockNanos, unlockNanos, maxLock, maxUnlock             atomic.Uint64
+	lastWait                                               atomic.Pointer[string]
 }
 
 type descriptorQueueBusy struct{ ready <-chan struct{} }
@@ -206,11 +209,13 @@ func (o *Owners) runDescriptorBatches() {
 
 func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
 	b := &o.batches
+	job.stage.Store(1)
 	started := time.Now()
 	queued := uint64(started.Sub(job.queued))
 	b.queueNanos.Add(queued)
 	recordLookupMaximum(&b.maxQueue, queued)
 	job.result = o.readDescriptorBatch(job)
+	job.stage.Store(5)
 	job.caller = nil
 	serviced := time.Now()
 	service := uint64(serviced.Sub(started))
@@ -258,9 +263,17 @@ func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
 		}
 	}
 	close(job.done)
+	job.stage.Store(6)
 	if available != nil {
 		close(available)
 	}
+}
+
+func (o *Owners) recordBatchWait(job *descriptorBatch) {
+	stage := job.stage.Load()
+	names := []string{"queued", "starting", "opening-proc", "reading-descriptors", "publishing-index", "completing", "done"}
+	message := fmt.Sprintf("stage=%s pid=%d offset=%d limit=%d visited=%d age=%s expired=%t queued=%d inline=%t", names[stage], job.key.pid, job.key.offset, job.key.limit, job.visited.Load(), time.Since(job.queued), time.Now().After(job.deadline), len(o.batches.jobs), job.inline)
+	o.batches.lastWait.Store(&message)
 }
 
 func (b *descriptorBatches) resumed(job *descriptorBatch, waiting time.Time) {
@@ -281,6 +294,7 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		out.err = context.DeadlineExceeded
 		return out
 	}
+	job.stage.Store(2)
 	f, err := openProcDescriptors(fmt.Sprintf("/proc/%d/fd", k.pid))
 	if err != nil {
 		out.err = err
@@ -300,7 +314,9 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		out.err = err
 		return out
 	}
+	job.stage.Store(3)
 	out.count, out.err = f.Visit(k.limit, func(name []byte) bool {
+		job.visited.Add(1)
 		if expired() {
 			return false
 		}
@@ -321,7 +337,9 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		// their compact results for callers, but retain only requested positive
 		// hints globally so the engine's own sockets do not double the index.
 		if k.cacheAll || o.hasInodeWaiter(inode) {
+			job.stage.Store(4)
 			o.publishHolder(inode, holder{pid: k.pid, start: k.start, fd: string(name)})
+			job.stage.Store(3)
 		}
 		return true
 	})

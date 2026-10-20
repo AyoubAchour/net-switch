@@ -13,7 +13,7 @@ import (
 
 type connection struct {
 	id               stack.TransportEndpointID
-	done             chan struct{}
+	completed        atomic.Bool
 	ready            atomic.Pointer[readyRelay]
 	ep               tcpip.Endpoint
 	ticket           flowapi.Ticket
@@ -53,7 +53,11 @@ func (f *Forwarder) startMaintenance() {
 				relay.cancel()
 			}
 			c.ep.Abort()
-			<-c.done
+			f.relays.mu.Lock()
+			for !c.completed.Load() {
+				f.relays.finished.Wait()
+			}
+			f.relays.mu.Unlock()
 			c.ticket.Close()
 			f.removeConnection(c)
 		}
@@ -88,11 +92,9 @@ func (f *Forwarder) sweep(now time.Time) {
 		state := gtcp.EndpointState(c.ep.State())
 		if state == gtcp.StateClose || state == gtcp.StateError {
 			c.releaseAdmission()
-			select {
-			case <-c.done:
+			if c.completed.Load() {
 				c.ticket.Close()
 				f.removeConnection(c)
-			default:
 			}
 			continue
 		}

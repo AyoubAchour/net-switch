@@ -85,6 +85,7 @@ type lookupStats struct {
 	Timeout, Missing, Ambiguous, Other                                                   uint64
 	CgroupHints, CgroupResolved, CgroupPopulated                                         uint64
 	LastError                                                                            string
+	LastBatchWait                                                                        string
 	MetadataRejected                                                                     uint64
 	LastMetadataError                                                                    string
 	SharedScans                                                                          uint64
@@ -134,6 +135,9 @@ func (o *Owners) Stats() any {
 	}
 	if p := o.lastLookupError.Load(); p != nil {
 		s.LastError = *p
+	}
+	if p := o.batches.lastWait.Load(); p != nil {
+		s.LastBatchWait = *p
 	}
 	return s
 }
@@ -966,6 +970,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 						}
 						return out.count, out.err
 					case <-ctx.Done():
+						o.recordBatchWait(job)
 						select {
 						case <-job.done:
 							o.batches.resumed(job, waiting)

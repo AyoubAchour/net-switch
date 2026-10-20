@@ -24,6 +24,7 @@ type relayWorkers struct {
 	stop       chan struct{}
 	stopOnce   sync.Once
 	wg         sync.WaitGroup
+	finished   *sync.Cond
 	bufferMu   sync.Mutex
 	loans      int
 	bufferPeak int
@@ -57,12 +58,14 @@ type readyRelay struct {
 	cancelled                      atomic.Bool
 	ctx                            context.Context
 	c                              *connection
+	connection                     connection
+	queue                          waiter.Queue
+	forward                        *Forwarder
 	remote                         platform.ReadyTCP
 	watch                          platform.Readiness
 	wq                             *waiter.Queue
 	entry                          waiter.Entry
 	up, down                       relayDirection
-	finish                         func()
 	waitBuffer                     bool // worker only
 	app                            string
 	queued, granted                bool // workers.bufferMu
@@ -74,6 +77,7 @@ func newRelayWorkers() *relayWorkers {
 	// its writes wait for those same consumers to make progress.
 	n := min(8, max(1, (runtime.GOMAXPROCS(0)+1)/2))
 	w := &relayWorkers{wake: make(chan struct{}, n), stop: make(chan struct{}), appLoans: make(map[string]int)}
+	w.finished = sync.NewCond(&w.mu)
 	for range n {
 		w.wg.Go(w.run)
 	}
@@ -223,24 +227,18 @@ func (w *relayWorkers) close() {
 	w.wg.Wait()
 }
 
-func (f *Forwarder) startReadyRelay(ctx context.Context, c *connection, wq *waiter.Queue, remote platform.ReadyTCP, closeApp func(), app string) error {
-	r := &readyRelay{workers: f.relays, initializing: true, ctx: f.ctx, c: c, remote: remote, wq: wq, app: app}
+func (f *Forwarder) startReadyRelay(ctx context.Context, r *readyRelay, remote platform.ReadyTCP, app string) error {
+	c, wq := r.c, &r.queue
+	r.workers, r.initializing, r.ctx, r.remote, r.wq, r.app, r.forward = f.relays, true, f.ctx, remote, wq, app, f
 	r.cancelled.Store(ctx.Err() != nil)
 	watch, err := remote.Watch(r.notify)
 	if err != nil {
 		return err
 	}
 	r.watch = watch
-	r.entry = waiter.NewFunctionEntry(waiter.ReadableEvents|waiter.WritableEvents|waiter.EventErr|waiter.EventHUp, func(waiter.EventMask) { r.notify() })
+	r.entry.Init(r, waiter.ReadableEvents|waiter.WritableEvents|waiter.EventErr|waiter.EventHUp)
 	wq.EventRegister(&r.entry)
 	f.wg.Add(1)
-	r.finish = func() {
-		remote.Close()
-		closeApp()
-		c.releaseAdmission()
-		close(c.done)
-		f.wg.Done()
-	}
 	// Once setup is finished, closure is an atomic flag and a work item.
 	// Keep no per-flow cancellation context or AfterFunc: cancelling 65,536
 	// children must not create 65,536 temporary cleanup goroutines either.
@@ -253,7 +251,15 @@ func (f *Forwarder) startReadyRelay(ctx context.Context, c *connection, wq *wait
 	return nil
 }
 
-func (r *readyRelay) cancel() { r.cancelled.Store(true); r.notify() }
+func (r *readyRelay) cancel()                      { r.cancelled.Store(true); r.notify() }
+func (r *readyRelay) NotifyEvent(waiter.EventMask) { r.notify() }
+
+func (f *Forwarder) completeConnection(c *connection) {
+	f.relays.mu.Lock()
+	c.completed.Store(true)
+	f.relays.finished.Broadcast()
+	f.relays.mu.Unlock()
+}
 
 func (r *readyRelay) close(abort bool) {
 	if r.closed.Swap(true) {
@@ -275,7 +281,11 @@ func (r *readyRelay) close(abort bool) {
 		}
 		r.c.ep.Abort()
 	}
-	r.finish()
+	r.remote.Close()
+	r.c.ep.Close()
+	r.c.releaseAdmission()
+	r.forward.completeConnection(r.c)
+	r.forward.wg.Done()
 }
 
 func stackError(err tcpip.Error) error {
