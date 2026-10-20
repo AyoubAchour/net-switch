@@ -27,6 +27,7 @@ const rejections = new Set(['ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETU
 const publicDestination = '1.0.0.1:443';
 const appDeviceIDs = new Set();
 const destinationCount = (stats, destination) => stats.destinations?.[destination] ?? 0;
+const udpSizes = [64, 1200, 1800, 8192, 12000, ...(options.profile === 'v1' ? [65000] : [])];
 
 async function applied(route, body, matches) {
   await server.api(route, body);
@@ -255,7 +256,7 @@ try {
     assert(after.testisp.connections > before.testisp.connections);
     return { direct, virtual, before, after };
   });
-  for (const size of [64, 1200, 1800, 8192, 12000]) {
+  for (const size of udpSizes) {
     await report.test(`controlled UDP baseline ${size} bytes on both lines`, 'harness-baseline', async () => ({
       direct: await client('udp', { target: responder.direct, size }),
       virtual: await client('udp', { target: responder.virtual, size, localAddress: harness.testisp.address }),
@@ -334,6 +335,12 @@ try {
     const udp = await client('udp', { target: ipv6Target, localAddress: '2001:db8:19::1' });
     return { tcp, udp };
   });
+  if (options.profile === 'v1') {
+    for (const size of [12000, 65000]) {
+      await report.test(`IPv6 fragmented UDP baseline ${size} bytes`, 'harness-baseline',
+        () => client('udp', { target: ipv6Target, localAddress: '2001:db8:19::1', size }));
+    }
+  }
   const mtuBaselines = {};
   for (const [host, source] of [[responder.virtual.host, harness.testisp.address], [ipv6Target.host, '2001:db8:19::1']]) {
     mtuBaselines[host] = await observe(`DF and oversize UDP baseline ${host}`, 'harness-baseline', async () => {
@@ -428,7 +435,7 @@ try {
     assert.equal(result.outcome, 'ECONNRESET', JSON.stringify(result));
     return result;
   });
-  for (const size of [64, 1200, 1800, 8192, 12000]) {
+  for (const size of udpSizes) {
     await observe(`UDP payload and fragmentation through TUN: ${size} bytes`, 'parity', () => client('udp', { target: responder.virtual, size }));
   }
   await observe('STUN two-server mapping through TUN', 'parity', async () => {
@@ -452,6 +459,12 @@ try {
     const byLine = await counts(1); assert(byLine[second.id] >= 1); await client('close');
     const udp = await client('udp', { target: ipv6Target }); return { tcp, udp, byLine };
   });
+  if (options.profile === 'v1') {
+    for (const size of [12000, 65000]) {
+      await report.test(`IPv6 fragmented UDP through TUN ${size} bytes`, 'parity',
+        () => client('udp', { target: ipv6Target, size }));
+    }
+  }
   await pinApp(mtuExe, second.id);
   for (const host of [responder.virtual.host, ipv6Target.host]) {
     await observe(`DF and oversize UDP through TUN ${host}`, 'baseline-defect', async () => {
@@ -692,10 +705,13 @@ try {
     // Engine exit is independently observed. Never confuse killing the whole
     // process tree with the app cleaning up after one component crashes.
     await until(() => server.child.exitCode !== null || server.child.signalCode !== null, 'control process death');
+    const deathStarted = performance.now();
     const exited = await until(() => {
       try { process.kill(engine.pid, 0); return false; }
       catch (error) { if (error.code !== 'ESRCH') throw error; return { pid: engine.pid, exitedWithoutHarnessKill: true }; }
     }, 'engine exits on its own after control process death', options.profile === 'v1' ? 35_000 : 30_000);
+    exited.observedAfterMs = performance.now() - deathStarted;
+    exited.old30SecondCheckWouldPass = exited.observedAfterMs <= 30_000;
     const state = await stoppedSnapshot();
     await recordOrphanPnP('PnP cleanup immediately after control-process crash', 'baseline-defect', state.state, state.pnp);
     const direct = await harness.probe();
@@ -704,6 +720,11 @@ try {
     return { exited, state, direct, response };
   });
   if (options.profile === 'v1') {
+    await report.test('65536 held flows fit the 512 MiB runtime budget', 'parity', async () => {
+      await client('close');
+      const { capacity } = await import('./capacity.mjs');
+      return capacity({ server, harness, directory: dir, line: second.id });
+    });
     report.pendingMilestone('service lifecycle and hung worker', 2, 'The engine process is real; SCM installation, recovery actions and Control worker jobs are the separate lifecycle milestone.');
     report.pendingMilestone('installer migration from 0.3.0/0.3.1, update rollback and uninstall', 5, 'Release remains blocked on the installer milestone. Existing installer smoke tests remain required.');
   } else {

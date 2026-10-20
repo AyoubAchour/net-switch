@@ -87,6 +87,7 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 	defer cancel()
 	owners := NewOwners()
 	dialer := &Dialer{Routes: routes}
+	defer func() { err = errors.Join(err, dialer.Close()) }()
 	e := engine.New(ctx, engine.Dependencies{OpenTun: routes.OpenTun, Routes: routes, Dialer: dialer, Owners: owners, Identities: owners},
 		flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncParent})
 	runtime := &Runtime{Engine: e, routes: routes, owners: owners}

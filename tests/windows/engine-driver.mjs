@@ -21,6 +21,8 @@ const stateDir = path.join(directory, 'native-state');
 const settingsFile = path.join(directory, 'engine-driver.json');
 let engine, pipe, epoch = 0, instance = '', serial = 0, stopping = false, ready = false;
 let saved, adapters, latest, healthBusy = false, reconnecting;
+let fatalError;
+const failures = [];
 const pending = new Map();
 let queue = Promise.resolve();
 function serially(fn) {
@@ -95,8 +97,15 @@ async function launch() {
     console.log(`ENGINE EXIT ${JSON.stringify({ pid: current.pid, code, signal, stopping })}`);
     if (current !== engine || stopping || !saved.on) return;
     ready = false;
+    failures.push(Date.now());
+    while (failures[0] < Date.now() - 600_000) failures.shift();
+    if (failures.length >= 5) {
+      fatalError = 'Engine failed five times in ten minutes; normal routing remains restored';
+      console.error(fatalError);
+      return;
+    }
     reconnecting = serially(async () => {
-      await delay(1000);
+      await delay([1000, 2000, 5000, 30_000][Math.min(failures.length - 1, 3)]);
       await launch();
     });
     reconnecting.catch((error) => { console.error(error); process.exitCode = 1; });
@@ -156,6 +165,7 @@ async function sample() {
   return latest;
 }
 async function state() {
+  if (fatalError) return { routing: { status: 'error', error: fatalError }, lines: saved.lines, apps: [], combine: saved.combine };
   if (!ready) return { routing: { status: saved.on ? 'starting' : 'off', ipv6: true }, lines: saved.lines, apps: [], combine: saved.combine };
   await sample();
   const apps = new Map();

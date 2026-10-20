@@ -34,6 +34,7 @@ type Forwarder struct {
 	inFlight                      int
 	connections                   map[stack.TransportEndpointID]*connection
 	retired                       map[*connection]struct{}
+	relays                        *relayWorkers
 	control                       flowapi.Controller
 	owners                        platform.OwnerLookup
 	dialer                        platform.LineDialer
@@ -50,6 +51,7 @@ func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Cont
 	ctx, cancel := context.WithCancel(ctx)
 	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]*pendingOpen), connections: make(map[stack.TransportEndpointID]*connection), retired: make(map[*connection]struct{}), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 2*inFlight, f.open)
+	f.relays = newRelayWorkers()
 	s.SetTransportProtocolHandler(gtcp.ProtocolNumber, f.Handle)
 	gtcp.SetTimeWaitHandler(s, f.Handle)
 	drain := gtcp.SetLocalCloseFence(s, localCloseFenceEnabled)
@@ -180,7 +182,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 	}()
 	ctx, cancel := context.WithCancel(f.ctx)
-	defer cancel()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cancel()
+		}
+	}()
 	ticket.SetCancel(cancel)
 	t := tuple(id)
 	lookup, cancelLookup := context.WithTimeout(ctx, 50*time.Millisecond)
@@ -211,9 +218,17 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 		return
 	}
-	defer remote.Close()
+	defer func() {
+		if !handedOff {
+			remote.Close()
+		}
+	}()
 	stopRemote := context.AfterFunc(ctx, func() { remote.SetLinger(0); remote.Close() })
-	defer stopRemote()
+	defer func() {
+		if !handedOff {
+			stopRemote()
+		}
+	}()
 	if ctx.Err() != nil {
 		return
 	}
@@ -240,9 +255,17 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		ep.Abort()
 	}
 	closeEndpoint := sync.OnceFunc(ep.Close)
-	defer closeEndpoint()
+	defer func() {
+		if !handedOff {
+			closeEndpoint()
+		}
+	}()
 	stopApp := context.AfterFunc(ctx, abort)
-	defer stopApp()
+	defer func() {
+		if !handedOff {
+			stopApp()
+		}
+	}()
 	if ctx.Err() != nil {
 		// The handshake succeeded; Abort owns the reset, not admission.
 		discardHandshake()
@@ -276,13 +299,25 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	// Keep the pending entry through endpoint setup. A delayed reopen hook
 	// must see either pending or connections, never a gap between them.
 	complete(false)
-	defer close(c.done)
-	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission}
 	if a, ok := remote.LocalAddr().(*net.TCPAddr); ok {
 		ticket.Established(a.AddrPort().Addr())
 	} else {
 		ticket.Established(netip.Addr{})
 	}
+	if ready, ok := remote.(platform.ReadyTCP); ok {
+		stopRemote()
+		stopApp()
+		if err := f.startReadyRelay(ctx, c, &wq, ready, func() { closeEndpoint(); c.releaseAdmission() }); err != nil {
+			abort()
+			close(c.done)
+			return
+		}
+		cancel()
+		handedOff = true
+		return
+	}
+	defer close(c.done)
+	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission}
 	count := func(u, d uint64) { c.up.Add(u); c.down.Add(d); ticket.Add(u, d) }
 	if err := Splice(ctx, app, remote, count, abort); err != nil {
 		abort()
@@ -297,7 +332,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 // Stop cancels dials and relays. The owner must close the stack before Wait,
 // which also unblocks handshakes whose app never sent its final ACK.
 func (f *Forwarder) Stop() { f.mu.Lock(); f.cancel(); f.mu.Unlock() }
-func (f *Forwarder) Wait() { f.wg.Wait() }
+func (f *Forwarder) Wait() { f.wg.Wait(); f.relays.close() }
 
 // gonet.Close delegates directly to Endpoint.Close, which requires one call.
 // Cancellation, splice errors and normal cleanup share this single owner.
