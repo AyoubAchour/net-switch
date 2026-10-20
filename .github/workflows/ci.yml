@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      tcp_probe:
+        description: Capture TCP8 stalls before session teardown
+        type: boolean
+        default: false
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -24,9 +28,54 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  tcp-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.tcp_probe
+    name: TCP8 evidence / ${{ matrix.ref }} / ${{ matrix.repeat }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        ref: [engine/wintun-tcp-probe, engine/wintun-tcp-platform-probe]
+        repeat: [1, 2]
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+      - run: git rev-parse HEAD
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
+      - run: ./scripts/prepare-wintun-tests.ps1
+      - name: Twenty TCP8 trials per implementation
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=16m' '-test.run=^TestWintunTCPProbe$'
+      - name: Two full performance comparisons
+        if: ${{ !cancelled() }}
+        run: |
+          $failures = 0
+          for ($i = 1; $i -le 2; $i++) {
+            Write-Host "PERFORMANCE_PROCESS $i"
+            ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintunPerformance$'
+            if ($LASTEXITCODE -ne 0) { $failures++ }
+          }
+          Write-Host "PERFORMANCE_FAILURES $failures/2"
+          if ($failures) { exit 1 }
+
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.tcp_probe
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
