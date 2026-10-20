@@ -572,7 +572,15 @@ func TestReadinessHalfCloseAndCancellation(t *testing.T) {
 				}
 			}
 			if err := c.CloseWrite(); err != nil {
-				t.Fatalf("round %d: native half-close: %v", round, err)
+				// Keep the original failure, but observe the actual peer before
+				// deferred close can turn a missing FIN into an apparent EOF.
+				local, localErr := windows.Getsockname(c.handle)
+				peer, peerErr := windows.Getpeername(c.handle)
+				socketError, socketErr := windows.GetsockoptInt(c.handle, windows.SOL_SOCKET, 0x1007) // SO_ERROR (Winsock).
+				server.SetReadDeadline(time.Now().Add(time.Second))
+				reply, readErr := io.ReadAll(server)
+				t.Fatalf("round %d: native half-close: %v; descriptor=%d local=%+v/%v peer=%+v/%v SO_ERROR=%d/%v; before cleanup peer received %q read=%v",
+					round, err, c.handle, local, localErr, peer, peerErr, socketError, socketErr, reply, readErr)
 			}
 			if err := server.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 				t.Fatal(err)

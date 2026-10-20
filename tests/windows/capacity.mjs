@@ -95,6 +95,10 @@ export async function capacity({ server, harness, directory, line }) {
       const stats = await engineStats();
       return stats.flows.Flows === 0 && stats;
     }, 'no ordinary flows before capacity measurement', 30_000);
+    // The controller needs a port too. Establish one durable connection before
+    // pressure; fetch's four-second idle eviction otherwise makes inspection
+    // itself fail with ENOBUFS. No automatic reconnect is allowed.
+    const controlReservation = await harness.reserveControl();
     for (let i = 0; i < 8; i++) {
       const exe = path.join(directory, `capacity-app-${i}.exe`);
       await copyFile(process.execPath, exe);
@@ -210,7 +214,7 @@ export async function capacity({ server, harness, directory, line }) {
     assert.equal(engineAfter.engineInstanceId, engineBefore.engineInstanceId, 'The engine restarted under port pressure');
     const last = samples.at(-1);
     const evidence = { nativeSamples, layoutCapacity, floor, ordinaryHeld, held, firstLimit, extraAdmissions, refusals,
-      refusalBaseline, refusalLimitMs, resetTimings, oldEchoBasedLimitMs,
+      refusalBaseline, refusalLimitMs, resetTimings, oldEchoBasedLimitMs, controlReservation,
       oldOneSecondCheckWouldPass: [...firstLimit, ...refusals].every((failure) => failure.ms <= 1000),
       oldEchoBasedCheckWouldPass: refusals.every((failure) => failure.ms <= oldEchoBasedLimitMs), portStats,
       portConfiguration, preparation, before, samples, observed, verifiedBefore, verifiedAfter, released, recovered, recoveryMs,

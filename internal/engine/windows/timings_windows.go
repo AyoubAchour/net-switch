@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"runtime"
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ type phaseTiming struct {
 type phaseTimings struct {
 	mu     sync.Mutex
 	values map[string]phaseTiming
+	trace  bool
 }
 
 func (p *phaseTimings) record(name string, elapsed time.Duration) {
@@ -38,7 +40,24 @@ func (p *phaseTimings) record(name string, elapsed time.Duration) {
 }
 func (p *phaseTimings) begin(name string) func() {
 	started := winclock.Now()
-	return func() { p.record(name, winclock.Since(started)) }
+	finish := func() { p.record(name, winclock.Since(started)) }
+	if p == nil || !p.trace {
+		return finish
+	}
+	switch name {
+	case "engine.stop.tcp-join", "engine.stop.stack-join", "journal.read", "cleanup.total":
+		// One bounded snapshot while a measured hosted phase is still active.
+		// This diagnostic never runs on users' machines.
+		timer := time.AfterFunc(10*time.Millisecond, func() {
+			b := make([]byte, 256<<10)
+			n := runtime.Stack(b, true)
+			record, _ := json.Marshal(map[string]any{"operation": "stop-wait", "phase": name, "stacks": string(b[:n])})
+			log.Printf("WINDOWS LIFECYCLE %s", record)
+		})
+		return func() { timer.Stop(); finish() }
+	default:
+		return finish
+	}
 }
 func (p *phaseTimings) snapshot() map[string]phaseTiming {
 	p.mu.Lock()

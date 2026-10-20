@@ -206,6 +206,7 @@ func setDNS(fp journal.Fingerprint, registration uint32) error {
 }
 
 func (o object) Inspect(ctx context.Context, fp journal.Fingerprint) (journal.Fingerprint, bool, error) {
+	defer o.all.timings.begin(o.kind + ".fingerprint.inspect")()
 	if err := ctx.Err(); err != nil {
 		return nil, false, err
 	}

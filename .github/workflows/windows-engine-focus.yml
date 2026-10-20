@@ -164,5 +164,5 @@ jobs:
       - name: Repeat native half-close and cancellation after the owner measurements
         if: ${{ !cancelled() && contains(github.ref, 'windows-platform-native') && !endsWith(github.ref, '-ports') }}
         run: |
-          go test -count=32 -v -run '^TestReadinessHalfCloseAndCancellation$' -timeout=5m ./internal/engine/windows
+          go test -count=64 -v -run '^TestReadinessHalfCloseAndCancellation$' -timeout=5m ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
