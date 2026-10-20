@@ -75,7 +75,7 @@ func TestKernelReconcileDoesNotBlockDials(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	addr := &netlink.Addr{IPNet: prefix("127.0.0.42/8")}
+	addr := &netlink.Addr{IPNet: prefix("127.0.0.42/32"), Scope: int(netlink.SCOPE_HOST), Broadcast: net.IPv4zero}
 	if err := netlink.AddrAdd(lo, addr); err != nil {
 		t.Fatal(err)
 	}

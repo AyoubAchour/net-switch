@@ -100,14 +100,16 @@ jobs:
           node scripts/engine-notices.mjs "$RUNNER_TEMP/netswitch-engine" --check
           go test -c -o "$RUNNER_TEMP/linux-platform.test" ./internal/engine/linux
       - name: Test Linux kernel interfaces and crash recovery in a private namespace
-        run: sudo unshare --net -- env NETSWITCH_ISOLATED_NETNS=1 "$RUNNER_TEMP/linux-platform.test" -test.v
+        run: |
+          sudo unshare --net -- env NETSWITCH_ISOLATED_NETNS=1 "$RUNNER_TEMP/linux-platform.test" -test.v
+          sudo unshare --net -- "$RUNNER_TEMP/linux-platform.test" -test.run '^TestConcurrentColdHoldersShareDescriptorScans$' -test.count 20 -test.v
       # The QUIC fixture is its own module at a pinned quic-go, so QUIC never
       # enters Net Switch's go.mod or vendor/.
       - name: Check and build the QUIC fixture
         id: quic
-        # A diagnostic run collects independent evidence even if a kernel
-        # regression failed. That failed step still makes the job fail.
-        if: ${{ (success() || inputs.profile) && steps.harness.outcome == 'success' }}
+        # Collect independent acceptance evidence even if a kernel regression
+        # failed. The failed kernel step still makes this job fail.
+        if: ${{ !cancelled() && steps.harness.outcome == 'success' }}
         working-directory: tests/quicfixture
         env:
           GOFLAGS: -mod=readonly
