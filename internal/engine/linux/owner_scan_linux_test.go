@@ -49,6 +49,9 @@ func TestExpiredHolderLookupDoesNotWaitForIndex(t *testing.T) {
 	defer cancel()
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	index := o.indexFor(1)
+	index.mu.Lock()
+	defer index.mu.Unlock()
 	done := make(chan error, 1)
 	go func() { _, err := o.holders(ctx, socketRow{inode: 1}); done <- err }()
 	select {
@@ -58,5 +61,35 @@ func TestExpiredHolderLookupDoesNotWaitForIndex(t *testing.T) {
 		}
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("expired lookup entered shared index work")
+	}
+}
+
+func TestOwnerIndexPublicationDoesNotWaitForUnrelatedShard(t *testing.T) {
+	o := newTestOwners(t)
+	const first = uint32(1)
+	second := uint32(2)
+	for o.indexFor(first) == o.indexFor(second) {
+		second++
+	}
+	waiter := o.subscribe(second)
+	defer o.unsubscribe(second, waiter)
+	locked := o.indexFor(first)
+	locked.mu.Lock()
+	defer locked.mu.Unlock()
+	want := holder{pid: 42, start: 7, fd: "19"}
+	done := make(chan struct{})
+	go func() { o.publish(map[uint32]holder{second: want}); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("publishing one inode waited on an unrelated shard")
+	}
+	select {
+	case <-waiter.ready:
+	default:
+		t.Fatal("published holder did not wake its subscriber")
+	}
+	if got := o.indexed(second); got.first != want {
+		t.Fatalf("published holder: %+v, want %+v", got.first, want)
 	}
 }
