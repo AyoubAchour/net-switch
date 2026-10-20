@@ -578,6 +578,10 @@ jobs:
         run: ./scripts/build-tray.ps1
       - name: Test app, native helper and tray on ARM64
         run: npm test
+      # Run after the tests so this cannot warm the CLR before their warm-up,
+      # or charge PowerShell startup and module inspection to a timed case.
+      - name: Print the tray's loaded CLR architecture
+        run: ./scripts/show-tray-runtime.ps1
       - name: Route real connections through the ARM64 engine, per app and combined
         if: ${{ !cancelled() }}
         run: |

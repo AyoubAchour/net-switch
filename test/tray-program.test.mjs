@@ -6,7 +6,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { test } from 'node:test';
+import { before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 // The tray icon as a program of its own (tray\bin\NetSwitchTray.exe, built by
@@ -32,21 +32,64 @@ async function exitWithin(run, ms) {
   }
 }
 
+// The frozen 0.3.x AnyCPU tray loads the emulated x64 CLR on ARM64. On fresh
+// runners, cold CLR startup/JIT took 5-14.6 seconds before Main ran. Launch it
+// once outside the behaviour tests' clocks, with a 60-second cold-start budget.
+// Bad arguments return before touching any data folder. This is not a retry:
+// a failed warm-up fails the suite, and all existing case deadlines stay put.
+// Keep its duration visible rather than hiding cold-start cost in a timeout.
+before(async () => {
+  if (needsTray.skip) return;
+  const started = performance.now();
+  const child = spawn(TRAY, ['--data-dir'], { stdio: 'ignore' });
+  const run = { exited: once(child, 'exit').then(([code]) => code) };
+  try {
+    assert.equal(await exitWithin(run, 60_000), 2, 'tray warm-up must exit with code 2 within 60 seconds');
+  } finally {
+    console.log(`tray warm-up: ${Math.round(performance.now() - started)} ms; exit=${child.exitCode}; signal=${child.signalCode}`);
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+    assert.notEqual(await exitWithin(run, 5000), 'still running', 'tray warm-up survived cleanup');
+  }
+}, { timeout: 70_000 });
+
 // A temporary data folder, and a start() whose processes are stopped (only
 // if still running) and waited for before the folder is removed.
 function setup(t) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'netswitch-tray-'));
   const runs = [];
   t.after(async () => {
+    // Save evidence before killing a timed-out process or deleting its log.
+    // A timeout before "started" needs a different investigation from one
+    // after the tray has logged that Net Switch is no longer running.
     for (const run of runs) {
-      if (run.child.exitCode === null && run.child.signalCode === null) run.child.kill();
+      t.diagnostic(JSON.stringify({ ...run.timing, pid: run.child.pid,
+        exitCode: run.child.exitCode, signalCode: run.child.signalCode,
+        elapsedMs: Math.round(performance.now() - run.started) }));
     }
-    await Promise.all(runs.map((run) => exitWithin(run, 5000)));
+    t.diagnostic(`tray.log before cleanup: ${log() || '(not written)'}`);
+    for (const run of runs) {
+      if (run.child.exitCode === null && run.child.signalCode === null) {
+        t.diagnostic(`stopping test process ${run.child.pid}`);
+        run.child.kill();
+      }
+    }
+    const exits = await Promise.all(runs.map((run) => exitWithin(run, 5000)));
+    for (let i = 0; i < runs.length; i++) {
+      assert.notEqual(exits[i], 'still running', `test process ${runs[i].child.pid} survived cleanup`);
+    }
     rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   });
   const start = (file, args, options = {}) => {
+    const started = performance.now();
+    const timing = { file: path.basename(file), startedAt: new Date().toISOString() };
     const child = spawn(file, args, { stdio: 'ignore', ...options });
-    const run = { child, exited: once(child, 'exit').then(([code]) => code) };
+    const elapsed = () => Math.round(performance.now() - started);
+    timing.spawnReturnedMs = elapsed();
+    child.once('spawn', () => { timing.spawnEventMs = elapsed(); });
+    const run = { child, started, timing, exited: once(child, 'exit').then(([code]) => {
+      timing.exitMs = elapsed();
+      return code;
+    }) };
     runs.push(run);
     return run;
   };
