@@ -256,7 +256,10 @@ func (d *Dialer) Echo(ctx context.Context, line string, destination netip.Addr, 
 	}
 	var count uintptr
 	if destination.Is6() {
-		src := windows.RawSockaddrInet6{Family: windows.AF_INET6, Addr: source.As16(), Scope_id: a.Index6}
+		src := windows.RawSockaddrInet6{Family: windows.AF_INET6, Addr: source.As16()}
+		if source.IsLinkLocalUnicast() {
+			src.Scope_id = a.Index6
+		}
 		dst := windows.RawSockaddrInet6{Family: windows.AF_INET6, Addr: destination.As16()}
 		count, _, callErr = iphlp.NewProc("Icmp6SendEcho2").Call(h, uintptr(event), 0, 0,
 			uintptr(unsafe.Pointer(&src)), uintptr(unsafe.Pointer(&dst)), data, uintptr(len(payload)),
@@ -277,6 +280,14 @@ func (d *Dialer) Echo(ctx context.Context, line string, destination netip.Addr, 
 		}
 		if status != windows.WAIT_OBJECT_0 {
 			return nil, errors.New("ICMP completion timed out")
+		}
+		parse := "IcmpParseReplies"
+		if destination.Is6() {
+			parse = "Icmp6ParseReplies"
+		}
+		count, _, callErr = iphlp.NewProc(parse).Call(uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)))
+		if count == 0 {
+			return nil, callErr
 		}
 	}
 	out := append([]byte(nil), request...)

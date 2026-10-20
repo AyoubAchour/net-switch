@@ -84,16 +84,22 @@ func TestTCPTableIncludesSYNSentAndSkipsZeroPID(t *testing.T) {
 		binary.BigEndian.PutUint16(r[16:], 443)
 	}
 	binary.LittleEndian.PutUint32(raw[4+20:], 123)
-	rows := map[platform.Tuple][]uint32{}
+	rows := map[platform.Tuple]tcpCandidates{}
 	if err := parseTCP(raw, false, rows); err != nil {
 		t.Fatal(err)
 	}
 	key := platform.Tuple{Source: netip.MustParseAddrPort("198.18.0.1:40000"), Destination: netip.MustParseAddrPort("1.1.1.1:443")}
-	if len(rows) != 1 || !slices.Equal(rows[key], []uint32{123}) {
+	if len(rows) != 1 || rows[key] != (tcpCandidates{pid: 123, count: 1}) {
 		t.Fatal(rows)
 	}
 	if err := parseTCP(raw[:len(raw)-1], false, rows); err == nil {
 		t.Fatal("accepted partial TCP table")
+	}
+	copy(raw[4+24:], raw[4:4+24])
+	binary.LittleEndian.PutUint32(raw[4+24+20:], 456)
+	clear(rows)
+	if err := parseTCP(raw, false, rows); err != nil || len(rows) != 1 || rows[key].count != 2 {
+		t.Fatalf("lost ambiguous exact tuple: %v %v", rows, err)
 	}
 }
 
