@@ -21,6 +21,7 @@ import (
 type Dialer struct {
 	Routes *Routes
 	pool   *readiness
+	udp    *udpReadiness
 	ports  *portDiagnostics
 }
 
@@ -29,17 +30,30 @@ func NewDialer(routes *Routes) (*Dialer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Dialer{Routes: routes, pool: pool, ports: newPortDiagnostics()}, nil
+	udp, err := newUDPReadiness(func(err error) {
+		if routes != nil && routes.Fatal != nil {
+			routes.Fatal(err)
+		}
+	})
+	if err != nil {
+		pool.close()
+		return nil, err
+	}
+	return &Dialer{Routes: routes, pool: pool, udp: udp, ports: newPortDiagnostics()}, nil
 }
 
 func (d *Dialer) Close() error {
 	if d.ports != nil {
 		d.ports.close()
 	}
+	var err error
 	if d.pool != nil {
-		return d.pool.close()
+		err = d.pool.close()
 	}
-	return nil
+	if d.udp != nil {
+		err = errors.Join(err, d.udp.close())
+	}
+	return err
 }
 
 func bindSocket(a Adapter, v6 bool) func(string, string, syscall.RawConn) error {
@@ -89,12 +103,17 @@ func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort
 }
 
 type udpSocket struct {
-	conn *net.UDPConn
-	raw  syscall.RawConn
-	mu   sync.Mutex
-	v6   bool
-	mtu  uint32
-	luid uint64
+	conn   *net.UDPConn
+	raw    syscall.RawConn
+	mu     sync.Mutex
+	v6     bool
+	mtu    uint32
+	luid   uint64
+	local  netip.AddrPort
+	pool   *udpReadiness
+	watch  *udpWatch
+	handle windows.Handle
+	closed bool
 }
 
 func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UDPConn, error) {
@@ -117,11 +136,30 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 		u.Close()
 		return nil, err
 	}
-	return &udpSocket{conn: u, raw: raw, v6: v6, mtu: a.MTU, luid: a.LUID}, nil
+	return &udpSocket{conn: u, raw: raw, v6: v6, mtu: a.MTU, luid: a.LUID,
+		local: u.LocalAddr().(*net.UDPAddr).AddrPort(), pool: d.udp}, nil
 }
-func (s *udpSocket) Close() error              { return s.conn.Close() }
-func (s *udpSocket) LocalAddr() netip.AddrPort { return s.conn.LocalAddr().(*net.UDPAddr).AddrPort() }
+func (s *udpSocket) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.watch == nil {
+		return s.conn.Close()
+	}
+	s.watch.Detach()
+	return errors.Join(s.watch.err, windows.Closesocket(s.handle))
+}
+func (s *udpSocket) LocalAddr() netip.AddrPort { return s.local }
 func (s *udpSocket) WaitReadable(ctx context.Context) error {
+	s.mu.Lock()
+	transferred, closed := s.watch != nil, s.closed
+	s.mu.Unlock()
+	if closed || transferred {
+		return net.ErrClosed
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -152,6 +190,12 @@ func (s *udpSocket) WaitReadable(ctx context.Context) error {
 	return err
 }
 func (s *udpSocket) ReadFrom(b []byte) (int, netip.AddrPort, error) {
+	s.mu.Lock()
+	transferred, closed := s.watch != nil, s.closed
+	s.mu.Unlock()
+	if closed || transferred {
+		return 0, netip.AddrPort{}, net.ErrClosed
+	}
 	n, addr, err := s.conn.ReadFromUDPAddrPort(b)
 	if platform.IsTooBig(err) {
 		err = &platform.TooBig{MTU: s.mtu}
@@ -161,15 +205,12 @@ func (s *udpSocket) ReadFrom(b []byte) (int, netip.AddrPort, error) {
 func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed || s.watch != nil {
+		return 0, net.ErrClosed
+	}
 	var optionErr error
 	err := s.raw.Control(func(fd uintptr) {
-		level, option, value := windows.IPPROTO_IP, 14, 0 // IP_DONTFRAGMENT.
-		if s.v6 {
-			level, option, value = windows.IPPROTO_IPV6, 14, 1
-		} else if df {
-			value = 1
-		}
-		optionErr = windows.SetsockoptInt(windows.Handle(fd), level, option, value)
+		optionErr = s.fragmentation(windows.Handle(fd), df)
 	})
 	if err != nil || optionErr != nil {
 		return 0, errors.Join(err, optionErr)
@@ -179,6 +220,16 @@ func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) 
 		err = &platform.TooBig{MTU: s.pathMTU(dst.Addr())}
 	}
 	return n, err
+}
+
+func (s *udpSocket) fragmentation(fd windows.Handle, df bool) error {
+	level, value := windows.IPPROTO_IP, 0
+	if s.v6 {
+		level, value = windows.IPPROTO_IPV6, 1
+	} else if df {
+		value = 1
+	}
+	return windows.SetsockoptInt(fd, level, 14, value) // IP_DONTFRAGMENT / IPV6_DONTFRAG.
 }
 
 // MIB_IPPATH_ROW, from netioapi.h. Both supported architectures use the same

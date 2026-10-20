@@ -26,10 +26,14 @@ type packetTrace struct {
 }
 
 func newPacketTrace() *packetTrace {
-	if os.Getenv("NETSWITCH_ENGINE_TEST_TRACE") != "1" || os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+	if !hostedTraceEnabled() {
 		return nil
 	}
 	return &packetTrace{}
+}
+
+func hostedTraceEnabled() bool {
+	return os.Getenv("NETSWITCH_ENGINE_TEST_TRACE") == "1" && os.Getenv("GITHUB_ACTIONS") == "true" && os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted"
 }
 
 // Hosted diagnostics only. Observe the controlled responder's UDP/ICMP and

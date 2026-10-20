@@ -55,6 +55,7 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
   const egress = new Set(egressGroups.flatMap((g) => g.ports));
   assert(egress.size >= released.released, 'Native established socket precondition missing');
   const ranges = before.socketResources.configuration.filter((s) => s.DynamicPortRangeNumberOfPorts > 0);
+  const closedPorts = new Set();
   assert(ranges.length);
   const { DynamicPortRangeStartPort: start, DynamicPortRangeNumberOfPorts: size } = ranges[0];
   evidence.nativeExpiryMs = nativeExpiryMs;
@@ -77,10 +78,17 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
     };
     const appStates = stateCounts(appPorts, '198.18.0.1'), engineStates = stateCounts(releasedEgress);
     const retainedWatches = stats.nativeReadiness.ports.filter((port) => releasedEgress.has(port)).length;
+    for (const record of stats.nativeReadiness.closes) {
+      if (record.sequence > before.nativeReadiness.closedCount && !record.error &&
+          record.local.startsWith(`${egressGroups[0].source}:`)) {
+        closedPorts.add(Number(record.local.slice(record.local.lastIndexOf(':') + 1)));
+      }
+    }
+    const confirmedCloses = [...releasedEgress].filter((port) => closedPorts.has(port)).length;
     const used = new Set(native.usedLocalPorts.filter((port) => port >= start && port < start + size));
     const elapsedMs = performance.now() - started;
     const observation = { elapsedMs, appStates, engineStates, releasedEgress: releasedEgress.size,
-      retainedWatches, handles: native.handles, handlesReleased: before.nativeSocketState.handles - native.handles,
+      retainedWatches, confirmedCloses, handles: native.handles, handlesReleased: before.nativeSocketState.handles - native.handles,
       flows: stats.flows.Flows, tableFreePortUpperBound: size - used.size,
       heapBytes: stats.heapBytes, stackBytes: stats.stackBytes, runtimeBytes: stats.runtimeBytes, gcCPUppm: stats.gcCPUppm };
     evidence.observations.push(observation);
@@ -93,9 +101,12 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
     if (elapsedMs >= 2000) {
       assert.equal(releasedEgress.size, released.released, 'Engine left released outbound connections established');
       assert.equal(retainedWatches, 0, 'Engine retained a readiness socket after normal close');
-      assert(observation.handlesReleased >= released.released, 'Engine retained handles after normal close');
+      // Global handles can rise when unrelated apps open new routed flows.
+      // Prove successful closes of these exact source sockets, not a static
+      // whole-process handle count which would misclassify legitimate work.
+      assert.equal(confirmedCloses, released.released, 'Engine did not close every released native descriptor');
     }
-    if (releasedEgress.size === released.released && retainedWatches === 0 &&
+    if (releasedEgress.size === released.released && retainedWatches === 0 && confirmedCloses === released.released &&
         Object.keys(appStates).length === 0 && Object.keys(engineStates).length === 0) {
       evidence.returnedAfterMs = elapsedMs;
       evidence.releasedEgress = [...releasedEgress];

@@ -33,6 +33,14 @@ Owner snapshots use the all-state TCP table and the module-owner UDP table.
 UDP's creation timestamp is part of its generation; PID alone cannot identify a
 reopened socket. Lookup histograms are exposed by `stats`. A failed or incomplete
 UDP dump cannot renew the NAT's two-second validation bound.
+The optional datagram readiness adapter uses one shared `WSAEventSelect` event
+to wake a non-consuming, zero-timeout `WSAPoll` query. It performs no receive
+until the shared worker supplies its buffer. Microsoft documents `MSG_PEEK`
+only for non-overlapped receives, so the new Watch path does not depend on
+overlapped peeking or on `WSAEMSGSIZE` proving non-consumption. Native tests
+separately cover queued and later arrivals, empty/one-byte/large datagrams,
+exact payload/source, rearm, cancellation and close. The earlier blocking
+`WaitReadable` evidence is a separate test of Go's RawRead path.
 Windows can return the same creation timestamp after an immediate same-process,
 same-port reopen. The native measurement observed 67 collisions in 100 immediate
 pairs, with collided creation calls spanning at most about 0.85 ms; none occurred
@@ -100,6 +108,8 @@ was copied or adapted.
 - [Microsoft UDP creation timestamps](https://learn.microsoft.com/windows/win32/api/udpmib/ns-udpmib-mib_udprow_owner_module)
 - [Winsock interface binding and fragmentation options](https://learn.microsoft.com/windows/win32/winsock/ipproto-ip-socket-options)
 - [Winsock per-socket port reuse](https://learn.microsoft.com/windows/win32/winsock/sol-socket-socket-options)
+- [Datagram event readiness](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsaeventselect) and [WSAPoll](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsapoll)
+- [WSARecv flags and overlapped restrictions](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsarecv) and [WSARecvFrom](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsarecvfrom)
 - [WFP conditions and layers](https://learn.microsoft.com/windows/win32/fwp/filtering-conditions-available-at-each-filtering-layer)
 - [WFP filter arbitration](https://learn.microsoft.com/windows/win32/fwp/filter-arbitration)
 - [IP Helper route creation](https://learn.microsoft.com/windows/win32/api/netioapi/nf-netioapi-createipforwardentry2)
