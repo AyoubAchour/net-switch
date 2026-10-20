@@ -87,7 +87,7 @@ func (i *identity) Snapshot(_ context.Context, keys []netip.AddrPort) (map[netip
 }
 func (i *identity) set(o platform.Owner) { i.mu.Lock(); i.value = o; i.mu.Unlock() }
 func send(n *NAT, a netip.AddrPort, b []byte) {
-	n.receive(local, a, len(b), func() ([]byte, []byte, bool) { return append([]byte(nil), b...), packet.UDP(local, a, b), false })
+	n.receive(local, a, 2*len(b)+28, func() ([]byte, []byte, bool) { return append([]byte(nil), b...), packet.UDP(local, a, b), false })
 }
 func await[T any](t *testing.T, ch <-chan T) T {
 	t.Helper()
