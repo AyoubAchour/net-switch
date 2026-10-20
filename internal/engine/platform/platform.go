@@ -28,6 +28,10 @@ type TunDevice interface {
 // implementations may avoid per-packet hooks only for this same Done channel.
 type TunIOContext interface{ BindIOContext(context.Context) }
 
+// RouteQuiescer stops and joins background route repair before teardown can
+// remove the TUN. Cancelling sibling contexts alone does not order their work.
+type RouteQuiescer interface{ Quiesce() }
+
 // BatchWriter accepts packets already available in the link queue, without
 // waiting to fill a batch. The return count excludes packets dropped under load.
 type BatchWriter interface {

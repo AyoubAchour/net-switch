@@ -187,6 +187,7 @@ func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 			return rollback(err)
 		}
 	}
+	p.objects.tun.beforeContextClose = p.Quiesce
 	if p.WrapTun != nil {
 		return p.WrapTun(p.objects.tun), nil
 	}
@@ -718,19 +719,28 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 		}
 	}
 }
-func (p *Platform) Cleanup(ctx context.Context) error {
-	p.bindings.Store(nil)
+func (p *Platform) Quiesce() {
 	p.routeMu.Lock()
 	cancel, done := p.monitorCancel, p.monitorDone
-	p.monitorCancel = nil
-	p.monitorDone = nil
 	p.routeMu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	// Retain the same completion channel until cleanup. Simultaneous TUN
+	// cancellation and Engine.Stop must both join, not let the second caller
+	// close the device while the first caller is still waiting for repair.
+	if done != nil {
 		<-done
 	}
+}
+
+func (p *Platform) Cleanup(ctx context.Context) error {
+	p.bindings.Store(nil)
+	p.Quiesce()
 	p.routeMu.Lock()
 	defer p.routeMu.Unlock()
+	p.monitorCancel = nil
+	p.monitorDone = nil
 	p.bindings.Store(nil)
 	err := p.journal.Cleanup(ctx)
 	if err == nil {

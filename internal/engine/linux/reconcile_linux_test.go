@@ -17,6 +17,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/journal"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 type pausedJournal struct {
@@ -24,6 +25,72 @@ type pausedJournal struct {
 	paused          atomic.Bool
 	started, resume chan struct{}
 	once            sync.Once
+}
+
+type observedTunClose struct {
+	tun.Device
+	monitor  <-chan struct{}
+	observed chan bool
+}
+
+func (d *observedTunClose) Close() error {
+	stopped := false
+	select {
+	case <-d.monitor:
+		stopped = true
+	default:
+	}
+	select {
+	case d.observed <- stopped:
+	default:
+	}
+	return d.Device.Close()
+}
+
+func TestKernelTunCancellationJoinsRouteMonitorBeforeDeviceClose(t *testing.T) {
+	requireKernelNamespace(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	p, err := New(ctx, filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if _, err := p.OpenTun(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Prepare(ctx, []platform.Line{{ID: "loop", Interface: "lo"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Capture(ctx); err != nil {
+		t.Fatal(err)
+	}
+	p.routeMu.Lock()
+	done := p.monitorDone
+	p.routeMu.Unlock()
+	select {
+	case <-done:
+		t.Fatal("fixture monitor was already stopped")
+	default:
+	}
+	if _, err := netlink.LinkByIndex(p.tunSpec.Index); err != nil {
+		t.Fatal("fixture TUN was not live:", err)
+	}
+	observed := &observedTunClose{Device: p.objects.tun.device, monitor: done, observed: make(chan bool, 4)}
+	p.objects.tun.device = observed
+	// Reproduce cancellation reaching the TUN before its sibling monitor.
+	// The wrapper only observes ordering; it still closes the real device.
+	ioContext, cancelIO := context.WithCancel(context.Background())
+	p.objects.tun.BindIOContext(ioContext)
+	cancelIO()
+	select {
+	case stopped := <-observed.observed:
+		if !stopped {
+			t.Fatal("TUN close began while route repair was still running")
+		}
+	case <-ctx.Done():
+		t.Fatal("TUN cancellation did not close the device")
+	}
 }
 
 func (s *pausedJournal) Append(r journal.Record) error {
