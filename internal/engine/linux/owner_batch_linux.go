@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"io"
 	"runtime"
 	"strconv"
@@ -39,22 +40,26 @@ type descriptorBatchResult struct {
 }
 
 type descriptorBatch struct {
-	key      descriptorBatchKey
-	queued   time.Time
-	deadline time.Time
-	done     chan struct{}
-	result   descriptorBatchResult // immutable after done closes
+	key       descriptorBatchKey
+	queued    time.Time
+	deadline  time.Time
+	done      chan struct{}
+	completed time.Time
+	result    descriptorBatchResult // immutable after done closes
 }
 
 type descriptorBatches struct {
-	mu                                                  sync.Mutex
-	jobs                                                chan *descriptorBatch
-	available                                           chan struct{}
-	live                                                map[descriptorBatchKey]*descriptorBatch
-	closed                                              atomic.Bool
-	workers                                             sync.WaitGroup
-	started, shared, early, fds, sockets, full, aborted atomic.Uint64
-	queueNanos, serviceNanos, maxQueue, maxService      atomic.Uint64
+	mu                                                     sync.Mutex
+	jobs                                                   chan *descriptorBatch
+	available                                              chan struct{}
+	live                                                   map[descriptorBatchKey]*descriptorBatch
+	recent                                                 [128]*descriptorBatch
+	closed                                                 atomic.Bool
+	workers                                                sync.WaitGroup
+	started, shared, early, fds, sockets, full, aborted    atomic.Uint64
+	queueNanos, serviceNanos, maxQueue, maxService         atomic.Uint64
+	reused, staleRetries, conflictWaits                    atomic.Uint64
+	completionNanos, resumeNanos, maxCompletion, maxResume atomic.Uint64
 }
 
 type descriptorQueueBusy struct{ ready <-chan struct{} }
@@ -65,12 +70,20 @@ func (*descriptorQueueBusy) Error() string { return "descriptor scanner queue is
 // published match immediately while the worker continues serving neighbours.
 // Workers only touch kernel proc directories; process-root metadata stays in
 // the caller, outside the shared worker pool.
-func (o *Owners) descriptorBatch(key descriptorBatchKey) (*descriptorBatch, error) {
+func (o *Owners) descriptorBatch(key descriptorBatchKey, requested time.Time) (*descriptorBatch, error) {
 	b := &o.batches
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.closed.Load() {
 		return nil, context.Canceled
+	}
+	// An overlapping lookup may reach this range after the worker finished.
+	// Reuse only work begun during that lookup; older negatives cannot prove
+	// anything about a descriptor opened since. Positive hints stay subject
+	// to the caller's normal live FD and process identity checks.
+	if previous := b.recent[maphash.Comparable(o.indexSeed, key)%uint64(len(b.recent))]; previous != nil && previous.key == key && !previous.result.began.Before(requested) {
+		b.reused.Add(1)
+		return previous, nil
 	}
 	if previous := b.live[key]; previous != nil {
 		b.shared.Add(1)
@@ -119,7 +132,8 @@ func (o *Owners) runDescriptorBatches() {
 		b.queueNanos.Add(queued)
 		recordLookupMaximum(&b.maxQueue, queued)
 		job.result = o.readDescriptorBatch(job)
-		service := uint64(time.Since(started))
+		serviced := time.Now()
+		service := uint64(serviced.Sub(started))
 		b.serviceNanos.Add(service)
 		recordLookupMaximum(&b.maxService, service)
 		if errors.Is(job.result.err, context.DeadlineExceeded) || errors.Is(job.result.err, context.Canceled) {
@@ -131,8 +145,23 @@ func (o *Owners) runDescriptorBatches() {
 			close(b.available)
 			b.available = make(chan struct{})
 		}
+		if job.result.err == nil || errors.Is(job.result.err, io.EOF) {
+			b.recent[maphash.Comparable(o.indexSeed, job.key)%uint64(len(b.recent))] = job
+		}
+		job.completed = time.Now()
+		completion := uint64(job.completed.Sub(serviced))
+		b.completionNanos.Add(completion)
+		recordLookupMaximum(&b.maxCompletion, completion)
 		close(job.done)
 		b.mu.Unlock()
+	}
+}
+
+func (b *descriptorBatches) resumed(job *descriptorBatch, waiting time.Time) {
+	if !job.completed.IsZero() && !job.completed.Before(waiting) {
+		delay := uint64(time.Since(job.completed))
+		b.resumeNanos.Add(delay)
+		recordLookupMaximum(&b.maxResume, delay)
 	}
 }
 

@@ -80,19 +80,21 @@ type Owners struct {
 }
 
 type lookupStats struct {
-	Timeout, Missing, Ambiguous, Other                                           uint64
-	CgroupHints, CgroupResolved, CgroupPopulated                                 uint64
-	LastError                                                                    string
-	MetadataRejected                                                             uint64
-	LastMetadataError                                                            string
-	SharedScans                                                                  uint64
-	MetadataPasses, SharedMetadata                                               uint64
-	SharedScopes                                                                 uint64
-	HolderTimeouts                                                               uint64
-	TimeoutStages                                                                map[string]lookupPhaseStat
-	DescriptorBatches, SharedBatches, EarlyBatchHints                            uint64
-	BatchDescriptors, BatchSockets, BatchQueueFull, AbortedBatches               uint64
-	BatchQueueNanos, BatchServiceNanos, BatchMaxQueueNanos, BatchMaxServiceNanos uint64
+	Timeout, Missing, Ambiguous, Other                                                   uint64
+	CgroupHints, CgroupResolved, CgroupPopulated                                         uint64
+	LastError                                                                            string
+	MetadataRejected                                                                     uint64
+	LastMetadataError                                                                    string
+	SharedScans                                                                          uint64
+	MetadataPasses, SharedMetadata                                                       uint64
+	SharedScopes                                                                         uint64
+	HolderTimeouts                                                                       uint64
+	TimeoutStages                                                                        map[string]lookupPhaseStat
+	DescriptorBatches, SharedBatches, EarlyBatchHints                                    uint64
+	BatchDescriptors, BatchSockets, BatchQueueFull, AbortedBatches                       uint64
+	BatchQueueNanos, BatchServiceNanos, BatchMaxQueueNanos, BatchMaxServiceNanos         uint64
+	ReusedBatches, StaleBatchRetries, ConflictBatchWaits                                 uint64
+	BatchCompletionNanos, BatchResumeNanos, BatchMaxCompletionNanos, BatchMaxResumeNanos uint64
 }
 
 func (o *Owners) Stats() any {
@@ -106,6 +108,9 @@ func (o *Owners) Stats() any {
 	s.BatchDescriptors, s.BatchSockets = o.batches.fds.Load(), o.batches.sockets.Load()
 	s.BatchQueueFull, s.AbortedBatches = o.batches.full.Load(), o.batches.aborted.Load()
 	s.BatchQueueNanos, s.BatchServiceNanos = o.batches.queueNanos.Load(), o.batches.serviceNanos.Load()
+	s.ReusedBatches, s.StaleBatchRetries, s.ConflictBatchWaits = o.batches.reused.Load(), o.batches.staleRetries.Load(), o.batches.conflictWaits.Load()
+	s.BatchCompletionNanos, s.BatchResumeNanos = o.batches.completionNanos.Load(), o.batches.resumeNanos.Load()
+	s.BatchMaxCompletionNanos, s.BatchMaxResumeNanos = o.batches.maxCompletion.Load(), o.batches.maxResume.Load()
 	s.BatchMaxQueueNanos, s.BatchMaxServiceNanos = o.batches.maxQueue.Load(), o.batches.maxService.Load()
 	s.HolderTimeouts = o.holderTimeouts.Load()
 	for phase := range o.timeoutPhases {
@@ -819,8 +824,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 				return 0, err
 			}
 			key := descriptorBatchKey{pid: pid, uid: r.uid, start: start, directory: metadata.Ino, offset: offset, limit: limit, advance: advancing, cacheAll: canIndex}
+		acquire:
 			for !expired() {
-				job, err := o.descriptorBatch(key)
+				job, err := o.descriptorBatch(key, requested)
 				if err != nil {
 					var busy *descriptorQueueBusy
 					if errors.As(err, &busy) {
@@ -834,69 +840,82 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 					batchErr = err
 					return 0, err
 				}
-				var ready <-chan struct{}
-				if notice != nil && result.AppID == "" {
-					ready = notice.ready
+				if result.AppID != "" {
+					o.batches.conflictWaits.Add(1)
 				}
-				select {
-				case <-ready:
-					inThisPID := func() bool {
-						found := false
-						o.indexed(r.inode).visit(func(h holder) error {
-							found = found || (h.pid == pid && h.start == start)
-							return nil
-						})
-						return found
+				waiting := time.Now()
+				for {
+					var ready <-chan struct{}
+					if notice != nil && result.AppID == "" {
+						ready = notice.ready
 					}
-					if !inThisPID() {
-						// Another holder's hint cannot finish this PID's search.
-						// Subscribe again, then close the publication race.
-						o.unsubscribe(r.inode, notice)
-						notice = o.subscribe(r.inode)
-						if !inThisPID() {
-							continue
-						}
-					}
-					matched = true
 					select {
-					case <-job.done:
-					default:
-						o.batches.early.Add(1)
-					}
-					return 0, nil
-				case <-job.done:
-					out := job.result
-					scannedFDs += out.count
-					maxSeen = max(maxSeen, out.lastFD)
-					if advancing {
-						maxFD = max(maxFD, out.lastFD)
-					}
-					for _, socket := range out.sockets {
-						if socket.inode == r.inode {
-							// A foreign-process scan may have read this inode before
-							// our subscription. Publish its exact FD, then use the
-							// same live identity validation as every other hint.
-							o.publish(map[uint32]holder{r.inode: {pid: pid, start: start, fd: strconv.FormatInt(socket.fd, 10)}})
-							matched = true
-							break
+					case <-ready:
+						inThisPID := func() bool {
+							found := false
+							o.indexed(r.inode).visit(func(h holder) error {
+								found = found || (h.pid == pid && h.start == start)
+								return nil
+							})
+							return found
 						}
+						if !inThisPID() {
+							// Another holder's hint cannot finish this PID's search.
+							// Subscribe again, then close the publication race.
+							o.unsubscribe(r.inode, notice)
+							notice = o.subscribe(r.inode)
+							if !inThisPID() {
+								continue
+							}
+						}
+						matched = true
+						select {
+						case <-job.done:
+						default:
+							o.batches.early.Add(1)
+						}
+						return 0, nil
+					case <-job.done:
+						o.batches.resumed(job, waiting)
+						out := job.result
+						scannedFDs += out.count
+						maxSeen = max(maxSeen, out.lastFD)
+						if advancing {
+							maxFD = max(maxFD, out.lastFD)
+						}
+						for _, socket := range out.sockets {
+							if socket.inode == r.inode {
+								// A foreign-process scan may have read this inode before
+								// our subscription. Publish its exact FD, then use the
+								// same live identity validation as every other hint.
+								o.publish(map[uint32]holder{r.inode: {pid: pid, start: start, fd: strconv.FormatInt(socket.fd, 10)}})
+								matched = true
+								break
+							}
+						}
+						if !matched && errors.Is(out.err, context.DeadlineExceeded) {
+							continue acquire
+						}
+						// A window begun before this request can supply a live
+						// positive hint, but a miss needs a fresh pass. Newly
+						// created descriptors may be absent from its kernel buffer.
+						if !matched && out.began.Before(requested) {
+							o.batches.staleRetries.Add(1)
+							continue acquire
+						}
+						if out.began.Before(requested) && errors.Is(out.err, io.EOF) {
+							return out.count, nil
+						}
+						return out.count, out.err
+					case <-ctx.Done():
+						select {
+						case <-job.done:
+							o.batches.resumed(job, waiting)
+						default:
+						}
+						batchErr = ctx.Err()
+						return 0, ctx.Err()
 					}
-					if !matched && errors.Is(out.err, context.DeadlineExceeded) {
-						continue
-					}
-					// A window begun before this request can supply a live
-					// positive hint, but a miss needs a fresh pass. Newly
-					// created descriptors may be absent from its kernel buffer.
-					if !matched && out.began.Before(requested) {
-						continue
-					}
-					if out.began.Before(requested) && errors.Is(out.err, io.EOF) {
-						return out.count, nil
-					}
-					return out.count, out.err
-				case <-ctx.Done():
-					batchErr = ctx.Err()
-					return 0, ctx.Err()
 				}
 			}
 			batchErr = context.DeadlineExceeded
