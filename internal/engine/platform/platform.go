@@ -128,6 +128,19 @@ type UDPConn interface {
 	Close() error
 }
 
+// ReadyUDP runs datagram I/O without parking a goroutine for each mapping.
+// Watch and Detach have the same lifetime rules as ReadyTCP. A datagram write
+// either succeeds whole or returns an error; ErrWouldBlock consumes nothing.
+// An empty datagram returns zero bytes with a valid source and nil error.
+// Asynchronous error records use UDPErrorHandler during Try operations; the
+// blocking UDPErrorQueue interface is only used by the legacy UDPConn path.
+type ReadyUDP interface {
+	UDPConn
+	Watch(func()) (Readiness, error)
+	TryReadFrom([]byte) (int, netip.AddrPort, error)
+	TryWriteTo([]byte, netip.AddrPort, bool) (int, error)
+}
+
 // TooBig carries the path MTU from a synchronous write or an OS error queue.
 type TooBig struct{ MTU uint32 }
 
