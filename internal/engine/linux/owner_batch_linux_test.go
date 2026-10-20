@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -114,10 +115,10 @@ func TestOtherPIDNotificationCannotHideAConflictingHolder(t *testing.T) {
 	}
 	pending.result = result
 	o.publish(map[uint32]holder{row.inode: b})
-	o.batches.mu.Lock()
+	o.batches.liveMu.Lock()
 	delete(o.batches.live, key)
 	close(pending.done)
-	o.batches.mu.Unlock()
+	o.batches.liveMu.Unlock()
 	select {
 	case err := <-done:
 		if !errors.Is(err, platform.ErrAmbiguous) {
@@ -290,6 +291,110 @@ func TestConflictBatchChecksTheProcessWithoutWaitingForAnotherCaller(t *testing.
 	shared, err := o.descriptorBatch(context.Background(), key, requested, false)
 	if err != nil || shared != job {
 		t.Fatal("overlapping discovery did not reuse the fresh conflict result", err)
+	}
+}
+
+func TestConflictScanAndCompletedCacheDoNotWaitForTheActiveJobMap(t *testing.T) {
+	row, _, _, key, _ := sharedBatchSocket(t)
+	o := newTestOwners(t)
+	o.batches.jobs = make(chan *descriptorBatch, 128)
+	o.batches.available = make(chan struct{})
+	o.batches.live = make(map[descriptorBatchKey]*descriptorBatch)
+	o.batches.liveMu.Lock()
+	defer o.batches.liveMu.Unlock()
+	type answer struct {
+		job *descriptorBatch
+		err error
+	}
+	done := make(chan answer, 1)
+	requested := time.Now()
+	go func() {
+		job, err := o.descriptorBatch(context.Background(), key, requested, true)
+		done <- answer{job, err}
+	}()
+	var got answer
+	select {
+	case got = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("independent conflict scan waited for the active-job map")
+	}
+	if got.err != nil || o.indexed(row.inode).count() == 0 {
+		t.Fatal("real descriptor scan did not complete", got.err)
+	}
+	go func() {
+		shared, err := o.descriptorBatch(context.Background(), key, requested, false)
+		done <- answer{shared, err}
+	}()
+	select {
+	case shared := <-done:
+		if shared.err != nil || shared.job != got.job {
+			t.Fatal("completed snapshot bypassed the fresh result", shared.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("completed snapshot waited for the active-job map")
+	}
+}
+
+func TestCloseJoinsAnActiveCallerOwnedScan(t *testing.T) {
+	_, _, _, key, _ := sharedBatchSocket(t)
+	o := newTestOwners(t)
+	openDirectory := func() bool {
+		entries, err := os.ReadDir("/proc/self/fd")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			path, _ := os.Readlink("/proc/self/fd/" + entry.Name())
+			if path == fmt.Sprintf("/proc/%d/fd", key.pid) {
+				return true
+			}
+		}
+		return false
+	}
+	if openDirectory() {
+		t.Fatal("fixture already has the child's proc directory open")
+	}
+	// Hold scratch acquisition after the real directory has opened, so the
+	// start condition is observed from the kernel rather than a counter.
+	processBuffers.mu.Lock()
+	unlock := sync.OnceFunc(processBuffers.mu.Unlock)
+	defer unlock()
+	reading := make(chan struct{})
+	go func() { defer close(reading); _, _ = o.descriptorBatch(context.Background(), key, time.Now(), true) }()
+	until := time.Now().Add(time.Second)
+	for !openDirectory() && time.Now().Before(until) {
+		runtime.Gosched()
+	}
+	if !openDirectory() || o.batches.inline.Load() != 1 {
+		t.Fatal("fixture did not hold a real proc directory in the caller-owned scan")
+	}
+	closed := make(chan struct{})
+	go func() { o.closeDescriptorBatches(); close(closed) }()
+	until = time.Now().Add(time.Second)
+	for !o.batches.closed.Load() && time.Now().Before(until) {
+		runtime.Gosched()
+	}
+	if !o.batches.closed.Load() {
+		t.Fatal("fixture never started batch shutdown")
+	}
+	select {
+	case <-closed:
+		t.Fatal("shutdown returned while a registered scan still held its proc directory")
+	case <-time.After(10 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case <-reading:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled scan did not return after publication unblocked")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not join the finished inline scan")
+	}
+	if openDirectory() {
+		t.Fatal("joined scan left its proc directory open")
 	}
 }
 
