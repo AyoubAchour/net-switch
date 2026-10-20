@@ -20,7 +20,7 @@ func installedOwnerServices() ownerServices {
 		setOwner: service.SetOwner,
 		query:    func() (service.Status, error) { return service.Query(service.Control) },
 		activeOwner: func(ctx context.Context) (string, error) {
-			rpc, err := ConnectDesktop(ctx, true)
+			rpc, err := ConnectStatus(ctx)
 			if err != nil {
 				return "", err
 			}

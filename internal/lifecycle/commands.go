@@ -81,7 +81,13 @@ func Ctl(args []string) error {
 				return err
 			}
 		}
-		rpc, err := ConnectDesktop(ctx, command == "status")
+		var rpc *RPC
+		var err error
+		if command == "status" {
+			rpc, err = ConnectStatus(ctx)
+		} else {
+			rpc, err = ConnectDesktop(ctx, false)
+		}
 		if err != nil {
 			return err
 		}

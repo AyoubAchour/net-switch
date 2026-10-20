@@ -4,11 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
+
+// Offline tests replace the transport; production always authenticates the
+// real service endpoint.
+var dialIPC = localipc.Dial
+
+func controlEndpoint(kind string) localipc.Endpoint {
+	return localipc.Endpoint{Path: localipc.DefaultPath(kind), Kind: kind, Service: service.Control}
+}
 
 func ConnectDesktop(ctx context.Context, status bool) (*RPC, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -17,7 +26,7 @@ func ConnectDesktop(ctx context.Context, status bool) (*RPC, error) {
 	if status {
 		kind = "status"
 	}
-	conn, err := localipc.Dial(ctx, localipc.Endpoint{Path: localipc.DefaultPath(kind), Kind: kind, Service: service.Control})
+	conn, err := dialIPC(ctx, controlEndpoint(kind))
 	if !status && localipc.Unavailable(err) {
 		if activateErr := service.Activate(ctx); activateErr != nil {
 			return nil, activateErr
@@ -26,8 +35,29 @@ func ConnectDesktop(ctx context.Context, status bool) (*RPC, error) {
 			if pauseErr := localipc.Pause(ctx, 100*time.Millisecond); pauseErr != nil {
 				return nil, pauseErr
 			}
-			conn, err = localipc.Dial(ctx, localipc.Endpoint{Path: localipc.DefaultPath(kind), Kind: kind, Service: service.Control})
+			conn, err = dialIPC(ctx, controlEndpoint(kind))
 		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return NewRPC(conn), nil
+}
+
+// ConnectStatus opens a read-only status connection without activating
+// Control. Every signed-in user may open the public endpoint, so one of them
+// can keep it busy (on Windows, idle opens hold its listening instance through
+// each bounded identity read). Callers with protected rights (the owner, an
+// elevated administrator, SYSTEM or root) therefore read status on the
+// protected endpoint, which the kernel refuses to other users before any
+// instance is used. Only a denied or missing protected endpoint falls back to
+// the public, status-only one; any other failure is reported as is.
+func ConnectStatus(ctx context.Context) (*RPC, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	conn, err := dialIPC(ctx, controlEndpoint("desktop"))
+	if localipc.Unavailable(err) || errors.Is(err, fs.ErrPermission) {
+		conn, err = dialIPC(ctx, controlEndpoint("status"))
 	}
 	if err != nil {
 		return nil, err
