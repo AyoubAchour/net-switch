@@ -93,7 +93,7 @@ type lookupStats struct {
 	DescriptorBatches, SharedBatches, EarlyBatchHints                                    uint64
 	BatchDescriptors, BatchSockets, BatchQueueFull, AbortedBatches                       uint64
 	BatchQueueNanos, BatchServiceNanos, BatchMaxQueueNanos, BatchMaxServiceNanos         uint64
-	ReusedBatches, StaleBatchRetries, ConflictBatchWaits                                 uint64
+	ReusedBatches, StaleBatchRetries, ConflictBatchRequests                              uint64
 	InlineBatches                                                                        uint64
 	BatchCompletionNanos, BatchResumeNanos, BatchMaxCompletionNanos, BatchMaxResumeNanos uint64
 }
@@ -109,7 +109,7 @@ func (o *Owners) Stats() any {
 	s.BatchDescriptors, s.BatchSockets = o.batches.fds.Load(), o.batches.sockets.Load()
 	s.BatchQueueFull, s.AbortedBatches = o.batches.full.Load(), o.batches.aborted.Load()
 	s.BatchQueueNanos, s.BatchServiceNanos = o.batches.queueNanos.Load(), o.batches.serviceNanos.Load()
-	s.ReusedBatches, s.StaleBatchRetries, s.ConflictBatchWaits = o.batches.reused.Load(), o.batches.staleRetries.Load(), o.batches.conflictWaits.Load()
+	s.ReusedBatches, s.StaleBatchRetries, s.ConflictBatchRequests = o.batches.reused.Load(), o.batches.staleRetries.Load(), o.batches.conflictWaits.Load()
 	s.InlineBatches = o.batches.inline.Load()
 	s.BatchCompletionNanos, s.BatchResumeNanos = o.batches.completionNanos.Load(), o.batches.resumeNanos.Load()
 	s.BatchMaxCompletionNanos, s.BatchMaxResumeNanos = o.batches.maxCompletion.Load(), o.batches.maxResume.Load()
