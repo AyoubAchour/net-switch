@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 )
 
 // A nonblocking peer with explicit readiness and short writes exercises the
@@ -28,6 +30,120 @@ type readyPeer struct {
 	writeClosed, closed    chan struct{}
 	watching               chan struct{}
 	writeOnce, closeOnce   sync.Once
+}
+
+type stalledAppOwners struct{ next atomic.Uint64 }
+
+func (o *stalledAppOwners) TCP(context.Context, platform.Tuple) (platform.Owner, error) {
+	app := "stalled"
+	if o.next.Add(1) > 512 {
+		app = "healthy"
+	}
+	return platform.Owner{AppID: app}, nil
+}
+func (*stalledAppOwners) UDP(context.Context, netip.AddrPort) (platform.Owner, error) {
+	return platform.Owner{}, nil
+}
+
+func Test512NonReadingConnectionsDoNotBlockAnotherAppsDataOrFIN(t *testing.T) {
+	control := &testfake.Controller{Line: "A"}
+	peers := make(chan *readyPeer, 1)
+	f, dial := harness(t, control, testfake.Dialer{TCPFunc: func(context.Context, string, netip.AddrPort) (platform.TCPConn, error) {
+		p := newReadyPeer()
+		peers <- p
+		return p, nil
+	}})
+	f.owners = &stalledAppOwners{}
+	var apps []*gonet.TCPConn
+	defer func() {
+		for _, app := range apps {
+			app.Close()
+		}
+	}()
+	var stalled []*readyPeer
+	payload := bytes.Repeat([]byte("s"), 256<<10)
+	for range 512 {
+		app, err := dial()
+		if err != nil {
+			t.Fatal(err)
+		}
+		apps = append(apps, app)
+		peer := <-peers
+		select {
+		case <-peer.watching:
+		case <-time.After(2 * time.Second):
+			t.Fatal("relay setup stalled")
+		}
+		peer.mu.Lock()
+		peer.download.Write(payload)
+		wake := peer.wake
+		peer.mu.Unlock()
+		wake()
+		stalled = append(stalled, peer)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		backpressured := 0
+		for _, peer := range stalled {
+			peer.mu.Lock()
+			left := peer.download.Len()
+			peer.mu.Unlock()
+			if left > 0 && left < len(payload) {
+				backpressured++
+			}
+		}
+		if backpressured == 512 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fixture only stalled %d/512 receivers", backpressured)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	began := time.Now()
+	for range 4 {
+		app, err := dial()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer app.Close()
+		peer := <-peers
+		select {
+		case <-peer.watching:
+		case <-time.After(time.Second):
+			t.Fatal("healthy relay setup stalled")
+		}
+		peer.mu.Lock()
+		peer.download.WriteString("healthy data and FIN")
+		peer.eof = true
+		wake := peer.wake
+		peer.mu.Unlock()
+		wake()
+		app.SetReadDeadline(time.Now().Add(2 * time.Second))
+		got, err := io.ReadAll(app)
+		if err != nil || string(got) != "healthy data and FIN" {
+			t.Fatalf("healthy app stalled: %q %v", got, err)
+		}
+		app.CloseWrite()
+	}
+	for _, peer := range stalled {
+		peer.mu.Lock()
+		remaining := peer.download.Len()
+		peer.mu.Unlock()
+		if remaining == 0 {
+			t.Fatal("stalled fixture drained before healthy probes")
+		}
+		select {
+		case <-peer.closed:
+			t.Fatal("stalled app was cut to free capacity")
+		default:
+		}
+	}
+	held, peak := f.RelayBufferBytes()
+	if peak > RelayHeldBudget {
+		t.Fatal("relay exceeded byte budget")
+	}
+	t.Logf("512 non-reading gVisor connections remain open; 4 healthy downloads and FIN completed in %s; loans=%d bytes peak=%d", time.Since(began), held, peak)
 }
 
 func newReadyPeer() *readyPeer {
@@ -61,6 +177,18 @@ func (p *readyPeer) TryRead(b []byte) (int, error) {
 	}
 	return 0, platform.ErrWouldBlock
 }
+func (p *readyPeer) TryPeek(b []byte) (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.download.Len() > 0 {
+		return copy(b, p.download.Bytes()), nil
+	}
+	if p.eof {
+		return 0, io.EOF
+	}
+	return 0, platform.ErrWouldBlock
+}
+func (p *readyPeer) TryDiscard(b []byte) (int, error) { return p.TryRead(b) }
 func (p *readyPeer) TryWrite(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -210,27 +338,31 @@ func TestReadyRelayActiveClosePreservesTimeWait(t *testing.T) {
 type readableEndpoint struct {
 	tcpip.Endpoint
 	data []byte
+	eof  bool
 }
 
-func (e *readableEndpoint) Read(out io.Writer, _ tcpip.ReadOptions) (tcpip.ReadResult, tcpip.Error) {
+func (e *readableEndpoint) Read(out io.Writer, opts tcpip.ReadOptions) (tcpip.ReadResult, tcpip.Error) {
 	if len(e.data) == 0 {
+		if e.eof {
+			return tcpip.ReadResult{}, &tcpip.ErrClosedForReceive{}
+		}
 		return tcpip.ReadResult{}, &tcpip.ErrWouldBlock{}
 	}
 	n, _ := out.Write(e.data)
-	e.data = e.data[n:]
+	if !opts.Peek {
+		e.data = e.data[n:]
+	}
 	return tcpip.ReadResult{Count: n}, nil
 }
+func (e *readableEndpoint) Shutdown(tcpip.ShutdownFlags) tcpip.Error { return nil }
 
 func TestBlockedRelayOwnsBytesAcrossWorkerScratchReuse(t *testing.T) {
+	w := &relayWorkers{}
 	control := &testfake.Controller{}
-	workers := &relayWorkers{waiting: make(map[*readyRelay]struct{})}
 	makeRelay := func(data []byte, peer *readyPeer) *readyRelay {
-		ticket, err := control.Begin("tcp", platform.Tuple{})
-		if err != nil {
-			t.Fatal(err)
-		}
+		ticket, _ := control.Begin("tcp", platform.Tuple{})
 		t.Cleanup(ticket.Close)
-		return &readyRelay{workers: workers, remote: peer, c: &connection{ep: &readableEndpoint{data: data}, ticket: ticket}}
+		return &readyRelay{workers: w, remote: peer, c: &connection{ticket: ticket, ep: &readableEndpoint{data: data}}}
 	}
 	firstBytes := bytes.Repeat([]byte("first connection\n"), 500)
 	firstPeer := newReadyPeer()
@@ -240,82 +372,169 @@ func TestBlockedRelayOwnsBytesAcrossWorkerScratchReuse(t *testing.T) {
 	if _, err := first.direction(&first.up, true, scratch); err != nil {
 		t.Fatal(err)
 	}
-	if first.up.buffer == nil || firstPeer.upload.Len() != 0 {
-		t.Fatal("fixture must retain the first connection's unwritten bytes")
+	if w.loans != 0 || !bytes.Equal(first.c.ep.(*readableEndpoint).data, firstBytes) {
+		t.Fatal("stall consumed source data or retained a loan")
 	}
-	secondBytes := bytes.Repeat([]byte("second connection uses the same worker\n"), 500)
+	secondBytes := bytes.Repeat([]byte("second connection\n"), 500)
 	secondPeer := newReadyPeer()
 	second := makeRelay(secondBytes, secondPeer)
 	if _, err := second.direction(&second.up, true, scratch); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(secondPeer.upload.Bytes(), secondBytes) {
-		t.Fatal("second connection did not overwrite the worker scratch")
+		t.Fatal("second connection failed")
 	}
 	firstPeer.blocked = false
 	if _, err := first.direction(&first.up, true, scratch); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(firstPeer.upload.Bytes(), firstBytes) {
-		t.Fatal("worker reuse changed another connection's pending bytes")
-	}
-	if first.up.buffer != nil || second.up.buffer != nil {
-		t.Fatal("drained connections retained their pending buffer")
+		t.Fatal("scratch reuse corrupted source")
 	}
 }
 
 func TestStalledDirectionsStopReadingAtTheirSharedBufferBound(t *testing.T) {
-	w := &relayWorkers{waiting: make(map[*readyRelay]struct{}), wake: make(chan struct{}, 1)}
+	w := &relayWorkers{}
 	control := &testfake.Controller{}
 	scratch := new(relayScratch)
-	var relays []*readyRelay
-	for i := 0; i < RelayHeldBudget/RelayBuffer+20; i++ {
+	for i := 0; i < 532; i++ {
 		ticket, _ := control.Begin("tcp", platform.Tuple{})
 		peer := newReadyPeer()
 		peer.blocked = true
-		r := &readyRelay{workers: w, remote: peer, c: &connection{ticket: ticket, ep: &readableEndpoint{data: []byte("held")}}}
-		relays = append(relays, r)
+		ep := &readableEndpoint{data: []byte("held")}
+		r := &readyRelay{workers: w, remote: peer, c: &connection{ticket: ticket, ep: ep}}
 		if _, err := r.direction(&r.up, true, scratch); err != nil {
 			t.Fatal(err)
 		}
-	}
-	if w.loans*RelayBuffer != RelayHeldBudget || len(w.waiting) != 20 {
-		t.Fatalf("stalled storage is not bounded: %d loans/%d waiters", w.loans, len(w.waiting))
-	}
-	last := relays[len(relays)-1]
-	if len(last.c.ep.(*readableEndpoint).data) != 4 || last.up.buffer != nil {
-		t.Fatal("an unbudgeted read consumed bytes before it could retain them")
-	}
-	for _, r := range relays {
-		r.remote.(*readyPeer).blocked = false
+		if w.loans != 0 || string(ep.data) != "held" {
+			t.Fatal("stall retained loan or consumed source")
+		}
+		peer.blocked = false
 		if _, err := r.direction(&r.up, true, scratch); err != nil {
 			t.Fatal(err)
 		}
-		if string(r.remote.(*readyPeer).upload.Bytes()) != "held" {
-			t.Fatal("capacity recovery lost buffered or unread data")
+		if peer.upload.String() != "held" {
+			t.Fatal("recovery lost data")
 		}
-		r.c.ticket.Close()
+		ticket.Close()
 	}
-	if w.loans != 0 {
-		t.Fatal("stalled relay loans were not returned")
+	if w.bufferPeak*RelayBuffer > RelayHeldBudget {
+		t.Fatal("shared budget exceeded")
 	}
 }
 
-func TestOneDirectionCannotEraseTheOtherDirectionsBudgetWakeup(t *testing.T) {
-	w := &relayWorkers{waiting: make(map[*readyRelay]struct{}), wake: make(chan struct{}, 1), loans: RelayHeldBudget / RelayBuffer}
-	r := &readyRelay{workers: w}
-	if w.borrow(r) {
-		t.Fatal("fixture failed to block the first direction at capacity")
+func TestRelayLoanFIFOAndAppLimit(t *testing.T) {
+	w := &relayWorkers{wake: make(chan struct{}, 1)}
+	holders := make([]*readyRelay, RelayAppLoans)
+	for i := range holders {
+		holders[i] = &readyRelay{workers: w, app: "slow"}
+		if !w.borrow(holders[i]) {
+			t.Fatal("early refusal")
+		}
 	}
-	// A different direction's pending write drains and obtains the freed
-	// slot before the first direction is retried. Its successful borrow
-	// must preserve the first direction's queued interest.
-	w.loans--
-	if !w.borrow(r) {
-		t.Fatal("second direction could not consume the free slot")
+	waiter := &readyRelay{workers: w, app: "slow"}
+	if w.borrow(waiter) {
+		t.Fatal("per-app loan cap exceeded")
 	}
-	w.giveBack()
-	if w.head != r {
-		t.Fatal("first direction was stranded with no readiness or budget wakeup")
+	healthy := &readyRelay{workers: w, app: "healthy"}
+	if w.borrow(healthy) {
+		t.Fatal("new caller skipped FIFO")
 	}
+	if !w.borrow(healthy) {
+		t.Fatal("eligible other app was not granted")
+	}
+	w.giveBack(healthy)
+	for i := 0; i < 100; i++ {
+		holder := holders[0]
+		w.giveBack(holder)
+		if w.borrow(holder) {
+			t.Fatal("slow holder overtook queued waiter")
+		}
+		if !w.borrow(waiter) {
+			t.Fatal("waiter starved")
+		}
+		w.giveBack(waiter)
+		if !w.borrow(holder) {
+			t.Fatal("holder never resumed")
+		}
+		if w.borrow(waiter) {
+			t.Fatal("waiter exceeded the per-app cap")
+		}
+	}
+	waiter.closed.Store(true)
+	for _, r := range holders {
+		w.giveBack(r)
+	}
+	if w.loans != 0 || len(w.waiting) != 0 {
+		t.Fatal("loans leaked")
+	}
+}
+
+func TestRelayGlobalLoanBoundReservesFreedSlotForFIFOHead(t *testing.T) {
+	w := &relayWorkers{wake: make(chan struct{}, 1)}
+	holders := make([]*readyRelay, RelayHeldBudget/RelayBuffer)
+	for i := range holders {
+		holders[i] = &readyRelay{workers: w, app: string(rune('a' + i/RelayAppLoans))}
+		if !w.borrow(holders[i]) {
+			t.Fatal("capacity refused too early")
+		}
+	}
+	waiter := &readyRelay{workers: w, app: "new app"}
+	if w.borrow(waiter) || w.loans*RelayBuffer != RelayHeldBudget {
+		t.Fatal("global loan bound exceeded")
+	}
+	w.giveBack(holders[0])
+	if w.borrow(holders[0]) {
+		t.Fatal("returning holder stole FIFO reservation")
+	}
+	if !w.borrow(waiter) {
+		t.Fatal("FIFO waiter did not receive reserved capacity")
+	}
+	w.giveBack(waiter)
+	if !w.borrow(holders[0]) {
+		t.Fatal("previous holder never resumed")
+	}
+	for _, r := range holders {
+		w.giveBack(r)
+	}
+	if w.loans != 0 || w.bufferPeak*RelayBuffer != RelayHeldBudget {
+		t.Fatal("loan accounting leaked or exceeded bound")
+	}
+}
+
+func TestStalledAppCannotFreezeHealthyRelay(t *testing.T) {
+	w := &relayWorkers{wake: make(chan struct{}, 1)}
+	control := &testfake.Controller{}
+	scratch := new(relayScratch)
+	var stalled []*readyRelay
+	for i := 0; i < 512; i++ {
+		ticket, _ := control.Begin("tcp", platform.Tuple{})
+		t.Cleanup(ticket.Close)
+		peer := newReadyPeer()
+		peer.blocked = true
+		r := &readyRelay{workers: w, app: "stalled", remote: peer, c: &connection{ticket: ticket, ep: &readableEndpoint{data: []byte("stalled")}}}
+		stalled = append(stalled, r)
+		if _, err := r.direction(&r.up, true, scratch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 16; i++ {
+		ticket, _ := control.Begin("tcp", platform.Tuple{})
+		t.Cleanup(ticket.Close)
+		peer := newReadyPeer()
+		r := &readyRelay{workers: w, app: "healthy", remote: peer, c: &connection{ticket: ticket, ep: &readableEndpoint{data: []byte("healthy"), eof: true}}}
+		began := time.Now()
+		if _, err := r.direction(&r.up, true, scratch); err != nil {
+			t.Fatal(err)
+		}
+		if peer.upload.String() != "healthy" || !r.up.finished || time.Since(began) > time.Second {
+			t.Fatal("healthy data or FIN stalled")
+		}
+	}
+	for _, r := range stalled {
+		if !r.up.blocked || string(r.c.ep.(*readableEndpoint).data) != "stalled" {
+			t.Fatal("fixture did not keep stalled peers open")
+		}
+	}
+	t.Logf("512 stalled flows remain open; 16 healthy flows delivered data and FIN; loans=%d/512 peak=%d", w.loans, w.bufferPeak)
 }

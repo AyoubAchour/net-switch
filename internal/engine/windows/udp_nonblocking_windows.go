@@ -160,6 +160,9 @@ func (s *udpSocket) TryWriteTo(b []byte, destination netip.AddrPort, df bool) (i
 	if errors.Is(err, windows.WSAEWOULDBLOCK) {
 		return 0, platform.ErrWouldBlock
 	}
+	if errors.Is(err, windows.WSAENOBUFS) {
+		return int(sent), platform.ErrDatagramDropped
+	}
 	if platform.IsTooBig(err) {
 		return 0, &platform.TooBig{MTU: s.pathMTU(destination.Addr())}
 	}
