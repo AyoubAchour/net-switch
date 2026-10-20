@@ -7,23 +7,17 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"os/exec"
-	"path/filepath"
+	"os"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
+	winplatform "github.com/AyoubAchour/net-switch/internal/platform/windows"
+	"github.com/AyoubAchour/net-switch/internal/platform/worker"
 	"golang.org/x/sys/windows"
 )
 
-type portTemplate struct {
-	SettingName                     string
-	DynamicPortRangeStartPort       *uint32
-	DynamicPortRangeNumberOfPorts   *uint32
-	AutoReusePortRangeStartPort     *uint32
-	AutoReusePortRangeNumberOfPorts *uint32
-}
+type portTemplate = winplatform.TCPPortSetting
 
 type portDiagnostics struct {
 	ctx     context.Context
@@ -68,26 +62,27 @@ func (p *portDiagnostics) observe(err error) {
 func (p *portDiagnostics) load() {
 	// This diagnostic runs once, only after real port exhaustion. It neither
 	// changes TCP settings nor delays routing startup or the refused packet.
-	ctx, cancel := context.WithTimeout(p.ctx, 60*time.Second)
-	defer cancel()
-	directory, err := windows.GetSystemDirectory()
+	executable, err := os.Executable()
 	var config []portTemplate
 	if err == nil {
-		command := exec.CommandContext(ctx, filepath.Join(directory, "WindowsPowerShell", "v1.0", "powershell.exe"),
-			"-NoProfile", "-NonInteractive", "-Command",
-			"Get-NetTCPSetting | Select-Object SettingName,DynamicPortRangeStartPort,DynamicPortRangeNumberOfPorts,AutoReusePortRangeStartPort,AutoReusePortRangeNumberOfPorts | ConvertTo-Json -Compress")
-		command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW | windows.IDLE_PRIORITY_CLASS}
-		command.WaitDelay = time.Second
-		var output []byte
-		output, err = command.Output()
+		var value any
+		value, err = (worker.Supervisor{Executable: executable}).Once(p.ctx, "tcp-port-configuration", nil)
 		if err == nil {
-			err = json.Unmarshal(output, &config)
+			var output []byte
+			output, err = json.Marshal(value)
+			if err == nil {
+				err = json.Unmarshal(output, &config)
+			}
 		}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err != nil {
 		p.state, p.err = "error", err.Error()
+		if p.ctx.Err() != nil {
+			p.state = "cancelled"
+			return
+		}
 		log.Printf("Windows TCP port configuration unavailable: %v", err)
 		return
 	}
