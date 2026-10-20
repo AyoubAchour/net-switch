@@ -77,7 +77,9 @@ func (p *tcpProbe) snapshot(reason string) {
 	s, _ := p.f.io.(*Session)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	report(p.t, map[string]any{"test": "tcp_probe", "reason": reason, "seconds": time.Since(p.start).Seconds(), "state": observeSession(s), "link_drops": p.link.Dropped.Load(), "tcp_stats": p.stack.Stats().TCP, "packets": p.packets, "fault": fmt.Sprint(p.f.fault())})
+	tcp := p.stack.Stats().TCP
+	counters := map[string]uint64{"received": tcp.ValidSegmentsReceived.Value(), "sent": tcp.SegmentsSent.Value(), "retransmits": tcp.Retransmits.Value(), "timeouts": tcp.Timeouts.Value(), "checksum_errors": tcp.ChecksumErrors.Value(), "resets_sent": tcp.ResetsSent.Value(), "resets_received": tcp.ResetsReceived.Value(), "connected": tcp.CurrentConnected.Value(), "send_errors": tcp.SegmentSendErrors.Value()}
+	report(p.t, map[string]any{"test": "tcp_probe", "reason": reason, "seconds": time.Since(p.start).Seconds(), "state": observeSession(s), "link_drops": p.link.Dropped.Load(), "tcp_stats": counters, "packets": p.packets, "fault": fmt.Sprint(p.f.fault())})
 }
 
 func (p *tcpProbe) packet(direction string, b []byte) {
