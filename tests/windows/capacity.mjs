@@ -1,10 +1,50 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
 import { copyFile } from 'node:fs/promises';
+import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hostedOnly, run, until } from './testisp/harness.mjs';
+
+async function nativeRefusalBaseline(host) {
+  const listener = net.createServer();
+  listener.listen(0, host);
+  await once(listener, 'listening');
+  const port = listener.address().port;
+  await new Promise((resolve) => listener.close(resolve));
+  return Promise.all(Array.from({ length: 3 }, () => new Promise((resolve, reject) => {
+    const started = performance.now(), socket = net.connect({ host, port });
+    const timer = setTimeout(() => { socket.destroy(); reject(new Error('Native refusal baseline timed out')); }, 5000);
+    socket.once('connect', () => { clearTimeout(timer); socket.destroy(); reject(new Error('Native closed port was occupied')); });
+    socket.once('error', (error) => {
+      clearTimeout(timer);
+      if (error.code !== 'ECONNREFUSED') reject(error);
+      else resolve({ code: error.code, ms: performance.now() - started });
+    });
+  })));
+}
+
+function refusalPackets(stats, refusals) {
+  const packets = stats.packetTrace?.records.map((record) => {
+    const b = Buffer.from(record.header, 'hex'), offset = (b[0] & 15) * 4;
+    if (b[9] !== 6 || b.length < offset + 20) return null;
+    return { ...record, source: b.readUInt16BE(offset), target: b.readUInt16BE(offset + 2),
+      seq: b.readUInt32BE(offset + 4), ack: b.readUInt32BE(offset + 8), flags: b[offset + 13] };
+  }).filter(Boolean);
+  assert(packets, 'The OS-limit gate needs the hosted Wintun boundary capture');
+  return refusals.map(({ localPort }) => {
+    const syn = packets.find((p) => p.direction === 'from-app' && p.source === localPort && p.flags === 2);
+    const reset = syn && packets.find((p) => p.direction === 'to-app' && p.target === localPort &&
+      p.flags === 20 && p.ack === ((syn.seq + 1) >>> 0));
+    assert(reset && !reset.error && reset.batchWritten === reset.batchPackets,
+      `Missing successfully written refusal for app port ${localPort}`);
+    const ms = reset.at - syn.at;
+    assert(ms >= 0 && ms <= 500, `Engine delayed the reset ${ms} ms for ${localPort}`);
+    return { localPort, ms };
+  });
+}
 
 export async function capacity({ server, harness, directory, line }) {
   hostedOnly();
@@ -15,6 +55,11 @@ export async function capacity({ server, harness, directory, line }) {
     // Measure this runner's available native pool with routing stopped. No
     // app half, health probe or survival flow competes with the native baseline.
     await server.api('routing', { on: false });
+    const refusalBaseline = await nativeRefusalBaseline(harness.uplink.address);
+    // Windows retries a refused SYN before ConnectEx reports ECONNREFUSED.
+    // Match the existing capped-TCP gate's native-refusal baseline + 500 ms.
+    const refusalLimitMs = Math.max(...refusalBaseline.map((sample) => sample.ms)) + 500;
+    console.log(`WINDOWS NATIVE REFUSAL BASELINE ${JSON.stringify({ refusalBaseline, refusalLimitMs })}`);
     const nativeOutput = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
       ['-test.v', '-test.run=^TestNativeBoundPortCapacity$', '-test.timeout=5m'],
       { env: { NETSWITCH_PORT_GATE: '1' }, timeout: 300_000 });
@@ -77,14 +122,14 @@ export async function capacity({ server, harness, directory, line }) {
     }
     const probeBaseline = await children[0].call('probe', target);
     assert.equal(probeBaseline.code, 'OK', `Fixed-source-port probe precondition failed: ${JSON.stringify(probeBaseline)}`);
-    const refusalLimitMs = probeBaseline.ms + 500; // Same allowance as the existing capped-TCP refusal gate.
+    const oldEchoBasedLimitMs = probeBaseline.ms + 500;
     await children[0].call('survival', target);
     let held = 1, firstLimit;
     // Both halves allocate from the same unchanged Windows ephemeral pool.
     // Internal engine ceilings remain 65,536 total / 8,192 per app.
     while (held < 65536 && !firstLimit) {
       for (const app of children) {
-        const result = await app.call('open', { ...target, count: 256 });
+        const result = await app.call('open', { ...target, count: 256, timeout: refusalLimitMs });
         assert.equal(result.lost, 0, 'A previously admitted capacity socket was cut');
         held += result.opened;
         assert(result.held <= 8192);
@@ -100,18 +145,23 @@ export async function capacity({ server, harness, directory, line }) {
     assert(held >= floor, `Held ${held}, below 95% of this runner's isolated two-half layout ${layoutCapacity}: ${JSON.stringify(nativeSamples)}`);
     const ordinaryHeld = held;
     const limitStats = await engineStats();
-    const refusals = [], extraAdmissions = [];
+    const refusals = [], extraAdmissions = [], resetTimings = [];
     // Failed ordinary connects release their app-side ports; unrelated OS
     // sockets can also close. Keep each subsequently successful fixed-port
     // probe, recording it, until the engine itself refuses native allocation.
     // This is bounded and reports every attempt; the 95% floor already passed
     // with ordinary two-half flows before this tail of one-half probes.
-    for (let n = 0; n < 512 && refusals.length < 128; n++) {
-      const refusal = await children[0].call('probe', { ...target, localPort: 45001 + n, keep: true });
-      if (refusal.code === 'OK') { extraAdmissions.push(refusal); held++; continue; }
-      refusals.push(refusal);
-      assert(['ECONNREFUSED', 'ECONNRESET'].includes(refusal.code) && refusal.ms <= refusalLimitMs,
-        `OS-limit flow was not reset promptly: ${JSON.stringify({ refusal, refusalLimitMs })}`);
+    for (let n = 0; n < 512 && refusals.length < 128;) {
+      const batch = await Promise.all(Array.from({ length: Math.min(32, 128 - refusals.length, 512 - n) },
+        () => children[0].call('probe', { ...target, localPort: 45001 + n++, keep: true, timeout: refusalLimitMs })));
+      const rejected = [];
+      for (const refusal of batch) {
+        if (refusal.code === 'OK') { extraAdmissions.push(refusal); held++; continue; }
+        refusals.push(refusal); rejected.push(refusal);
+        assert(['ECONNREFUSED', 'ECONNRESET'].includes(refusal.code) && refusal.ms <= refusalLimitMs,
+          `OS-limit flow was not reset promptly: ${JSON.stringify({ refusal, refusalLimitMs })}`);
+      }
+      resetTimings.push(...refusalPackets(await engineStats(), rejected));
     }
     assert.equal(refusals.length, 128, 'Did not establish the actual native allocation limit');
     const refusedStats = await engineStats();
@@ -149,7 +199,7 @@ export async function capacity({ server, harness, directory, line }) {
     const released = await children[0].call('release', { count: 512 });
     assert.equal(released.released, 512);
     const recoveryStarted = performance.now();
-    const recovered = await children[0].call('open', { ...target, count: 256 });
+    const recovered = await children[0].call('open', { ...target, count: 256, timeout: refusalLimitMs });
     const recoveryMs = performance.now() - recoveryStarted;
     assert.equal(recovered.opened, 256, 'Capacity did not return after ports were freed');
     assert.equal(recovered.failures.length, 0, JSON.stringify(recovered.failures));
@@ -159,7 +209,10 @@ export async function capacity({ server, harness, directory, line }) {
     const engineAfter = await server.api('engine-command', { method: 'hello' });
     assert.equal(engineAfter.engineInstanceId, engineBefore.engineInstanceId, 'The engine restarted under port pressure');
     const last = samples.at(-1);
-    const evidence = { nativeSamples, layoutCapacity, floor, ordinaryHeld, held, firstLimit, extraAdmissions, refusals, refusalLimitMs, portStats,
+    const evidence = { nativeSamples, layoutCapacity, floor, ordinaryHeld, held, firstLimit, extraAdmissions, refusals,
+      refusalBaseline, refusalLimitMs, resetTimings, oldEchoBasedLimitMs,
+      oldOneSecondCheckWouldPass: [...firstLimit, ...refusals].every((failure) => failure.ms <= 1000),
+      oldEchoBasedCheckWouldPass: refusals.every((failure) => failure.ms <= oldEchoBasedLimitMs), portStats,
       portConfiguration, preparation, before, samples, observed, verifiedBefore, verifiedAfter, released, recovered, recoveryMs,
       old65536CheckWouldPass: held === 65536, internalTotalCeiling: 65536, internalPerAppCeiling: 8192,
       heapPerFlow: last.heapBytes / held, stackPerFlow: last.stackBytes / held,

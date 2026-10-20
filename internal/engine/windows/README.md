@@ -6,15 +6,21 @@ SYSTEM; `--standalone-admin` additionally allows elevated administrators for the
 hosted acceptance controller. Neither mode accepts a remote or ordinary-user
 client. Services, enrolment and desktop IPC belong to milestone 2.
 
-The engine holds its journal mutex on one locked OS thread for its entire
-lifetime. Recovery runs under that lock, before any Wintun DLL load. It calls
+The engine holds an exclusive byte-range lock in a verified SYSTEM/Administrators
+folder for its entire lifetime. The shared `winlock` helper also serves the
+separate lifecycle store lock. A standard user holding the old predictable
+Global mutex cannot block it. Recovery runs under the file lock, before any
+Wintun DLL load. It calls
 the existing `RecoverAfterCrash` only for the name/GUID in a durable adapter
 record. Live foreign adapters are never adopted. Interface configuration,
 addresses and routes have durable intents and full live identity checks. The
 capture-route phase persists all intents in one group commit before creating any
-route, then persists the created marks together. Cleanup checks each fingerprint
-in reverse order and commits removed marks together; durable intents recover any
-interrupted phase. Physical defaults and interface metrics are left alone.
+route, then persists the created marks together. Interface/address setup and
+the owned WFP permissions use another group. Cleanup checks each fingerprint in
+reverse order. Only a complete cleanup atomically replaces the journal with an
+empty, flushed checkpoint; an interrupted cleanup retains its original intents.
+Live checkpoints preserve both intents and created marks. Physical defaults and
+interface metrics are left alone.
 
 The same journal owns a fixed WFP sublayer and three persistent filters for
 inbound ICMPv4 type 3 and ICMPv6 types 1/2, scoped to the TUN's arrival-interface
@@ -27,6 +33,13 @@ Owner snapshots use the all-state TCP table and the module-owner UDP table.
 UDP's creation timestamp is part of its generation; PID alone cannot identify a
 reopened socket. Lookup histograms are exposed by `stats`. A failed or incomplete
 UDP dump cannot renew the NAT's two-second validation bound.
+Windows can return the same creation timestamp after an immediate same-process,
+same-port reopen. The native measurement observed 67 collisions in 100 immediate
+pairs, with collided creation calls spanning at most about 0.85 ms; none occurred
+in 256 trials with requested waits of 0.1–20 ms. That is an observation, not a
+proven bound. Such a socket may retain the surviving session's line. Re-pin does
+not move existing sessions; Reconnect and cap/block closure still do. A different
+or restarted process remains a different identity, and stale/idle bounds remain.
 
 All socket creation sets the per-family interface option and binds the source
 address. A failed binding never falls back to an unbound socket. Discovery keeps
@@ -34,6 +47,15 @@ virtual interfaces eligible so VPN-as-a-line policy can be added independently.
 Outbound TCP also requests `SO_REUSE_UNICASTPORT`; its effect depends on Windows'
 existing auto-reuse port configuration. The engine never changes global port
 ranges or registry settings.
+The internal ceilings remain 65,536 flows / 8,192 per app. Windows acceptance
+instead requires graceful exhaustion of its native port pool, at least 95% of
+the isolated measurement for the same two-half layout, preserved held traffic
+and recovery after ports are released. `stats.socketResources` counts native
+port exhaustion. On the first such error, one asynchronous native COM query
+reads `MSFT_NetTCPSetting` in the existing restricted, supervised worker and
+records the actual pool and auto-reuse configuration in stats and logs. It
+changes no settings and does not delay the failed flow. PowerShell is used only
+as a hosted test oracle. Local resource exhaustion is not treated as a failed line.
 
 The Wintun session already preserves packet order and reopens corrupt rings.
 The engine uses batch writes and checksum-verification metadata. Interface-down

@@ -33,12 +33,12 @@ function echo(socket, value, timeout = 1000) {
     socket.write(Buffer.from([value]));
   });
 }
-async function openOne({ host, port, localPort }) {
+async function openOne({ host, port, localPort, timeout = 1000 }) {
   const started = performance.now();
   const socket = net.connect({ host, port, ...(localPort ? { localAddress: '198.18.0.1', localPort } : {}) });
   try {
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('Capacity handshake deadline')), 1000);
+      const timer = setTimeout(() => reject(new Error('Capacity handshake deadline')), timeout);
       socket.once('error', (error) => { clearTimeout(timer); reject(error); });
       socket.once('connect', () => { clearTimeout(timer); resolve(); });
     });
@@ -50,14 +50,14 @@ async function openOne({ host, port, localPort }) {
     return { failure: { code: error.code ?? 'DEADLINE', message: error.message, ms: performance.now() - started } };
   }
 }
-process.on('message', async ({ id, command, host, ports, count, localPort = 45000, keep = false }) => {
+process.on('message', async ({ id, command, host, ports, count, localPort = 45000, keep = false, timeout = 1000 }) => {
   try {
     if (command === 'open') {
       const failures = [];
       let opened = 0;
       for (let n = 0; n < count; n += 32) {
         await Promise.all(Array.from({ length: Math.min(32, count - n) }, async (_, k) => {
-          const { socket, failure } = await openOne({ host, port: ports[(sockets.length + k) % ports.length] });
+          const { socket, failure } = await openOne({ host, port: ports[(sockets.length + k) % ports.length], timeout });
           if (failure) failures.push(failure);
           else {
             hold(socket);
@@ -70,12 +70,12 @@ process.on('message', async ({ id, command, host, ports, count, localPort = 4500
     } else if (command === 'probe') {
       // A fixed app-side port outside the dynamic pool lets this SYN reach
       // the engine even when an ordinary app cannot allocate another port.
-      const { socket, failure, ms } = await openOne({ host, port: ports[0], localPort });
+      const { socket, failure, ms } = await openOne({ host, port: ports[0], localPort, timeout });
       if (socket) {
         if (keep) hold(socket);
         else await closeSocket(socket);
       }
-      process.send({ id, result: failure ?? { code: 'OK', ms } });
+      process.send({ id, result: { ...(failure ?? { code: 'OK', ms }), localPort } });
     } else if (command === 'verify') {
       let maxMs = 0;
       for (let n = 0; n < sockets.length; n += 128) {
