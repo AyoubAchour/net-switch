@@ -46,6 +46,7 @@ type Totals struct {
 	Lines map[string]Bytes `json:"lines"`
 }
 type Gauges struct {
+	RefusedTCP, RefusedUDP                                        Refusals
 	PeakUnknown, PeakUnknownUDP                                   int
 	AdmittedUnknown, AdmittedUnknownUDP                           uint64
 	PeakFlows, PeakHandshakes, PeakUDP, PeakPerApp, PeakUDPPerApp int
@@ -189,11 +190,11 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 		return nil, errors.New("invalid tuple")
 	}
 	if tuple.Source.Addr().Is6() && !t.policy.IPv6() {
-		t.gauges.Rejected++
+		t.refusal(protocol).Policy++
 		return nil, policy.ErrIPv6
 	}
 	if t.gauges.Flows >= t.limits.Flows || (protocol == "udp" && t.gauges.UDP >= t.limits.UDP) || (protocol == "tcp" && t.gauges.Handshakes >= t.limits.Handshakes) {
-		t.gauges.Rejected++
+		t.refuseBegin(protocol)
 		return nil, ErrBudget
 	}
 	t.nextID++
@@ -244,14 +245,14 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	}
 	d, err := t.policy.Decide(owner, f.record.Source.Port(), f.record.Source.Addr().Is6(), t.k.Load()+1)
 	if err != nil {
-		t.gauges.Rejected++
+		t.refusal(f.record.Protocol).Policy++
 		return flowapi.Decision{}, err
 	}
 	c := t.apps[owner.AppID]
 	udp := f.record.Protocol == "udp"
 	unknown := owner.AppID == ""
 	if c.flows >= t.limits.PerApp || (udp && c.udp >= t.limits.UDPPerApp) || (unknown && (t.gauges.Unknown >= t.limits.Unknown || (udp && t.gauges.UnknownUDP >= t.limits.UnknownUDP))) {
-		t.gauges.Rejected++
+		t.refuseOwner(f.record.Protocol, owner.AppID)
 		return flowapi.Decision{}, ErrBudget
 	}
 	c.flows++
