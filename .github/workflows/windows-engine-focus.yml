@@ -143,13 +143,13 @@ jobs:
           $env:GOMAXPROCS = ''
           go test -count=1 -v -run '^TestOwner(SteadyColdTiming|ColdBurstTiming)$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Isolate bound Winsock capacity and measure UDP timestamp collisions
+      - name: Isolate UDP allocation with two active halves and measure timestamp collisions
         if: ${{ !cancelled() && endsWith(github.ref, '-ports') }}
         env:
           NETSWITCH_PORT_GATE: '1'
         run: |
           Get-NetTCPSetting | Select-Object SettingName,DynamicPortRangeStartPort,DynamicPortRangeNumberOfPorts,AutoReusePortRangeStartPort,AutoReusePortRangeNumberOfPorts | ConvertTo-Json -Compress
-          go test -count=1 -v -run '^Test(NativeBoundPortCapacity|UDPGenerationCollisionWindow)$' -timeout=5m ./internal/engine/windows
+          go test -count=1 -v -run '^Test(NativeUDPSocketCapacity|NativeUDPPairedCapacity|UDPGenerationCollisionWindow)$' -timeout=5m ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep every observed result
         if: ${{ always() && !contains(github.ref, 'windows-platform-native') }}
