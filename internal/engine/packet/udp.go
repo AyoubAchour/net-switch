@@ -6,7 +6,11 @@ import (
 )
 
 func UDP(src, dst netip.AddrPort, payload []byte) []byte {
-	if len(payload) > 65507 {
+	maximum := 65507
+	if src.Addr().Is6() {
+		maximum = 65527
+	}
+	if len(payload) > maximum {
 		return nil
 	}
 	// Build directly in the final allocation: the pending-byte reservation

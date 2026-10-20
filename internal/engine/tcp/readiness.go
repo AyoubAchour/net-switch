@@ -22,6 +22,7 @@ type relayWorkers struct {
 	head, tail *readyRelay
 	wake       chan struct{}
 	stop       chan struct{}
+	stopOnce   sync.Once
 	wg         sync.WaitGroup
 }
 
@@ -135,7 +136,10 @@ func (w *relayWorkers) run() {
 	}
 }
 
-func (w *relayWorkers) close() { close(w.stop); w.wg.Wait() }
+func (w *relayWorkers) close() {
+	w.stopOnce.Do(func() { close(w.stop) })
+	w.wg.Wait()
+}
 
 func (f *Forwarder) startReadyRelay(ctx context.Context, c *connection, wq *waiter.Queue, remote platform.ReadyTCP, closeApp func()) error {
 	r := &readyRelay{workers: f.relays, initializing: true, ctx: f.ctx, c: c, remote: remote, wq: wq}
@@ -151,6 +155,7 @@ func (f *Forwarder) startReadyRelay(ctx context.Context, c *connection, wq *wait
 	r.finish = func() {
 		remote.Close()
 		closeApp()
+		c.releaseAdmission()
 		close(c.done)
 		f.wg.Done()
 	}
@@ -175,10 +180,10 @@ func (r *readyRelay) close(abort bool) {
 	r.watch.Detach()
 	r.wq.EventUnregister(&r.entry)
 	if abort {
+		r.remote.SetLinger(0)
 		if closeAdmissionEnabled {
 			r.c.ticket.Retire()
 		}
-		r.remote.SetLinger(0)
 		r.c.ep.Abort()
 	}
 	for _, d := range []*relayDirection{&r.up, &r.down} {

@@ -250,7 +250,11 @@ async function health() {
       const binding = stats.bindings?.[line.id];
       let up = Boolean(binding?.up && binding?.default4);
       if (up) {
-        const probe = (operator) => command('probe', { opId: randomUUID(), line: line.id, operator });
+        const probe = async (operator) => {
+          const result = await command('probe', { opId: randomUUID(), line: line.id, operator });
+          if (result.outcome === 'engineUnavailable') throw new Error(result.error);
+          return result;
+        };
         const quick = await probe('quick:cloudflare');
         if (line.up && quick.ok) continue;
         if (!line.up) up = (await probe('cloudflare')).ok;

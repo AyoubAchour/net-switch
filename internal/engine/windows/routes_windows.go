@@ -29,8 +29,10 @@ type Routes struct {
 	mu       sync.Mutex
 	session  *journal.Session
 	objects  *objects
+	tun      *wintun.Session
 	lines    []platform.Line
 	bindings atomic.Pointer[bindingTable]
+	active   atomic.Bool
 	capture  []journal.Fingerprint
 	cancel   context.CancelFunc
 	done     chan struct{}
@@ -135,6 +137,7 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 	if err != nil {
 		return nil, err
 	}
+	r.tun = s
 	r.capture = nil
 	for _, prefix := range CapturePrefixes() {
 		fp := maps.Clone(base)
@@ -154,6 +157,15 @@ func (r *Routes) Bindings() map[string]Adapter {
 	return maps.Clone(*r.bindings.Load())
 }
 
+func (r *Routes) TunStats() wintun.Stats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tun == nil {
+		return wintun.Stats{}
+	}
+	return r.tun.Stats()
+}
+
 func (r *Routes) resolve(lines []platform.Line) (bindingTable, error) {
 	adapters, err := readAdapters()
 	if err != nil {
@@ -161,8 +173,12 @@ func (r *Routes) resolve(lines []platform.Line) (bindingTable, error) {
 	}
 	b := make(bindingTable, len(lines))
 	for _, l := range lines {
+		identity := l.Interface
+		if identity == "" {
+			identity = l.ID
+		}
 		for _, a := range adapters {
-			if l.ID == a.ID || l.ID == a.Alias {
+			if identity == a.ID || identity == a.Alias {
 				b[l.ID] = a
 				break
 			}
@@ -194,6 +210,7 @@ func (r *Routes) Capture(ctx context.Context) error {
 	}
 	run, cancel := context.WithCancel(context.Background())
 	r.cancel, r.done = cancel, make(chan struct{})
+	r.active.Store(true)
 	go r.monitor(run, r.done)
 	return nil
 }
@@ -226,16 +243,32 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 				}
 			}
 		}
-		// A lost capture route must not silently send apps down another line.
-		// Fail open as a whole on any foreign mutation; startup can rebuild.
-		if err == nil {
+		// A down Wintun adapter is not a removed adapter. Its session remains
+		// registered until the ordered reader gets ErrAdapterRemoved. Restore
+		// lost owned routes when it comes back; never create a new session
+		// merely because GetIfEntry2 reports down.
+		up := false
+		if err == nil && r.objects.adapter != nil {
+			row := windows.MibIfRow2{InterfaceLuid: r.objects.adapter.LUID()}
+			err = windows.GetIfEntry2Ex(windows.MibIfEntryNormal, &row)
+			if missing(err) {
+				err = nil
+			} else {
+				up = err == nil && row.OperStatus == windows.IfOperStatusUp
+			}
+		}
+		if err == nil && up {
 			for _, fp := range r.capture {
 				live, found, inspectErr := (object{r.objects, "route"}).Inspect(ctx, fp)
 				if inspectErr != nil {
 					err = inspectErr
 					break
 				}
-				if !found || !maps.Equal(live, fp) {
+				if !found {
+					if err = r.session.Create(ctx, "route", fp); err != nil {
+						break
+					}
+				} else if !maps.Equal(live, fp) {
 					err = fmt.Errorf("owned capture route changed: found=%t expected=%v observed=%v", found, fp, live)
 					break
 				}
@@ -250,7 +283,8 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 	}
 }
 
-func (r *Routes) Cleanup(ctx context.Context) error {
+func (r *Routes) Quiesce() {
+	r.active.Store(false)
 	r.mu.Lock()
 	cancel, done := r.cancel, r.done
 	r.cancel, r.done = nil, nil
@@ -259,6 +293,10 @@ func (r *Routes) Cleanup(ctx context.Context) error {
 		cancel()
 		<-done
 	}
+}
+
+func (r *Routes) Cleanup(ctx context.Context) error {
+	r.Quiesce()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.objects.recovering = true
@@ -266,6 +304,7 @@ func (r *Routes) Cleanup(ctx context.Context) error {
 	r.objects.recovering = false
 	if err == nil {
 		r.capture = nil
+		r.tun = nil
 	}
 	return err
 }

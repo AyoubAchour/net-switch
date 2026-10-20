@@ -12,6 +12,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -307,26 +308,38 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	if ready, ok := remote.(platform.ReadyTCP); ok {
 		stopRemote()
 		stopApp()
-		if err := f.startReadyRelay(ctx, c, &wq, ready, func() { closeEndpoint(); c.releaseAdmission() }); err != nil {
+		if err := f.startReadyRelay(ctx, c, &wq, ready, closeEndpoint); err != nil {
 			abort()
 			close(c.done)
 			return
 		}
-		cancel()
+		cancel() // readiness now owns closure; release the setup context tree
 		handedOff = true
 		return
 	}
+	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission, ep: ep, wq: &wq}
+	// Lookup, dialing and handshake work can grow this goroutine's stack.
+	// Hand off to a small relay goroutine so every idle connection does not
+	// retain the setup frame, request and its deferred cleanup closures.
+	f.wg.Go(func() { f.relay(ctx, c, app, remote, cancel, stopRemote, stopApp, abort) })
+	handedOff = true
+	// TIME_WAIT releases admission at the state transition. The monitor keeps
+	// this ticket until removal and relay completion for final byte accounting.
+}
+
+func (f *Forwarder) relay(ctx context.Context, c *connection, app *onceCloseConn, remote platform.TCPConn, cancel context.CancelFunc, stopRemote, stopApp func() bool, abort func()) {
+	// Publish completion only after both sockets and cancellation hooks have
+	// finished cleanup. Wait includes this goroutine as well as setup.
 	defer close(c.done)
-	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission}
-	count := func(u, d uint64) { c.up.Add(u); c.down.Add(d); ticket.Add(u, d) }
+	defer cancel()
+	defer remote.Close()
+	defer func() { app.Close(); c.releaseAdmission() }()
+	defer stopRemote()
+	defer stopApp()
+	count := func(u, d uint64) { c.up.Add(u); c.down.Add(d); c.ticket.Add(u, d) }
 	if err := Splice(ctx, app, remote, count, abort); err != nil {
 		abort()
 	}
-	app.Close()
-	c.releaseAdmission()
-	// TCP releases admission once both directions end and payload drains, or
-	// on reset/removal. Keep the ticket until removal and relay completion
-	// for final byte accounting.
 }
 
 // Stop cancels dials and relays. The owner must close the stack before Wait,
@@ -340,6 +353,8 @@ type onceCloseConn struct {
 	*gonet.TCPConn
 	close           func()
 	afterCloseWrite func()
+	ep              tcpip.Endpoint
+	wq              *waiter.Queue
 }
 
 func (c *onceCloseConn) Close() error { c.close(); return nil }
@@ -350,4 +365,18 @@ func (c *onceCloseConn) CloseWrite() error {
 		c.afterCloseWrite()
 	}
 	return err
+}
+
+func (c *onceCloseConn) WaitReadable(ctx context.Context) error {
+	entry, wake := waiter.NewChannelEntry(waiter.ReadableEvents)
+	c.wq.EventRegister(&entry)
+	defer c.wq.EventUnregister(&entry)
+	for c.ep.Readiness(waiter.ReadableEvents) == 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-wake:
+		}
+	}
+	return nil
 }

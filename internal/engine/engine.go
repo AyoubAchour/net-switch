@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"runtime/debug"
+	"runtime/metrics"
 	"sync"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
@@ -94,10 +96,16 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	// service context and protocol lease do; reattach keeps these flows alive.
 	run, cancel := context.WithCancel(e.root)
 	e.cancel = cancel
+	if device, ok := tun.(platform.TunIOContext); ok {
+		device.BindIOContext(run)
+	}
 	e.tcp = ntcp.New(run, s, e.limits.Handshakes, e.Table, e.deps.Owners, e.deps.Dialer, link)
 	e.udp = udp.New(run, s, e.Table, e.deps.Owners, e.deps.Identities, e.deps.Dialer, link, tun.MTU())
 	echo := newEcho(run, e.deps.Dialer, e.Table, link)
 	nat := e.udp
+	if events, ok := e.deps.Identities.(platform.UDPNotifications); ok {
+		e.pumps.Go(func() { events.WatchUDP(run, nat.Destroy, nat.RefreshNow) })
+	}
 	link.SetObserver(func(p *gv.PacketBuffer) {
 		first, ok := p.Data().PullUp(20)
 		if !ok {
@@ -132,7 +140,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			} else if b[0]>>4 != 4 {
 				continue
 			}
-			p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), b[:n]...))})
+			// MakeWithData copies into a gVisor-owned chunk before returning.
+			// An extra clone here doubles ingress payload allocations.
+			p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b[:n])})
 			if verified, ok := tun.(platform.ChecksumVerifier); ok {
 				p.RXChecksumValidated = verified.RXChecksumVerified(b[:n])
 			}
@@ -142,10 +152,14 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	})
 	e.pumps.Go(func() {
 		packets := make([][]byte, 64)
+		owned := make([]ns.OutputPacket, len(packets))
 		for {
-			n := link.ReadBatch(run, packets)
+			n := link.ReadOwnedBatch(run, owned)
 			if n == 0 {
 				return
+			}
+			for i := range n {
+				packets[i] = owned[i].Bytes
 			}
 			var err error
 			if batch, ok := tun.(platform.BatchWriter); ok {
@@ -156,6 +170,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 						break
 					}
 				}
+			}
+			for i := range n {
+				owned[i].Release()
 			}
 			clear(packets[:n])
 			if err != nil {
@@ -227,6 +244,9 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return e.stopLocked(ctx)
 }
 func (e *Engine) stopLocked(ctx context.Context) error {
+	if routes, ok := e.deps.Routes.(platform.RouteQuiescer); ok {
+		routes.Quiesce()
+	}
 	if e.cancel != nil {
 		e.cancel()
 	}
@@ -278,16 +298,48 @@ func (e *Engine) Stats() any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := map[string]any{"flows": e.Table.Stats()}
+	if tun, ok := e.tun.(interface{ Stats() any }); ok {
+		s["tunKernel"] = tun.Stats()
+	}
+	if owners, ok := e.deps.Owners.(interface{ Stats() any }); ok {
+		s["ownerLookup"] = owners.Stats()
+	}
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	s["heapBytes"] = memory.HeapAlloc
+	s["stackBytes"] = memory.StackInuse
+	s["heapGoalBytes"] = memory.NextGC
+	s["gcCycles"] = uint64(memory.NumGC)
+	s["gcCPUppm"] = uint64(memory.GCCPUFraction * 1_000_000)
+	s["runtimeBytes"] = memory.Sys - memory.HeapReleased
+	s["goroutines"] = uint64(runtime.NumGoroutine())
+	samples := []metrics.Sample{{Name: "/gc/stack/starting-size:bytes"}, {Name: "/gc/heap/live:bytes"}, {Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/total:cpu-seconds"}}
+	metrics.Read(samples)
+	s["stackStartBytes"] = samples[0].Value.Uint64()
+	s["heapLiveBytes"] = samples[1].Value.Uint64()
+	s["gcCPUNanos"] = uint64(samples[2].Value.Float64() * 1e9)
+	s["totalCPUNanos"] = uint64(samples[3].Value.Float64() * 1e9)
 	if e.lastError != nil {
 		s["fatal"] = e.lastError.Error()
 	}
 	if e.link != nil {
 		s["tunDropped"] = e.link.Dropped.Load()
+		s["tunQueued"] = e.link.Queued()
+		s["tunPeakQueued"] = e.link.PeakQueued()
 	}
 	if e.tcp != nil {
 		s["tcpRejected"] = e.tcp.Rejected.Load()
 		s["tcpInvalid"] = e.tcp.Invalid.Load()
 		s["tcpDialFailed"] = e.tcp.DialFailed.Load()
+	}
+	if e.stack != nil {
+		stats := e.stack.Stats()
+		s["tcpSegmentsSent"] = stats.TCP.SegmentsSent.Value()
+		s["tcpRetransmits"] = stats.TCP.Retransmits.Value()
+		s["tcpRTOs"] = stats.TCP.Timeouts.Value()
+		s["tcpSACKRecoveries"] = stats.TCP.SACKRecovery.Value()
+		s["tcpSpuriousRTOs"] = stats.TCP.SpuriousRTORecovery.Value()
+		s["transportDropped"] = stats.DroppedPackets.Value()
 	}
 	if e.udp != nil {
 		s["udpRejected"] = e.udp.Rejected.Load()
@@ -296,6 +348,8 @@ func (e *Engine) Stats() any {
 		s["udpIdentityErrors"] = e.udp.IdentityErrors.Load()
 		s["udpOversize"] = e.udp.Oversize.Load()
 		s["udpReadErrors"] = e.udp.ReadErrors.Load()
+		s["udpPeakQueuePackets"] = e.udp.PeakQueuePackets.Load()
+		s["udpPeakQueueBytes"] = e.udp.PeakQueueBytes.Load()
 	}
 	return s
 }

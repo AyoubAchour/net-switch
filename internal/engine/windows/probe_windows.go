@@ -20,9 +20,13 @@ import (
 
 func (d *Dialer) Probe(ctx context.Context, line, operator string) (platform.ProbeResult, error) {
 	start := time.Now()
+	if !d.Routes.active.Load() {
+		return platform.ProbeResult{Outcome: "engineUnavailable", Error: "routing engine is not running"}, nil
+	}
 	quick := strings.HasPrefix(operator, "quick:")
 	operator = strings.ToLower(strings.TrimPrefix(operator, "quick:"))
 	var host, target, media string
+	var custom netip.AddrPort
 	switch operator {
 	case "cloudflare":
 		host, target, media = "1.1.1.1", "https://1.1.1.1/cdn-cgi/trace", "text/plain"
@@ -33,7 +37,14 @@ func (d *Dialer) Probe(ctx context.Context, line, operator string) (platform.Pro
 		query := []byte{0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}
 		target = "https://9.9.9.9/dns-query?dns=" + base64.RawURLEncoding.EncodeToString(query)
 	default:
-		return platform.ProbeResult{}, errors.New("unknown probe operator")
+		// Today's user-chosen targets are IP:port TCP probes. Keep that
+		// contract while named operators provide the full HTTPS checks.
+		var err error
+		custom, err = netip.ParseAddrPort(operator)
+		if err != nil || custom.Port() == 0 {
+			return platform.ProbeResult{}, errors.New("unknown probe operator or invalid IP:port target")
+		}
+		quick = true
 	}
 	timeout := 10 * time.Second
 	if quick {
@@ -42,14 +53,21 @@ func (d *Dialer) Probe(ctx context.Context, line, operator string) (platform.Pro
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	result := func(ok bool, err error) (platform.ProbeResult, error) {
-		r := platform.ProbeResult{OK: ok, Latency: time.Since(start)}
+		r := platform.ProbeResult{OK: ok, Outcome: "lineFailed", Latency: time.Since(start)}
+		if ok {
+			r.Outcome = "ok"
+		}
 		if err != nil {
 			r.Error = err.Error()
 		}
 		return r, nil
 	}
 	if quick {
-		c, err := d.DialTCP(ctx, line, netip.MustParseAddrPort(host+":443"))
+		address := custom
+		if !address.IsValid() {
+			address = netip.MustParseAddrPort(host + ":443")
+		}
+		c, err := d.DialTCP(ctx, line, address)
 		if err != nil {
 			return result(false, err)
 		}
