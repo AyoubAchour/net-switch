@@ -96,6 +96,7 @@ type lookupStats struct {
 	ReusedBatches, StaleBatchRetries, ConflictBatchRequests                              uint64
 	InlineBatches                                                                        uint64
 	BatchCompletionNanos, BatchResumeNanos, BatchMaxCompletionNanos, BatchMaxResumeNanos uint64
+	BatchLockNanos, BatchUnlockNanos, BatchMaxLockNanos, BatchMaxUnlockNanos uint64
 }
 
 func (o *Owners) Stats() any {
@@ -113,6 +114,8 @@ func (o *Owners) Stats() any {
 	s.InlineBatches = o.batches.inline.Load()
 	s.BatchCompletionNanos, s.BatchResumeNanos = o.batches.completionNanos.Load(), o.batches.resumeNanos.Load()
 	s.BatchMaxCompletionNanos, s.BatchMaxResumeNanos = o.batches.maxCompletion.Load(), o.batches.maxResume.Load()
+	s.BatchLockNanos, s.BatchUnlockNanos = o.batches.lockNanos.Load(), o.batches.unlockNanos.Load()
+	s.BatchMaxLockNanos, s.BatchMaxUnlockNanos = o.batches.maxLock.Load(), o.batches.maxUnlock.Load()
 	s.BatchMaxQueueNanos, s.BatchMaxServiceNanos = o.batches.maxQueue.Load(), o.batches.maxService.Load()
 	s.HolderTimeouts = o.holderTimeouts.Load()
 	for phase := range o.timeoutPhases {

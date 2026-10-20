@@ -62,6 +62,7 @@ type descriptorBatches struct {
 	reused, staleRetries, conflictWaits                    atomic.Uint64
 	inline                                                 atomic.Uint64
 	completionNanos, resumeNanos, maxCompletion, maxResume atomic.Uint64
+	lockNanos, unlockNanos, maxLock, maxUnlock             atomic.Uint64
 }
 
 type descriptorQueueBusy struct{ ready <-chan struct{} }
@@ -74,7 +75,11 @@ func (*descriptorQueueBusy) Error() string { return "descriptor scanner queue is
 // the caller, outside the shared worker pool.
 func (o *Owners) descriptorBatch(ctx context.Context, key descriptorBatchKey, requested time.Time, inline bool) (*descriptorBatch, error) {
 	b := &o.batches
+	acquiring := time.Now()
 	b.mu.Lock()
+	locked := uint64(time.Since(acquiring))
+	b.lockNanos.Add(locked)
+	recordLookupMaximum(&b.maxLock, locked)
 	if b.closed.Load() {
 		b.mu.Unlock()
 		return nil, context.Canceled
@@ -195,7 +200,11 @@ func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
 	completion := uint64(job.completed.Sub(serviced))
 	b.completionNanos.Add(completion)
 	recordLookupMaximum(&b.maxCompletion, completion)
+	unlocking := time.Now()
 	b.mu.Unlock()
+	unlocked := uint64(time.Since(unlocking))
+	b.unlockNanos.Add(unlocked)
+	recordLookupMaximum(&b.maxUnlock, unlocked)
 	// Waking every follower can itself schedule work. Publish the immutable
 	// result under the lock, then notify without holding the shared job map.
 	close(job.done)
