@@ -62,7 +62,7 @@ type Owners struct {
 	cgroupMu        sync.RWMutex
 	recentMu        sync.RWMutex
 	cgroups         map[uint64]string
-	recent          map[uint32][]uint32
+	recent          map[uint32]*recentOwners
 	cache           map[uint64]cachedHolders
 	index           [ownerIndexShards]ownerIndex
 	indexSeed       maphash.Seed
@@ -153,7 +153,7 @@ func NewOwners() *Owners {
 	// Inode hints and their subscribers share a shard, not the process-state
 	// lock. Small workloads need not retain and scan tens of MiB of empty
 	// index space, and a growing shard cannot stall every other lookup.
-	o := &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32][]uint32, 64), cache: make(map[uint64]cachedHolders, 16384), windows: make(map[uint32]fdWindow, 4096), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
+	o := &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32]*recentOwners, 64), cache: make(map[uint64]cachedHolders, 16384), windows: make(map[uint32]fdWindow, 4096), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
 	for i := range o.index {
 		o.index[i].inodes = make(map[uint32]inodeHolders, 128)
 		o.index[i].waiters = make(map[uint32]*inodeWaiter, 128)
@@ -544,9 +544,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		cached = o.cache[r.cookie].holders
 		o.mu.Unlock()
 	}
-	o.recentMu.RLock()
-	recent := o.recent[r.uid]
-	o.recentMu.RUnlock()
+	recent := o.recentPIDs(r.uid)
 	indexed := o.indexed(r.inode)
 	initialIndexTime = time.Since(indexStarted)
 	hinted += len(cached) + indexed.count()

@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -191,9 +192,7 @@ func TestBusyHintedProcessGetsATargetedPassBeforeDeadline(t *testing.T) {
 	}
 	blocked := make(chan struct{})
 	defer close(blocked)
-	o.recentMu.Lock()
-	o.recent[row.uid] = []uint32{pid}
-	o.recentMu.Unlock()
+	o.rememberPID(row.uid, pid)
 	o.mu.Lock()
 	o.windows[pid] = fdWindow{start: start, lastFD: -1, scanning: blocked}
 	o.mu.Unlock()
@@ -213,4 +212,43 @@ func TestBusyHintedProcessGetsATargetedPassBeforeDeadline(t *testing.T) {
 		t.Fatal("fixture released its scanner early")
 	default:
 	}
+}
+
+func TestRecentHolderSnapshotsStayImmutableDuringUpdates(t *testing.T) {
+	o := newTestOwners(t)
+	for pid := uint32(1); pid <= 32; pid++ {
+		o.rememberPID(1000, pid)
+	}
+	snapshot := o.recentPIDs(1000)
+	if len(snapshot) != 32 || snapshot[0] != 32 || snapshot[31] != 1 {
+		t.Fatal("fixture did not fill the bounded hint list")
+	}
+	var writers sync.WaitGroup
+	for i := uint32(0); i < 8; i++ {
+		writers.Go(func() {
+			for pid := uint32(33); pid < 200; pid++ {
+				o.rememberPID(1000, pid+i*200)
+			}
+		})
+	}
+	for range 1000 {
+		for i, pid := range snapshot {
+			if pid != uint32(32-i) {
+				t.Error("writer changed a published snapshot")
+				break
+			}
+		}
+		current := o.recentPIDs(1000)
+		seen := map[uint32]bool{}
+		for _, pid := range current {
+			if pid == 0 || seen[pid] {
+				t.Error("hint list contains a zero or duplicate PID")
+			}
+			seen[pid] = true
+		}
+		if len(current) > 32 {
+			t.Error("hint list exceeded its bound")
+		}
+	}
+	writers.Wait()
 }

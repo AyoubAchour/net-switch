@@ -45,7 +45,11 @@ func (d *procDescriptors) Visit(limit int, consume func([]byte) bool) (int, erro
 	count := 0
 	for count < limit {
 		if d.position == d.end {
-			n, err := unix.ReadDirent(d.fd, d.buffer[:])
+			// Numeric fd records occupy at most 32 bytes. A small targeted
+			// window must not make procfs instantiate hundreds of additional
+			// entries that the following seek would immediately discard.
+			size := min(len(d.buffer), (min(limit-count, 512)+2)*32)
+			n, err := unix.ReadDirent(d.fd, d.buffer[:size])
 			if err == unix.EINTR {
 				continue
 			}
