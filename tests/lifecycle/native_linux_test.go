@@ -31,7 +31,10 @@ func (a *linuxActor) command(exe string, args ...string) *exec.Cmd {
 	cmd.Env = append(os.Environ(), "HOME="+a.home, "USER="+a.name)
 	return cmd
 }
-func (a *linuxActor) close() { _ = exec.Command("userdel", a.name).Run() }
+func (a *linuxActor) close() {
+	_ = exec.Command("loginctl", "disable-linger", a.name).Run()
+	_ = exec.Command("userdel", a.name).Run()
+}
 func newActor(t *testing.T, name string) actor {
 	t.Helper()
 	if b, err := exec.Command("useradd", "--create-home", name).CombinedOutput(); err != nil {
@@ -40,6 +43,9 @@ func newActor(t *testing.T, name string) actor {
 	u, err := user.Lookup(name)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if b, err := exec.Command("loginctl", "enable-linger", name).CombinedOutput(); err != nil {
+		t.Fatal(err, string(b))
 	}
 	n, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil {
@@ -56,7 +62,7 @@ func verifyPermissions(t *testing.T, owner, other actor) {
 			t.Fatal(err, string(b))
 		}
 	}
-	c := openClient(t, other, false)
+	c := openClient(t, other, true)
 	defer c.input.Close()
 	if _, err := c.call(t, "routing", map[string]any{"on": true}); err == nil {
 		t.Fatal("SO_PEERCRED accepted another UID")
@@ -66,7 +72,7 @@ func permissionProbe() error {
 	if os.Geteuid() == 0 {
 		return errors.New("permission probe ran as root")
 	}
-	info, err := os.Stat(localipc.DefaultPath("desktop"))
+	info, err := os.Stat(localipc.DefaultPath("status"))
 	if err != nil {
 		return err
 	}

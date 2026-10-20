@@ -102,26 +102,23 @@ func EngineService(ctx context.Context, ready func(), c Config, log func(string)
 	watch := time.NewTicker(time.Second)
 	defer watch.Stop()
 	var result error
+	var health healthWatch
+	suspended := false
 running:
 	for {
 		select {
 		case event := <-service.Events(ctx):
+			if event.Suspend || event.Resume {
+				health = healthWatch{}
+				suspended = event.Suspend
+			}
 			if event.Resume {
 				owner, err := LoadOwner(c.Data)
 				if err != nil {
-					result = err
-					break running
+					log("resume owner lookup: " + err.Error())
+					continue
 				}
-				present, err := ownerSessionPresent(owner.User, ^uint32(0))
-				if err != nil {
-					log("resume owner session check: " + err.Error())
-				}
-				if !present {
-					log("resume without an owner session; waiting for sign-in")
-					break running
-				}
-				server.Resume()
-				log("power resume: ten-second lease renewal grace")
+				resumeEngine(server, owner.User, sessionPresence(c.Data), log)
 			}
 		case <-ctx.Done():
 			break running
@@ -141,6 +138,31 @@ running:
 				}
 				break running
 			}
+			if !suspended && runtime.adapter.Snapshot().Status == "on" {
+				if err := health.check(runCtx, runtime.adapter, time.Now); err != nil {
+					runtime.adapter.Fail(err)
+					result = err
+					log(err.Error())
+					break running
+				}
+			} else {
+				health = healthWatch{}
+			}
+		}
+	}
+	if server.LeaseExpired() || result != nil {
+		runtime.mu.Lock()
+		runtime.state.ExitReason = "adapter-failed"
+		if server.LeaseExpired() {
+			runtime.state.ExitReason = "lease-expired"
+		}
+		err = Save(filepath.Join(c.Data, "engine-state.json"), runtime.state)
+		runtime.mu.Unlock()
+		if err != nil {
+			result = errors.Join(result, err)
+		}
+		if server.LeaseExpired() {
+			log("control lease expired; cleaning up without counting an engine failure")
 		}
 	}
 	stopCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
@@ -173,6 +195,19 @@ running:
 		return errors.Join(result, err)
 	}
 	return result
+}
+
+func resumeEngine(server interface{ Resume() }, owner string, present func(string, uint32) (bool, error), log func(string)) {
+	signedIn, err := present(owner, ^uint32(0))
+	if err != nil {
+		log("resume owner session check: " + err.Error())
+	}
+	if err == nil && !signedIn {
+		log("resume without an owner session; Control decides routing intent")
+		return
+	}
+	server.Resume()
+	log("power resume: ten-second lease renewal grace")
 }
 
 func readEngineState(data string, state *engineState, log func(string)) error {

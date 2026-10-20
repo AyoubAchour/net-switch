@@ -126,17 +126,15 @@ func TestExpiryFencesBeforeWaitingForBlockedMutation(t *testing.T) {
 	}
 }
 
-func TestLeaseExcludesInjectedSleepAndWallClockJumps(t *testing.T) {
+func TestLeaseUsesInjectedClockForRenewalAndExpiry(t *testing.T) {
 	table := flows.New(flows.Defaults(), nil)
 	s := New(&runtimeFake{table: table}, table, nil)
 	awake := time.Unix(100, 0)
-	wall := awake
 	s.now = func() time.Time { return awake }
 	call(t, s, Request{ID: "attach", Method: "attach", Instance: s.Instance})
 	awake = awake.Add(20 * time.Second)
-	wall = wall.Add(8 * time.Hour) // hibernate; unbiased/monotonic time is paused
-	if wall.Sub(awake) < time.Hour || s.Expired() {
-		t.Fatal("sleep consumed the lease")
+	if s.Expired() {
+		t.Fatal("lease expired before the injected clock deadline")
 	}
 	call(t, s, Request{ID: "renew", Method: "renew", Instance: s.Instance, Epoch: 1})
 	awake = awake.Add(Lease - time.Nanosecond)

@@ -194,7 +194,7 @@ func TestOwnerLogoffAndHybridResumeWaitForSignIn(t *testing.T) {
 	for _, event := range []service.Event{{Logoff: true, Session: 7}, {Resume: true}} {
 		stops := 0
 		handleSessionEvent(event, "owner", func(owner string, exclude uint32) (bool, error) {
-			if owner != "owner" || event.Logoff && exclude != 7 {
+			if owner != "owner" || exclude != ^uint32(0) {
 				t.Fatal("wrong OS session checked")
 			}
 			return false, nil

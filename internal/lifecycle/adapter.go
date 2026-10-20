@@ -27,9 +27,10 @@ type adapterPayload struct {
 	Line     string           `json:"line,omitempty"`
 }
 type engineState struct {
-	Instance string              `json:"engineInstanceId"`
-	Epoch    uint64              `json:"epoch"`
-	Applied  *ce.Acknowledgement `json:"appliedRevision"`
+	ExitReason string              `json:"exitReason,omitempty"`
+	Instance   string              `json:"engineInstanceId"`
+	Epoch      uint64              `json:"epoch"`
+	Applied    *ce.Acknowledgement `json:"appliedRevision"`
 }
 
 func normalizeAdapterPath(path string) string {

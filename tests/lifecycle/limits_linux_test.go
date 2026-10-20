@@ -2,9 +2,11 @@ package lifecycle_test
 
 import (
 	"context"
+	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
+	"os"
 	"os/exec"
-	"strings"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -14,7 +16,7 @@ func resetControlRecoveryWindow(t *testing.T) {
 	if b, err := exec.Command("systemctl", "reset-failed", "netswitch.service").CombinedOutput(); err != nil {
 		t.Fatal(err, string(b))
 	}
-	t.Log("isolated fault case: reset Control's start counter; installed five-starts-per-minute limit is unchanged")
+	t.Log("isolated fault case: reset Control restart delay; start limiting is disabled")
 }
 func controlStartLimit(t *testing.T, ctx context.Context, owner actor, echo string) {
 	t.Helper()
@@ -25,6 +27,7 @@ func controlStartLimit(t *testing.T, ctx context.Context, owner actor, echo stri
 	}
 	c := openClient(t, owner, false)
 	c.must(t, "signin", nil, nil)
+	wait(t, "routing before crash storm", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	var session struct{ Token, URL string }
 	c.must(t, "session", nil, &session)
 	stream := proxyStream(t, session.URL, session.Token, echo)
@@ -36,32 +39,32 @@ func controlStartLimit(t *testing.T, ctx context.Context, owner actor, echo stri
 		}
 		killUnreset(t, s.PID)
 		if i < 4 {
-			wait(t, "limited Control restart", 15*time.Second, func() bool {
+			wait(t, "Control restart with growing delay", 35*time.Second, func() bool {
 				next, e := service.Query(service.Control)
 				return e == nil && next.Running && next.PID != s.PID
 			})
 			checkEcho(t, stream)
 		}
 	}
-	// systemd 255 retains Result=signal when a restart is rate-limited. Prove
-	// the behavior instead: no sixth process while the lease drains, and
-	// exactly five automatic restart attempts.
-	wait(t, "Control stops after fifth crash", 10*time.Second, func() bool {
-		s, err := service.Query(service.Control)
-		return err == nil && s.Stopped
-	})
-	wait(t, "lease fails open after Control hits restart limit", 40*time.Second, func() bool {
-		c, err := service.Query(service.Control)
-		if err != nil || !c.Stopped {
-			t.Fatal("Control restarted beyond the installed limit", c, err)
-		}
+	wait(t, "lease fails open during the long restart delay", 40*time.Second, func() bool {
 		s, e := service.Query(service.Engine)
 		return e == nil && s.Stopped
 	})
-	b, err := exec.Command("systemctl", "show", "--property=NRestarts", "--value", "netswitch.service").Output()
-	if err != nil || strings.TrimSpace(string(b)) != "5" {
-		t.Fatal("unexpected restart count", string(b), err)
-	}
 	directEcho(t, echo)
-	t.Log("five Control starts exhausted the installed rate limit; engine lease cleaned up without an infinite restart loop")
+	if info, err := os.Stat(localipc.DefaultPath("status")); err != nil || info.Mode()&os.ModeSocket == 0 {
+		t.Fatal("activation socket disappeared", err)
+	}
+	desktop := owner.command(filepath.Join(os.Getenv("NETSWITCH_LIFECYCLE_DIR"), "netswitch-desktop"), "--background")
+	if err := desktop.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = desktop.Process.Kill(); _ = desktop.Wait() }()
+	wait(t, "Control recovers after storm without reset-failed", 75*time.Second, func() bool { s, e := service.Query(service.Control); return e == nil && s.Running })
+	fresh := openClient(t, owner, false)
+	defer fresh.input.Close()
+	wait(t, "original desktop reconnects and routing recovers", 35*time.Second, func() bool {
+		s := getStatus(t, fresh)
+		return s.DesktopPID == uint32(desktop.Process.Pid) && s.Routing == "on"
+	})
+	t.Log("crash storm failed open; socket remained present and desktop recovered without a reset or reboot")
 }

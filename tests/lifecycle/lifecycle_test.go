@@ -50,6 +50,27 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 func clientMain(args []string) int {
+	if len(args) == 2 && args[0] == "http-flood" {
+		if err := httpFlood(args[1]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if len(args) == 1 && args[0] == "low-pipe" {
+		if err := lowPipeClient(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if len(args) == 2 && args[0] == "held-store" {
+		if err := heldStoreClient(args[1]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) > 0 && args[0] == "legacy-mutex" {
 		if err := legacyMutex(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -207,11 +228,12 @@ func (c *client) must(t *testing.T, method string, extra map[string]any, out any
 }
 
 type status struct {
-	Routing    string  `json:"routing"`
-	Instance   string  `json:"engineInstanceId"`
-	ControlPID uint32  `json:"controlPID"`
-	DesktopPID uint32  `json:"desktopPID"`
-	Error      *string `json:"error"`
+	EarlyDisconnects uint64  `json:"earlyDisconnects"`
+	Routing          string  `json:"routing"`
+	Instance         string  `json:"engineInstanceId"`
+	ControlPID       uint32  `json:"controlPID"`
+	DesktopPID       uint32  `json:"desktopPID"`
+	Error            *string `json:"error"`
 }
 
 func getStatus(t *testing.T, c *client) status {
@@ -325,7 +347,21 @@ func TestRealServices(t *testing.T) {
 	owner, other := newActor(t, "NSLifecycleOwner"), newActor(t, "NSLifecycleOther")
 	t.Cleanup(owner.close)
 	t.Cleanup(other.close)
+	if runtime.GOOS == "windows" {
+		if err := lifecycle.Save(filepath.Join(data, "fault-owner-sessions.json"), map[string]bool{owner.id(): true, other.id(): true}); err != nil {
+			t.Fatal(err)
+		}
+		t.Log("synthetic Windows actors use injected WTS presence; their IPC authentication still uses real OS tokens")
+		t.Run("real-WTS-session-probe", func(t *testing.T) {
+			b, err := exec.Command(filepath.Join(dir, "session.test.exe"), "-test.v", "-test.run=^TestRealWindowsOwnerSession$").CombinedOutput()
+			if err != nil {
+				t.Fatal(err, string(b))
+			}
+			t.Log(string(b))
+		})
+	}
 	adapter := fixture(t, dir)
+	t.Run("held-hostile-store-cannot-block-install", func(t *testing.T) { blockedStoreInstallation(t, dir, adapter, other) })
 	t.Run("installation-rejects-writable-images-and-parents", func(t *testing.T) { installationTrust(t, dir) })
 	config := lifecycle.Config{Directory: dir, Data: data, Adapter: adapter, Mode: "proxy"}
 	if err := lifecycle.Save(filepath.Join(data, "service-config.json"), config); err != nil {
@@ -339,7 +375,7 @@ func TestRealServices(t *testing.T) {
 	if err := service.Install(service.Config{Directory: dir, Data: data}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 14*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 45*time.Second)
@@ -510,15 +546,40 @@ func TestRealServices(t *testing.T) {
 		})
 	}
 	t.Run("non-owner-connect-close-preserves-routing", func(t *testing.T) {
+		initialClosed := getStatus(t, c).EarlyDisconnects
 		exe, _ := os.Executable()
-		if b, err := other.command(exe, "client", "disconnect-burst").CombinedOutput(); err != nil {
-			t.Fatal(err, string(b))
+		attack := other.command(exe, "client", "disconnect-burst")
+		var output bytes.Buffer
+		attack.Stdout = &output
+		attack.Stderr = &output
+		if err := attack.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() { done <- attack.Wait() }()
+		time.Sleep(250 * time.Millisecond)
+		fresh := openClient(t, owner, false)
+		fresh.must(t, "session", nil, nil)
+		fresh.input.Close()
+		if err := <-done; err != nil {
+			t.Fatal(err, output.String())
+		}
+		t.Log(output.String())
+		if getStatus(t, c).Routing != "on" {
+			t.Fatal("routing lost during active connection flood")
 		}
 		after := getStatus(t, c)
+		if runtime.GOOS == "windows" && after.EarlyDisconnects <= initialClosed {
+			t.Fatal("raw burst never exercised ERROR_NO_DATA")
+		}
+		t.Logf("closed-before-accept count=%d", after.EarlyDisconnects)
 		if after.Routing != "on" || after.ControlPID != first.ControlPID || after.Instance != first.Instance {
 			t.Fatal("connect-close changed routing or service lifetime", after)
 		}
 	})
+	t.Run("low-integrity-owner-cannot-exhaust-owner-slots", func(t *testing.T) { lowIntegrityCapacity(t, owner) })
+	t.Run("HTTP-flood-preserves-owner-capacity", func(t *testing.T) { httpCapacity(t, c, owner, other) })
+	t.Run("last-logind-session-stops-routing", func(t *testing.T) { ownerSignout(t, c, owner) })
 	t.Run("engine-ipc-rejects-standard-users", func(t *testing.T) {
 		exe, _ := os.Executable()
 		for _, user := range []actor{owner, other} {

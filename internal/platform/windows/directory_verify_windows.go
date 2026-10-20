@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/AyoubAchour/net-switch/internal/wintrust"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -104,6 +106,9 @@ func VerifyDirectory(path string) error {
 		}
 	}()
 	for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
+		if err := wintrust.Path(parent, true); err != nil {
+			return err
+		}
 		p, err := windows.UTF16PtrFromString(parent)
 		if err != nil {
 			return err

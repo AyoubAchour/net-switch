@@ -8,6 +8,32 @@ import (
 )
 
 func TestSCMPowerResumeReachesProgram(t *testing.T) {
+	testSCMEvent(t, svc.ChangeRequest{Cmd: svc.PowerEvent, EventType: 18}, Event{Resume: true})
+}
+
+func TestSCMLogoffDispatchIgnoresExpiredCallbackPointer(t *testing.T) {
+	testSCMEvent(t, svc.ChangeRequest{Cmd: svc.SessionChange, EventType: 6, EventData: 1}, Event{Logoff: true, SessionChanged: true})
+}
+
+func TestModernStandbyCallbackCycles(t *testing.T) {
+	events := make(chan Event, 64)
+	for range 7 {
+		publishPowerEvent(events, 4)
+		publishPowerEvent(events, 18)
+		publishPowerEvent(events, 7)
+		if e := <-events; !e.Suspend {
+			t.Fatal(e)
+		}
+		if e := <-events; !e.Resume {
+			t.Fatal(e)
+		}
+		if e := <-events; !e.Resume {
+			t.Fatal(e)
+		}
+	}
+}
+
+func testSCMEvent(t *testing.T, request svc.ChangeRequest, want Event) {
 	requests := make(chan svc.ChangeRequest, 1)
 	updates := make(chan svc.Status, 8)
 	observed := make(chan Event, 1)
@@ -35,10 +61,10 @@ func TestSCMPowerResumeReachesProgram(t *testing.T) {
 			if s.Accepts&svc.AcceptPowerEvent == 0 {
 				t.Fatal("SCM will not deliver resume")
 			}
-			requests <- svc.ChangeRequest{Cmd: svc.PowerEvent, EventType: 18}
+			requests <- request
 			select {
 			case event := <-observed:
-				if !event.Resume {
+				if event != want {
 					t.Fatal(event)
 				}
 			case <-timer.C:

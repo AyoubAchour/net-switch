@@ -17,8 +17,9 @@ import (
 )
 
 type handler struct {
-	run Program
-	err error
+	run   Program
+	err   error
+	power func(chan Event) (func(), error)
 }
 
 func ReportError(name string, err error) {
@@ -34,6 +35,14 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	ctx, events := eventContext(ctx)
+	if h.power != nil {
+		unregister, err := h.power(events)
+		if err != nil {
+			h.err = err
+			return true, 1
+		}
+		defer unregister()
+	}
 	status := svc.Status{State: svc.StartPending, WaitHint: 30000}
 	updates <- status
 	ready := make(chan struct{})
@@ -59,21 +68,12 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 				updates <- status
 				cancel(ErrRestart)
 			case svc.PowerEvent:
-				if request.EventType == 18 {
-					events <- Event{Resume: true}
-				} // PBT_APMRESUMEAUTOMATIC
+				publishPowerEvent(events, request.EventType)
 			case svc.SessionChange:
-				if request.EventType == 6 && request.EventData != 0 { // WTS_SESSION_LOGOFF
-					var data struct{ Size, Session uint32 }
-					var read uintptr
-					// svc exposes the callback buffer as uintptr. Copy it
-					// through the OS instead of manufacturing a Go pointer.
-					if err := windows.ReadProcessMemory(windows.CurrentProcess(), request.EventData, (*byte)(unsafe.Pointer(&data)), unsafe.Sizeof(data), &read); err == nil && read == unsafe.Sizeof(data) && data.Size >= uint32(read) {
-						events <- Event{Logoff: true, Session: data.Session}
-					} else {
-						fmt.Fprintln(os.Stderr, "session-change data unavailable; checking all owner sessions")
-						events <- Event{Logoff: true, Session: ^uint32(0)}
-					}
+				// EventData belongs to a callback that has already returned.
+				select {
+				case events <- Event{SessionChanged: true, Logoff: request.EventType == 6}:
+				default:
 				}
 			case svc.Interrogate:
 				updates <- status
@@ -108,7 +108,7 @@ func Run(name string, program Program) error {
 	if !ok {
 		return errors.New("service mode must be started by the Windows service manager")
 	}
-	h := &handler{run: program}
+	h := &handler{run: program, power: registerPowerEvents}
 	if err := svc.Run(name, h); err != nil {
 		return err
 	}
@@ -274,7 +274,7 @@ func Install(c Config) error {
 			// reads. Only Engine can load the signed TUN driver.
 			// MULTI_SZ needs embedded zeroes; build it explicitly.
 			var names []uint16
-			privileges := []string{"SeChangeNotifyPrivilege", "SeImpersonatePrivilege", "SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege"}
+			privileges := []string{"SeChangeNotifyPrivilege", "SeImpersonatePrivilege", "SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege", "SeTcbPrivilege"}
 			if entry.name == Engine {
 				privileges = append(privileges, "SeLoadDriverPrivilege")
 			}

@@ -32,3 +32,18 @@ func Hit(data, point string) {
 	}
 	select {} // the test kills this exact process after verifying the barrier
 }
+
+// Hosted Windows actors have real tokens but no WTS desktop. This explicit
+// fixture substitutes only their session presence, never their IPC identity.
+func OwnerSession(data, user string) (bool, bool) {
+	b, err := os.ReadFile(filepath.Join(data, "fault-owner-sessions.json"))
+	if err != nil {
+		return false, false
+	}
+	var sessions map[string]bool
+	if json.Unmarshal(b, &sessions) != nil {
+		return false, false
+	}
+	present, known := sessions[user]
+	return present, known
+}

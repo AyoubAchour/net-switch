@@ -18,6 +18,8 @@ type listener struct{ *net.UnixListener }
 func DefaultPath(kind string) string {
 	if kind == "status" {
 		kind = "desktop"
+	} else if kind == "desktop" {
+		kind = "owner"
 	}
 	return "/run/netswitch/" + kind + ".sock"
 }
@@ -41,7 +43,7 @@ func credentials(c *net.UnixConn) (Peer, error) {
 
 func Listen(e Endpoint) (Listener, error) {
 	// Socket activation owns the desktop pathname and its permissions.
-	if e.Kind == "desktop" && os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) && os.Getenv("LISTEN_FDS") == "1" {
+	if e.Kind == "status" && os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) && os.Getenv("LISTEN_FDS") == "1" {
 		f := os.NewFile(3, "netswitch.socket")
 		l, err := net.FileListener(f)
 		f.Close()
@@ -92,6 +94,20 @@ func Listen(e Endpoint) (Listener, error) {
 	mode := os.FileMode(0666)
 	if e.Kind == "engine" {
 		mode = 0600
+	}
+	if e.Kind == "desktop" {
+		mode = 0600
+		if e.Owner != "" {
+			uid, err := strconv.Atoi(e.Owner)
+			if err != nil {
+				u.Close()
+				return nil, err
+			}
+			if err := os.Chown(e.Path, uid, -1); err != nil {
+				u.Close()
+				return nil, err
+			}
+		}
 	}
 	if err := os.Chmod(e.Path, mode); err != nil {
 		u.Close()

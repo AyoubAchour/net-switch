@@ -35,7 +35,7 @@ type Access struct {
 }
 
 func (a *Access) status() any {
-	return map[string]any{"owner": a.Owner, "pending": a.Owner.User == "", "routing": a.Remote.Snapshot().Status, "error": a.Remote.Snapshot().Error, "controlPID": os.Getpid(), "engineInstanceId": a.Remote.Snapshot().Instance, "desktopPID": a.Desktop.PID()}
+	return map[string]any{"owner": a.Owner, "pending": a.Owner.User == "", "routing": a.Remote.Snapshot().Status, "error": a.Remote.Snapshot().Error, "controlPID": os.Getpid(), "engineInstanceId": a.Remote.Snapshot().Instance, "desktopPID": a.Desktop.PID(), "earlyDisconnects": localipc.EarlyDisconnects.Load()}
 }
 func (a *Access) request(ctx context.Context, peer localipc.Peer, statusOnly bool, session string, r controlRequest) (any, error) {
 	if r.Method == "status" {
@@ -157,15 +157,12 @@ func accept(ctx context.Context, l localipc.Listener, serve func(*localipc.Conn)
 		cancel()
 		clients.Wait()
 	}()
-	var peerReport time.Time
+	var peerReport, limitReport rejectionLog
 	for {
 		c, err := l.Accept(ctx)
 		if err != nil {
 			if errors.Is(err, localipc.ErrPeer) {
-				if time.Since(peerReport) > 10*time.Second {
-					log(err.Error())
-					peerReport = time.Now()
-				}
+				peerReport.report(log, err.Error())
 				continue
 			}
 			if ctx.Err() != nil || errors.Is(err, io.EOF) || errors.Is(err, os.ErrClosed) {
@@ -182,12 +179,23 @@ func accept(ctx context.Context, l localipc.Listener, serve func(*localipc.Conn)
 			})
 		} else {
 			c.Close()
-			if time.Since(peerReport) > 10*time.Second {
-				log("IPC connection limit reached; owner and service slots remain reserved")
-				peerReport = time.Now()
-			}
+			limitReport.report(log, "IPC connection limit reached; owner and service slots remain reserved")
 		}
 	}
+}
+
+type rejectionLog struct {
+	last       time.Time
+	suppressed uint64
+}
+
+func (r *rejectionLog) report(log func(string), message string) {
+	if time.Since(r.last) < 10*time.Second {
+		r.suppressed++
+		return
+	}
+	log(fmt.Sprintf("%s (suppressed since previous report: %d)", message, r.suppressed))
+	r.last, r.suppressed = time.Now(), 0
 }
 
 type connectionLimits struct {

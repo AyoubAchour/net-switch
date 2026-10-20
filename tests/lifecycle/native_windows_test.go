@@ -251,7 +251,7 @@ func hostedMain(m *testing.M) (bool, int) {
 		}
 		os.Stdout, os.Stderr = log, log
 		code := 1
-		os.Args = []string{os.Args[0], "-test.v", "-test.timeout=15m"}
+		os.Args = []string{os.Args[0], "-test.v", "-test.timeout=22m"}
 		err = service.Run("NetSwitchLifecycleTests", func(_ context.Context, ready func()) error {
 			ready()
 			code = m.Run()

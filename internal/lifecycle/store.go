@@ -79,6 +79,11 @@ func Read(path string, value any) error {
 }
 func LoadConfig(data string) (Config, error) {
 	var c Config
+	resolved, err := ResolveStore(data)
+	if err != nil {
+		return c, err
+	}
+	data = resolved
 	if err := CheckDirectory(data); err != nil {
 		return c, err
 	}

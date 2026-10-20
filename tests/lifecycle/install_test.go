@@ -23,6 +23,12 @@ func installationTrust(t *testing.T, dir string) {
 	if err := service.CheckInstallation(candidate, adapter); err != nil {
 		t.Fatal("trusted installation precondition", err)
 	}
+	if err := os.Link(adapter, filepath.Join(candidate, "adapter-hardlink")); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CheckInstallation(candidate, adapter); err != nil {
+		t.Fatal("protected hardlinked installation refused", err)
+	}
 	for _, path := range []string{filepath.Join(candidate, binary("netswitch")), adapter, root} {
 		restore := writableInstallPath(t, path)
 		err := service.CheckInstallation(candidate, adapter)

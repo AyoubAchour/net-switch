@@ -3,9 +3,9 @@ name: Service lifecycle
 on:
   push:
     branches: [main]
-    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/topo/**', 'tests/windows/testisp/**', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
   pull_request:
-    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/topo/**', 'tests/windows/testisp/**', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
   workflow_dispatch:
 
 permissions:
@@ -69,6 +69,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'ipc.test.exe') ./internal/localipc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'session.test.exe') ./internal/lifecycle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle-other-app.exe') ./tests/lifecycle/trafficclient
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'testisp.exe') ./tests/windows/testisp
@@ -91,7 +93,7 @@ jobs:
           go build -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle-other-app" ./tests/lifecycle/trafficclient
           sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"
           cd tests/lifecycle
-          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v -test.timeout=15m
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v -test.timeout=22m
       - name: Linux service diagnostics
         if: always() && matrix.os == 'Linux'
         shell: bash

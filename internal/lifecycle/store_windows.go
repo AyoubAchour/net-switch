@@ -48,6 +48,13 @@ func PrepareDirectory(path string) error {
 	}
 	return win.ProtectDirectory(path)
 }
+func PrepareStore(path string) (string, error) {
+	if !Administrator() {
+		return "", errors.New("creating the service store requires an administrator")
+	}
+	return win.PrepareMachineDirectory(path)
+}
+func ResolveStore(path string) (string, error) { return win.ResolveMachineDirectory(path) }
 func CheckDirectory(path string) error {
 	return win.VerifyDirectory(path)
 }

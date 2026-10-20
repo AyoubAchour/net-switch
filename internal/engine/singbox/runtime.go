@@ -193,6 +193,13 @@ func (a *Adapter) status(status string, err error) {
 	}
 }
 func (a *Adapter) Fail(err error) { a.status("error", err) }
+
+// Health checks the forwarding process independently of expensive flow
+// snapshots. The service host owns the consecutive-failure window.
+func (a *Adapter) Health(ctx context.Context) error {
+	_, _, err := a.request(ctx, "GET", "/version", nil)
+	return err
+}
 func (a *Adapter) ForgetLane(id string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

@@ -15,9 +15,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func DefaultData() string { return "/var/lib/netswitch" }
-func Administrator() bool { return os.Geteuid() == 0 }
-func CurrentUser() string { return strconv.Itoa(os.Getuid()) }
+func DefaultData() string                      { return "/var/lib/netswitch" }
+func PrepareStore(path string) (string, error) { return path, PrepareDirectory(path) }
+func ResolveStore(path string) (string, error) { return path, nil }
+func Administrator() bool                      { return os.Geteuid() == 0 }
+func CurrentUser() string                      { return strconv.Itoa(os.Getuid()) }
 func ResolveOwner(name string) (Owner, error) {
 	if name == "" {
 		name = os.Getenv("SUDO_UID")

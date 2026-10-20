@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -43,7 +44,7 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 	if err := lifecycle.Save(filepath.Join(config.Data, "control-journal.json"), map[string]any{"settings": settings, "wanted": false, "bootId": boot}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	for _, failure := range []string{"engine-kill", "lease-expiry"} {
 		t.Run(failure, func(t *testing.T) {
@@ -73,22 +74,126 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 			}
 			restore := disableRecovery(t)
 			defer restore()
+			faultAt := time.Now()
 			kill(t, control.PID)
 			fixture.exchange(t, conn) // Control death alone must preserve the flow
 			if failure == "engine-kill" {
+				faultAt = time.Now()
 				kill(t, engine.PID)
 			}
 			wait(t, "TUN engine stopped", 45*time.Second, func() bool { s, e := service.Query(service.Engine); return e == nil && s.Stopped })
 			fixture.clean(t)
+			cleanAt := time.Since(faultAt)
 			direct, err := fixture.dial(ctx, "tcp4", fixture.target)
 			if err != nil {
 				t.Fatal("previously captured target is not direct after cleanup", err)
 			}
 			fixture.exchange(t, direct)
 			direct.Close()
+			directAt := time.Since(faultAt)
+			bound := 42 * time.Second // lease 30s + one tick + bounded cleanup
+			if failure == "engine-kill" {
+				bound = 12 * time.Second
+			}
+			t.Logf("FAIL_OPEN fault=%s routes_and_adapter_gone=%s direct_traffic=%s bound=%s", failure, cleanAt, directAt, bound)
+			if cleanAt > bound || directAt > bound {
+				t.Fatal("fail-open exceeded bound")
+			}
 			t.Log("TUN captured a live stream; adapter/routes/rules returned to baseline; the same target works directly")
 		})
 	}
+	t.Run("hung-adapter-fails-open-recovers-and-latches", func(t *testing.T) {
+		resetControlRecoveryWindow(t)
+		if err := service.Start(ctx, service.Control); err != nil {
+			t.Fatal(err)
+		}
+		c := openClient(t, owner, false)
+		defer func() { c.input.Close() }()
+		c.must(t, "routing", map[string]any{"on": true}, nil)
+		wait(t, "TUN before hang", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+		for hang := 1; hang <= 5; hang++ {
+			before := getStatus(t, c)
+			live, err := fixture.dial(ctx, "tcp4", fixture.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fixture.exchange(t, live)
+			assertTUNCaptured(t, config.Data, before.Instance, fixture)
+			fixture.installed(t)
+			pidBytes, err := os.ReadFile(filepath.Join(config.Data, "adapter-"+before.Instance, "engine.pid"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pid, err := strconv.ParseUint(strings.TrimSpace(string(pidBytes)), 10, 32)
+			if err != nil || pid == 0 {
+				t.Fatal("adapter pid precondition", err)
+			}
+			restore := func() {}
+			if hang == 1 {
+				restore = disableRecovery(t)
+			}
+			faultAt := time.Now()
+			suspendAdapter(t, uint32(pid))
+			if hang == 1 {
+				kill(t, before.ControlPID)
+			} // health must work without Control
+			wait(t, "hung engine stopped", 28*time.Second, func() bool { s, e := service.Query(service.Engine); return e == nil && s.Stopped })
+			fixture.clean(t)
+			cleanAt := time.Since(faultAt)
+			direct, err := fixture.dial(ctx, "tcp4", fixture.target)
+			if err != nil {
+				t.Fatal("hung engine did not fail open", err)
+			}
+			fixture.exchange(t, direct)
+			direct.Close()
+			live.Close()
+			if cleanAt > 28*time.Second {
+				t.Fatal("health cleanup exceeded 28s", cleanAt)
+			}
+			if hang == 1 {
+				restore()
+				if err := service.Start(ctx, service.Control); err != nil {
+					t.Fatal(err)
+				}
+				c.input.Close()
+				c = openClient(t, owner, false)
+			}
+			wait(t, "one durable failure for this hang", 10*time.Second, func() bool {
+				var j struct {
+					Failures []int64 `json:"failures"`
+				}
+				return lifecycle.Read(filepath.Join(config.Data, "control-journal.json"), &j) == nil && len(j.Failures) >= hang
+			})
+			if hang < 5 {
+				wait(t, "new working engine after hang", 45*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
+				working, err := fixture.dial(ctx, "tcp4", fixture.target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fixture.exchange(t, working)
+				working.Close()
+				if time.Since(faultAt) > 70*time.Second {
+					t.Fatal("hang recovery exceeded 70s")
+				}
+			} else {
+				until := time.Now().Add(32 * time.Second)
+				for time.Now().Before(until) {
+					s, e := service.Query(service.Engine)
+					if e != nil || !s.Stopped {
+						t.Fatal("fifth hang did not latch", s, e)
+					}
+					time.Sleep(time.Second)
+				}
+			}
+			var j struct {
+				Failures []int64 `json:"failures"`
+			}
+			if err := lifecycle.Read(filepath.Join(config.Data, "control-journal.json"), &j); err != nil || len(j.Failures) != hang {
+				t.Fatal("hang counted more than once", len(j.Failures), err)
+			}
+			t.Logf("HUNG_ENGINE hang=%d clean=%s recovered_or_latched=%s failures=%d control_down=%t", hang, cleanAt, time.Since(faultAt), len(j.Failures), hang == 1)
+		}
+	})
 }
 
 func assertTUNCaptured(t *testing.T, data, instance string, fixture tunFixture) {

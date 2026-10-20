@@ -13,7 +13,7 @@ func checkInstalledPath(path string, _ bool) error {
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != 0 || info.Mode().Perm()&0022 != 0 || info.Mode()&os.ModeSymlink != 0 ||
-		!info.IsDir() && (!info.Mode().IsRegular() || stat.Nlink != 1) {
+		!info.IsDir() && !info.Mode().IsRegular() {
 		return fmt.Errorf("installation path must be root-owned and not writable by other users: %s", path)
 	}
 	return nil

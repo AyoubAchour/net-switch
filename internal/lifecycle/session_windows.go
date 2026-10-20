@@ -7,55 +7,40 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var querySession = windows.NewLazySystemDLL("wtsapi32.dll").NewProc("WTSQuerySessionInformationW")
-
-func ownerSessionPresent(owner string, excluded uint32) (bool, error) {
+func ownerSessionPresent(owner string, _ uint32) (bool, error) {
+	if owner == "" {
+		return false, nil
+	}
 	var sessions *windows.WTS_SESSION_INFO
 	var count uint32
 	if err := windows.WTSEnumerateSessions(0, 0, 1, &sessions, &count); err != nil {
 		return false, err
 	}
 	defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(sessions)))
-	read := func(id, class uint32) (string, error) {
-		var data *uint16
-		var size uint32
-		ok, _, err := querySession.Call(0, uintptr(id), uintptr(class), uintptr(unsafe.Pointer(&data)), uintptr(unsafe.Pointer(&size)))
-		if ok == 0 {
-			return "", err
-		}
-		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(data)))
-		if data == nil || size < 2 || size > 65536 {
-			return "", errors.New("invalid session name")
-		}
-		return windows.UTF16ToString(unsafe.Slice(data, size/2)), nil
-	}
+	var uncertain error
 	for _, session := range unsafe.Slice(sessions, count) {
-		if session.SessionID == 0 || session.SessionID == excluded {
+		if session.SessionID == 0 {
 			continue
 		}
-		name, err := read(session.SessionID, 5) // WTSUserName
-		if err != nil {
-			return false, err
-		}
-		if name == "" {
+		var token windows.Token
+		if err := windows.WTSQueryUserToken(session.SessionID, &token); err != nil {
+			if !errors.Is(err, windows.ERROR_NO_TOKEN) {
+				uncertain = errors.Join(uncertain, err)
+			}
 			continue
 		}
-		domain, err := read(session.SessionID, 7) // WTSDomainName
+		user, err := token.GetTokenUser()
+		token.Close()
 		if err != nil {
-			return false, err
-		}
-		if domain != "" {
-			name = domain + `\` + name
-		}
-		sid, _, _, err := windows.LookupSID("", name)
-		if err != nil {
-			return false, err
+			uncertain = errors.Join(uncertain, err)
+			continue
 		}
 		// Disconnected RDP sessions remain signed in. Desktop process death
 		// also does not constitute a sign-out.
-		if sid.String() == owner {
+		if user.User.Sid.String() == owner {
 			return true, nil
 		}
 	}
-	return false, nil
+	// An incomplete enumeration is unknown, not evidence of logoff.
+	return false, uncertain
 }

@@ -6,10 +6,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync/atomic"
 	"time"
 )
 
 var ErrPeer = errors.New("IPC peer could not be authenticated")
+
+// Observable proof that the real NPFS closed-before-accept path ran.
+var EarlyDisconnects atomic.Uint64
 
 type Peer struct {
 	User    string `json:"user"`

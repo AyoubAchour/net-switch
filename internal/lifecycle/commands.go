@@ -59,6 +59,13 @@ func Ctl(args []string) error {
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
+	if command != "install" && command != "status" && command != "start" && command != "stop" {
+		resolved, err := ResolveStore(*data)
+		if err != nil {
+			return err
+		}
+		*data = resolved
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	printJSON := func(value any, err error) error {
@@ -133,7 +140,8 @@ func Ctl(args []string) error {
 		if err := service.CheckInstallation(*dir, *adapter); err != nil {
 			return err
 		}
-		if err := PrepareDirectory(*data); err != nil {
+		*data, err = PrepareStore(*data)
+		if err != nil {
 			return err
 		}
 		c := Config{Directory: *dir, Data: *data, Adapter: *adapter, Mode: *mode}

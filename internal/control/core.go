@@ -645,7 +645,7 @@ func (c *Core) Start(ctx context.Context) error {
 	return c.startQueue.Do(ctx, func() error {
 		if c.op.ServiceMode {
 			c.mu.Lock()
-			blocked := len(c.failureTimes) >= 5
+			blocked := len(c.failureTimes) >= 5 || c.now() < c.retryAt
 			c.mu.Unlock()
 			if blocked {
 				return nil
@@ -744,14 +744,18 @@ func (c *Core) Routing(ctx context.Context, on bool) error {
 	})
 }
 
-// SignIn starts routing without resetting an already active recovery budget.
+// SignIn acknowledges durable intent. Only the supervisor attempts an engine
+// start, so desktop handshakes cannot bypass its retry schedule.
 func (c *Core) SignIn(ctx context.Context) error {
-	// A second owner session or a retry after an interrupted handshake must
-	// not erase an existing crash budget.
-	if c.WantsRouting() {
-		return c.Start(ctx)
+	if !c.op.ServiceMode {
+		return c.Routing(ctx, true)
 	}
-	return c.Routing(ctx, true)
+	c.applyMu.Lock()
+	defer c.applyMu.Unlock()
+	c.mu.Lock()
+	c.wanted = true
+	c.mu.Unlock()
+	return c.persistJournal()
 }
 
 // ResumeRouting preserves the crash budget when SCM restarts Control.

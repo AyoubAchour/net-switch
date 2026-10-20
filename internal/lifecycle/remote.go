@@ -37,7 +37,9 @@ type Remote struct {
 	startService         func(context.Context, string) error
 	queryService         func(string) (service.Status, error)
 	waitStopped          func(context.Context, string) error
+	forceStop            func(context.Context, string) error
 	wakeGrace            time.Time
+	exitReason           func(string) (string, error)
 }
 
 func NewRemote(ctx context.Context, log func(string)) *Remote {
@@ -143,12 +145,24 @@ func (r *Remote) recoverConnection(cause error, id uint64) {
 		r.mu.Unlock()
 		status, queryErr := r.queryService(service.Engine)
 		if queryErr == nil && status.Stopped {
+			reason := ""
+			if r.exitReason != nil {
+				var readErr error
+				reason, readErr = r.exitReason(instance)
+				if readErr != nil {
+					r.log("cannot read engine exit classification: " + readErr.Error())
+				}
+			}
 			r.mu.Lock()
 			stopping = r.stopping
 			grace := time.Now().Before(r.wakeGrace)
 			current := r.recovery == id && r.rpc == nil && r.instance == instance && r.attempt == attempt
 			if current && !stopping && !grace {
-				r.failLocked(fmt.Errorf("engine instance exited: %w", cause))
+				if reason == "lease-expired" {
+					r.snapshot = ce.Snapshot{Status: "off"}
+				} else {
+					r.failLocked(fmt.Errorf("engine instance exited: %w", cause))
+				}
 			}
 			r.mu.Unlock()
 			if !current {
@@ -422,6 +436,36 @@ func (r *Remote) Apply(ctx context.Context, revision ce.Revision) (ce.Acknowledg
 	return ack, err
 }
 func (r *Remote) Stop(ctx context.Context) error {
+	stopCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	err := r.stopGracefully(stopCtx)
+	cancel()
+	if err == nil {
+		return nil
+	}
+	r.log("engine stop did not complete within its bound; terminating its service to fail open: " + err.Error())
+	killCtx, killCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer killCancel()
+	force := r.forceStop
+	if force == nil {
+		force = service.ForceStop
+	}
+	if killErr := force(killCtx, service.Engine); killErr != nil {
+		return errors.Join(err, fmt.Errorf("forced engine cleanup failed: %w", killErr))
+	}
+	r.mu.Lock()
+	rpc := r.rpc
+	r.rpc = nil
+	r.stopping = true
+	r.snapshot = ce.Snapshot{Status: "off"}
+	r.instance = ""
+	r.mu.Unlock()
+	if rpc != nil {
+		rpc.Close()
+	}
+	return nil
+}
+
+func (r *Remote) stopGracefully(ctx context.Context) error {
 	r.mu.Lock()
 	rpc := r.rpc
 	r.mu.Unlock()

@@ -2,7 +2,6 @@ package lifecycle_test
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,8 +12,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/lifecycle"
+	"golang.org/x/sys/windows"
 )
 
 func powershell(t *testing.T, script string, env ...string) []byte {
@@ -67,18 +68,52 @@ func prepareTUN(t *testing.T, dir, data string) tunFixture {
 	if response.StatusCode != 200 {
 		t.Fatal("TestISP target mapping", response.StatusCode)
 	}
+	var tunIndex uint32
 	return tunFixture{
 		line: "TestISP", target: "198.19.128.2:" + port, dial: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, exchange: checkEcho,
 		installed: func(t *testing.T) {
-			out := powershell(t, "$a=Get-NetAdapter -Name NetSwitch -ErrorAction Stop; $routes=@(Get-NetRoute -InterfaceIndex $a.ifIndex); if ($routes.Count -lt 1) {throw 'TUN has no routes'}; [pscustomobject]@{index=$a.ifIndex;routes=$routes.Count}|ConvertTo-Json -Compress")
-			var evidence map[string]any
-			if json.Unmarshal(out, &evidence) != nil {
-				t.Fatal(string(out))
+			index, routes, err := nativeTUNState(0)
+			if err != nil || index == 0 || routes == 0 {
+				t.Fatal("native TUN precondition", index, routes, err)
 			}
-			t.Log("TUN adapter and routes", evidence)
+			tunIndex = index
+			t.Logf("native TUN precondition: interface=%d routes=%d", index, routes)
 		},
 		clean: func(t *testing.T) {
-			powershell(t, "$a=@(Get-NetAdapter -IncludeHidden | Where-Object Name -eq NetSwitch); $r=@(Get-NetRoute | Where-Object InterfaceAlias -eq NetSwitch); $f=@(Get-NetFirewallRule | Where-Object DisplayName -like '*NetSwitch*'); if ($a.Count -or $r.Count -or $f.Count) {throw ('TUN leftovers: adapters={0} routes={1} rules={2}' -f $a.Count,$r.Count,$f.Count)}")
+			wait(t, "native adapter and routes gone", 10*time.Second, func() bool {
+				index, routes, err := nativeTUNState(tunIndex)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return index == 0 && routes == 0
+			})
 		},
 	}
+}
+
+func nativeTUNState(previous uint32) (uint32, int, error) {
+	var interfaces *windows.MibIfTable2
+	if err := windows.GetIfTable2Ex(windows.MibIfTableNormal, &interfaces); err != nil {
+		return 0, 0, err
+	}
+	defer windows.FreeMibTable(unsafe.Pointer(interfaces))
+	var index uint32
+	for _, row := range unsafe.Slice(&interfaces.Table[0], interfaces.NumEntries) {
+		if windows.UTF16ToString(row.Alias[:]) == "NetSwitch" {
+			index = row.InterfaceIndex
+			previous = index
+		}
+	}
+	var routes *windows.MibIpForwardTable2
+	if err := windows.GetIpForwardTable2(windows.AF_UNSPEC, &routes); err != nil {
+		return 0, 0, err
+	}
+	defer windows.FreeMibTable(unsafe.Pointer(routes))
+	count := 0
+	for _, row := range routes.Rows() {
+		if previous != 0 && row.InterfaceIndex == previous {
+			count++
+		}
+	}
+	return index, count, nil
 }

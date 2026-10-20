@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 	"unsafe"
@@ -41,7 +42,7 @@ func pipeDACL(e Endpoint) (string, error) {
 			s += "(A;;0x100183;;;" + e.Owner + ")"
 		}
 	}
-	return s, nil
+	return s + "S:(ML;;NRNW;;;ME)", nil
 }
 func (l *listener) create(first bool) (windows.Handle, error) {
 	p, err := windows.UTF16PtrFromString(l.endpoint.Path)
@@ -149,6 +150,7 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 		return nil, err
 	}
 	if closedClient {
+		EarlyDisconnects.Add(1)
 		windows.CloseHandle(h)
 		return nil, fmt.Errorf("%w: client disconnected before accept", ErrPeer)
 	}
@@ -157,7 +159,7 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 		windows.CloseHandle(h)
 		return nil, fmt.Errorf("%w: %v", ErrPeer, err)
 	}
-	p, err := processPeer(pid)
+	p, err := pipePeer(h, pid)
 	if err != nil {
 		windows.CloseHandle(h)
 		return nil, fmt.Errorf("%w: %v", ErrPeer, err)
@@ -165,17 +167,68 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 	return &Conn{ReadWriteCloser: os.NewFile(uintptr(h), l.endpoint.Path), Peer: p}, nil
 }
 
+var impersonatePipe = windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateNamedPipeClient")
+
+func pipePeer(pipe windows.Handle, pid uint32) (peer Peer, err error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	ok, _, callErr := impersonatePipe.Call(uintptr(pipe))
+	if ok == 0 {
+		return Peer{}, callErr
+	}
+	defer func() {
+		if revertErr := windows.RevertToSelf(); revertErr != nil {
+			// A thread that cannot drop its borrowed identity must never run
+			// further privileged work, nor return to Go's scheduler.
+			fmt.Fprintln(os.Stderr, "cannot revert pipe impersonation:", revertErr)
+			os.Exit(1)
+		}
+	}()
+	var token windows.Token
+	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &token); err != nil {
+		return Peer{}, err
+	}
+	defer token.Close()
+	var integrity [64]uint64
+	var size uint32
+	if err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&integrity[0])), uint32(unsafe.Sizeof(integrity)), &size); err != nil {
+		return Peer{}, err
+	}
+	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&integrity[0]))
+	if label.Label.Sid == nil || label.Label.Sid.SubAuthorityCount() == 0 || label.Label.Sid.SubAuthority(uint32(label.Label.Sid.SubAuthorityCount()-1)) < 0x2000 {
+		return Peer{}, fmt.Errorf("pipe client integrity is below medium")
+	}
+	return tokenPeer(token, pid)
+}
+
 func processPeer(pid uint32) (Peer, error) {
+	return processPeerAt(pid, 0)
+}
+
+func processPeerAt(pid uint32, connectionCreated uint64) (Peer, error) {
 	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
 		return Peer{}, err
 	}
 	defer windows.CloseHandle(p)
+	if connectionCreated != 0 {
+		var created, exited, kernel, user windows.Filetime
+		if err := windows.GetProcessTimes(p, &created, &exited, &kernel, &user); err != nil {
+			return Peer{}, err
+		}
+		if uint64(created.HighDateTime)<<32|uint64(created.LowDateTime) > connectionCreated {
+			return Peer{}, ErrPeer
+		}
+	}
 	var token windows.Token
 	if err := windows.OpenProcessToken(p, windows.TOKEN_QUERY, &token); err != nil {
 		return Peer{}, err
 	}
 	defer token.Close()
+	return tokenPeer(token, pid)
+}
+
+func tokenPeer(token windows.Token, pid uint32) (Peer, error) {
 	user, err := token.GetTokenUser()
 	if err != nil {
 		return Peer{}, err

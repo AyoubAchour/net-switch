@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -113,6 +114,10 @@ func Desktop(ctx context.Context, show bool) error {
 			stop()
 			if err != nil {
 				rpc.Close()
+				var rejected rpcError
+				if errors.As(err, &rejected) {
+					return fmt.Errorf("sign-in was rejected: %w", err)
+				}
 				if localipc.Pause(ctx, backoff) != nil {
 					return nil
 				}

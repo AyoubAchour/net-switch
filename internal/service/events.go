@@ -8,9 +8,11 @@ import (
 var ErrRestart = errors.New("service restart requested; preserve routing")
 
 type Event struct {
-	Resume  bool
-	Logoff  bool
-	Session uint32
+	Suspend        bool
+	SessionChanged bool
+	Resume         bool
+	Logoff         bool
+	Session        uint32
 }
 type eventsKey struct{}
 

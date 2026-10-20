@@ -45,6 +45,7 @@ type Server struct {
 	epoch                       uint64
 	expires                     time.Time
 	attached, stopping, stopped bool
+	leaseExpired                bool
 	runtime                     Runtime
 	table                       *flows.Table
 	prober                      platform.Prober
@@ -68,6 +69,12 @@ func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
 	return s
 }
 func (s *Server) Done() <-chan struct{} { return s.done }
+
+func (s *Server) LeaseExpired() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leaseExpired
+}
 
 // Resume gives Control a bounded opportunity to run after the OS wakes.
 // It cannot resurrect an instance whose cleanup already started.
@@ -339,6 +346,7 @@ func (s *Server) Expired() bool {
 		return false
 	}
 	s.stopping = true
+	s.leaseExpired = true
 	return true
 }
 
@@ -349,6 +357,9 @@ func (s *Server) CheckLease(ctx context.Context) error {
 	if !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {
 		s.mu.Unlock()
 		return nil
+	}
+	if !s.stopping {
+		s.leaseExpired = true
 	}
 	s.stopping = true
 	s.mu.Unlock()

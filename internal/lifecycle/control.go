@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
 
@@ -30,6 +29,14 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 		return err
 	}
 	remote := NewRemote(ctx, log)
+	remote.exitReason = func(instance string) (string, error) {
+		var state engineState
+		err := readEngineState(c.Data, &state, log)
+		if err != nil || state.Instance != instance {
+			return "", err
+		}
+		return state.ExitReason, nil
+	}
 	// Attach before considering any cleanup or new start. A Control restart
 	// must preserve the engine's existing flows and fixed closure cutoffs.
 	attachCtx, stopAttach := context.WithTimeout(ctx, 10*time.Second)
@@ -56,6 +63,14 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	wasRunning := err == nil && remote.Snapshot().Status == "on"
 	if err != nil {
 		log("no existing engine attachment: " + err.Error())
+		var previous engineState
+		if readErr := readEngineState(c.Data, &previous, log); readErr != nil {
+			return readErr
+		}
+		if previous.ExitReason == "adapter-failed" {
+			remote.instance = previous.Instance
+			remote.Fail(errors.New("previous engine instance failed while Control was unavailable"))
+		}
 	}
 	ioOptions := settings.Options{Files: durableFiles{}, SyncFile: syncFile, SyncParent: SyncDirectory, OnBackupError: func(err error) { log("backup: " + err.Error()) }}
 	store := settings.New(c.Data, ioOptions)
@@ -118,16 +133,8 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	var quitOnce sync.Once
 	httpHandler := &control.HTTP{Core: core, Port: port, ValidToken: tokens.Valid, Pair: tokens.Redeem, Asset: ServiceAsset, Quit: func() { quitOnce.Do(func() { close(quit) }) }}
 	httpHandler.PairAllowed = func(r *http.Request) bool {
-		local, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
-		if !ok || owner.User == "" {
-			return false
-		}
-		remote, err := net.ResolveTCPAddr("tcp4", r.RemoteAddr)
-		if err != nil {
-			return false
-		}
-		user, err := localipc.TCPOwner(remote, local)
-		return err == nil && user == owner.User
+		user, _ := r.Context().Value(httpPeerKey{}).(string)
+		return owner.User != "" && user == owner.User
 	}
 	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/pair" || r.URL.Path == "/pair.js" || r.URL.Path == "/pair.css" {
@@ -136,14 +143,12 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 		}
 		httpHandler.ServeHTTP(w, r)
 	})
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 40 * time.Second, IdleTimeout: 60 * time.Second}
+	server := &http.Server{Handler: mux, ConnContext: httpPeerContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 40 * time.Second, IdleTimeout: 15 * time.Second}
 	defer server.Close()
 	failures := make(chan error, 4)
-	go func() { defer crash.Recover("service HTTP"); failures <- server.Serve(listener) }()
-	paths := []string{"desktop"}
-	if runtime.GOOS == "windows" {
-		paths = append(paths, "status")
-	}
+	boundedHTTP := &httpListener{Listener: listener, limits: &connectionLimits{owner: owner.User, users: map[string]int{}}, log: log}
+	go func() { defer crash.Recover("service HTTP"); failures <- server.Serve(boundedHTTP) }()
+	paths := []string{"desktop", "status"}
 	var listeners []localipc.Listener
 	defer func() {
 		for _, l := range listeners {
@@ -168,13 +173,23 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	if err := core.ApplyPolicy(ctx); err != nil {
 		return err
 	}
+	// A retained boot ID is not evidence of an owner session. Query before
+	// any Start, including recovery of an already attached engine.
+	if present, queryErr := sessionPresence(c.Data)(owner.User, ^uint32(0)); queryErr != nil {
+		log("initial owner session query unavailable; retaining routing state: " + queryErr.Error())
+	} else if !present {
+		if err := core.Routing(ctx, false); err != nil {
+			return err
+		}
+		wasRunning = false
+	}
 	if wasRunning {
 		if err := core.ResumeRouting(ctx); err != nil {
 			return err
 		}
 	}
 	core.Run()
-	go runSessionEvents(ctx, service.Events(serviceCtx), owner.User, remote, func() error { return core.Routing(ctx, false) }, log)
+	go runSessionEvents(ctx, service.Events(serviceCtx), owner.User, remote, func() error { return core.Routing(ctx, false) }, log, sessionPresence(c.Data))
 	ready()
 	// No credential, HTTP port or session token is published to a file.
 	log(fmt.Sprintf("Control ready (PID %d); owner=%s", os.Getpid(), owner.Name))
