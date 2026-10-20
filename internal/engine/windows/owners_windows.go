@@ -61,6 +61,9 @@ type LookupHistogram struct {
 	TCPReadNanos       uint64   `json:"tcpReadNanos"`
 	TCPIndexNanos      uint64   `json:"tcpIndexNanos"`
 	CacheMissRefreshes uint64   `json:"cacheMissRefreshes"`
+	TCPRetries         uint64   `json:"tcpRetries"`
+	SnapshotBuckets    []uint64 `json:"snapshotBuckets"`
+	ProcessBuckets     []uint64 `json:"processBuckets"`
 }
 
 var lookupBounds = [...]uint64{100, 250, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, ^uint64(0)}
@@ -72,11 +75,23 @@ type Owners struct {
 	paths                                                         map[processKey]platform.Owner
 	tcpBuffers                                                    [2][]byte
 	hist                                                          [len(lookupBounds)]atomic.Uint64
+	snapshotHist, processHist                                     [len(lookupBounds)]atomic.Uint64
 	count, misses, ambiguous, maxUS                               atomic.Uint64
 	tcpRefreshes, tcpReadNanos, tcpIndexNanos, cacheMissRefreshes atomic.Uint64
+	tcpRetries                                                    atomic.Uint64
 }
 
 func NewOwners() *Owners { return &Owners{paths: make(map[processKey]platform.Owner)} }
+
+func measureStage(hist *[len(lookupBounds)]atomic.Uint64, start time.Time) {
+	us := uint64(max(0, time.Since(start).Microseconds()))
+	for i, bound := range lookupBounds {
+		if us <= bound {
+			hist[i].Add(1)
+			return
+		}
+	}
+}
 
 func (o *Owners) measure(start time.Time, err error) {
 	us := uint64(max(0, time.Since(start).Microseconds()))
@@ -102,10 +117,12 @@ func (o *Owners) measure(start time.Time, err error) {
 
 func (o *Owners) Stats() LookupHistogram {
 	h := LookupHistogram{Count: o.count.Load(), Misses: o.misses.Load(), Ambiguous: o.ambiguous.Load(), MaxUS: o.maxUS.Load(),
-		UpperUS: append([]uint64(nil), lookupBounds[:]...), Buckets: make([]uint64, len(lookupBounds))}
+		UpperUS: append([]uint64(nil), lookupBounds[:]...), Buckets: make([]uint64, len(lookupBounds)),
+		TCPRetries: o.tcpRetries.Load(), SnapshotBuckets: make([]uint64, len(lookupBounds)), ProcessBuckets: make([]uint64, len(lookupBounds))}
 	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
 	for i := range h.Buckets {
 		h.Buckets[i] = o.hist[i].Load()
+		h.SnapshotBuckets[i], h.ProcessBuckets[i] = o.snapshotHist[i].Load(), o.processHist[i].Load()
 	}
 	return h
 }
@@ -202,6 +219,8 @@ func parseTCP(b []byte, v6 bool, rows map[platform.Tuple]tcpCandidates) error {
 // One refresh is shared by all callers. Waiting for it remains cancellable;
 // process image queries never hold the snapshot mutex.
 func (o *Owners) tcpSnapshot(ctx context.Context, after time.Time) (ownerSnapshot, error) {
+	start := time.Now()
+	defer measureStage(&o.snapshotHist, start)
 	for {
 		o.mu.Lock()
 		if !o.snapshot.at.IsZero() && o.snapshot.at.After(after) && time.Since(o.snapshot.at) < 5*time.Millisecond {
@@ -322,6 +341,7 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 	var after time.Time
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt != 0 {
+			o.tcpRetries.Add(1)
 			select {
 			case <-time.After(2 * time.Millisecond):
 			case <-ctx.Done():
@@ -348,6 +368,8 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 			return owner, platform.ErrAmbiguous
 		}
 		if candidates.count == 1 {
+			start := time.Now()
+			defer measureStage(&o.processHist, start)
 			return o.process(candidates.pid)
 		}
 		after = s.at

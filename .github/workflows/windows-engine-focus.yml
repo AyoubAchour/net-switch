@@ -94,6 +94,14 @@ jobs:
         run: |
           node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compare owner timing with the production processor default
+        if: ${{ !cancelled() && endsWith(github.ref, '-native') }}
+        env:
+          NETSWITCH_LOOKUP_GATE: '1'
+        run: |
+          $env:GOMAXPROCS = ''
+          go test -count=1 -v -run '^TestOwnerColdBurstTiming$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep every observed result
         if: ${{ always() && !endsWith(github.ref, '-native') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

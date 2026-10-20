@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -255,7 +256,7 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 	}
 	p95 := durations[949]
 	raw, _ := json.Marshal(o.Stats())
-	t.Logf("WINDOWS OWNER GATE rows>=2000 cold=1000 found=%d p95_us=%d histogram=%s", 1000-misses, p95.Microseconds(), raw)
+	t.Logf("WINDOWS OWNER GATE rows>=2000 cold=1000 found=%d p95_us=%d processors=%d cpus=%d histogram=%s", 1000-misses, p95.Microseconds(), runtime.GOMAXPROCS(0), runtime.NumCPU(), raw)
 	if misses > 5 || p95 >= 5*time.Millisecond {
 		t.Fatalf("owner gate: misses=%d p95=%s", misses, p95)
 	}
