@@ -86,9 +86,16 @@ type wfpSubLayer struct {
 
 //go:uintptrescapes
 func wfpCall(name string, args ...uintptr) error {
-	code, _, _ := wfpDLL.NewProc(name).Call(args...)
+	result, _, _ := wfpDLL.NewProc(name).Call(args...)
+	return wfpStatus(name, result)
+}
+func wfpStatus(name string, result uintptr) error {
+	// These APIs return DWORD, not a pointer-sized status. In particular an
+	// HRESULT-shaped FWP_E_* value may have sign bits in the native register.
+	// FormatMessage hides that difference; errors.Is must see the DWORD.
+	code := uint32(result)
 	if code != 0 {
-		return fmt.Errorf("%s: %w", name, windows.Errno(code))
+		return fmt.Errorf("%s (status 0x%08x, native 0x%x): %w", name, code, result, windows.Errno(code))
 	}
 	return nil
 }
