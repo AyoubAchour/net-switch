@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,5 +108,46 @@ func TestHolderRepresentativeUpdatesPreservePublishedSnapshots(t *testing.T) {
 	case <-notice.ready:
 	default:
 		t.Fatal("an unchanged but freshly observed descriptor did not notify its waiter")
+	}
+}
+
+type closePublishedHolderContext struct {
+	context.Context
+	o      *Owners
+	inode  uint32
+	h      holder
+	close  func()
+	once   sync.Once
+	closed atomic.Bool
+}
+
+func (c *closePublishedHolderContext) Err() error {
+	if c.o.batches.inline.Load() > 0 && !c.closed.Load() {
+		published := false
+		_ = c.o.indexed(c.inode).visit(func(h holder) error { published = published || h == c.h; return nil })
+		if published {
+			c.once.Do(func() { c.close(); c.closed.Store(true) })
+		}
+	}
+	return c.Context.Err()
+}
+
+func TestRepresentativeClosingDuringScanMustBeRediscovered(t *testing.T) {
+	o := newTestOwners(t)
+	row, parent, child, _, _, conn := sharedBatchSocketWithParent(t)
+	// Only the other process is indexed initially. The parent's own FD is
+	// closed after its real scanner publishes it, before live validation.
+	// sharedBatchSocketWithParent retains another live File in the parent.
+	o.publish(map[uint32]holder{row.inode: child})
+	o.rememberPID(row.uid, parent.pid)
+	base, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	ctx := &closePublishedHolderContext{Context: base, o: o, inode: row.inode, h: parent, close: func() { conn.Close() }}
+	owner, err := o.holders(ctx, row)
+	if !ctx.closed.Load() {
+		t.Fatal("fixture did not close the parent's FD after scanner publication")
+	}
+	if !errors.Is(err, platform.ErrAmbiguous) || owner.AppID != "" {
+		t.Fatalf("late representative failure hid a live conflicting process: %+v %v", owner, err)
 	}
 }
