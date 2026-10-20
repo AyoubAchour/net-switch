@@ -114,8 +114,10 @@ The [default-route proof dispatch](https://github.com/AyoubAchour/net-switch/act
 passed on x64 (job 118921850928) and ARM64 (118921850646). For each local TLS
 destination, the counter was 0 before, 1 after the working request, still 1
 during withdrawal, and 2 after recovery. Withdrawal returned an unreachable
-network/host error and no responder request. Pause/drop, direct-only firewall
-isolation, recovery, normal cleanup and observed-orphan recovery also passed.
+network/host error and no responder request. Pause/drop, recovery, normal cleanup
+and observed-orphan recovery also passed. That early run used a local relay in
+the direct-firewall case; it does not prove the gateway's real-uplink isolation.
+Review restored the public relay for that case, which final-head CI rechecks.
 
 The [temporary diagnostics dispatch](https://github.com/AyoubAchour/net-switch/actions/runs/39508070773)
 failed deliberately on both runners after suspending the owned CI engine.
@@ -139,6 +141,9 @@ The [ten-job repeat](https://github.com/AyoubAchour/net-switch/actions/runs/3951
 is pinned to `5d8ef68a3c75b5b5ac48ef95630c99aa1344266f`: three complete acceptance
 jobs and two complete TestISP proof jobs per architecture, at most four at once.
 Proof and acceptance retain their separate 15- and 25-minute limits.
+This repeat predates the review's restoration of the public firewall relay,
+additional saved-config comparisons and clearer installer error. The remaining
+moved traffic paths are unchanged; final-head CI covers those review changes.
 See [PR #53](https://github.com/AyoubAchour/net-switch/pull/53) for its results and
 final-head CI; an intentional diagnostic failure is not a passing traffic run.
 

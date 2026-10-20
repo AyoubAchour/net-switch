@@ -47,7 +47,8 @@ accepted as evidence.
 
 The runner takes `--server-exe` (also `--server-executable`), optional
 `--server-entry`, and `--engine-exe` (also `--engine-executable`).
-Today these select Node, `server.mjs` and the pinned sing-box binary. A native
+Today acceptance selects Node, the test launcher for the shipped server factory,
+and the pinned sing-box binary. A native
 server omits `--server-entry`. Version commands can be supplied as JSON arrays
 with `--server-version-args` and `--engine-version-args`.
 
