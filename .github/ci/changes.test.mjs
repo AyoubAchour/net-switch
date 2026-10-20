@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { areaFor, areas, changedFiles, classify, decide, groups } from './changes.mjs';
+import { areaFor, changedFiles, classify, decide, groups } from './changes.mjs';
 
 const known = paths => classify(paths, new Set(paths));
 const enabled = result => groups.filter(group => result.outputs[group]).sort();
@@ -13,17 +13,28 @@ const cases = {
   tests_linux: ['tests/linux/wire/wire.go', 'tests/linux/suite/suite.go', 'tests/linux/snap-inputs.sh'],
   tests_windows: ['tests/windows/client.mjs', 'tests/windows/testisp/stack_windows.go'],
 };
+// Expected dependencies are deliberately independent of the classifier's map.
+// Changing that map must also explain why this coverage contract has changed.
+const expected = {
+  docs: [],
+  frozen: ['node', 'helper', 'installer', 'legacy_windows', 'go_linux', 'acceptance', 'control'],
+  go_shared: ['go_windows', 'go_linux', 'legacy_windows', 'testisp', 'wintun', 'acceptance', 'control'],
+  go_windows: ['go_windows', 'legacy_windows', 'testisp', 'wintun', 'control'],
+  go_linux: ['go_linux', 'acceptance'],
+  tests_linux: ['go_windows', 'go_linux', 'acceptance'],
+  tests_windows: ['node', 'go_windows', 'legacy_windows', 'testisp', 'control'],
+};
 for (const [area, paths] of Object.entries(cases)) {
   test(`${area}: every known path selects its complete dependency group`, () => {
     for (const path of paths) {
       assert.equal(areaFor(path), area);
-      assert.deepEqual(enabled(known([path])), [...areas[area]].sort());
+      assert.deepEqual(enabled(known([path])), [...expected[area]].sort());
     }
   });
 }
 
 test('mixed areas take the union, never their intersection', () => {
-  assert.deepEqual(enabled(known(['README.md', 'lib/tray.cs', 'internal/wintun/ring_windows.go'])), [...new Set([...areas.frozen, ...areas.go_windows])].sort());
+  assert.deepEqual(enabled(known(['README.md', 'lib/tray.cs', 'internal/wintun/ring_windows.go'])), [...new Set([...expected.frozen, ...expected.go_windows])].sort());
 });
 
 test('unclassified dependencies and fixtures run everything, before docs matching', () => {
@@ -44,14 +55,14 @@ test('Markdown bundled in the installer is a product input', () => {
 });
 
 test('deleted files use their original area and mixed deletions stay conservative', () => {
-  assert.deepEqual(enabled(known(['lib/tray.cs'])), [...areas.frozen].sort());
+  assert.deepEqual(enabled(known(['lib/tray.cs'])), [...expected.frozen].sort());
   assert.equal(known(['lib/tray.cs', 'old-unmapped-input']).full, true);
 });
 
 test('renames account for both source and destination and new destinations force full', () => {
   const paths = ['internal/engine/old.go', 'docs/old.md'];
   assert.equal(classify(paths, new Set([paths[0]])).full, true);
-  assert.deepEqual(enabled(known(paths)), [...areas.go_shared].sort());
+  assert.deepEqual(enabled(known(paths)), [...expected.go_shared].sort());
 });
 
 test('all non-PR events, tags, full label and empty diffs run everything', () => {
