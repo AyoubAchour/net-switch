@@ -40,7 +40,7 @@ func kernelScopePath(path string) bool {
 
 func kernelLookupPath(path string) bool {
 	switch procLeaf(path) {
-	case "stat", "environ", "fd":
+	case "stat", "fd":
 		return true
 	}
 	return kernelScopePath(path)
@@ -49,8 +49,8 @@ func kernelLookupPath(path string) bool {
 // Only fixed kernel metadata in the engine's own proc/cgroup mounts uses
 // these calls. They keep the lookup's Go processor across short operations.
 // Never extend this to /proc/PID/root or other process-controlled filesystems.
-// Environ contents can fault in user memory, so their reads remain ordinary
-// scheduling syscalls even though opening/stating the proc inode is short.
+// Environ opens wait on the target's exec_update_lock, and its contents can
+// fault in user memory. Both its opens and reads remain scheduling syscalls.
 func openKernelFile(path string, flags int) (fd int, direct bool, err error) {
 	if !kernelLookupPath(path) {
 		fd, err = unix.Open(path, flags, 0)
