@@ -136,7 +136,7 @@ type Core struct {
 	wanted, quitting, elevated                   bool
 	powerSuspended                               bool
 	powerGeneration                              uint64
-	engineStarting                               bool
+	engineStarting, startReturned                bool
 	startPowerGeneration                         uint64
 	monitorFailures, scanFailures, retryAttempts int
 	retryAt, elevationAt, sharesAt               int64
@@ -535,6 +535,13 @@ func (c *Core) statusLocked(s engine.Snapshot) {
 		c.failureDirty = true
 		c.log("engine start or exit crossed a power transition; retaining the existing crash budget")
 	}
+	// A start whose reply was lost returns while the engine is still starting;
+	// Remote's connection recovery publishes the outcome later. The attempt and
+	// its power classification last until Control observes that outcome. The
+	// re-read keeps a sample taken before Start returned from ending it early.
+	if c.engineStarting && c.startReturned && settledStatus(s.Status) && settledStatus(c.op.Engine.Snapshot().Status) {
+		c.engineStarting = false
+	}
 	freshFailure := s.FailureID != "" && s.FailureID != c.lastFailureID
 	if s.Status == c.lastStatus && (!c.op.ServiceMode || !freshFailure) {
 		return
@@ -569,6 +576,7 @@ func (c *Core) statusLocked(s engine.Snapshot) {
 	}
 	c.log("%s", msg)
 }
+func settledStatus(status string) bool { return status == "on" || status == "off" || status == "error" }
 func (c *Core) noteLocked(kind, id, text string) {
 	e := map[string]any{"id": c.op.ID(), "at": c.now(), "kind": kind, "lineId": id, "text": text}
 	c.events = append(c.events, e)
@@ -700,12 +708,13 @@ func (c *Core) Start(ctx context.Context) error {
 			c.statusLocked(engine.Snapshot{Status: "starting"})
 		}
 		c.engineStarting = true
+		c.startReturned = false
 		c.startPowerGeneration = c.powerGeneration
 		c.mu.Unlock()
 		if err := c.op.Engine.Start(ctx, p); err != nil {
 			c.mu.Lock()
+			c.startReturned = true
 			c.statusLocked(c.op.Engine.Snapshot())
-			c.engineStarting = false
 			c.mu.Unlock()
 			if c.op.ServiceMode {
 				c.applyMu.Lock()
@@ -715,8 +724,8 @@ func (c *Core) Start(ctx context.Context) error {
 			return err
 		}
 		c.mu.Lock()
+		c.startReturned = true
 		c.statusLocked(c.op.Engine.Snapshot())
-		c.engineStarting = false
 		for _, lane := range c.lanes {
 			// Node's wanted() samples an uninitialised LaneSwitch, changing
 			// its generation and discarding the first selector acknowledgement.
