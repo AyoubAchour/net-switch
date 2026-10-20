@@ -42,6 +42,7 @@ async function inspectStopped(phases) {
 try {
   harness = await startHarness(path.join(directory, 'testisp'));
   responder = await targets(harness.uplink.address);
+  await harness.control('targets', { ports: [responder.direct.http, ...responder.direct.udp] });
   const clientExe = path.join(directory, 'lifecycle-app.exe');
   await copyFile(process.execPath, clientExe);
   client = spawn(clientExe, [path.resolve('tests/windows/client.mjs')], { windowsHide: true, stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });

@@ -39,6 +39,7 @@ type Routes struct {
 	Table    *flows.Table
 	Fatal    func(error)
 	timings  *phaseTimings
+	trace    *packetTrace
 }
 
 func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Routes, error) {
@@ -66,7 +67,7 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 		return nil, fmt.Errorf("engine crash recovery: %w", err)
 	}
 	o.recovering = false
-	r := &Routes{Instance: instance, session: s, objects: o, timings: timings}
+	r := &Routes{Instance: instance, session: s, objects: o, timings: timings, trace: newPacketTrace()}
 	b := bindingTable{}
 	r.bindings.Store(&b)
 	return r, nil
@@ -160,7 +161,7 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 	}
 	// Session.Close leaves adapter ownership with the journal. Cleanup first
 	// removes capture, then addresses/settings, then the adapter itself.
-	return &measuredTun{Session: s, timings: r.timings}, nil
+	return &measuredTun{Session: s, timings: r.timings, trace: r.trace}, nil
 }
 
 func (r *Routes) Bindings() map[string]Adapter {

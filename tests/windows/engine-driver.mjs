@@ -90,7 +90,9 @@ async function connect() {
   console.log(`ENGINE ATTACH ${JSON.stringify({ instance, epoch, loaded: hello.appliedRevision })}`);
 }
 async function launch() {
-  engine = spawn(exe, ['run', '--standalone-admin', '--state-dir', stateDir], { windowsHide: true, stdio: ['ignore', 'inherit', 'inherit'] });
+  // libuv assigns ordinary Windows children to a kill-on-parent-close job.
+  // The engine owns its lease and must survive this test controller's death.
+  engine = spawn(exe, ['run', '--standalone-admin', '--state-dir', stateDir], { detached: true, windowsHide: true, stdio: ['ignore', 'inherit', 'inherit'] });
   const current = engine;
   engine.on('error', (error) => console.error(error));
   engine.on('exit', (code, signal) => {

@@ -3,6 +3,7 @@
 package winengine
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"sync"
@@ -75,6 +76,25 @@ func (s measuredJournalStore) Append(record journal.Record) error {
 type measuredTun struct {
 	*wintun.Session
 	timings *phaseTimings
+	trace   *packetTrace
+}
+
+func (s *measuredTun) ReadPacket(ctx context.Context, packet []byte) (int, error) {
+	n, err := s.Session.ReadPacket(ctx, packet)
+	if n > 0 && n <= len(packet) {
+		s.trace.record("from-app", packet[:n], 0, 0, err)
+	}
+	return n, err
+}
+
+func (s *measuredTun) WriteBatch(packets [][]byte) (int, error) {
+	n, err := s.Session.WriteBatch(packets)
+	if s.trace != nil {
+		for _, packet := range packets {
+			s.trace.record("to-app", packet, n, len(packets), err)
+		}
+	}
+	return n, err
 }
 
 func (s *measuredTun) Close() error {

@@ -99,6 +99,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Real TUN 1.0 acceptance and flow-cap measurement
         if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && steps.build.outcome == 'success' }}
+        env:
+          NETSWITCH_ENGINE_TEST_TRACE: '1'
         run: |
           node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

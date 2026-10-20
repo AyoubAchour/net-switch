@@ -85,22 +85,40 @@ func TestTCPTableIncludesSYNSentAndSkipsZeroPID(t *testing.T) {
 		binary.BigEndian.PutUint16(r[16:], 443)
 	}
 	binary.LittleEndian.PutUint32(raw[4+20:], 123)
-	rows := map[platform.Tuple]tcpCandidates{}
-	if err := parseTCP(raw, false, rows); err != nil {
+	rows := tcpIndex{}
+	if err := parseTCP(raw, false, &rows); err != nil {
 		t.Fatal(err)
 	}
 	key := platform.Tuple{Source: netip.MustParseAddrPort("198.18.0.1:40000"), Destination: netip.MustParseAddrPort("1.1.1.1:443")}
-	if len(rows) != 1 || rows[key] != (tcpCandidates{pid: 123, count: 1}) {
+	if len(rows.v4)+len(rows.v6) != 1 || rows.find(key) != (tcpCandidates{pid: 123, count: 1}) {
 		t.Fatal(rows)
 	}
-	if err := parseTCP(raw[:len(raw)-1], false, rows); err == nil {
+	if err := parseTCP(raw[:len(raw)-1], false, &rows); err == nil {
 		t.Fatal("accepted partial TCP table")
 	}
 	copy(raw[4+24:], raw[4:4+24])
 	binary.LittleEndian.PutUint32(raw[4+24+20:], 456)
-	clear(rows)
-	if err := parseTCP(raw, false, rows); err != nil || len(rows) != 1 || rows[key].count != 2 {
+	rows = tcpIndex{}
+	if err := parseTCP(raw, false, &rows); err != nil || len(rows.v4)+len(rows.v6) != 1 || rows.find(key).count != 2 {
 		t.Fatalf("lost ambiguous exact tuple: %v %v", rows, err)
+	}
+}
+
+func TestTCPMappedListenerWithUnspecifiedPeer(t *testing.T) {
+	raw := make([]byte, 4+56)
+	binary.LittleEndian.PutUint32(raw, 1)
+	source := netip.MustParseAddr("::ffff:127.0.0.1").As16()
+	copy(raw[4:20], source[:])
+	binary.BigEndian.PutUint16(raw[4+20:], 40000)
+	binary.LittleEndian.PutUint32(raw[4+48:], 2) // LISTEN, with an unspecified IPv6 peer.
+	binary.LittleEndian.PutUint32(raw[4+52:], 123)
+	var rows tcpIndex
+	if err := parseTCP(raw, true, &rows); err != nil {
+		t.Fatal(err)
+	}
+	key := platform.Tuple{Source: netip.MustParseAddrPort("127.0.0.1:40000"), Destination: netip.MustParseAddrPort("[::]:0")}
+	if rows.find(key) != (tcpCandidates{pid: 123, count: 1}) {
+		t.Fatal("lost the valid mapped listener row", rows)
 	}
 }
 
