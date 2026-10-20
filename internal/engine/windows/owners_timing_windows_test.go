@@ -18,9 +18,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Diagnose clock resolution without changing the existing gate. The pinned Go
-// runtime reads KUSER_SHARED_DATA interrupt time on Windows; compare QPC on
-// these same cold calls before attributing a quantized sample to the lookup.
+// Keep an independent QPC measurement beside the old Go clock on exactly the
+// same cold calls. The pinned Go runtime reads coarse interrupt time on Windows.
 func lookupPerformanceClock(t *testing.T) (func() int64, int64) {
 	t.Helper()
 	dll := windows.NewLazySystemDLL("kernel32.dll")
@@ -165,8 +164,8 @@ func TestOwnerSteadyColdTiming(t *testing.T) {
 	p95 := samples[(95*count+99)/100-1]
 	preciseP95 := preciseSamples[(95*count+99)/100-1]
 	histogram, _ := json.Marshal(owners.Stats())
-	t.Logf("WINDOWS OWNER LATENCY samples=%d found=%d raw_rows_min=%d raw_rows_max=%d baseline=%d baseline_timewait=%d p95_us=%d processors=%d cpus=%d histogram=%s",
-		count, len(samples), minRows, maxRows, baseline, timeWait, p95.Microseconds(), runtime.GOMAXPROCS(0), runtime.NumCPU(), histogram)
+	t.Logf("WINDOWS OWNER LATENCY samples=%d found=%d raw_rows_min=%d raw_rows_max=%d baseline=%d baseline_timewait=%d p95_us=%d old_go_p95_us=%d processors=%d cpus=%d histogram=%s",
+		count, len(samples), minRows, maxRows, baseline, timeWait, preciseP95.Microseconds(), p95.Microseconds(), runtime.GOMAXPROCS(0), runtime.NumCPU(), histogram)
 	t.Logf("WINDOWS OWNER CLOCK COMPARISON samples=%d frequency=%d go_p95_us=%d qpc_p95_us=%d go_zero_samples=%d qpc_zero_samples=%d slow_pairs_go_qpc_us=%v",
 		count, frequency, p95.Microseconds(), preciseP95.Microseconds(),
 		slices.IndexFunc(samples, func(d time.Duration) bool { return d > 0 }),
@@ -174,7 +173,24 @@ func TestOwnerSteadyColdTiming(t *testing.T) {
 	if preciseP95 >= 5*time.Millisecond {
 		t.Errorf("high-resolution cold owner latency at 2000 rows: p95=%s, requires under 5ms", preciseP95)
 	}
-	if p95 >= 5*time.Millisecond {
-		t.Fatalf("cold owner latency at 2000 rows: p95=%s, requires under 5ms", p95)
+	t.Logf("OLD GO-CLOCK LATENCY CHECK would_pass=%t", p95 < 5*time.Millisecond)
+}
+
+func TestSnapshotFreshnessIgnoresCoarseClockTicks(t *testing.T) {
+	published := time.Second
+	snapshot := &ownerSnapshot{at: published}
+	// All these instants fit inside one 16 ms Go-clock tick. Expiry must follow
+	// the precise publication age, and a newer required generation must win.
+	for _, test := range []struct {
+		age, after time.Duration
+		want       bool
+	}{
+		{0, 0, true}, {4999 * time.Microsecond, 0, true},
+		{5 * time.Millisecond, 0, false}, {15 * time.Millisecond, 0, false},
+		{0, published, false},
+	} {
+		if got := freshSnapshot(snapshot, test.after, published+test.age); got != test.want {
+			t.Fatalf("age=%v required=%v fresh=%t want=%t", test.age, test.after, got, test.want)
+		}
 	}
 }

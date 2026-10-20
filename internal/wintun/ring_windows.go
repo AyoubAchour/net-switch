@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
+	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"golang.org/x/sys/windows"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 )
@@ -152,12 +153,12 @@ func (r *rings) close() error {
 }
 
 func (r *rings) awaitRelease() bool {
-	deadline := time.Now().Add(250 * time.Millisecond)
+	deadline := winclock.Now() + 250*time.Millisecond
 	for r.send.load(4) != ^uint32(0) {
-		if time.Now().After(deadline) {
+		if winclock.Now() >= deadline {
 			return false
 		}
-		time.Sleep(time.Millisecond)
+		winclock.System.WaitDone(nil, time.Millisecond)
 	}
 	return true
 }

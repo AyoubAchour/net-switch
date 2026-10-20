@@ -18,6 +18,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/apppath"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"golang.org/x/sys/windows"
 )
 
@@ -40,7 +41,7 @@ type socketOwner struct {
 	created uint64
 }
 type ownerSnapshot struct {
-	at      time.Time
+	at      time.Duration
 	rows    tcpIndex
 	err     error
 	rawRows uint64
@@ -148,8 +149,8 @@ type Owners struct {
 
 func NewOwners() *Owners { return &Owners{paths: make(map[processKey]platform.Owner)} }
 
-func measureStage(hist *[len(lookupBounds)]atomic.Uint64, start time.Time) {
-	us := uint64(max(0, time.Since(start).Microseconds()))
+func measureStage(hist *[len(lookupBounds)]atomic.Uint64, start time.Duration) {
+	us := uint64(max(0, winclock.Since(start).Microseconds()))
 	for i, bound := range lookupBounds {
 		if us <= bound {
 			hist[i].Add(1)
@@ -158,8 +159,8 @@ func measureStage(hist *[len(lookupBounds)]atomic.Uint64, start time.Time) {
 	}
 }
 
-func (o *Owners) measure(start time.Time, err error) {
-	us := uint64(max(0, time.Since(start).Microseconds()))
+func (o *Owners) measure(start time.Duration, err error) {
+	us := uint64(max(0, winclock.Since(start).Microseconds()))
 	o.count.Add(1)
 	if err != nil {
 		o.misses.Add(1)
@@ -291,14 +292,18 @@ func parseTCP(b []byte, v6 bool, rows *tcpIndex) error {
 // GetExtendedTcpTable accepts one family per call. A five-millisecond snapshot
 // and one in-flight refresh are shared by all SYNs of that family. A lookup
 // never waits for the unrelated family's dump. Both waits remain cancellable.
-func (o *Owners) tcpSnapshot(ctx context.Context, after time.Time, family int) (ownerSnapshot, error) {
-	start := time.Now()
+func freshSnapshot(s *ownerSnapshot, after, now time.Duration) bool {
+	return s != nil && s.at > after && now >= s.at && now-s.at < 5*time.Millisecond
+}
+
+func (o *Owners) tcpSnapshot(ctx context.Context, after time.Duration, family int) (ownerSnapshot, error) {
+	start := winclock.Now()
 	defer measureStage(&o.snapshotHist, start)
 	for {
 		if err := ctx.Err(); err != nil {
 			return ownerSnapshot{}, err
 		}
-		if s := o.snapshot[family].Load(); s != nil && s.at.After(after) && time.Since(s.at) < 5*time.Millisecond {
+		if s := o.snapshot[family].Load(); freshSnapshot(s, after, winclock.Now()) {
 			return *s, s.err
 		}
 		pending := o.refresh[family].Load()
@@ -309,7 +314,7 @@ func (o *Owners) tcpSnapshot(ctx context.Context, after time.Time, family int) (
 			}
 			// A different refresh may have published between our two loads.
 			// Reuse it rather than starting another dump after winning the slot.
-			if s := o.snapshot[family].Load(); s != nil && s.at.After(after) && time.Since(s.at) < 5*time.Millisecond {
+			if s := o.snapshot[family].Load(); freshSnapshot(s, after, winclock.Now()) {
 				pending.result = s
 				o.refresh[family].Store(nil)
 				close(pending.done)
@@ -322,7 +327,7 @@ func (o *Owners) tcpSnapshot(ctx context.Context, after time.Time, family int) (
 			return ownerSnapshot{}, ctx.Err()
 		case <-pending.done:
 			s := pending.result
-			if !s.at.After(after) {
+			if s.at <= after {
 				continue
 			}
 			return *s, s.err
@@ -334,20 +339,20 @@ func (o *Owners) refreshTCP(pending *tcpRefresh, family int) {
 	// The IP Helper call is synchronous and cannot be cancelled. Keep at
 	// most one snapshot per family in flight, while every lookup can leave at
 	// its own 50 ms deadline. One caller's cancellation cannot poison peers.
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := winclock.System.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	s := ownerSnapshot{at: time.Now()}
+	s := ownerSnapshot{at: winclock.Now()}
 	o.tcpRefreshes.Add(1)
 	af, stride := uint32(windows.AF_INET), 24
 	if family == 1 {
 		af, stride = windows.AF_INET6, 56
 	}
-	readStart := time.Now()
+	readStart := winclock.Now()
 	b, err := readOwnerTableInto(ctx, tcpTable, af, tcpOwnerPIDAll, &o.tcpBuffers[family])
-	o.tcpReadNanos.Add(uint64(time.Since(readStart)))
+	o.tcpReadNanos.Add(uint64(winclock.Since(readStart)))
 	s.err = err
 	if s.err == nil {
-		indexStart := time.Now()
+		indexStart := winclock.Now()
 		// One scalar value per tuple avoids allocating a slice for every row.
 		if family == 0 {
 			s.rows.v4 = make(map[[12]byte]tcpCandidates, len(b)/stride)
@@ -358,7 +363,7 @@ func (o *Owners) refreshTCP(pending *tcpRefresh, family int) {
 		if s.err == nil {
 			s.rawRows = uint64(binary.LittleEndian.Uint32(b))
 		}
-		o.tcpIndexNanos.Add(uint64(time.Since(indexStart)))
+		o.tcpIndexNanos.Add(uint64(winclock.Since(indexStart)))
 	}
 	measureStage(&o.refreshHist, s.at)
 	rows := s.rawRows
@@ -419,22 +424,23 @@ func (o *Owners) process(pid uint32) (platform.Owner, error) {
 }
 
 func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.Owner, err error) {
-	start := time.Now()
+	start := winclock.Now()
 	defer func() { o.measure(start, err) }()
-	ctx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	ctx, cancel := winclock.System.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
-	var after [2]time.Time
+	var after [2]time.Duration
 	primary := 0
 	if tuple.Source.Addr().Is6() {
 		primary = 1
 	}
 	for attempt := 0; attempt < 3; attempt++ {
+		if winclock.Since(start) >= 50*time.Millisecond {
+			return owner, context.DeadlineExceeded
+		}
 		if attempt != 0 {
 			o.tcpRetries.Add(1)
-			select {
-			case <-time.After(2 * time.Millisecond):
-			case <-ctx.Done():
-				return owner, ctx.Err()
+			if err := winclock.System.Wait(ctx, 2*time.Millisecond); err != nil {
+				return owner, err
 			}
 		}
 		// Mapped IPv4 sockets may appear in the IPv6 table. Fall back there
@@ -450,7 +456,7 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 			candidates := s.rows.find(tuple)
 			// Cached absence predating this socket is not a native lookup
 			// miss. Refresh before spending one of the retry delays.
-			if candidates.count == 0 && s.at.Before(start) {
+			if candidates.count == 0 && s.at < start {
 				o.cacheMissRefreshes.Add(1)
 				s, e = o.tcpSnapshot(ctx, s.at, family)
 				if e != nil {
@@ -465,9 +471,16 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 				return owner, platform.ErrAmbiguous
 			}
 			if candidates.count == 1 {
-				start := time.Now()
-				defer measureStage(&o.processHist, start)
-				return o.process(candidates.pid)
+				processStart := winclock.Now()
+				owner, err = o.process(candidates.pid)
+				measureStage(&o.processHist, processStart)
+				if winclock.Since(start) >= 50*time.Millisecond {
+					return platform.Owner{}, context.DeadlineExceeded
+				}
+				if ctx.Err() != nil {
+					return platform.Owner{}, ctx.Err()
+				}
+				return owner, err
 			}
 			after[family] = s.at
 		}
@@ -535,7 +548,7 @@ func (o *Owners) udpOwner(key netip.AddrPort, rows map[netip.AddrPort][]socketOw
 }
 
 func (o *Owners) UDP(ctx context.Context, key netip.AddrPort) (owner platform.Owner, err error) {
-	start := time.Now()
+	start := winclock.Now()
 	defer func() { o.measure(start, err) }()
 	family := uint32(windows.AF_INET)
 	if key.Addr().Is6() {
