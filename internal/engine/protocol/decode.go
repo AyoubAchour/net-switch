@@ -29,9 +29,10 @@ type Request struct {
 	App           string           `json:"app,omitempty"`
 }
 type Reply struct {
-	ID     string `json:"id"`
-	Result any    `json:"result,omitempty"`
-	Error  string `json:"error,omitempty"`
+	ID       string `json:"id"`
+	Result   any    `json:"result,omitempty"`
+	Error    string `json:"error,omitempty"`
+	terminal bool
 }
 type Event = flowapi.Event
 

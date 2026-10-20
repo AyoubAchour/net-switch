@@ -153,6 +153,16 @@ func (t *Table) Predict(app string) (policy.Prediction, error) {
 	return t.policy.Predict(app), nil
 }
 
+func (t *Table) EchoLine(ipv6 bool) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.policy == nil {
+		return "", ErrStopped
+	}
+	d, err := t.policy.Decide(platform.Owner{}, 0, ipv6, 0)
+	return d.Line, err
+}
+
 func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()

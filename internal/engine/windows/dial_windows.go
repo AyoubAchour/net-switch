@@ -1,0 +1,224 @@
+//go:build windows
+
+package winengine
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"net"
+	"net/netip"
+	"sync"
+	"syscall"
+	"time"
+	"unsafe"
+
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"golang.org/x/sys/windows"
+)
+
+type Dialer struct{ Routes *Routes }
+
+func bindSocket(a Adapter, v6 bool) func(string, string, syscall.RawConn) error {
+	return func(_, _ string, raw syscall.RawConn) error {
+		var callErr error
+		err := raw.Control(func(fd uintptr) {
+			level, index := windows.IPPROTO_IP, a.Index4
+			if v6 {
+				level, index = windows.IPPROTO_IPV6, a.Index6
+			} else {
+				var b [4]byte
+				binary.BigEndian.PutUint32(b[:], index)
+				index = binary.LittleEndian.Uint32(b[:])
+			}
+			callErr = windows.SetsockoptInt(windows.Handle(fd), level, 31, int(index))
+		})
+		return errors.Join(err, callErr)
+	}
+}
+
+func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort) (platform.TCPConn, error) {
+	a, source, err := d.Routes.binding(line, remote.Addr().Is6())
+	if err != nil {
+		return nil, err
+	}
+	network := "tcp4"
+	if remote.Addr().Is6() {
+		network = "tcp6"
+	}
+	dial := net.Dialer{Timeout: 10 * time.Second, LocalAddr: net.TCPAddrFromAddrPort(netip.AddrPortFrom(source, 0)),
+		Control: bindSocket(a, remote.Addr().Is6()), KeepAlive: 30 * time.Second}
+	c, err := dial.DialContext(ctx, network, remote.String())
+	if err != nil {
+		return nil, err
+	}
+	return c.(*net.TCPConn), nil
+}
+
+type udpSocket struct {
+	conn *net.UDPConn
+	raw  syscall.RawConn
+	mu   sync.Mutex
+	v6   bool
+	mtu  uint32
+}
+
+func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UDPConn, error) {
+	a, source, err := d.Routes.binding(line, v6)
+	if err != nil {
+		return nil, err
+	}
+	network := "udp4"
+	if v6 {
+		network = "udp6"
+	}
+	lc := net.ListenConfig{Control: bindSocket(a, v6)}
+	c, err := lc.ListenPacket(ctx, network, netip.AddrPortFrom(source, 0).String())
+	if err != nil {
+		return nil, err
+	}
+	u := c.(*net.UDPConn)
+	raw, err := u.SyscallConn()
+	if err != nil {
+		u.Close()
+		return nil, err
+	}
+	return &udpSocket{conn: u, raw: raw, v6: v6, mtu: a.MTU}, nil
+}
+func (s *udpSocket) Close() error              { return s.conn.Close() }
+func (s *udpSocket) LocalAddr() netip.AddrPort { return s.conn.LocalAddr().(*net.UDPAddr).AddrPort() }
+func (s *udpSocket) ReadFrom(b []byte) (int, netip.AddrPort, error) {
+	n, addr, err := s.conn.ReadFromUDPAddrPort(b)
+	if platform.IsTooBig(err) {
+		err = &platform.TooBig{MTU: s.mtu}
+	}
+	return n, addr, err
+}
+func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var optionErr error
+	err := s.raw.Control(func(fd uintptr) {
+		level, option, value := windows.IPPROTO_IP, 14, 0 // IP_DONTFRAGMENT.
+		if s.v6 {
+			level, option, value = windows.IPPROTO_IPV6, 14, 1
+		} else if df {
+			value = 1
+		}
+		optionErr = windows.SetsockoptInt(windows.Handle(fd), level, option, value)
+	})
+	if err != nil || optionErr != nil {
+		return 0, errors.Join(err, optionErr)
+	}
+	n, err := s.conn.WriteToUDPAddrPort(b, dst)
+	if platform.IsTooBig(err) {
+		mtu := s.mtu
+		// GetBestRoute2 is constrained to our interface by the source address.
+		// An unconnected UDP socket cannot query a single IP_MTU; use the
+		// interface MTU as the safe local ceiling when Winsock rejects a send.
+		if mtu == 0 {
+			mtu = 1280
+		}
+		err = &platform.TooBig{MTU: mtu}
+	}
+	return n, err
+}
+
+// Avoid importing a second Winsock binding package for the two ICMP APIs.
+type ipOptions struct {
+	TTL, TOS, Flags, Size byte
+	Data                  *byte
+}
+type echoReply struct {
+	Address, Status, RoundTrip uint32
+	DataSize, Reserved         uint16
+	Data                       *byte
+	Options                    ipOptions
+}
+
+func (d *Dialer) Echo(ctx context.Context, line string, destination netip.Addr, request []byte) ([]byte, error) {
+	a, source, err := d.Routes.binding(line, destination.Is6())
+	if err != nil {
+		return nil, err
+	}
+	if len(request) < 8 || len(request) > 9000 {
+		return nil, errors.New("invalid echo size")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	create := "IcmpCreateFile"
+	if destination.Is6() {
+		create = "Icmp6CreateFile"
+	}
+	h, _, callErr := iphlp.NewProc(create).Call()
+	if h == uintptr(windows.InvalidHandle) {
+		return nil, callErr
+	}
+	defer iphlp.NewProc("IcmpCloseHandle").Call(h)
+	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer windows.CloseHandle(event)
+	payload := request[8:]
+	reply := make([]byte, len(payload)+256)
+	options := ipOptions{TTL: 64}
+	var data uintptr
+	if len(payload) != 0 {
+		data = uintptr(unsafe.Pointer(&payload[0]))
+	}
+	timeout := uint32(3000)
+	if until, ok := ctx.Deadline(); ok {
+		timeout = uint32(max(1, min(3000, time.Until(until).Milliseconds())))
+	}
+	var count uintptr
+	if destination.Is6() {
+		src := windows.RawSockaddrInet6{Family: windows.AF_INET6, Addr: source.As16(), Scope_id: a.Index6}
+		dst := windows.RawSockaddrInet6{Family: windows.AF_INET6, Addr: destination.As16()}
+		count, _, callErr = iphlp.NewProc("Icmp6SendEcho2").Call(h, uintptr(event), 0, 0,
+			uintptr(unsafe.Pointer(&src)), uintptr(unsafe.Pointer(&dst)), data, uintptr(len(payload)),
+			uintptr(unsafe.Pointer(&options)), uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)), uintptr(timeout))
+	} else {
+		src, dst := source.As4(), destination.As4()
+		count, _, callErr = iphlp.NewProc("IcmpSendEcho2Ex").Call(h, uintptr(event), 0, 0,
+			uintptr(binary.LittleEndian.Uint32(src[:])), uintptr(binary.LittleEndian.Uint32(dst[:])),
+			data, uintptr(len(payload)), uintptr(unsafe.Pointer(&options)), uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)), uintptr(timeout))
+	}
+	if count == 0 && !errors.Is(callErr, windows.ERROR_IO_PENDING) {
+		return nil, callErr
+	}
+	if count == 0 {
+		status, err := windows.WaitForSingleObject(event, timeout+1000)
+		if err != nil {
+			return nil, err
+		}
+		if status != windows.WAIT_OBJECT_0 {
+			return nil, errors.New("ICMP completion timed out")
+		}
+	}
+	out := append([]byte(nil), request...)
+	if destination.Is6() {
+		// ICMPV6_ECHO_REPLY contains IPV6_ADDRESS_EX (26 bytes, padded to 28),
+		// status, RTT; data follows the fixed 36-byte header.
+		if binary.LittleEndian.Uint32(reply[28:]) != 0 {
+			return nil, errors.New("IPv6 echo failed")
+		}
+		copy(out[8:], reply[36:36+len(payload)])
+		out[0] = 129
+	} else {
+		r := (*echoReply)(unsafe.Pointer(&reply[0]))
+		if r.Status != 0 || int(r.DataSize) != len(payload) {
+			return nil, errors.New("IPv4 echo failed")
+		}
+		if len(payload) != 0 {
+			start, base := uintptr(unsafe.Pointer(r.Data)), uintptr(unsafe.Pointer(&reply[0]))
+			if start < base || start-base+uintptr(r.DataSize) > uintptr(len(reply)) {
+				return nil, errors.New("invalid ICMP reply buffer")
+			}
+			copy(out[8:], unsafe.Slice(r.Data, int(r.DataSize)))
+		}
+		out[0] = 0
+	}
+	return out, nil
+}
