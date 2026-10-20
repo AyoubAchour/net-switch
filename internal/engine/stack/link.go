@@ -98,27 +98,27 @@ func (pool *outputBuffers) close() {
 // Link owns its output buffers. A slot is reserved before copying a packet;
 // neither stack writers nor the UDP reply path wait for the TUN consumer.
 type Link struct {
-	ingress     sync.Mutex
-	mu          sync.Mutex
-	dispatcher  gv.NetworkDispatcher
-	observer    func(*gv.PacketBuffer)
+	ingress      sync.Mutex
+	mu           sync.Mutex
+	dispatcher   gv.NetworkDispatcher
+	observer     func(*gv.PacketBuffer)
 	afterInbound func()
-	delivery    atomic.Pointer[linkDelivery]
-	queue       [QueuePackets]OutputPacket
-	buffers     outputBuffers
-	head, count int
-	peak        int
-	mtu         atomic.Uint32
-	closed      bool
-	onClose     func()
-	ready       chan struct{}
-	done        chan struct{}
-	Dropped     atomic.Uint64
+	delivery     atomic.Pointer[linkDelivery]
+	queue        [QueuePackets]OutputPacket
+	buffers      outputBuffers
+	head, count  int
+	peak         int
+	mtu          atomic.Uint32
+	closed       bool
+	onClose      func()
+	ready        chan struct{}
+	done         chan struct{}
+	Dropped      atomic.Uint64
 }
 
 type linkDelivery struct {
-	dispatcher gv.NetworkDispatcher
-	observer   func(*gv.PacketBuffer)
+	dispatcher   gv.NetworkDispatcher
+	observer     func(*gv.PacketBuffer)
 	afterInbound func()
 }
 

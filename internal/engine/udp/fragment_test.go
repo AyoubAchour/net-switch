@@ -31,7 +31,7 @@ func TestIPv6FragmentIntentSurvivesReassembly(t *testing.T) {
 		t.Run(map[bool]string{false: "unfragmented-needs-PTB", true: "host-already-fragmented"}[fragmented], func(t *testing.T) {
 			conn := &fragmentSocket{socket: newSocket(), df: make(chan bool, 1)}
 			d := testfake.Dialer{UDPFunc: func(context.Context, string, bool) (platform.UDPConn, error) { return conn, nil }}
-			link := channel.New(16, 9000, "")
+			link := ns.NewLink()
 			s, err := ns.New(link, ns.DefaultOptions())
 			if err != nil {
 				t.Fatal(err)

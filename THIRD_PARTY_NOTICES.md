@@ -91,13 +91,15 @@ and its native Windows platform implementation.
 
 - The unshipped `netswitch-cleanup` tool includes the Go runtime and golang.org/x/sys under the same BSD-3-Clause licenses as the helper.
 
-gVisor is copyright The gVisor Authors. Net Switch modifies seven TCP files,
+gVisor is copyright The gVisor Authors. Net Switch modifies eight TCP files,
 each with a modification notice. `third_party/gvisor-local-close.patch` contains
 the opt-in local-app close admission, TIME_WAIT handling, retained-buffer budget
 and buffer accounting hooks in five files. It also adds
 `dispatcher_netswitch_test.go`, marked "Net Switch addition, not upstream".
 `third_party/gvisor-rto-recovery.patch` changes `rack.go` and `snd.go` to preserve
 TCP timeout recovery until its flight drains, independently of the opt-in hooks.
+`third_party/gvisor-sack-cache.patch` shares a bounded SACK node cache in
+`sack_scoreboard.go` so idle connections need no private node free list.
 The generator applies the reproducible patches in filename order. License and
 authors are preserved in the generated source and vendor trees. wireguard-go is
 copyright WireGuard LLC and is used unmodified for Linux TUN I/O. netlink and
