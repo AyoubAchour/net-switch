@@ -14,10 +14,21 @@ import (
 	"time"
 	"unsafe"
 
+	winplatform "github.com/AyoubAchour/net-switch/internal/platform/windows"
 	"golang.org/x/sys/windows"
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 4 && os.Args[1] == "worker" && os.Args[2] == "query" && os.Args[3] == "tcp-port-configuration" {
+		os.Exit(winplatform.Run(os.Args[2:]))
+	}
+	if os.Getenv("NETSWITCH_OWNERSHIP_SQUATTER") == "1" {
+		if err := ownershipSquatter(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if os.Getenv("NETSWITCH_PIPE_DENIED_CHILD") == "1" {
 		if err := deniedPipeClient(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -28,7 +39,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func deniedPipeClient() error {
+func mediumPeerIdentity() error {
 	token := windows.GetCurrentProcessToken()
 	if token.IsElevated() {
 		return errors.New("negative peer was still elevated")
@@ -55,6 +66,13 @@ func deniedPipeClient() error {
 	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&b[0]))
 	if label.Label.Sid.String() != "S-1-16-8192" {
 		return fmt.Errorf("negative peer integrity is %s", label.Label.Sid.String())
+	}
+	return nil
+}
+
+func deniedPipeClient() error {
+	if err := mediumPeerIdentity(); err != nil {
+		return err
 	}
 	p, _ := windows.UTF16PtrFromString(EnginePipe)
 	h, err := windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
@@ -211,4 +229,52 @@ func TestPipeCloseWakesAccept(t *testing.T) {
 			t.Fatal("close did not cancel pending accept")
 		}
 	}
+}
+
+func TestPipeDisconnectedBeforeAcceptIsRetryable(t *testing.T) {
+	hosted(t)
+	p, err := ListenPipe(EnginePipe, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	name, _ := windows.UTF16PtrFromString(EnginePipe)
+	for range 32 {
+		// Connect and disappear before the server calls ConnectNamedPipe.
+		h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil,
+			windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		windows.CloseHandle(h)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, err = p.Accept(ctx)
+		cancel()
+		if !errors.Is(err, errPeerRefused) {
+			t.Fatalf("early disconnect became fatal: %v", err)
+		}
+	}
+	h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := os.NewFile(uintptr(h), EnginePipe)
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	conn, err := p.Accept(ctx)
+	if err != nil {
+		t.Fatalf("legitimate peer after early disconnects: %v", err)
+	}
+	defer conn.Close()
+	client.SetDeadline(time.Now().Add(time.Second))
+	if _, err := conn.Write([]byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	var b [2]byte
+	if _, err := io.ReadFull(client, b[:]); err != nil || string(b[:]) != "ok" {
+		t.Fatalf("legitimate reply after retry: %q %v", b, err)
+	}
+	t.Log("32 disconnects before Accept remained retryable; legitimate peer then received its reply")
 }
