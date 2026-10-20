@@ -28,6 +28,11 @@ type TunDevice interface {
 // implementations may avoid per-packet hooks only for this same Done channel.
 type TunIOContext interface{ BindIOContext(context.Context) }
 
+// TunCloseStarter optionally interrupts I/O and begins native teardown without
+// waiting. Close must still join teardown and return its result. The engine
+// overlaps this work with route cleanup, and joins before acknowledging stop.
+type TunCloseStarter interface{ BeginClose() }
+
 // RouteQuiescer stops and joins background route repair before teardown can
 // remove the TUN. Cancelling sibling contexts alone does not order their work.
 type RouteQuiescer interface{ Quiesce() }
