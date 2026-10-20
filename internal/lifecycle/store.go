@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/AyoubAchour/net-switch/internal/service"
 	"github.com/AyoubAchour/net-switch/internal/settings"
 )
 
@@ -87,6 +88,9 @@ func LoadConfig(data string) (Config, error) {
 	if c.Data != data || !filepath.IsAbs(c.Directory) || !filepath.IsAbs(c.Adapter) || (c.Mode != "proxy" && c.Mode != "tun") {
 		return c, errors.New("invalid service configuration")
 	}
+	if err := service.CheckInstallation(c.Directory, c.Adapter); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 func LoadOwner(data string) (Owner, error) {
@@ -115,6 +119,11 @@ func Enroll(ctx context.Context, data, user string) (Owner, error) {
 	}
 	if owner.User == "" || owner.User == "0" || owner.User == "S-1-5-18" {
 		return Owner{}, errors.New("enrol a person, not root or SYSTEM")
+	}
+	if current, err := LoadOwner(data); err != nil {
+		return Owner{}, err
+	} else if current.User == owner.User {
+		return current, nil
 	}
 	if err := Save(filepath.Join(data, "owner.json"), owner); err != nil {
 		return Owner{}, err

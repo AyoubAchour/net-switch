@@ -47,17 +47,28 @@ func Desktop(ctx context.Context, show bool) error {
 	// Only the sign-in entry point requests automatic routing. Reopening a
 	// window must preserve an explicit Turn off or a latched recovery error.
 	first := !show
+	backoff := time.Second
 	for ctx.Err() == nil {
 		connectCtx, stop := context.WithTimeout(ctx, 40*time.Second)
-		status, err := ConnectDesktop(connectCtx, true)
+		// The owner uses the protected endpoint first. Public status load
+		// cannot prevent a desktop from obtaining its own reserved slot.
+		status, err := ConnectDesktop(connectCtx, false)
 		if err != nil {
 			if err = service.Activate(connectCtx); err == nil {
-				status, err = ConnectDesktop(connectCtx, true)
+				status, err = ConnectDesktop(connectCtx, false)
 			}
 			if err != nil {
-				stop()
-				return err
+				status, err = ConnectDesktop(connectCtx, true)
 			}
+		}
+		if err != nil {
+			stop()
+			fmt.Println("Net Switch is not ready; retrying:", err)
+			if localipc.Pause(ctx, backoff) != nil {
+				return nil
+			}
+			backoff = min(backoff*2, 30*time.Second)
+			continue
 		}
 		var state struct {
 			Owner   Owner  `json:"owner"`
@@ -67,7 +78,11 @@ func Desktop(ctx context.Context, show bool) error {
 		status.Close()
 		if err != nil {
 			stop()
-			return err
+			if localipc.Pause(ctx, backoff) != nil {
+				return nil
+			}
+			backoff = min(backoff*2, 30*time.Second)
+			continue
 		}
 		if state.Owner.User == "" || state.Owner.User != CurrentUser() {
 			stop()
@@ -84,7 +99,25 @@ func Desktop(ctx context.Context, show bool) error {
 		rpc, err := ConnectDesktop(connectCtx, false)
 		stop()
 		if err != nil {
-			return err
+			if localipc.Pause(ctx, backoff) != nil {
+				return nil
+			}
+			continue
+		}
+		backoff = time.Second
+		// Keep the sign-in intent until the server has acknowledged it.
+		if first {
+			signCtx, stop := context.WithTimeout(ctx, 40*time.Second)
+			err = rpc.Call(signCtx, map[string]any{"method": "signin"}, nil)
+			stop()
+			if err != nil {
+				rpc.Close()
+				if localipc.Pause(ctx, backoff) != nil {
+					return nil
+				}
+				continue
+			}
+			first = false
 		}
 		err = desktopSession(ctx, rpc, show, first)
 		rpc.Close()

@@ -87,6 +87,13 @@ func (a *Access) serve(ctx context.Context, c *localipc.Conn, statusOnly bool) {
 	defer cancel()
 	stop := context.AfterFunc(ctx, func() { c.Close() })
 	defer stop()
+	// Owner desktop sessions are long-lived; public status connections are
+	// short requests. A partial frame does not keep an idle slot alive.
+	var idle *time.Timer
+	if statusOnly || c.Peer.User != a.Owner.User || a.Owner.User == "" {
+		idle = time.AfterFunc(10*time.Second, func() { c.Close() })
+		defer idle.Stop()
+	}
 	scan := bufio.NewScanner(c)
 	scan.Buffer(make([]byte, 4096), protocol.MessageLimit+1)
 	var write sync.Mutex
@@ -94,6 +101,9 @@ func (a *Access) serve(ctx context.Context, c *localipc.Conn, statusOnly bool) {
 	slots := make(chan struct{}, 16)
 	defer tasks.Wait()
 	for scan.Scan() {
+		if idle != nil {
+			idle.Reset(10 * time.Second)
+		}
 		var r controlRequest
 		if err := json.Unmarshal(scan.Bytes(), &r); err != nil || r.ID == "" || len(r.ID) > 128 {
 			return
@@ -131,11 +141,15 @@ func (a *Access) serve(ctx context.Context, c *localipc.Conn, statusOnly bool) {
 	a.Desktop.Disconnect(session)
 	cancel()
 }
-func accept(ctx context.Context, l localipc.Listener, serve func(*localipc.Conn), log func(string)) error {
+func accept(ctx context.Context, l localipc.Listener, serve func(*localipc.Conn), log func(string), owners ...string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(ctx, func() { l.Close() })
 	defer stop()
-	slots := make(chan struct{}, 32)
+	owner := ""
+	if len(owners) != 0 {
+		owner = owners[0]
+	}
+	limits := &connectionLimits{owner: owner, users: map[string]int{}}
 	var clients sync.WaitGroup
 	defer func() {
 		// A failed listener must reach service recovery even when clients
@@ -159,17 +173,58 @@ func accept(ctx context.Context, l localipc.Listener, serve func(*localipc.Conn)
 			}
 			return err
 		}
-		select {
-		case slots <- struct{}{}:
+		if limits.take(c.Peer.User) {
 			clients.Go(func() {
-				defer func() { <-slots }()
+				defer limits.release(c.Peer.User)
 				stop := context.AfterFunc(ctx, func() { c.Close() })
 				defer stop()
 				serve(c)
 			})
-		default:
+		} else {
 			c.Close()
-			log("IPC connection limit reached")
+			if time.Since(peerReport) > 10*time.Second {
+				log("IPC connection limit reached; owner and service slots remain reserved")
+				peerReport = time.Now()
+			}
 		}
+	}
+}
+
+type connectionLimits struct {
+	mu     sync.Mutex
+	owner  string
+	users  map[string]int
+	public int
+}
+
+func privilegedPeer(user string) bool { return user == "0" || user == "S-1-5-18" }
+func (l *connectionLimits) take(user string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	limit := 2
+	public := user != l.owner || l.owner == ""
+	if privilegedPeer(user) {
+		limit, public = 8, false
+	} else if !public {
+		limit = 32
+	}
+	if l.users[user] >= limit || public && l.public >= 16 {
+		return false
+	}
+	l.users[user]++
+	if public {
+		l.public++
+	}
+	return true
+}
+func (l *connectionLimits) release(user string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.users[user]--
+	if l.users[user] == 0 {
+		delete(l.users, user)
+	}
+	if (user != l.owner || l.owner == "") && !privilegedPeer(user) {
+		l.public--
 	}
 }

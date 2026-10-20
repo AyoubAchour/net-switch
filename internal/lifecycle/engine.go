@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -17,7 +18,9 @@ import (
 )
 
 func EngineService(ctx context.Context, ready func(), c Config, log func(string)) error {
-	release, err := (Lock{Data: c.Data, Name: "engine"}).Acquire(ctx)
+	lockCtx, lockCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer lockCancel()
+	release, err := (Lock{Data: c.Data, Name: "engine"}).Acquire(lockCtx)
 	if err != nil {
 		return err
 	}
@@ -41,9 +44,15 @@ func EngineService(ctx context.Context, ready func(), c Config, log func(string)
 	if err = retireAdapterScopes(store, records); err != nil {
 		return err
 	}
+	if err = removeRetiredAdapterFolders(c.Data); err != nil {
+		return err
+	}
+	if err = store.ClearRetired(); err != nil {
+		return err
+	}
 	runtime := &adapterRuntime{data: c.Data}
 	var previous engineState
-	if err := Read(filepath.Join(c.Data, "engine-state.json"), &previous); err != nil && !os.IsNotExist(err) {
+	if err := readEngineState(c.Data, &previous, log); err != nil {
 		return err
 	}
 	runtime.state.Epoch = previous.Epoch
@@ -96,6 +105,24 @@ func EngineService(ctx context.Context, ready func(), c Config, log func(string)
 running:
 	for {
 		select {
+		case event := <-service.Events(ctx):
+			if event.Resume {
+				owner, err := LoadOwner(c.Data)
+				if err != nil {
+					result = err
+					break running
+				}
+				present, err := ownerSessionPresent(owner.User, ^uint32(0))
+				if err != nil {
+					log("resume owner session check: " + err.Error())
+				}
+				if !present {
+					log("resume without an owner session; waiting for sign-in")
+					break running
+				}
+				server.Resume()
+				log("power resume: ten-second lease renewal grace")
+			}
 		case <-ctx.Done():
 			break running
 		case <-server.Done():
@@ -139,6 +166,50 @@ running:
 		return errors.Join(result, err)
 	}
 	return result
+}
+
+func readEngineState(data string, state *engineState, log func(string)) error {
+	path := filepath.Join(data, "engine-state.json")
+	err := Read(path, state)
+	if err == nil {
+		return nil
+	}
+	// Decode the backup into fresh state; a partial primary decode must not
+	// leak fields into the restored epoch/history.
+	var backup engineState
+	backupErr := Read(path+".bak", &backup)
+	if backupErr == nil {
+		*state = backup
+		log("engine state restored from protected backup: " + err.Error())
+		return nil
+	}
+	if os.IsNotExist(err) && os.IsNotExist(backupErr) {
+		return nil
+	}
+	return fmt.Errorf("engine state and backup unreadable: %w", errors.Join(err, backupErr))
+}
+
+func removeRetiredAdapterFolders(data string) error {
+	entries, err := os.ReadDir(data)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if len(name) != len("adapter-")+32 || name[:8] != "adapter-" {
+			continue
+		}
+		if _, err := hex.DecodeString(name[8:]); err != nil {
+			continue
+		}
+		if e.Type()&os.ModeSymlink != 0 || !e.IsDir() {
+			return fmt.Errorf("unexpected retired adapter path %s", name)
+		}
+		if err := os.RemoveAll(filepath.Join(data, name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func retireAdapterScopes(store *journal.FileStore, records []journal.Record) error {

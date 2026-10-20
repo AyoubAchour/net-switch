@@ -31,8 +31,9 @@ func ReportError(name string, err error) {
 }
 
 func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates chan<- svc.Status) (bool, uint32) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	ctx, events := eventContext(ctx)
 	status := svc.Status{State: svc.StartPending, WaitHint: 30000}
 	updates <- status
 	ready := make(chan struct{})
@@ -45,14 +46,27 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 		select {
 		case <-ready:
 			ready = nil
-			status = svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown}
+			status = svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPowerEvent | svc.AcceptSessionChange}
 			updates <- status
 		case request := <-requests:
 			switch request.Cmd {
 			case svc.Stop, svc.Shutdown:
 				status = svc.Status{State: svc.StopPending, WaitHint: 30000}
 				updates <- status
-				cancel()
+				cancel(nil)
+			case svc.Cmd(128):
+				status = svc.Status{State: svc.StopPending, WaitHint: 30000}
+				updates <- status
+				cancel(ErrRestart)
+			case svc.PowerEvent:
+				if request.EventType == 18 {
+					events <- Event{Resume: true}
+				} // PBT_APMRESUMEAUTOMATIC
+			case svc.SessionChange:
+				if request.EventType == 6 && request.EventData != 0 { // WTS_SESSION_LOGOFF
+					data := (*struct{ Size, Session uint32 })(unsafe.Pointer(request.EventData))
+					events <- Event{Logoff: true, Session: data.Session}
+				}
 			case svc.Interrogate:
 				updates <- status
 			}
@@ -68,6 +82,15 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 			return false, 0
 		}
 	}
+}
+func RequestRestart(ctx context.Context, name string) error {
+	s, err := open(name, windows.SERVICE_USER_DEFINED_CONTROL)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	_, err = s.Control(svc.Cmd(128))
+	return err
 }
 func Run(name string, program Program) error {
 	ok, err := svc.IsWindowsService()
@@ -106,7 +129,7 @@ func Query(name string) (Status, error) {
 	}
 	defer s.Close()
 	state, err := s.Query()
-	return Status{PID: state.ProcessId, Running: state.State == svc.Running}, err
+	return Status{PID: state.ProcessId, Running: state.State == svc.Running, Stopped: state.State == svc.Stopped}, err
 }
 func Start(ctx context.Context, name string) error {
 	s, err := open(name, windows.SERVICE_START|windows.SERVICE_QUERY_STATUS)
@@ -114,6 +137,20 @@ func Start(ctx context.Context, name string) error {
 		return err
 	}
 	defer s.Close()
+	for {
+		state, err := s.Query()
+		if err != nil {
+			return err
+		}
+		if state.State != svc.StopPending {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 	err = s.Start()
 	if err != nil && err != windows.ERROR_SERVICE_ALREADY_RUNNING {
 		return err

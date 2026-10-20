@@ -3,13 +3,17 @@ package lifecycle_test
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -150,8 +154,8 @@ func permissionProbe() error {
 	if err != windows.ERROR_ACCESS_DENIED {
 		return fmt.Errorf("competing pipe failed for wrong reason: %w", err)
 	}
-	if _, err := os.ReadFile(filepath.Join(testData(), "owner.json")); err == nil {
-		return errors.New("standard user read protected enrollment")
+	if _, err := os.ReadFile(filepath.Join(testData(), "owner.json")); !errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("protected enrollment must fail with permission denied, got %v", err)
 	}
 	fmt.Println("standard-user service rights, pipe-instance ACL and store ACL denied")
 	return nil
@@ -168,6 +172,24 @@ func desktopDenied() error {
 		return fmt.Errorf("desktop pipe denied for wrong reason: %w", err)
 	}
 	return nil
+}
+func legacyMutex() error {
+	if lifecycle.Administrator() {
+		return errors.New("mutex squatter is elevated")
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	digest := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(testData())) + "\x00engine"))
+	name, _ := windows.UTF16PtrFromString(fmt.Sprintf(`Global\NetSwitch-%x`, digest[:16]))
+	h, err := windows.CreateMutex(nil, true, name)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	defer windows.ReleaseMutex(h)
+	fmt.Println("held")
+	_, err = io.Copy(io.Discard, os.Stdin)
+	return err
 }
 func probeMain([]string) int { return 2 }
 func disableRecovery(t *testing.T) func() {
@@ -229,7 +251,7 @@ func hostedMain(m *testing.M) (bool, int) {
 		}
 		os.Stdout, os.Stderr = log, log
 		code := 1
-		os.Args = []string{os.Args[0], "-test.v", "-test.timeout=8m"}
+		os.Args = []string{os.Args[0], "-test.v", "-test.timeout=15m"}
 		err = service.Run("NetSwitchLifecycleTests", func(_ context.Context, ready func()) error {
 			ready()
 			code = m.Run()
@@ -286,7 +308,7 @@ func hostedMain(m *testing.M) (bool, int) {
 			fmt.Println(err)
 			return true, 1
 		}
-		deadline := time.Now().Add(9 * time.Minute)
+		deadline := time.Now().Add(16 * time.Minute)
 		for time.Now().Before(deadline) {
 			state, err := s.Query()
 			if err != nil {

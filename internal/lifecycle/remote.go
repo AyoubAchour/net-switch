@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/buildinfo"
 	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
@@ -17,20 +18,28 @@ import (
 // Remote implements Control's existing engine boundary. Only this object
 // knows about the temporary adapter payload; service ownership is independent.
 type Remote struct {
-	mu       sync.Mutex
-	connect  sync.Mutex
-	rpc      *RPC
-	instance string
-	epoch    uint64
-	snapshot ce.Snapshot
-	desired  *ce.Revision
-	endpoint localipc.Endpoint
-	ctx      context.Context
-	log      func(string)
+	mu                   sync.Mutex
+	connect              sync.Mutex
+	rpc                  *RPC
+	instance             string
+	epoch                uint64
+	snapshot             ce.Snapshot
+	desired              *ce.Revision
+	endpoint             localipc.Endpoint
+	ctx                  context.Context
+	log                  func(string)
+	recovering, stopping bool
+	forgotten            map[string]uint64
+	forgetSequence       uint64
+	dial                 func(context.Context, localipc.Endpoint) (*localipc.Conn, error)
+	startService         func(context.Context, string) error
+	queryService         func(string) (service.Status, error)
+	waitStopped          func(context.Context, string) error
+	wakeGrace            time.Time
 }
 
 func NewRemote(ctx context.Context, log func(string)) *Remote {
-	return &Remote{ctx: ctx, log: log, endpoint: localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine}, snapshot: ce.Snapshot{Status: "off"}}
+	return &Remote{ctx: ctx, log: log, endpoint: localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine}, snapshot: ce.Snapshot{Status: "off"}, forgotten: map[string]uint64{}, dial: localipc.Dial, startService: service.Start, queryService: service.Query, waitStopped: service.WaitStopped}
 }
 func (r *Remote) Snapshot() ce.Snapshot {
 	r.mu.Lock()
@@ -46,39 +55,97 @@ func (r *Remote) Fail(err error) {
 	defer r.mu.Unlock()
 	message := err.Error()
 	if r.snapshot.Status != "error" || r.snapshot.FailureID == "" {
-		r.snapshot.FailureID = randomID()
+		r.snapshot.FailureID = r.instance
+		if r.snapshot.FailureID == "" {
+			r.snapshot.FailureID = randomID()
+		}
 	}
 	r.snapshot.Status = "error"
 	r.snapshot.Error = &message
 }
 func (r *Remote) disconnect(rpc *RPC, err error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.rpc == rpc {
-		r.rpc = nil
-		r.snapshot.Status = "error"
-		r.snapshot.FailureID = randomID()
-		message := "Routing stopped, restarting: " + err.Error()
-		r.snapshot.Error = &message
-		rpc.Close()
-		r.log(message)
+	if r.rpc != rpc || r.stopping || r.recovering || r.ctx.Err() != nil {
+		r.mu.Unlock()
+		return
+	}
+	r.rpc, r.recovering = nil, true
+	r.mu.Unlock()
+	rpc.Close()
+	r.log("engine transport interrupted; checking the existing service before counting a failure: " + err.Error())
+	go r.recoverConnection(err)
+}
+func (r *Remote) recoverConnection(cause error) {
+	defer func() { r.mu.Lock(); r.recovering = false; r.mu.Unlock() }()
+	for r.ctx.Err() == nil {
+		r.mu.Lock()
+		stopping := r.stopping
+		r.mu.Unlock()
+		if stopping {
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.ctx, 5*time.Second)
+		err := r.Attach(ctx, false)
+		cancel()
+		if err == nil {
+			r.log("reattached to engine after transport interruption")
+			return
+		}
+		status, queryErr := r.queryService(service.Engine)
+		if queryErr == nil && status.Stopped {
+			r.mu.Lock()
+			stopping = r.stopping
+			grace := time.Now().Before(r.wakeGrace)
+			r.mu.Unlock()
+			if grace {
+				if localipc.Pause(r.ctx, time.Second) != nil {
+					return
+				}
+				continue
+			}
+			if !stopping {
+				r.Fail(fmt.Errorf("engine instance exited: %w", cause))
+			}
+			return
+		}
+		if localipc.Pause(r.ctx, time.Second) != nil {
+			return
+		}
+	}
+}
+func (r *Remote) Wake() {
+	r.mu.Lock()
+	r.wakeGrace = time.Now().Add(10 * time.Second)
+	rpc := r.rpc
+	r.mu.Unlock()
+	if rpc != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(r.ctx, 5*time.Second)
+			defer cancel()
+			if err := r.call(ctx, "renew", nil, "", nil); err != nil {
+				r.disconnect(rpc, err)
+			}
+		}()
 	}
 }
 func (r *Remote) Attach(ctx context.Context, start bool) error {
 	r.connect.Lock()
 	defer r.connect.Unlock()
 	r.mu.Lock()
-	connected := r.rpc != nil
+	connected, stopping := r.rpc != nil, r.stopping
 	r.mu.Unlock()
 	if connected {
 		return nil
 	}
-	c, err := localipc.Dial(ctx, r.endpoint)
+	if stopping {
+		return errors.New("engine stop in progress")
+	}
+	c, err := r.dial(ctx, r.endpoint)
 	if err != nil && start {
-		if err = service.Start(ctx, service.Engine); err != nil {
+		if err = r.startService(ctx, service.Engine); err != nil {
 			return err
 		}
-		c, err = localipc.Dial(ctx, r.endpoint)
+		c, err = r.dial(ctx, r.endpoint)
 	}
 	if err != nil {
 		return err
@@ -91,12 +158,16 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 		}
 	}()
 	var hello struct {
+		Version      string      `json:"version"`
 		Instance     string      `json:"engineInstanceId"`
 		Snapshot     ce.Snapshot `json:"adapterSnapshot"`
 		Capabilities []string    `json:"capabilities"`
 	}
 	if err = rpc.Call(ctx, map[string]any{"method": "hello"}, &hello); err != nil {
 		return err
+	}
+	if hello.Version != buildinfo.String() {
+		return fmt.Errorf("engine version %q is incompatible with Control %q", hello.Version, buildinfo.String())
 	}
 	supported := false
 	for _, v := range hello.Capabilities {
@@ -115,11 +186,18 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 		return errors.New("engine returned a zero epoch")
 	}
 	r.mu.Lock()
+	if r.stopping {
+		r.mu.Unlock()
+		return errors.New("engine stop in progress")
+	}
 	r.rpc = rpc
 	r.instance = hello.Instance
 	r.epoch = attach.Epoch
 	r.snapshot = hello.Snapshot
 	r.snapshot.Instance = hello.Instance
+	if r.snapshot.Status == "error" {
+		r.snapshot.FailureID = hello.Instance
+	}
 	if start && r.snapshot.Status != "on" {
 		r.snapshot.Status = "starting"
 		r.snapshot.Error = nil
@@ -127,6 +205,7 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 	r.mu.Unlock()
 	ok = true
 	go r.renew(rpc)
+	go r.pollStats(rpc)
 	return nil
 }
 func (r *Remote) renew(rpc *RPC) {
@@ -143,13 +222,29 @@ func (r *Remote) renew(rpc *RPC) {
 		case <-tick.C:
 			ctx, cancel := context.WithTimeout(r.ctx, 4*time.Second)
 			err := r.call(ctx, "renew", nil, "", nil)
-			if err == nil {
-				err = r.refresh(ctx)
-			}
 			cancel()
 			if err != nil {
 				r.disconnect(rpc, err)
 				return
+			}
+		}
+	}
+}
+func (r *Remote) pollStats(rpc *RPC) {
+	tick := time.NewTicker(5 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-rpc.Done():
+			return
+		case <-tick.C:
+			ctx, cancel := context.WithTimeout(r.ctx, 4*time.Second)
+			err := r.refresh(ctx)
+			cancel()
+			if err != nil {
+				r.log("engine stats unavailable (lease renewal remains independent): " + err.Error())
 			}
 		}
 	}
@@ -179,12 +274,24 @@ func (r *Remote) request(ctx context.Context, method string, payload any, opID, 
 	return rpc.Call(ctx, request, out)
 }
 func (r *Remote) refresh(ctx context.Context) error {
+	r.mu.Lock()
+	rpc, instance := r.rpc, r.instance
+	r.mu.Unlock()
 	var s ce.Snapshot
 	if err := r.call(ctx, "stats", adapterPayload{}, "", &s); err != nil {
 		return err
 	}
 	r.mu.Lock()
-	r.snapshot = s
+	if r.rpc == rpc && r.instance == instance && !r.stopping {
+		s.Instance = instance
+		if s.Status == "error" {
+			s.FailureID = instance
+		}
+		r.snapshot = s
+		for line := range r.forgotten {
+			delete(r.snapshot.Policy.Lanes, line)
+		}
+	}
 	r.mu.Unlock()
 	return nil
 }
@@ -192,13 +299,22 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	r.mu.Lock()
+	r.stopping = false
+	// Failures before an instance exists belong to this one start attempt.
+	if r.rpc == nil && !r.recovering {
+		r.instance = ""
+		r.snapshot.FailureID = ""
+	}
 	if r.snapshot.Status != "on" {
 		r.snapshot.Status = "starting"
 		r.snapshot.Error = nil
 	}
 	r.mu.Unlock()
 	if err := r.Attach(ctx, true); err != nil {
-		r.Fail(err)
+		status, queryErr := r.queryService(service.Engine)
+		if queryErr == nil && status.Stopped {
+			r.Fail(err)
+		}
 		return err
 	}
 	r.mu.Lock()
@@ -209,7 +325,14 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	}
 	var ack ce.Acknowledgement
 	if err := r.call(ctx, "start", adapterPayload{Revision: revision}, "", &ack); err != nil {
-		r.Fail(err)
+		// A lost response may mean the start succeeded. Reattach before
+		// deciding; the next snapshot or a stopped service proves failure.
+		r.mu.Lock()
+		rpc := r.rpc
+		r.mu.Unlock()
+		if rpc != nil {
+			r.disconnect(rpc, err)
+		}
 		return err
 	}
 	if ack.Number != revision.Number || ack.Hash != revision.Hash {
@@ -230,6 +353,9 @@ func (r *Remote) Apply(ctx context.Context, revision ce.Revision) (ce.Acknowledg
 		return ce.Acknowledgement{Number: revision.Number, Hash: revision.Hash, Instance: s.Instance}, nil
 	}
 	var ack ce.Acknowledgement
+	if err := r.flushForgotten(ctx); err != nil {
+		return ack, err
+	}
 	err := r.call(ctx, "apply", adapterPayload{Revision: &revision}, "", &ack)
 	if err == nil {
 		err = r.refresh(ctx)
@@ -241,7 +367,7 @@ func (r *Remote) Stop(ctx context.Context) error {
 	rpc := r.rpc
 	r.mu.Unlock()
 	if rpc == nil {
-		if status, err := service.Query(service.Engine); err != nil || !status.Running {
+		if status, err := r.queryService(service.Engine); err != nil || status.Stopped {
 			r.mu.Lock()
 			r.snapshot = ce.Snapshot{Status: "off"}
 			r.mu.Unlock()
@@ -254,12 +380,24 @@ func (r *Remote) Stop(ctx context.Context) error {
 		rpc = r.rpc
 		r.mu.Unlock()
 	}
+	r.mu.Lock()
+	r.stopping = true
+	r.mu.Unlock()
 	if err := r.call(ctx, "stop", nil, "", nil); err != nil {
+		r.mu.Lock()
+		r.stopping = false
+		r.mu.Unlock()
 		return fmt.Errorf("engine stop was not acknowledged: %w", err)
+	}
+	// The acknowledgement precedes the engine's final journal append and
+	// SCM transition. Do not start a replacement until both have completed.
+	if err := r.waitStopped(ctx, service.Engine); err != nil {
+		return err
 	}
 	r.mu.Lock()
 	r.rpc = nil
 	r.snapshot = ce.Snapshot{Status: "off"}
+	r.instance = ""
 	r.mu.Unlock()
 	rpc.Close()
 	return nil
@@ -300,14 +438,30 @@ func (r *Remote) Probe(ctx context.Context, request ce.ProbeRequest) ce.ProbeRes
 	return out
 }
 func (r *Remote) ForgetLane(line string) {
-	if r.Snapshot().Status != "on" {
-		return
+	// Core calls this while holding its state lock. Queue the invalidation
+	// locally; Apply flushes it after Core releases that lock.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.forgetSequence++
+	r.forgotten[line] = r.forgetSequence
+	delete(r.snapshot.Policy.Lanes, line)
+}
+func (r *Remote) flushForgotten(ctx context.Context) error {
+	r.mu.Lock()
+	work := map[string]uint64{}
+	for line, seq := range r.forgotten {
+		work[line] = seq
 	}
-	ctx, cancel := context.WithTimeout(r.ctx, 3*time.Second)
-	defer cancel()
-	if err := r.call(ctx, "adapterForgetLane", adapterPayload{Line: line}, "", nil); err != nil {
-		r.log("forget lane: " + err.Error())
-	} else if err := r.refresh(ctx); err != nil {
-		r.log("refresh forgotten lane: " + err.Error())
+	r.mu.Unlock()
+	for line, seq := range work {
+		if err := r.call(ctx, "adapterForgetLane", adapterPayload{Line: line}, "", nil); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		if r.forgotten[line] == seq {
+			delete(r.forgotten, line)
+		}
+		r.mu.Unlock()
 	}
+	return nil
 }

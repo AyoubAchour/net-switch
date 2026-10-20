@@ -125,3 +125,58 @@ func TestExpiryFencesBeforeWaitingForBlockedMutation(t *testing.T) {
 		t.Fatal("attachment resurrected expired engine")
 	}
 }
+
+func TestLeaseExcludesInjectedSleepAndWallClockJumps(t *testing.T) {
+	table := flows.New(flows.Defaults(), nil)
+	s := New(&runtimeFake{table: table}, table, nil)
+	awake := time.Unix(100, 0)
+	wall := awake
+	s.now = func() time.Time { return awake }
+	call(t, s, Request{ID: "attach", Method: "attach", Instance: s.Instance})
+	awake = awake.Add(20 * time.Second)
+	wall = wall.Add(8 * time.Hour) // hibernate; unbiased/monotonic time is paused
+	if wall.Sub(awake) < time.Hour || s.Expired() {
+		t.Fatal("sleep consumed the lease")
+	}
+	call(t, s, Request{ID: "renew", Method: "renew", Instance: s.Instance, Epoch: 1})
+	awake = awake.Add(Lease - time.Nanosecond)
+	if s.Expired() {
+		t.Fatal("lease expired before 30 awake seconds")
+	}
+	awake = awake.Add(time.Nanosecond)
+	if !s.Expired() {
+		t.Fatal("awake-time expiry was disabled")
+	}
+}
+
+func TestPowerResumeGraceCannotResurrectExpiredEngine(t *testing.T) {
+	table := flows.New(flows.Defaults(), nil)
+	s := New(&runtimeFake{table: table}, table, nil)
+	now := time.Unix(100, 0)
+	s.now = func() time.Time { return now }
+	call(t, s, Request{ID: "attach", Method: "attach", Instance: s.Instance})
+	now = now.Add(29 * time.Second)
+	s.Resume()
+	now = now.Add(9 * time.Second)
+	if s.Expired() {
+		t.Fatal("resume did not grant a renewal opportunity")
+	}
+	call(t, s, Request{ID: "renew", Method: "renew", Instance: s.Instance, Epoch: 1})
+	now = now.Add(Lease)
+	if !s.Expired() {
+		t.Fatal("missing expiry precondition")
+	}
+	s.Resume()
+	if reply := s.Handle(context.Background(), Request{ID: "renew", Method: "renew", Instance: s.Instance, Epoch: 1}); reply.Error == "" {
+		t.Fatal("resume resurrected an engine already cleaning up")
+	}
+}
+
+func TestNativeLeaseClockAdvances(t *testing.T) {
+	before := leaseNow()
+	time.Sleep(20 * time.Millisecond)
+	elapsed := leaseNow().Sub(before)
+	if elapsed <= 0 || elapsed > time.Second {
+		t.Fatal("lease clock unavailable or invalid", elapsed)
+	}
+}

@@ -2,17 +2,14 @@ package lifecycle
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
 	"sync"
 	"unsafe"
 
 	win "github.com/AyoubAchour/net-switch/internal/platform/windows"
+	"github.com/AyoubAchour/net-switch/internal/winlock"
 	"golang.org/x/sys/windows"
 )
 
@@ -106,48 +103,42 @@ func BootID() (string, error) {
 type Lock struct{ Data, Name string }
 
 func (l Lock) Acquire(ctx context.Context) (func() error, error) {
-	result := make(chan error, 1)
-	release := make(chan struct{})
-	done := make(chan error, 1)
-	digest := sha256.Sum256([]byte(strings.ToLower(filepath.Clean(l.Data)) + "\x00" + l.Name))
-	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		sd, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;SY)(A;;GA;;;BA)")
-		if err != nil {
-			result <- err
-			return
-		}
-		sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
-		name, _ := windows.UTF16PtrFromString(fmt.Sprintf(`Global\NetSwitch-%x`, digest[:16]))
-		handle, err := windows.CreateMutex(&sa, false, name)
-		if err != nil && err != windows.ERROR_ALREADY_EXISTS {
-			result <- err
-			return
-		}
-		defer windows.CloseHandle(handle)
-		for {
-			state, err := windows.WaitForSingleObject(handle, 20)
-			if err != nil {
-				result <- err
-				return
-			}
-			if state == windows.WAIT_OBJECT_0 || state == windows.WAIT_ABANDONED {
-				result <- nil
-				<-release
-				done <- windows.ReleaseMutex(handle)
-				return
-			}
-			if ctx.Err() != nil {
-				result <- ctx.Err()
-				return
-			}
-		}
-	}()
-	if err := <-result; err != nil {
+	if l.Name != "engine" && l.Name != "enrollment" {
+		return nil, errors.New("invalid machine lock name")
+	}
+	if err := CheckDirectory(l.Data); err != nil {
+		return nil, err
+	}
+	// The pathname is inside the verified store. Unprivileged users cannot
+	// plant it, unlike a Global mutex. A byte-range lock dies with the handle.
+	sd, err := windows.SecurityDescriptorFromString("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)")
+	if err != nil {
+		return nil, err
+	}
+	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	name, err := windows.UTF16PtrFromString(filepath.Join(l.Data, l.Name+".lock"))
+	if err != nil {
+		return nil, err
+	}
+	h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, &sa, windows.OPEN_ALWAYS, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, err
+	}
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		windows.CloseHandle(h)
+		return nil, err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 || info.NumberOfLinks != 1 {
+		windows.CloseHandle(h)
+		return nil, errors.New("machine lock is not a regular single-link file")
+	}
+	if err := winlock.Acquire(ctx, h); err != nil {
+		windows.CloseHandle(h)
 		return nil, err
 	}
 	var once sync.Once
-	var err error
-	return func() error { once.Do(func() { close(release); err = <-done }); return err }, nil
+	var closeErr error
+	return func() error { once.Do(func() { closeErr = windows.CloseHandle(h) }); return closeErr }, nil
 }

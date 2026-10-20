@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/buildinfo"
+	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
 
@@ -97,13 +98,20 @@ func Ctl(args []string) error {
 		if flags.NArg() == 1 {
 			name = flags.Arg(0)
 		}
-		// A changed owner revokes every existing connection and browser token.
-		status, queryErr := service.Query(service.Control)
-		if queryErr == nil && status.Running {
-			if err := service.Stop(ctx, service.Control); err != nil {
-				return err
-			}
+		next, err := ResolveOwner(name)
+		if err != nil {
+			return err
 		}
+		current, err := LoadOwner(*data)
+		if err != nil {
+			return err
+		}
+		if current.User == next.User {
+			return printJSON(current, nil)
+		}
+		// A changed owner replaces Control and revokes every browser token,
+		// while preserving the engine and the durable routing intent.
+		status, queryErr := service.Query(service.Control)
 		owner, err := Enroll(ctx, *data, name)
 		if err != nil {
 			return err
@@ -112,8 +120,20 @@ func Ctl(args []string) error {
 			return err
 		}
 		if queryErr == nil && status.Running {
-			if err := service.Start(ctx, service.Control); err != nil {
+			if err := service.RequestRestart(ctx, service.Control); err != nil {
 				return err
+			}
+			for {
+				s, err := service.Query(service.Control)
+				if err != nil {
+					return err
+				}
+				if s.Running && s.PID != status.PID {
+					break
+				}
+				if err := localipc.Pause(ctx, 100*time.Millisecond); err != nil {
+					return err
+				}
 			}
 		}
 		return printJSON(owner, nil)
@@ -139,6 +159,9 @@ func Ctl(args []string) error {
 		}
 		if *mode != "tun" && *mode != "proxy" {
 			return errors.New("mode must be tun or proxy")
+		}
+		if err := service.CheckInstallation(*dir, *adapter); err != nil {
+			return err
 		}
 		if err := PrepareDirectory(*data); err != nil {
 			return err

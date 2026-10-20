@@ -1,6 +1,9 @@
 name: Service lifecycle
 
 on:
+  push:
+    branches: [main]
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
   pull_request:
     paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
   workflow_dispatch:
@@ -55,7 +58,6 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          ./scripts/fetch-engine.ps1
           $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles 'NetSwitch-Lifecycle-CI'
           foreach ($name in @('netswitch', 'netswitch-engine', 'netswitch-desktop', 'netswitchctl')) {
             go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"
@@ -65,6 +67,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle-other-app.exe') ./tests/lifecycle/trafficclient
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'testisp.exe') ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/lifecycle/prepare-windows.ps1 -Directory $env:NETSWITCH_LIFECYCLE_DIR
           Set-Location tests/lifecycle
           & (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') run-hosted
           exit $LASTEXITCODE
@@ -82,7 +87,7 @@ jobs:
           go build -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle-other-app" ./tests/lifecycle/trafficclient
           sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"
           cd tests/lifecycle
-          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v -test.timeout=8m
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v -test.timeout=15m
       - name: Linux service diagnostics
         if: always() && matrix.os == 'Linux'
         shell: bash

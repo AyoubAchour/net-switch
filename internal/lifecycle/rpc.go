@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"strconv"
 	"sync"
@@ -16,13 +15,21 @@ import (
 
 type RPC struct {
 	conn    io.ReadWriteCloser
-	write   sync.Mutex
+	writes  chan rpcWrite
 	mu      sync.Mutex
 	pending map[string]chan rpcReply
 	done    chan struct{}
 	err     error
 	next    atomic.Uint64
 }
+type rpcWrite struct {
+	ctx  context.Context
+	data []byte
+}
+type rpcError string
+
+func (e rpcError) Error() string { return "IPC: " + string(e) }
+
 type rpcReply struct {
 	ID     string          `json:"id"`
 	Result json.RawMessage `json:"result"`
@@ -30,9 +37,30 @@ type rpcReply struct {
 }
 
 func NewRPC(c io.ReadWriteCloser) *RPC {
-	r := &RPC{conn: c, pending: map[string]chan rpcReply{}, done: make(chan struct{})}
+	r := &RPC{conn: c, writes: make(chan rpcWrite, protocol.Outstanding), pending: map[string]chan rpcReply{}, done: make(chan struct{})}
 	go r.read()
+	go r.write()
 	return r
+}
+func (r *RPC) write() {
+	for {
+		select {
+		case <-r.done:
+			return
+		case w := <-r.writes:
+			if w.ctx.Err() != nil {
+				continue
+			}
+			n, err := r.conn.Write(w.data)
+			if err == nil && n != len(w.data) {
+				err = io.ErrShortWrite
+			}
+			if err != nil {
+				r.fail(err)
+				return
+			}
+		}
+	}
 }
 func (r *RPC) read() {
 	scan := bufio.NewScanner(r.conn)
@@ -95,21 +123,22 @@ func (r *RPC) Call(ctx context.Context, request map[string]any, result any) erro
 		return err
 	}
 	defer func() { r.mu.Lock(); delete(r.pending, id); r.mu.Unlock() }()
-	// Cancellation closes this connection: an ambiguous mutation is recovered
-	// using its durable revision/opId, never retried as a fresh operation.
-	stop := context.AfterFunc(ctx, func() { r.fail(ctx.Err()) })
-	defer stop()
-	r.write.Lock()
-	_, err = r.conn.Write(append(b, '\n'))
-	r.write.Unlock()
-	if err != nil {
-		r.fail(err)
+	// A request deadline is not a transport failure. Late replies are dropped
+	// by ID; ambiguous mutations retain their durable revision/operation ID.
+	select {
+	case r.writes <- rpcWrite{ctx, append(b, '\n')}:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-r.done:
+		r.mu.Lock()
+		err = r.err
+		r.mu.Unlock()
 		return err
 	}
 	select {
 	case reply := <-ch:
 		if reply.Error != "" {
-			return fmt.Errorf("IPC: %s", reply.Error)
+			return rpcError(reply.Error)
 		}
 		if result != nil {
 			return json.Unmarshal(reply.Result, result)

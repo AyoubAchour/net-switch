@@ -61,14 +61,27 @@ func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
 	if _, err := rand.Read(id[:]); err != nil {
 		panic(err)
 	}
-	s := &Server{Instance: hex.EncodeToString(id[:]), now: time.Now, runtime: runtime, table: table, prober: prober, operations: map[string]*operation{}, clients: map[*connection]struct{}{}, done: make(chan struct{})}
+	s := &Server{Instance: hex.EncodeToString(id[:]), now: leaseNow, runtime: runtime, table: table, prober: prober, operations: map[string]*operation{}, clients: map[*connection]struct{}{}, done: make(chan struct{})}
 	if counter, ok := runtime.(interface{ InitialEpoch() uint64 }); ok {
 		s.epoch = counter.InitialEpoch()
 	}
 	return s
 }
 func (s *Server) Done() <-chan struct{} { return s.done }
-func (s *Server) finish()               { s.doneOnce.Do(func() { close(s.done) }) }
+
+// Resume gives Control a bounded opportunity to run after the OS wakes.
+// It cannot resurrect an instance whose cleanup already started.
+func (s *Server) Resume() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attached && !s.stopping && !s.stopped {
+		grace := s.now().Add(10 * time.Second)
+		if s.expires.Before(grace) {
+			s.expires = grace
+		}
+	}
+}
+func (s *Server) finish() { s.doneOnce.Do(func() { close(s.done) }) }
 func (s *Server) finishStopped() {
 	s.mu.Lock()
 	stopped := s.stopped

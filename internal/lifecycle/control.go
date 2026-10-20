@@ -117,6 +117,18 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	quit := make(chan struct{})
 	var quitOnce sync.Once
 	httpHandler := &control.HTTP{Core: core, Port: port, ValidToken: tokens.Valid, Pair: tokens.Redeem, Asset: ServiceAsset, Quit: func() { quitOnce.Do(func() { close(quit) }) }}
+	httpHandler.PairAllowed = func(r *http.Request) bool {
+		local, ok := r.Context().Value(http.LocalAddrContextKey).(*net.TCPAddr)
+		if !ok || owner.User == "" {
+			return false
+		}
+		remote, err := net.ResolveTCPAddr("tcp4", r.RemoteAddr)
+		if err != nil {
+			return false
+		}
+		user, err := localipc.TCPOwner(remote, local)
+		return err == nil && user == owner.User
+	}
 	mux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/pair" || r.URL.Path == "/pair.js" || r.URL.Path == "/pair.css" {
 			servePair(w, r, port)
@@ -146,7 +158,7 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 		}
 		listeners = append(listeners, l)
 		workers.Go(func() {
-			failures <- accept(ctx, l, func(conn *localipc.Conn) { access.serve(ctx, conn, kind == "status") }, log)
+			failures <- accept(ctx, l, func(conn *localipc.Conn) { access.serve(ctx, conn, kind == "status") }, log, owner.User)
 		})
 	}
 	core.CheckElevation(ctx)
@@ -162,18 +174,25 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 		}
 	}
 	core.Run()
+	go runSessionEvents(ctx, service.Events(serviceCtx), owner.User, remote, func() error { return core.Routing(ctx, false) }, log)
 	ready()
 	// No credential, HTTP port or session token is published to a file.
 	log(fmt.Sprintf("Control ready (PID %d); owner=%s", os.Getpid(), owner.Name))
 	alreadyStopped := false
 	select {
 	case err = <-failures:
-		if errors.Is(err, http.ErrServerClosed) {
-			err = nil
+		// Only an explicit service stop or Quit may commit routing=false.
+		// Listener death is a crash: SCM can reattach while the lease holds.
+		if err == nil {
+			err = errors.New("service listener ended unexpectedly")
 		}
+		return fmt.Errorf("service listener failed; preserving routing intent: %w", err)
 	case err = <-crash.Failures():
 		return err // preserve the lease while SCM restarts Control
 	case <-serviceCtx.Done():
+		if errors.Is(context.Cause(serviceCtx), service.ErrRestart) {
+			return service.ErrRestart
+		}
 	case <-quit:
 		alreadyStopped = true
 	}

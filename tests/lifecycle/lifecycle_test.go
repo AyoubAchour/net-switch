@@ -50,6 +50,23 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 func clientMain(args []string) int {
+	if len(args) > 0 && args[0] == "legacy-mutex" {
+		if err := legacyMutex(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if len(args) > 0 && args[0] == "http" {
+		return httpClientMain()
+	}
+	if len(args) > 0 && args[0] == "disconnect-burst" {
+		if err := disconnectBurst(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) > 0 && args[0] == "status-capacity" {
 		if err := statusCapacity(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -78,7 +95,7 @@ func clientMain(args []string) int {
 		}
 		return 0
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 14*time.Minute)
 	defer cancel()
 	statusOnly := len(args) > 0 && args[0] == "status"
 	rpc, err := lifecycle.ConnectDesktop(ctx, statusOnly)
@@ -239,8 +256,8 @@ func api(t *testing.T, url, token, method, route, body string) (int, []byte) {
 func fixture(t *testing.T, dir string) string {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		path, err := filepath.Abs("../../engine/sing-box.exe")
-		if err != nil {
+		path := filepath.Join(dir, "adapter", "sing-box.exe")
+		if _, err := os.Stat(path); err != nil {
 			t.Fatal(err)
 		}
 		return path
@@ -340,6 +357,7 @@ func TestRealServices(t *testing.T) {
 	}
 	t.Run("pending-enrollment-and-sign-in", func(t *testing.T) {
 		readonly := openClient(t, other, true)
+		defer readonly.input.Close()
 		s := getStatus(t, readonly)
 		if s.Routing != "off" {
 			t.Fatal("routing started before owner enrollment", s)
@@ -368,6 +386,7 @@ func TestRealServices(t *testing.T) {
 	c.must(t, "session", nil, &session)
 	t.Run("non-owner-and-native-permissions", func(t *testing.T) {
 		readonly := openClient(t, other, true)
+		defer readonly.input.Close()
 		_ = getStatus(t, readonly)
 		for _, method := range []string{"session", "pair", "routing", "signin"} {
 			if _, err := readonly.call(t, method, nil); err == nil {
@@ -380,11 +399,35 @@ func TestRealServices(t *testing.T) {
 			t.Fatal("non-owner desktop did not offer status only", err, string(output))
 		}
 		exe, _ := os.Executable()
-		b, err := other.command(exe, "client", "status-capacity").CombinedOutput()
+		attack := other.command(exe, "client", "status-capacity")
+		input, err := attack.StdinPipe()
 		if err != nil {
-			t.Fatalf("status listener did not survive excess standard-user connections: %v: %s", err, b)
+			t.Fatal(err)
 		}
-		t.Log(strings.TrimSpace(string(b)))
+		attackOutput, err := attack.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var diagnostics bytes.Buffer
+		attack.Stderr = &diagnostics
+		if err := attack.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { input.Close(); _ = attack.Process.Kill(); _ = attack.Wait() }()
+		ready, err := bufio.NewReader(attackOutput).ReadString('\n')
+		if err != nil || !strings.HasPrefix(ready, "holding 40 ") {
+			t.Fatal("capacity precondition", ready, err, diagnostics.String())
+		}
+		fresh := openClient(t, owner, false)
+		fresh.must(t, "desktop-connect", nil, nil)
+		fresh.must(t, "session", nil, &session)
+		if code, _ := apiAs(t, owner, session.URL, session.Token, "GET", "/api/state", ""); code != 200 {
+			t.Fatal("owner token blocked during attack", code)
+		}
+		if b, err := owner.command(filepath.Join(dir, binary("netswitchctl")), "status").CombinedOutput(); err != nil {
+			t.Fatal("owner CLI blocked during attack", err, string(b))
+		}
+		t.Log("owner desktop, token and CLI succeeded while all 40 attacker handles remained open")
 	})
 	t.Run("pairing-and-bearer", func(t *testing.T) {
 		var code string
@@ -393,7 +436,13 @@ func TestRealServices(t *testing.T) {
 		if status != 401 {
 			t.Fatal("anonymous API accepted", status)
 		}
-		status, b := api(t, session.URL, "", "POST", "/api/pair", `{"code":"`+code+`"}`)
+		for range 5 {
+			status, _ := apiAs(t, other, session.URL, "", "POST", "/api/pair", `{"code":"000000"}`)
+			if status != 403 {
+				t.Fatal("other user reached pairing attempts", status)
+			}
+		}
+		status, b := apiAs(t, owner, session.URL, "", "POST", "/api/pair", `{"code":"`+code+`"}`)
 		if status != 200 {
 			t.Fatalf("pairing failed %d", status)
 		}
@@ -406,7 +455,7 @@ func TestRealServices(t *testing.T) {
 		if len(paired.Token) != 64 {
 			t.Fatal("token is not 256 bits")
 		}
-		status, _ = api(t, session.URL, "", "POST", "/api/pair", `{"code":"`+code+`"}`)
+		status, _ = apiAs(t, owner, session.URL, "", "POST", "/api/pair", `{"code":"`+code+`"}`)
 		if status != 401 {
 			t.Fatal("code reused")
 		}
@@ -421,12 +470,12 @@ func TestRealServices(t *testing.T) {
 			wrong = "000001"
 		}
 		for range 3 {
-			status, _ = api(t, session.URL, "", "POST", "/api/pair", `{"code":"`+wrong+`"}`)
+			status, _ = apiAs(t, owner, session.URL, "", "POST", "/api/pair", `{"code":"`+wrong+`"}`)
 			if status != 401 {
 				t.Fatal("wrong code accepted")
 			}
 		}
-		status, _ = api(t, session.URL, "", "POST", "/api/pair", `{"code":"`+next+`"}`)
+		status, _ = apiAs(t, owner, session.URL, "", "POST", "/api/pair", `{"code":"`+next+`"}`)
 		if status != 401 {
 			t.Fatal("code accepted after three global attempts")
 		}
@@ -449,6 +498,16 @@ func TestRealServices(t *testing.T) {
 	c.must(t, "signin", nil, nil)
 	wait(t, "routing on", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	first := getStatus(t, c)
+	t.Run("non-owner-connect-close-preserves-routing", func(t *testing.T) {
+		exe, _ := os.Executable()
+		if b, err := other.command(exe, "client", "disconnect-burst").CombinedOutput(); err != nil {
+			t.Fatal(err, string(b))
+		}
+		after := getStatus(t, c)
+		if after.Routing != "on" || after.ControlPID != first.ControlPID || after.Instance != first.Instance {
+			t.Fatal("connect-close changed routing or service lifetime", after)
+		}
+	})
 	t.Run("engine-ipc-rejects-standard-users", func(t *testing.T) {
 		exe, _ := os.Executable()
 		for _, user := range []actor{owner, other} {
@@ -677,6 +736,64 @@ func TestRealServices(t *testing.T) {
 		c.must(t, "routing", map[string]any{"on": true}, nil)
 		wait(t, "restart after explicit stop", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	})
+	t.Run("enrollment-preserves-routing-and-same-owner-is-noop", func(t *testing.T) {
+		before := getStatus(t, c)
+		stream := proxyStream(t, session.URL, session.Token, echo)
+		defer stream.Close()
+		checkEcho(t, stream)
+		ctl := filepath.Join(dir, binary("netswitchctl"))
+		if b, err := exec.Command(ctl, "enroll", "--data", data, "--owner", owner.id()).CombinedOutput(); err != nil {
+			t.Fatal(err, string(b))
+		}
+		if after := getStatus(t, c); after.ControlPID != before.ControlPID || after.Instance != before.Instance {
+			t.Fatal("same owner enrollment restarted services", after)
+		}
+		if b, err := exec.Command(ctl, "enroll", "--data", data, "--owner", other.id()).CombinedOutput(); err != nil {
+			t.Fatal(err, string(b))
+		}
+		checkEcho(t, stream)
+		replacement := openClient(t, other, false)
+		after := getStatus(t, replacement)
+		if after.Instance != before.Instance || after.ControlPID == before.ControlPID || after.Routing != "on" {
+			t.Fatal("Control replacement lost engine", after)
+		}
+		replacement.input.Close()
+		if b, err := exec.Command(ctl, "enroll", "--data", data, "--owner", owner.id()).CombinedOutput(); err != nil {
+			t.Fatal(err, string(b))
+		}
+		c = openClient(t, owner, false)
+		c.must(t, "session", nil, &session)
+		checkEcho(t, stream)
+	})
+	t.Run("legacy-global-mutex-cannot-block-start", func(t *testing.T) {
+		if runtime.GOOS != "windows" {
+			t.Skip("Windows kernel namespace attack")
+		}
+		c.must(t, "routing", map[string]any{"on": false}, nil)
+		attack := other.command(hostedTestExecutable(), "client", "legacy-mutex")
+		input, err := attack.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err := attack.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var diagnostic bytes.Buffer
+		attack.Stderr = &diagnostic
+		if err := attack.Start(); err != nil {
+			t.Fatal(err)
+		}
+		defer func() { input.Close(); _ = attack.Process.Kill(); _ = attack.Wait() }()
+		line, err := bufio.NewReader(output).ReadString('\n')
+		if err != nil || strings.TrimSpace(line) != "held" {
+			t.Fatal("mutex squatter precondition", line, err, diagnostic.String())
+		}
+		c.must(t, "routing", map[string]any{"on": true}, nil)
+		if getStatus(t, c).Routing != "on" {
+			t.Fatal("planted Global mutex blocked engine")
+		}
+	})
 	t.Run("committed-stop-survives-control-crash", func(t *testing.T) {
 		stream := proxyStream(t, session.URL, session.Token, echo)
 		defer stream.Close()
@@ -841,6 +958,7 @@ func TestRealServices(t *testing.T) {
 		}
 		wait(t, "clean engine exit", 10*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
 	})
+	t.Run("real-tun-fail-open", func(t *testing.T) { tunServices(t, config, owner) })
 }
 func binary(name string) string {
 	if runtime.GOOS == "windows" {

@@ -664,6 +664,10 @@ func (c *Core) Start(ctx context.Context) error {
 			return nil
 		}
 		p := c.policyLocked()
+		if c.op.ServiceMode && len(p.Lines) == 0 {
+			c.mu.Unlock()
+			return nil
+		}
 		current := c.op.Engine.Snapshot()
 		if len(p.Lines) > 0 && current.Status != "on" && current.Status != "starting" {
 			c.statusLocked(engine.Snapshot{Status: "starting"})

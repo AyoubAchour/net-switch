@@ -2,7 +2,10 @@
 // an engine as a child of Control.
 package service
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 const Control = "NetSwitch"
 const Engine = "NetSwitchEngine"
@@ -16,4 +19,22 @@ type Config struct {
 type Status struct {
 	PID     uint32 `json:"pid"`
 	Running bool   `json:"running"`
+	Stopped bool   `json:"stopped"`
+}
+
+func WaitStopped(ctx context.Context, name string) error {
+	for {
+		s, err := Query(name)
+		if err != nil {
+			return err
+		}
+		if s.Stopped {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }

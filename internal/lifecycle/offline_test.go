@@ -96,6 +96,33 @@ func TestRemoteSnapshotRetainsFailureBeforeFirstAttachment(t *testing.T) {
 	}
 }
 
+func TestRPCTimeoutDoesNotDisconnectOtherRequests(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	rpc := NewRPC(client)
+	defer rpc.Close()
+	go func() {
+		scan := bufio.NewScanner(server)
+		for scan.Scan() {
+			var request map[string]any
+			_ = json.Unmarshal(scan.Bytes(), &request)
+			if request["method"] == "renew" {
+				_ = json.NewEncoder(server).Encode(map[string]any{"id": request["id"], "result": true})
+			}
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := rpc.Call(ctx, map[string]any{"method": "slow-stats"}, nil); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := rpc.Call(ctx, map[string]any{"method": "renew"}, nil); err != nil {
+		t.Fatal("a timed-out stats request broke the independent lease renewal:", err)
+	}
+}
+
 type failedListener struct {
 	conn *localipc.Conn
 	err  error

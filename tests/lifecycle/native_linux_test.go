@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/internal/localipc"
+	"github.com/AyoubAchour/net-switch/tests/linux/inet"
 )
 
 type linuxActor struct {
@@ -56,6 +57,7 @@ func verifyPermissions(t *testing.T, owner, other actor) {
 		}
 	}
 	c := openClient(t, other, false)
+	defer c.input.Close()
 	if _, err := c.call(t, "routing", map[string]any{"on": true}); err == nil {
 		t.Fatal("SO_PEERCRED accepted another UID")
 	}
@@ -71,15 +73,25 @@ func permissionProbe() error {
 	if info.Mode().Perm() != 0666 {
 		return fmt.Errorf("desktop socket mode is %o", info.Mode().Perm())
 	}
-	if _, err := os.ReadFile(filepath.Join(testData(), "owner.json")); err == nil {
-		return errors.New("user read owner store")
+	if _, err := os.ReadFile(filepath.Join(testData(), "owner.json")); !errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("protected enrollment must fail with permission denied, got %v", err)
 	}
 	fmt.Println("standard-user store access denied; desktop socket permits status")
 	return nil
 }
-func desktopDenied() error              { return nil }
-func probeMain([]string) int            { return 2 }
-func hostedMain(*testing.M) (bool, int) { return false, 0 }
+func desktopDenied() error   { return nil }
+func legacyMutex() error     { return errors.New("Windows only") }
+func probeMain([]string) int { return 2 }
+func hostedMain(*testing.M) (bool, int) {
+	if len(os.Args) > 1 && os.Args[1] == "serve" && hosted() {
+		if err := inet.Main(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return true, 1
+		}
+		return true, 0
+	}
+	return false, 0
+}
 func disableRecovery(t *testing.T) func() {
 	t.Helper()
 	dir := "/run/systemd/system/netswitch.service.d"

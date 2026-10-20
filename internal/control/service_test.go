@@ -99,3 +99,25 @@ func TestServiceCountsFailuresNotStatusObservations(t *testing.T) {
 		t.Fatal("a distinct failed attempt was not counted")
 	}
 }
+
+func TestServiceNoLinesWaitsWithoutAnEngineAttempt(t *testing.T) {
+	c, e, _, _ := testCore(t, map[string]any{"lines": []any{}})
+	c.op.ServiceMode = true
+	started := false
+	e.beforeStart = func() { started = true }
+	if err := c.Routing(context.Background(), true); err != nil {
+		t.Fatal(err)
+	}
+	if started || len(c.failureTimes) != 0 || !c.wanted {
+		t.Fatal("an empty configuration must wait for a line without consuming the failure budget")
+	}
+	if err := c.save(map[string]any{"lines": testLines()}); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.Lock()
+	c.syncLanesLocked()
+	c.mu.Unlock()
+	if err := c.Start(context.Background()); err != nil || !started {
+		t.Fatal("a configured line did not unblock the pending start", err)
+	}
+}

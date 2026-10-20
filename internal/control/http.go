@@ -21,13 +21,14 @@ func (e *ClientError) Error() string { return e.Message }
 func bad(message string) error       { return &ClientError{message} }
 
 type HTTP struct {
-	Core       *Core
-	Port       int
-	Token      string
-	Quit       func()
-	ValidToken func(string) bool
-	Pair       func(string) (string, error)
-	Asset      func(string, []byte) []byte
+	Core        *Core
+	Port        int
+	Token       string
+	Quit        func()
+	ValidToken  func(string) bool
+	Pair        func(string) (string, error)
+	PairAllowed func(*http.Request) bool
+	Asset       func(string, []byte) []byte
 }
 
 func (h *HTTP) sameToken(s string) bool {
@@ -69,6 +70,10 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	path := r.URL.Path
 	if path == "/api/pair" && r.Method == "POST" && h.Pair != nil {
+		if h.PairAllowed != nil && !h.PairAllowed(r) {
+			sendJSON(w, 403, map[string]any{"error": "Pairing is available only to the enrolled owner's browser."})
+			return
+		}
 		b, err := io.ReadAll(io.LimitReader(r.Body, 129))
 		var input struct {
 			Code string `json:"code"`

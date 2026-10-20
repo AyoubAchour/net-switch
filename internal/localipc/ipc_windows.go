@@ -118,7 +118,10 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 		err = windows.GetOverlappedResult(h, &over, &transferred, true)
 		stop()
 	}
-	if err != nil && err != windows.ERROR_PIPE_CONNECTED {
+	// A client can connect and close between CreateNamedPipe and this wait.
+	// Replace the listener while the old instance still protects its name.
+	closedClient := err == windows.ERROR_NO_DATA
+	if err != nil && err != windows.ERROR_PIPE_CONNECTED && !closedClient {
 		windows.CloseHandle(h)
 		l.mu.Lock()
 		if l.pending == h {
@@ -144,6 +147,10 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 	if err != nil {
 		windows.CloseHandle(h)
 		return nil, err
+	}
+	if closedClient {
+		windows.CloseHandle(h)
+		return nil, fmt.Errorf("%w: client disconnected before accept", ErrPeer)
 	}
 	var pid uint32
 	if err := windows.GetNamedPipeClientProcessId(h, &pid); err != nil {
