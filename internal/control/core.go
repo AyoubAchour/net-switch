@@ -753,6 +753,13 @@ func (c *Core) SignIn(ctx context.Context) error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
 	c.mu.Lock()
+	if !c.wanted {
+		// A new sign-in after logoff is a fresh routing intent. Repeated
+		// handshakes while that intent is already on keep its retry budget.
+		c.retryAttempts = 0
+		c.retryAt = 0
+		c.failureTimes = nil
+	}
 	c.wanted = true
 	c.mu.Unlock()
 	return c.persistJournal()

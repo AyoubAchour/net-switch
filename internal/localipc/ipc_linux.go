@@ -2,6 +2,7 @@ package localipc
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -101,19 +102,19 @@ func Listen(e Endpoint) (Listener, error) {
 	}
 	if e.Kind == "desktop" {
 		mode = 0600
-		// Set mode while root still owns the socket. CAP_CHOWN permits
-		// handing it over; chmod afterwards would require CAP_FOWNER too.
+		// Keep root ownership for stale-listener probing after a crash. A
+		// named ACL grants only the enrolled UID access; group zero gets none.
 		if err := os.Chmod(e.Path, mode); err != nil {
 			u.Close()
 			return nil, err
 		}
 		if e.Owner != "" {
-			uid, err := strconv.Atoi(e.Owner)
+			uid, err := strconv.ParseUint(e.Owner, 10, 32)
 			if err != nil {
 				u.Close()
 				return nil, err
 			}
-			if err := os.Chown(e.Path, uid, -1); err != nil {
+			if err := unix.Setxattr(e.Path, "system.posix_acl_access", ownerSocketACL(uint32(uid)), 0); err != nil {
 				u.Close()
 				return nil, err
 			}
@@ -125,6 +126,29 @@ func Listen(e Endpoint) (Listener, error) {
 		return nil, err
 	}
 	return &listener{u}, nil
+}
+
+func ownerSocketACL(uid uint32) []byte {
+	// Linux POSIX ACL xattr version 2; little-endian tag, permissions, ID.
+	entries := []struct {
+		tag, perm uint16
+		id        uint32
+	}{
+		{1, 6, ^uint32(0)},  // root file owner
+		{2, 6, uid},         // enrolled user
+		{4, 0, ^uint32(0)},  // owning group
+		{16, 6, ^uint32(0)}, // named-user mask
+		{32, 0, ^uint32(0)}, // everyone else
+	}
+	b := make([]byte, 4+8*len(entries))
+	binary.LittleEndian.PutUint32(b, 2)
+	for i, e := range entries {
+		o := 4 + i*8
+		binary.LittleEndian.PutUint16(b[o:], e.tag)
+		binary.LittleEndian.PutUint16(b[o+2:], e.perm)
+		binary.LittleEndian.PutUint32(b[o+4:], e.id)
+	}
+	return b
 }
 func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 	c, err := l.AcceptUnix()

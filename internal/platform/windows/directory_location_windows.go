@@ -60,6 +60,12 @@ func prepareMachineDirectory(path string, beforePublish func(string) error) (str
 	if !strings.EqualFold(resolved, path) {
 		return resolved, nil
 	}
+	// Reusing a certified live store needs no exclusive ACL/migration work.
+	// In particular, an engine lock held by our own running service is not a
+	// hostile occupant and must not cause a new location to be published.
+	if err := VerifyDirectory(path); err == nil {
+		return path, nil
+	}
 	// Validate ancestors before touching a candidate or choosing a new name.
 	for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
 		if err := wintrust.Path(parent, true); err != nil {

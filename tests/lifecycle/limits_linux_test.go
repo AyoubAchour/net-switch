@@ -7,9 +7,48 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
+
+func enrollmentRestarts(t *testing.T, ctx context.Context, owner actor, echo string) {
+	resetControlRecoveryWindow(t)
+	if err := service.Start(ctx, service.Control); err != nil {
+		t.Fatal(err)
+	}
+	c := openClient(t, owner, false)
+	defer c.input.Close()
+	c.must(t, "signin", nil, nil)
+	wait(t, "routing before enrollment restarts", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+	var session struct{ Token, URL string }
+	c.must(t, "session", nil, &session)
+	stream := proxyStream(t, session.URL, session.Token, echo)
+	defer stream.Close()
+	for range 6 {
+		before, err := service.Query(service.Control)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := service.RequestRestart(ctx, service.Control); err != nil {
+			t.Fatal(err)
+		}
+		wait(t, "intentional replacement stays prompt", 5*time.Second, func() bool {
+			s, e := service.Query(service.Control)
+			return e == nil && s.Running && s.PID != before.PID
+		})
+		checkEcho(t, stream)
+		b, err := exec.Command("systemctl", "show", "--property=NRestarts", "--value", "netswitch.service").Output()
+		n, parseErr := strconv.Atoi(strings.TrimSpace(string(b)))
+		if err != nil || parseErr != nil || n > 1 {
+			t.Fatal("enrollment accumulated crash backoff", string(b), err, parseErr)
+		}
+	}
+	if err := service.Stop(ctx, service.Control); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func resetControlRecoveryWindow(t *testing.T) {
 	t.Helper()

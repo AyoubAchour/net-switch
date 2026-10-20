@@ -71,16 +71,3 @@ func statusCapacity() error {
 	fmt.Printf("status listener survived %d standard-user connections without restarting Control\n", len(connections))
 	return nil
 }
-
-func pacedDisconnectBurst() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	for range 500 {
-		c, err := localipc.Dial(ctx, localipc.Endpoint{Path: localipc.DefaultPath("status"), Kind: "status", Service: service.Control})
-		if err != nil {
-			return err
-		}
-		c.Close()
-	}
-	return nil
-}

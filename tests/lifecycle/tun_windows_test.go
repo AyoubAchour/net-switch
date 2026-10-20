@@ -2,6 +2,7 @@ package lifecycle_test
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/lifecycle"
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 )
 
 func powershell(t *testing.T, script string, env ...string) []byte {
@@ -98,7 +100,7 @@ func prepareTUN(t *testing.T, dir, data string) tunFixture {
 		audit: func(t *testing.T) {
 			// Preserve the broader firewall assertion outside the native timed
 			// interval. ARM64 CIM inventory latency is not cleanup latency.
-			powershell(t, "$f=@(Get-NetFirewallRule | Where-Object DisplayName -like '*NetSwitch*'); if ($f.Count) {throw 'NetSwitch firewall leftovers'}")
+			powershell(t, "$a=@(Get-NetAdapter -IncludeHidden | Where-Object Name -eq NetSwitch); $r=@(Get-NetRoute | Where-Object InterfaceAlias -eq NetSwitch); $f=@(Get-NetFirewallRule | Where-Object DisplayName -like '*NetSwitch*'); if ($a.Count -or $r.Count -or $f.Count) {throw ('TUN leftovers: adapters={0} routes={1} rules={2}' -f $a.Count,$r.Count,$f.Count)}")
 		},
 	}
 }
@@ -140,6 +142,13 @@ func nativeTUNState(previous uint32) (uint32, int, error) {
 		if windows.UTF16ToString(row.Alias[:]) == "NetSwitch" {
 			index = row.InterfaceIndex
 			previous = index
+			present, err := nativeAdapterPresent(row.InterfaceGuid)
+			if err != nil {
+				return 0, 0, err
+			}
+			if !present {
+				index = 0
+			}
 		}
 	}
 	var routes *windows.MibIpForwardTable2
@@ -154,4 +163,47 @@ func nativeTUNState(previous uint32) (uint32, int, error) {
 		}
 	}
 	return index, count, nil
+}
+
+// IP Helper retains phantom interface rows after device removal. Presence is
+// a PnP property, not an OperStatus test: disabled live devices still count.
+// The installed precondition uses this exact lookup before any fault.
+func nativeAdapterPresent(target windows.GUID) (bool, error) {
+	class, err := windows.GUIDFromString("{4d36e972-e325-11ce-bfc1-08002be10318}")
+	if err != nil {
+		return false, err
+	}
+	devices, err := windows.SetupDiGetClassDevsEx(&class, "", 0, windows.DIGCF_PRESENT, 0, "")
+	if err != nil {
+		return false, err
+	}
+	defer windows.SetupDiDestroyDeviceInfoList(devices)
+	for i := 0; ; i++ {
+		device, err := devices.EnumDeviceInfo(i)
+		if errors.Is(err, windows.ERROR_NO_MORE_ITEMS) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		h, err := devices.OpenDevRegKey(device, windows.DICS_FLAG_GLOBAL, 0, windows.DIREG_DRV, registry.QUERY_VALUE)
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		key := registry.Key(h)
+		id, _, err := key.GetStringValue("NetCfgInstanceId")
+		key.Close()
+		if errors.Is(err, registry.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if strings.EqualFold(id, target.String()) {
+			return true, nil
+		}
+	}
 }

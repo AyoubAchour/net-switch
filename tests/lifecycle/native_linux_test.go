@@ -1,6 +1,7 @@
 package lifecycle_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/tests/linux/inet"
@@ -62,6 +64,14 @@ func verifyPermissions(t *testing.T, owner, other actor) {
 			t.Fatal(err, string(b))
 		}
 	}
+	probe := other.command(exe, "client", "desktop-denied")
+	// GID zero alone is not root authority. The private socket must grant
+	// the named owner UID, not every process that happens to share its group.
+	probe.SysProcAttr.Credential.Gid = 0
+	probe.SysProcAttr.Credential.Groups = []uint32{0}
+	if b, err := probe.CombinedOutput(); err != nil {
+		t.Fatal("private owner socket ACL", err, string(b))
+	}
 	c := openClient(t, other, true)
 	defer c.input.Close()
 	if _, err := c.call(t, "routing", map[string]any{"on": true}); err == nil {
@@ -85,7 +95,19 @@ func permissionProbe() error {
 	fmt.Println("standard-user store access denied; desktop socket permits status")
 	return nil
 }
-func desktopDenied() error   { return nil }
+func desktopDenied() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	c, err := localipc.Dial(ctx, localipc.Endpoint{Path: localipc.DefaultPath("desktop"), Kind: "desktop"})
+	if err == nil {
+		c.Close()
+		return errors.New("non-owner opened private owner socket")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("owner socket denial was not permissions: %w", err)
+	}
+	return nil
+}
 func legacyMutex() error     { return errors.New("Windows only") }
 func probeMain([]string) int { return 2 }
 func hostedMain(*testing.M) (bool, int) {

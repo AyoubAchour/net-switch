@@ -185,17 +185,34 @@ func accept(ctx context.Context, l localipc.Listener, serve func(*localipc.Conn)
 }
 
 type rejectionLog struct {
-	last       time.Time
+	mu         sync.Mutex
+	timer      *time.Timer
 	suppressed uint64
 }
 
 func (r *rejectionLog) report(log func(string), message string) {
-	if time.Since(r.last) < 10*time.Second {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.timer != nil {
 		r.suppressed++
 		return
 	}
 	log(fmt.Sprintf("%s (suppressed since previous report: %d)", message, r.suppressed))
-	r.last, r.suppressed = time.Now(), 0
+	r.suppressed = 0
+	r.timer = time.AfterFunc(10*time.Second, func() { r.flush(log, message) })
+}
+
+func (r *rejectionLog) flush(log func(string), message string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.suppressed == 0 {
+		r.timer = nil
+		return
+	}
+	log(fmt.Sprintf("%s (suppressed since previous report: %d)", message, r.suppressed))
+	r.suppressed = 0
+	// A final burst gets a summary even if no later rejection arrives.
+	r.timer = time.AfterFunc(10*time.Second, func() { r.flush(log, message) })
 }
 
 type connectionLimits struct {

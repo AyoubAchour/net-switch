@@ -62,6 +62,11 @@ func systemctl(ctx context.Context, args ...string) error {
 }
 func Start(ctx context.Context, name string) error { return systemctl(ctx, "start", unit(name)) }
 func RequestRestart(ctx context.Context, name string) error {
+	// Enrollment is an intentional replacement, not a crash. systemd 255's
+	// reset-failed also resets NRestarts, which drives RestartSteps.
+	if err := systemctl(ctx, "reset-failed", unit(name)); err != nil {
+		return err
+	}
 	return systemctl(ctx, "kill", "--kill-whom=main", "--signal=SIGUSR1", unit(name))
 }
 
@@ -115,7 +120,7 @@ func Install(c Config) error {
 	readCapabilities := "CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_SYS_PTRACE"
 	units := map[string]string{
 		"netswitch.socket":         "[Unit]\nDescription=Net Switch local desktop socket\n[Socket]\nListenStream=/run/netswitch/desktop.sock\nSocketMode=0666\nDirectoryMode=0755\nRemoveOnStop=yes\n[Install]\nWantedBy=sockets.target\n",
-		"netswitch.service":        "[Unit]\nDescription=Net Switch Control\nRequires=netswitch.socket\nAfter=netswitch.socket\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch") + " service --data " + quoted(c.Data) + "\nRestart=on-failure\nRestartSec=1s\nRestartSteps=4\nRestartMaxDelaySec=60s\nKillMode=control-group\nTimeoutStopSec=40s\nCapabilityBoundingSet=CAP_CHOWN " + readCapabilities + "\n" + common,
+		"netswitch.service":        "[Unit]\nDescription=Net Switch Control\nRequires=netswitch.socket\nAfter=netswitch.socket\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch") + " service --data " + quoted(c.Data) + "\nRestart=on-failure\nRestartSec=1s\nRestartSteps=4\nRestartMaxDelaySec=60s\nKillMode=control-group\nTimeoutStopSec=40s\nCapabilityBoundingSet=" + readCapabilities + "\n" + common,
 		"netswitch-engine.service": "[Unit]\nDescription=Net Switch Engine\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch-engine") + " service --data " + quoted(c.Data) + "\nExecStopPost=" + run("netswitchctl") + " cleanup --engine --data " + quoted(c.Data) + "\nRestart=no\nKillMode=mixed\nTimeoutStopSec=30s\nCapabilityBoundingSet=" + readCapabilities + "\nDeviceAllow=/dev/net/tun rw\n" + common,
 	}
 	if err := os.MkdirAll("/run/netswitch", 0755); err != nil {

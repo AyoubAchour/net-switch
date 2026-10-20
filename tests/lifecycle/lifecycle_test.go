@@ -561,6 +561,11 @@ func TestRealServices(t *testing.T) {
 		fresh := openClient(t, owner, false)
 		fresh.must(t, "session", nil, nil)
 		fresh.input.Close()
+		select {
+		case err := <-done:
+			t.Fatal("flood ended before owner admission was proved", err)
+		default:
+		}
 		if err := <-done; err != nil {
 			t.Fatal(err, output.String())
 		}
@@ -686,6 +691,7 @@ func TestRealServices(t *testing.T) {
 		checkEcho(t, stream)
 	})
 	t.Run("desktop-death-keeps-routing", func(t *testing.T) {
+		before := getStatus(t, c)
 		desktop := owner.command(filepath.Join(dir, binary("netswitch-desktop")), "--background")
 		if err := desktop.Start(); err != nil {
 			t.Fatal(err)
@@ -704,11 +710,12 @@ func TestRealServices(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = desktop.Wait()
-		if s := getStatus(t, c); s.Routing != "on" || s.Instance != first.Instance {
+		if s := getStatus(t, c); s.Routing != "on" || s.Instance != before.Instance {
 			t.Fatal("desktop death changed engine", s)
 		}
 	})
 	t.Run("control-crash-reattaches", func(t *testing.T) {
+		before := getStatus(t, c)
 		stream := proxyStream(t, session.URL, session.Token, echo)
 		defer stream.Close()
 		checkEcho(t, stream)
@@ -733,7 +740,7 @@ func TestRealServices(t *testing.T) {
 		wait(t, "engine reattach", 10*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 		s := getStatus(t, c)
 		engineAfter, err := service.Query(service.Engine)
-		if err != nil || s.Instance != first.Instance || engineAfter.PID != engine.PID {
+		if err != nil || s.Instance != before.Instance || engineAfter.PID != engine.PID {
 			t.Fatal("Control restart replaced engine", s, err)
 		}
 		checkEcho(t, stream)
@@ -1070,6 +1077,7 @@ func TestRealServices(t *testing.T) {
 		wait(t, "clean engine exit", 10*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
 	})
 	t.Run("control-start-limit-fails-open", func(t *testing.T) { controlStartLimit(t, ctx, owner, echo) })
+	t.Run("enrollment-restarts-do-not-backoff", func(t *testing.T) { enrollmentRestarts(t, ctx, owner, echo) })
 	t.Run("CLI-activates-stopped-Control", func(t *testing.T) { cliActivation(t, owner) })
 	t.Run("real-tun-fail-open", func(t *testing.T) { tunServices(t, config, owner) })
 }

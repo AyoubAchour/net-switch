@@ -73,3 +73,23 @@ func TestRepeatedLeaseStopsRecoverWithoutFailureBudget(t *testing.T) {
 		}
 	}
 }
+
+func TestNewSignInAfterLogoffResetsOldLatchWithoutStarting(t *testing.T) {
+	c, e, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	c.wanted = false
+	c.failureTimes = []int64{1, 2, 3, 4, 5}
+	c.retryAt = c.now() + 30000
+	e.calls = nil
+	if err := c.SignIn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.failureTimes) != 0 || c.retryAt != 0 || !c.wanted {
+		t.Fatal("fresh OS sign-in kept the previous intent's latch")
+	}
+	for _, call := range e.calls {
+		if call == "start" {
+			t.Fatal("sign-in bypassed supervisor")
+		}
+	}
+}
