@@ -54,6 +54,30 @@ func TestReleaseBlockerMustBeDeclaredAndActuallyMeasured(t *testing.T) {
 	}
 }
 
+func TestEarlyMandatoryFailureKeepsItsCauseBeforeAttribution(t *testing.T) {
+	for _, expect := range []bool{false, true} {
+		c := &Case{ID: "load", Title: "load", Label: Parity, ReleaseBlocker: "eBPF follow-up"}
+		if expect {
+			c.Label, c.Defect = BaselineDefect, "baseline capacity defect"
+		}
+		c.Run = func(t *T) {
+			if expect {
+				t.Expect(false, "the real capacity failure")
+				return
+			}
+			t.Require(false, "the real capacity failure")
+			t.ReleaseCheck(true, "unreachable attribution measurement")
+		}
+		r := run(t, V1, c)
+		if !r.JobFailed || r.Cases[0].Outcome != Fail || r.Cases[0].Error != "" || r.Cases[0].Detail() != "the real capacity failure" {
+			t.Fatalf("a missing later measurement hid the mandatory failure: %+v", r.Cases[0])
+		}
+		if err := CheckRelease([]*Case{c}); err == nil {
+			t.Fatal("the aborted measurement removed its release declaration")
+		}
+	}
+}
+
 func TestEveryReleaseMeasurementRemainsVisible(t *testing.T) {
 	r := run(t, V1, &Case{ID: "load", Title: "load", Label: Parity, ReleaseBlocker: "eBPF follow-up", Run: func(t *T) {
 		t.Check(true, "routing is correct")

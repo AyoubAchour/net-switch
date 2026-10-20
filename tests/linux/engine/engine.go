@@ -314,6 +314,7 @@ type Stats struct {
 	AdmittedUnknown, AdmittedUnknownUDP                           uint64
 	OwnerLookup                                                   json.RawMessage
 	TunKernel                                                     json.RawMessage
+	TCPFlows                                                      json.RawMessage
 	PeakFlows, PeakHandshakes, PeakUDP, PeakPerApp, PeakUDPPerApp int
 	// Gauges: what's in use now. TimeWait counts retained TIME_WAIT
 	// endpoints, which aren't live flows (5.9).

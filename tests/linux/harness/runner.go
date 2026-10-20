@@ -388,7 +388,10 @@ func runCase(parent context.Context, c *Case, opts Options) (CaseResult, string)
 			}
 		}
 	}
-	if opts.Kind == V1 && c.ReleaseBlocker != "" && tally.ReleaseChecks == 0 && result.Error == "" {
+	if opts.Kind == V1 && c.ReleaseBlocker != "" && tally.ReleaseChecks == 0 && tally.Failed == 0 && tally.ExpectFailed == 0 && result.Error == "" {
+		// A failed prerequisite may stop the case before attribution can be
+		// measured. Preserve that real failure instead of replacing its cause
+		// with a secondary missing-measurement error.
 		result.Error = "a declared release blocker must measure its release checks"
 		t.write("ERROR", result.Error)
 	}

@@ -330,6 +330,7 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		AdmittedUnknown: g.AdmittedUnknown, AdmittedUnknownUDP: g.AdmittedUnknownUDP,
 		OwnerLookup: nested["ownerLookup"],
 		TunKernel:   nested["tunKernel"],
+		TCPFlows:    nested["tcpFlows"],
 		PeakFlows:   g.PeakFlows, PeakHandshakes: g.PeakHandshakes, PeakUDP: g.PeakUDP, PeakPerApp: g.PeakPerApp, PeakUDPPerApp: g.PeakUDPPerApp,
 		Flows: int64(g.Flows), Handshakes: int64(g.Handshakes), UDP: int64(g.UDP),
 		Unknown: int64(g.Unknown), UnknownUDP: int64(g.UnknownUDP), TimeWait: int64(g.TimeWait),

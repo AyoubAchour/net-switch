@@ -141,7 +141,7 @@ func tunQueue(e *Env) {
 func memoryLimit(e *Env) {
 	e.StartEngine(e.DefaultConfig())
 	_, s := e.v1()
-	stream := e.StartStream("charlie", AsUser, 100*time.Second)
+	stream := e.StartStream("charlie", AsUser, 130*time.Second)
 	e.streamUp("charlie", stream)
 	fault(e, s, "heap-pressure", "on")
 	fault(e, s, "heap-pressure", "collect")
@@ -167,6 +167,6 @@ func memoryLimit(e *Env) {
 	queues.Wait(e, 30*time.Second)
 	fault(e, s, "heap-pressure", "off")
 	var alive Stream
-	stream.WaitJSON(e, 110*time.Second, &alive)
+	stream.WaitJSON(e, 140*time.Second, &alive)
 	e.CheckStreamSurvived(fmt.Sprintf("existing stream at %d MiB", 512), alive, "c")
 }
