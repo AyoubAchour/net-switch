@@ -74,8 +74,9 @@ func LookupPin(pinsJSON, version, arch string) (Pin, error) {
 
 // Download fetches the tarball, retrying, and checks its size and SHA-256.
 func Download(ctx context.Context, pin Pin) ([]byte, error) {
+	const maxAttempts = 4
 	var lastErr error
-	for attempt := 0; attempt < 4; attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-time.After(time.Duration(attempt*5) * time.Second):
@@ -84,13 +85,16 @@ func Download(ctx context.Context, pin Pin) ([]byte, error) {
 			}
 		}
 		data, err := get(ctx, pin.URL, pin.Size)
+		if err == nil {
+			err = Verify(data, pin)
+		}
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		return data, Verify(data, pin)
+		return data, nil
 	}
-	return nil, fmt.Errorf("download %s: %w", pin.URL, lastErr)
+	return nil, fmt.Errorf("download %s failed after %d attempts: %w", pin.URL, maxAttempts, lastErr)
 }
 
 func get(ctx context.Context, url string, size int64) ([]byte, error) {
