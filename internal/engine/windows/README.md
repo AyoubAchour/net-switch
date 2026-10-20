@@ -33,6 +33,10 @@ Owner snapshots use the all-state TCP table and the module-owner UDP table.
 UDP's creation timestamp is part of its generation; PID alone cannot identify a
 reopened socket. Lookup histograms are exposed by `stats`. A failed or incomplete
 UDP dump cannot renew the NAT's two-second validation bound.
+Concurrent first-packet lookups share one in-flight UDP dump per address family.
+Each lookup requires a dump started after that lookup began; an earlier cached
+positive cannot extend the observed same-port generation collision window.
+The once-per-second reconciliation still reads a separate complete native table.
 The optional datagram readiness adapter uses one shared `WSAEventSelect` event
 to wake a non-consuming, zero-timeout `WSAPoll` query. It performs no receive
 until the shared worker supplies its buffer. Microsoft documents `MSG_PEEK`
