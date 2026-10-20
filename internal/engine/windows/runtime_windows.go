@@ -57,6 +57,8 @@ func (r *Runtime) Start(ctx context.Context, revision policy.Revision) (policy.A
 }
 
 func (r *Runtime) Stop(ctx context.Context) error {
+	stopTrace := startStopTrace(ctx)
+	defer stopTrace()
 	finish := r.routes.timings.begin("engine.stop.total")
 	err := r.Engine.Stop(ctx)
 	finish()
