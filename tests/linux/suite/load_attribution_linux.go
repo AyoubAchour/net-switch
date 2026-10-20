@@ -5,6 +5,7 @@ package suite
 import (
 	"fmt"
 	"net/netip"
+	"slices"
 	"strconv"
 	"time"
 
@@ -102,16 +103,26 @@ func (e *Env) expectLoadTCP(label, name string, user User, want engine.LineID, d
 
 // A load declaration never covers recovery after that load has ended.
 func (e *Env) expectRecoveryTCP(label string) {
+	e.expectSteadyTCP(label, "bravo", "b", topo.Server4, 3)
+}
+
+func (e *Env) withSteadyAttribution(check func()) {
 	deferred := e.deferAttribution
 	e.deferAttribution = false
 	defer func() { e.deferAttribution = deferred }()
-	e.expectLoadTCP(label, "bravo", AsUser, "b", topo.Server4, 3)
+	check()
+}
+
+func (e *Env) expectSteadyTCP(label, name string, want engine.LineID, dst netip.Addr, count int) {
+	e.withSteadyAttribution(func() {
+		e.expectLoadTCP(label, name, AsUser, want, dst, count)
+	})
 }
 
 // Correlate each client's own local/remote tuple, its engine row, the source
 // returned over that very connection, and the server's independent accept log.
 // Opposite routing mistakes cannot disappear in aggregate line counts.
-func (e *Env) checkHeldTCP(held map[string]app.HeldList, apps map[string]*Bg) {
+func (e *Env) checkHeldTCP(held map[string]app.HeldList, apps map[string]*Bg, requireKnown ...string) {
 	rows := make(map[string]engine.Flow)
 	duplicates := 0
 	for _, f := range e.Flows() {
@@ -132,13 +143,14 @@ func (e *Env) checkHeldTCP(held map[string]app.HeldList, apps map[string]*Bg) {
 	invalid, total := duplicates, 0
 	seen := map[string]bool{}
 	for name, list := range held {
+		appName := apps[name].r.App
 		e.T.Check(list.Established == len(list.Conns), "%s reports every held tuple (%d/%d)", name, len(list.Conns), list.Established)
 		for _, c := range list.Conns {
 			key := c.Local + " " + c.Remote
 			f, present := rows[key]
-			line, _, err := loadFlowLine(f, AppPath(name), apps[name].Pid(), e.loadLine(name))
+			line, known, err := loadFlowLine(f, AppPath(appName), apps[name].Pid(), e.loadLine(appName))
 			serverKey := c.Seen + " " + c.Remote
-			if !present || err != nil || topo.LineOfText(c.Seen) != line || accepted[serverKey] != 1 || seen[key] {
+			if !present || err != nil || topo.LineOfText(c.Seen) != line || accepted[serverKey] != 1 || seen[key] || (!known && slices.Contains(requireKnown, name)) {
 				if invalid < 5 {
 					e.T.Logf("held tuple %s: present=%t identity=%v server=%s records=%d", key, present, err, c.Seen, accepted[serverKey])
 				}

@@ -87,6 +87,7 @@ func mixedCaps(e *Env) {
 		total += list.Established
 		e.T.Logf("MIXED TCP OFFER %s: held=%d errors=%v failure-ms=%+v", name, list.Established, list.Errors, list.FailedMS)
 	}
+	total += e.capacityTail(release, tcpApps, held)
 	// Still fail unless the exact cap is held, but preserve the profile and
 	// live accounting when a holder is missing so the failure is diagnosable.
 	e.T.Check(total == tcpFlowsTotal-udpSessionsTotal, "the TCP holders fill exactly the remaining 49,152 slots (%d)", total)
@@ -111,11 +112,11 @@ func mixedCaps(e *Env) {
 		float64(int64(full.Counters["stackBytes"])-int64(withTW.Counters["stackBytes"]))/float64(total),
 		float64(int64(withTW.Counters["heapBytes"])-int64(udpStats.Counters["heapBytes"]))/4096,
 		full.Counters["gcCPUNanos"]-baseline.Counters["gcCPUNanos"], full.Counters["totalCPUNanos"]-baseline.Counters["totalCPUNanos"], full.TunKernel, full.Counters["tunDropped"])
-	e.checkHeldTCP(held, tcpApps)
+	e.checkHeldTCP(held, tcpApps, capacityTailKey)
 	release.Open(e)
-	for _, name := range AppNames {
+	for name, bg := range tcpApps {
 		var result app.HoldResult
-		tcpApps[name].WaitJSON(e, 2*time.Minute, &result)
+		bg.WaitJSON(e, 2*time.Minute, &result)
 		e.T.Check(result.StillOpen == held[name].Established, "%s's mixed-cap TCP flows survived (%d/%d)", name, result.StillOpen, held[name].Established)
 	}
 	for _, bg := range udpApps {

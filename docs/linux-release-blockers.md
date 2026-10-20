@@ -64,6 +64,9 @@ Post-fault recovery is different: the three sequential probes after pending
 overload, unknown-owner overload and a stalled TUN writer must all identify
 bravo and use line b. Their identity and per-connection server checks are hard
 PR failures, even though the enclosing overload case retains its declaration.
+The sequential probes after handshake overload are hard too, as are other
+route-recovery probes. A regression runs an unknown recovery result inside a
+declared load case and requires the actual harness to fail the job.
 The DNS-change survival precondition now also requires zero discarded streams;
 its original no-retry verdict is an assertion, not only a diagnostic line.
 
@@ -76,9 +79,26 @@ survival and each held TCP tuple's identity/route/server correlation are hard.
 It reports baseline, UDP-only, UDP-plus-TIME_WAIT and mixed memory samples, so
 the incremental cost per session, per flow and per retained endpoint is visible.
 
-The total TCP cap fixture now offers ten apps' 8,000 attempts, with the same
-100 concurrent attempts per app. Even the app with the survival stream stays
-below its 8,192 limit. No failed attempt is retried. In the x64 run
+The total TCP cap fixture offers ten apps' 8,000 attempts, with the same
+100 concurrent attempts per app, followed by a fixed 100-attempt sequential
+tail from kilo. The tail always runs, even if the burst filled every slot.
+It waits for pending admissions to drain, requires the original burst to have
+reached the reservation cap, and requires zero tail lookup misses. Kilo remains
+below 8,192 even if all its 8,100 attempts succeed. No failed attempt is retried.
+The burst-only held-cap and attribution verdicts are logged before the tail;
+the exact final 65,536 held-flow assertion remains hard.
+The original pre-tail 99.5% formula remains a measured release check as well
+as the complete-case formula, so successful tail lookups cannot dilute it.
+
+This distinguishes temporary reservations from held connections: total capacity
+is reserved before lookup, so the last in-flight unknown-owner refusal can free
+a slot after other clients have received their total-cap refusals. Run
+39483757994, Ubuntu 26 x64, ended at 65,535 TCP-only flows and 65,534 mixed
+flows with only explicit refusals. Both remained failed cap tests. The mixed
+fixture uses the same fixed tail and still requires 49,152 TCP, 16,384 UDP and
+4,096 TIME_WAIT simultaneously. It never fills adaptively until a check passes.
+
+In the earlier x64 run
 [39441805445](https://github.com/AyoubAchour/net-switch/actions/runs/39441805445),
 the former 68,400 attempts produced 63,176 identified flows plus 2,048 unknown
 flows: only 65,224 live flows. That run correctly failed the unchanged exact
