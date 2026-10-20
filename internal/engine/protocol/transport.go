@@ -10,9 +10,10 @@ import (
 )
 
 type connection struct {
-	events  chan Event
-	replies chan Reply
-	slots   chan struct{}
+	events   chan Event
+	replies  chan Reply
+	slots    chan struct{}
+	finished func()
 }
 
 // Serve owns the transport until EOF or cancellation. Its reader and writer
@@ -23,7 +24,7 @@ func (s *Server) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 	defer rw.Close()
 	stop := context.AfterFunc(ctx, func() { rw.Close() })
 	defer stop()
-	c := &connection{events: make(chan Event, 64), replies: make(chan Reply, Outstanding), slots: make(chan struct{}, Outstanding)}
+	c := &connection{events: make(chan Event, 64), replies: make(chan Reply, Outstanding), slots: make(chan struct{}, Outstanding), finished: s.finished}
 	s.mu.Lock()
 	if len(s.clients) >= 4 {
 		s.mu.Unlock()
@@ -148,6 +149,9 @@ func (c *connection) write(ctx context.Context, w io.Writer) error {
 		}
 		if reply {
 			<-c.slots
+			if value.(Reply).terminal && c.finished != nil {
+				c.finished()
+			}
 		}
 	}
 }

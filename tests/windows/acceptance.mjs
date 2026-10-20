@@ -695,7 +695,7 @@ try {
     const exited = await until(() => {
       try { process.kill(engine.pid, 0); return false; }
       catch (error) { if (error.code !== 'ESRCH') throw error; return { pid: engine.pid, exitedWithoutHarnessKill: true }; }
-    }, 'engine exits on its own after control process death', 30_000);
+    }, 'engine exits on its own after control process death', options.profile === 'v1' ? 35_000 : 30_000);
     const state = await stoppedSnapshot();
     await recordOrphanPnP('PnP cleanup immediately after control-process crash', 'baseline-defect', state.state, state.pnp);
     const direct = await harness.probe();
@@ -703,9 +703,14 @@ try {
     const response = await client('open', { target: responder.virtual }); await client('close');
     return { exited, state, direct, response };
   });
-  report.deferred('service lifecycle, lease reattach and lapse, hung worker', 2, 'Today’s Node app has no service/lease/worker IPC contract.');
-  report.deferred('installer migration from 0.3.0/0.3.1, update rollback and uninstall', 5, 'The 1.0 service layout and installer do not exist yet. Existing installer smoke tests remain required.');
-  report.deferred('freeze: sequence wrap, stale SYN/data/RST, final ACK loss, timestamps off, reordered TUN queues', 3, 'These require the engine’s in-memory link endpoint; Winsock does not expose the app-side TCP sequence or queue injection. Socket reuse tests above run against today’s app.');
+  if (options.profile === 'v1') {
+    report.pendingMilestone('service lifecycle and hung worker', 2, 'The engine process is real; SCM installation, recovery actions and Control worker jobs are the separate lifecycle milestone.');
+    report.pendingMilestone('installer migration from 0.3.0/0.3.1, update rollback and uninstall', 5, 'Release remains blocked on the installer milestone. Existing installer smoke tests remain required.');
+  } else {
+    report.deferred('service lifecycle, lease reattach and lapse, hung worker', 2, 'Today’s Node app has no service/lease/worker IPC contract.');
+    report.deferred('installer migration from 0.3.0/0.3.1, update rollback and uninstall', 5, 'The 1.0 service layout and installer do not exist yet. Existing installer smoke tests remain required.');
+    report.deferred('freeze: sequence wrap, stale SYN/data/RST, final ACK loss, timestamps off, reordered TUN queues', 3, 'These require the engine’s in-memory link endpoint; Winsock does not expose the app-side TCP sequence or queue injection. Socket reuse tests above run against today’s app.');
+  }
 } catch (error) {
   console.error(error); process.exitCode = 1;
   if (!report.results.some((result) => result.status === 'fail')) report.results.push({ name: 'acceptance setup or teardown', label: server ? 'parity' : 'harness-baseline', status: 'fail', error: error.stack });

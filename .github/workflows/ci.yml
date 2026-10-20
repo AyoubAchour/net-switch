@@ -143,6 +143,10 @@ jobs:
           package-manager-cache: false
       - name: Build gateway and separately addressed probe process
         run: |
+          go build -o dist/windows-test/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -v ./internal/engine/...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./tests/windows/testisp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
@@ -170,9 +174,9 @@ jobs:
         run: |
           ./scripts/fetch-engine.ps1
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
-      - name: Run acceptance against today's Node server and sing-box
+      - name: Run the 1.0 profile against the real Windows engine
         run: |
-          node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry server.mjs --engine-exe engine/sing-box.exe --profile baseline
+          node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep report, executable identities and traffic evidence
         if: always()

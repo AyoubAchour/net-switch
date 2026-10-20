@@ -29,6 +29,10 @@ export class Report {
     }
   }
   deferred(name, milestone, reason) { this.results.push({ name, label: 'parity', status: 'deferred', milestone, reason }); }
+  pendingMilestone(name, milestone, reason) {
+    if (![2, 5].includes(milestone)) throw new Error('Only lifecycle and installer work may be pending in the engine profile');
+    this.results.push({ name, label: 'parity', status: 'pending-milestone', milestone, reason });
+  }
   async save(file) {
     const counts = this.results.reduce((all, { label, status }) => {
       const group = all[label] ??= {};
@@ -36,6 +40,8 @@ export class Report {
       return all;
     }, {});
     console.log(`CASE COUNTS ${JSON.stringify({ architecture: process.arch, counts })}`);
-    await writeFile(file, JSON.stringify({ profile: this.profile, architecture: process.arch, results: this.results }, null, 2));
+    const releaseReady = !this.results.some(({ status }) => status !== 'pass');
+    const oldV1WouldPass = !this.results.some(({ status }) => status !== 'pass');
+    await writeFile(file, JSON.stringify({ profile: this.profile, architecture: process.arch, releaseReady, oldV1WouldPass, results: this.results }, null, 2));
   }
 }
