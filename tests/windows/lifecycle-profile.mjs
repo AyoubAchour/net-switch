@@ -21,6 +21,7 @@ const result = { architecture: process.arch, complete: false, variants: [] };
 let harness, responder, active, client, inspection;
 const calls = new Map();
 let serial = 0;
+const priorAdapterFirst = process.env.NETSWITCH_ENGINE_ADAPTER_FIRST;
 
 const ask = (command, args = {}) => new Promise((resolve, reject) => {
   const id = ++serial;
@@ -67,13 +68,19 @@ try {
   // The legacy engine leaves a non-present adapter after stop. Measure 1.0
   // first so that its intentional refusal to adopt a foreign adapter cannot
   // turn the legacy cleanup defect into a failed 1.0 startup precondition.
-  for (const [name, options] of [['1.0', native], ['0.3.x', legacy]]) {
+  const variants = [['1.0', native, false]];
+  if (process.argv.includes('--adapter-first-comparison')) variants.push(['1.0-adapter-first', native, true]);
+  variants.push(['0.3.x', legacy, false]);
+  for (const [name, options, adapterFirst] of variants) {
+    const isNative = options.profile === 'v1';
+    process.env.NETSWITCH_ENGINE_ADAPTER_FIRST = adapterFirst ? '1' : '0';
     const data = path.join(directory, name);
     await mkdir(data, { recursive: true });
     await writeFile(path.join(data, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
     const variant = { name, executables: await recordLaunch(options), setup: {}, phases: {},
-      nativeStopProfiled: name === '1.0' && process.env.NETSWITCH_ENGINE_STOP_TRACE === '1',
-      nativeCloseAfterRoutes: name === '1.0' && process.env.NETSWITCH_ENGINE_CLOSE_AFTER_ROUTES === '1' };
+      nativeStopProfiled: isNative && process.env.NETSWITCH_ENGINE_STOP_TRACE === '1',
+      nativeCloseAfterRoutes: isNative && process.env.NETSWITCH_ENGINE_CLOSE_AFTER_ROUTES === '1',
+      nativeAdapterFirst: adapterFirst };
     result.variants.push(variant);
     const nativeStart = output.events.length;
     active = await timedPhase(variant.setup, 'controllerLaunchMs', () => startServer(options, data, output));
@@ -95,7 +102,7 @@ try {
     await timedPhase(variant.phases, 'clientCloseMs', () => ask('close'));
     const after = await timedPhase(variant.phases, 'harnessAfterFlowStatsMs', () => harness.control('stats'));
     assert(after.testisp.connections > before.testisp.connections, 'First flow did not cross TestISP');
-    if (name === '1.0') {
+    if (isNative) {
       variant.runningEngine = await timedPhase(variant.phases, 'harnessEngineStatsMs', () => active.api('engine-command', { method: 'stats' }));
     }
     variant.runningInspection = await inspectState(variant.phases, true);
@@ -124,4 +131,6 @@ try {
   if (inspection) await inspection.close().catch((error) => { result.inspectionError = error.stack; process.exitCode = 1; });
   await writeFile(path.join(directory, 'report.json'), JSON.stringify(result, null, 2));
   log.end();
+  if (priorAdapterFirst === undefined) delete process.env.NETSWITCH_ENGINE_ADAPTER_FIRST;
+  else process.env.NETSWITCH_ENGINE_ADAPTER_FIRST = priorAdapterFirst;
 }
