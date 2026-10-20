@@ -24,6 +24,10 @@ import (
 
 type bindingTable map[string]Adapter
 
+func (r *Routes) StopPhase(name string) func() {
+	return r.timings.begin("engine.stop." + name)
+}
+
 type Routes struct {
 	Instance    string
 	mu          sync.Mutex

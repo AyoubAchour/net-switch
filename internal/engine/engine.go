@@ -244,23 +244,38 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return e.stopLocked(ctx)
 }
 func (e *Engine) stopLocked(ctx context.Context) error {
+	phase := func(string) func() { return func() {} }
+	if timing, ok := e.deps.Routes.(interface{ StopPhase(string) func() }); ok {
+		phase = timing.StopPhase
+	}
+	finish := phase("quiesce")
 	if routes, ok := e.deps.Routes.(platform.RouteQuiescer); ok {
 		routes.Quiesce()
 	}
+	finish()
+	finish = phase("flow-close")
 	if e.cancel != nil {
 		e.cancel()
 	}
 	e.Table.Unload()
 	e.Table.CloseAll()
+	finish()
+	finish = phase("tcp-stop")
 	if e.tcp != nil {
 		e.tcp.Stop()
 	}
+	finish()
+	finish = phase("stack-close")
 	if e.stack != nil {
 		e.stack.Close()
 	}
+	finish()
+	finish = phase("udp-close")
 	if e.udp != nil {
 		e.udp.Close()
 	}
+	finish()
+	finish = phase("tun-signal")
 	joinTun := func() error { return nil }
 	if e.tun != nil {
 		if starter, ok := e.tun.(platform.TunCloseStarter); ok {
@@ -270,16 +285,25 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 			e.tun.Close()
 		}
 	}
+	finish()
+	finish = phase("pumps-join")
 	e.pumps.Wait()
+	finish()
+	finish = phase("stack-join")
 	if e.stack != nil {
 		e.stack.Wait()
 	}
+	finish()
+	finish = phase("tcp-join")
 	if e.tcp != nil {
 		e.tcp.Wait()
 	}
+	finish()
+	finish = phase("link-close")
 	if e.link != nil {
 		e.link.Close()
 	}
+	finish()
 	e.stack = nil
 	e.tcp = nil
 	e.udp = nil
