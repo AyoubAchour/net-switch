@@ -534,12 +534,19 @@ try {
   });
   await report.test('cap exhaustion closes old secondary flows and preserves main flows', 'parity', async () => {
     const prepare = async (stage, fn) => {
+      const started = performance.now();
       try { return await fn(); }
       catch (cause) {
         const error = new Error(`${stage}: ${cause.message}`, { cause });
-        error.evidence = { stage,
+        error.evidence = { stage, elapsedMs: performance.now() - started, at: new Date().toISOString(),
           state: await server.api('state').catch((error) => ({ error: error.message })),
-          gateway: await harness.control('stats').catch((error) => ({ error: error.message })) };
+          gateway: await harness.control('stats').catch((error) => ({ error: error.message })),
+          diagnostics: await harness.control('diagnostics').catch((error) => ({ error: error.message })),
+          heartbeat: await client('heartbeat').catch((error) => ({ error: error.message })),
+          responder: responder.seen.slice(-30),
+          logs: Object.fromEntries(await Promise.all(['server.log', 'engine.log'].map(async (name) => [name,
+            await readFile(path.join(dataDir, name), 'utf8').then((value) => value.split('\n').slice(-30).join('\n')).catch(String)]))) };
+        console.error(`CAP SETUP FAILURE ${JSON.stringify(error.evidence)}`);
         throw error;
       }
     };

@@ -73,6 +73,8 @@ export async function startHarness(directory) {
   processHandle.on('error', (error) => { spawnError = error; });
   const exited = new Promise((resolve) => processHandle.on('close', resolve));
   const control = async (endpoint, body) => {
+    const started = performance.now();
+    try {
     const response = await fetch(`${state.control}/${endpoint}`, { method: body === undefined ? 'GET' : 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) });
@@ -83,6 +85,13 @@ export async function startHarness(directory) {
       assert(!result.ring.error, `GetIfEntry2Ex failed: ${result.ring.error}`);
     }
     return result;
+    } catch (cause) {
+      const evidence = { endpoint, elapsedMs: performance.now() - started, pid: processHandle.pid,
+        exitCode: processHandle.exitCode, signal: processHandle.signalCode, cause: cause.cause?.message ?? cause.message,
+        log: await readFile(path.join(dir, 'testisp.log'), 'utf8').then((value) => value.split('\n').slice(-40).join('\n')).catch(String) };
+      console.error(`TestISP control failure ${JSON.stringify(evidence)}`);
+      throw new Error(`TestISP ${endpoint}: ${JSON.stringify(evidence)}`, { cause });
+    }
   };
   // A caller's finally may close again after a failure. Preserve the first
   // pre-recovery snapshot and error instead of inspecting a recovered device.
@@ -149,7 +158,9 @@ export async function startHarness(directory) {
     await network('configure');
     await writeFile(path.join(dir, 'network.json'), JSON.stringify({ uplink, testisp: state }, null, 2));
     const probe = async (line, failure = false) => {
+      console.log(`TestISP probe start ${JSON.stringify({ at: new Date().toISOString(), line, failure })}`);
       const result = await run(probeExe, ['probe', ...(line ? ['--interface', String(line.index), '--source', line.address] : [])], { failure, timeout: 10_000 });
+      console.log(`TestISP probe end ${JSON.stringify(result)}`);
       if (!failure) {
         const response = JSON.parse(result.stdout);
         assert.match(response.body, /(?:^|\n)ip=/, 'Real HTTPS trace body missing');

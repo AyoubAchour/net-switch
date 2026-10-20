@@ -176,6 +176,9 @@ func serve(args []string) error {
 	})
 	mux.HandleFunc("POST /stop", func(w http.ResponseWriter, r *http.Request) { g.close(); fmt.Fprint(w, "{}") })
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		log.Printf("control request peer=%s method=%s path=%s", r.RemoteAddr, r.Method, r.URL.Path)
+		defer func() { log.Printf("control response peer=%s path=%s elapsed=%s", r.RemoteAddr, r.URL.Path, time.Since(started)) }()
 		if r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "unauthorized", 401)
 			return
@@ -184,7 +187,7 @@ func serve(args []string) error {
 		mux.ServeHTTP(w, r)
 	}), ReadHeaderTimeout: 3 * time.Second}
 	go func() {
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Serve(controlListener{listener}); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Print(err)
 			g.close()
 		}
