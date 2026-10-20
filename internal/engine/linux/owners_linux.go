@@ -39,6 +39,7 @@ type cachedHolders struct {
 }
 type fdWindow struct {
 	start      uint64
+	directory  uint64 // inode of the pinned kernel proc fd directory
 	next       int64
 	high       int64 // end of the sequentially indexed range; tail probes cannot advance it
 	extent     int64 // largest descriptor observed, including tail probes
@@ -49,6 +50,7 @@ type fdWindow struct {
 	assisting  chan struct{}
 	fullScan   time.Time // start of a completed, wholly indexed descriptor pass
 	fullUID    uint32
+	identity   *ownerValidation
 }
 type Owners struct {
 	queries         diagPool
@@ -57,6 +59,8 @@ type Owners struct {
 	cgroupStats     [3]atomic.Uint64
 	sharedScans     atomic.Uint64
 	assistedScans   atomic.Uint64
+	metadataPasses  atomic.Uint64
+	sharedMetadata  atomic.Uint64
 	lastLookupError atomic.Pointer[string]
 	mu              sync.Mutex
 	cgroupMu        sync.RWMutex
@@ -81,6 +85,7 @@ type lookupStats struct {
 	LastMetadataError                            string
 	SharedScans                                  uint64
 	AssistedScans                                uint64
+	MetadataPasses, SharedMetadata               uint64
 }
 
 func (o *Owners) Stats() any {
@@ -89,6 +94,7 @@ func (o *Owners) Stats() any {
 	s.MetadataRejected = rejectedMetadata.Load()
 	s.SharedScans = o.sharedScans.Load()
 	s.AssistedScans = o.assistedScans.Load()
+	s.MetadataPasses, s.SharedMetadata = o.metadataPasses.Load(), o.sharedMetadata.Load()
 	if p := lastRejectedMetadata.Load(); p != nil {
 		s.LastMetadataError = *p
 	}
@@ -496,15 +502,22 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 		validationStarted := time.Now()
 		defer func() { validationTime += time.Since(validationStarted) }()
-		got, ok := socketInodeAt(unix.AT_FDCWD, fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd))
+		path := fmt.Sprintf("/proc/%d/fd/%s", h.pid, h.fd)
+		got, ok := socketInodeAt(unix.AT_FDCWD, path)
 		if !ok || got != r.inode {
 			return nil
 		}
-		// processOwnerAt checks this incarnation's start time after all
-		// metadata reads, before returning an identity. Another stat here is
-		// redundant: a recycled PID is still rejected by that final check.
-		live, err := processOwnerAt(h.pid, h.start)
+		// A shared metadata read must begin after this descriptor check.
+		// Check the descriptor again afterward, before accepting the holder.
+		checked := time.Now()
+		live, err := o.validationFor(h).resolve(ctx, checked, o)
 		if err != nil || live.StartTime != h.start {
+			if errors.Is(err, os.ErrNotExist) {
+				o.invalidateStart(h)
+			}
+			return nil
+		}
+		if got, ok := socketInodeAt(unix.AT_FDCWD, path); !ok || got != r.inode {
 			return nil
 		}
 		if result.AppID != "" && result.AppID != live.AppID {
@@ -604,11 +617,19 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				return nil
 			}
 		}
-		start, err := processStart(pid)
+		dir := fmt.Sprintf("/proc/%d/fd", pid)
+		f, err := openProcDescriptors(dir)
 		if err != nil {
 			return nil
 		}
-		dir := fmt.Sprintf("/proc/%d/fd", pid)
+		defer f.Close()
+		descriptor := f.fd
+		var metadata unix.Stat_t
+		if unix.Fstat(descriptor, &metadata) != nil {
+			return nil
+		}
+		canIndex := metadata.Uid == r.uid || slices.Contains(recent, pid)
+		lastPID, lastUID, lastIndexed = pid, metadata.Uid, canIndex
 		// Share the normal scanner's hints. A descheduled scanner must not
 		// hold every follower until its deadline: after a short wait, allow
 		// one targeted assistant for this same process, never an unrelated walk.
@@ -636,7 +657,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 		}
 		current := o.windows[pid]
 		shared := func() bool {
-			return current.start == start && current.fullUID == r.uid && !current.fullScan.Before(requested)
+			return current.directory == metadata.Ino && current.fullUID == r.uid && !current.fullScan.Before(requested)
 		}
 		if shared() {
 			o.mu.Unlock()
@@ -698,6 +719,9 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			}
 		}
 		scanStarted := time.Now()
+		if current.directory != metadata.Ino {
+			current = fdWindow{directory: metadata.Ino, lastFD: -1, scanning: current.scanning, assisting: current.assisting}
+		}
 		if assist {
 			current.assisting = gate
 			o.assistedScans.Add(1)
@@ -727,20 +751,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			close(gate)
 			o.mu.Unlock()
 		}()
-		f, err := openProcDescriptors(dir)
-		if err != nil {
-			return nil
-		}
+		// Close before releasing the gate and validating metadata; the early
+		// defer also covers paths that never acquired a scanner slot.
 		defer f.Close()
-		descriptor := f.fd
-		var metadata unix.Stat_t
-		canIndex := (unix.Fstat(descriptor, &metadata) == nil && metadata.Uid == r.uid) || slices.Contains(recent, pid)
-		lastPID, lastUID, lastIndexed = pid, metadata.Uid, canIndex
 		o.mu.Lock()
 		window := o.windows[pid]
-		if window.start != start {
-			window = fdWindow{start: start, lastFD: -1, scanning: window.scanning, assisting: window.assisting}
-		}
+		start := window.start
 		// Once a live holder is known, reuse other processes' very recent
 		// search windows. A burst must not rescan the same 64 descriptors in
 		// every concurrent lookup. Positive hints are always revalidated above.
@@ -779,6 +795,26 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				return true
 			}
 			if canIndex || uint32(inode) == r.inode {
+				// Processes without socket descriptors need no stat read.
+				// A directory inode only scopes search hints; accept still
+				// validates the live fd and the PID incarnation before use.
+				if start == 0 {
+					var err error
+					start, err = processStart(pid)
+					if err != nil {
+						return true
+					}
+					o.mu.Lock()
+					current := o.windows[pid]
+					if current.directory == metadata.Ino {
+						if current.start != start {
+							current.identity = nil
+						}
+						current.start = start
+						o.windows[pid] = current
+					}
+					o.mu.Unlock()
+				}
 				remember[uint32(inode)] = holder{pid, start, string(fd)}
 				if len(remember) >= 32 {
 					o.publish(remember)
@@ -794,7 +830,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			o.publish(remember)
 			o.mu.Lock()
 			defer o.mu.Unlock()
-			if current := o.windows[pid]; current.start == start {
+			if current := o.windows[pid]; current.directory == metadata.Ino {
 				current.high = max(current.high, maxFD)
 				current.extent = max(current.extent, maxSeen)
 				current.observed = time.Now()
@@ -879,7 +915,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				if tail, err := descriptorTail(&f, pid, expired); err == nil {
 					o.mu.Lock()
 					current := o.windows[pid]
-					if current.start == start {
+					if current.directory == metadata.Ino {
 						current.tailProbed = true
 						current.extent = max(current.extent, tail)
 						o.windows[pid] = current
@@ -908,7 +944,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 					heavy = append(heavy, pid)
 				}
 				o.mu.Lock()
-				if current := o.windows[pid]; current.start == start {
+				if current := o.windows[pid]; current.directory == metadata.Ino {
 					current.next = 0
 					o.windows[pid] = current
 				}
