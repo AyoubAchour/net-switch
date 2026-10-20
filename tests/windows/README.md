@@ -5,6 +5,9 @@ the gateway, clients, server, engine or PowerShell network scripts on a develope
 PC. Local checks are syntax, vet and build only, at Idle priority with two cores.
 All tests run in CI.
 
+See the [Windows HTTP failure investigation](ci-failure-investigation.md) for the
+original control reset and cap-setup timeout, retained diagnostics and repeat counts.
+
 The existing app and release packaging are unchanged. `Windows acceptance / x64`
 and `Windows acceptance / ARM64` have a 25-minute job limit and upload reports,
 executable identities, target observations and logs even after a failed test.

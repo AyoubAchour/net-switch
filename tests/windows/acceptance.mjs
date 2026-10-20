@@ -135,6 +135,18 @@ async function counts(total) {
   }, `${total} real test-app flows in app state`, 25_000);
 }
 
+async function engineConnections() {
+  const config = JSON.parse(await readFile(path.join(dataDir, 'engine-config.json'), 'utf8'));
+  const { external_controller: controller, secret } = config.experimental.clash_api;
+  assert(/^127\.0\.0\.1:\d+$/.test(controller), 'Expected the owned engine loopback API');
+  const response = await fetch(`http://${controller}/connections`, {
+    headers: { Authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(5000),
+  });
+  assert(response.ok, `Engine connections: HTTP ${response.status}`);
+  return { pid: (await readFile(path.join(dataDir, 'engine.pid'), 'utf8')).trim(),
+    connections: (await response.json()).connections };
+}
+
 async function newPublicOn(line, count = 3) {
   await pin(line.id);
   const before = await harness.control('stats');
@@ -534,21 +546,37 @@ try {
   });
   await report.test('cap exhaustion closes old secondary flows and preserves main flows', 'parity', async () => {
     const prepare = async (stage, fn) => {
+      const started = performance.now();
       try { return await fn(); }
       catch (cause) {
         const error = new Error(`${stage}: ${cause.message}`, { cause });
-        error.evidence = { stage,
-          state: await server.api('state').catch((error) => ({ error: error.message })),
-          gateway: await harness.control('stats').catch((error) => ({ error: error.message })) };
+        error.evidence = { stage, elapsedMs: performance.now() - started, at: new Date().toISOString(), responder: responder.seen.slice(-30) };
+        // Capture the short packet/request histories immediately, even if the
+        // app's state API is the component that has stopped responding.
+        Object.assign(error.evidence, Object.fromEntries(await Promise.all(Object.entries({
+          state: server.api('state'),
+          engineConnections: engineConnections(),
+          gateway: harness.control('stats'),
+          diagnostics: harness.control('diagnostics'),
+          heartbeat: client('heartbeat', {}, 5000),
+          requests: client('requests', {}, 5000),
+          logs: Promise.all([
+            ['server', path.join(dataDir, 'server.log')],
+            ['engine', path.join(dataDir, 'engine.log')],
+            ['gateway', path.join(dir, 'testisp', 'testisp.log')],
+          ].map(async ([name, file]) => [name,
+            await readFile(file, 'utf8').then((value) => value.split('\n').slice(-30).join('\n')).catch(String)])).then(Object.fromEntries),
+        }).map(async ([name, promise]) => [name, await promise.catch((error) => ({ error: error.message }))]))));
+        console.error(`CAP SETUP FAILURE ${JSON.stringify(error.evidence)}`);
         throw error;
       }
     };
-    await pin(main.id);
+    await prepare('pinning the client to the main line', () => pin(main.id));
     const mainHeld = await prepare('opening the main-line HTTPS flows', () => client('open', { count: 2 }));
-    await pinApp(clientExe, second.id);
+    await prepare('pinning the client to the secondary line', () => pinApp(clientExe, second.id));
     const secondHeld = await prepare('opening the controlled secondary-line HTTP flows',
       () => client('open', { count: 2, target: responder.virtual }));
-    await counts(4);
+    await prepare('waiting for all four setup flows in app state', () => counts(4));
     try {
       // Main has no stand-in, so its exception must preserve these sockets.
       await applied('lines/update', { id: second.id, strict: true }, (state) => state.lines.find((line) => line.id === second.id)?.strict);

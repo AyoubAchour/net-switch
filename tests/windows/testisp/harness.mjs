@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
+import { subscribe, unsubscribe } from 'node:diagnostics_channel';
 import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -72,17 +73,51 @@ export async function startHarness(directory) {
   let spawnError;
   processHandle.on('error', (error) => { spawnError = error; });
   const exited = new Promise((resolve) => processHandle.on('close', resolve));
+  const httpEvents = [];
+  const channels = ['client:beforeConnect', 'client:connected', 'client:sendHeaders', 'client:connectError', 'request:error'];
+  const observers = channels.map((name) => {
+    const observe = (event) => {
+      if (!state) return;
+      const origin = event.request?.origin;
+      if (origin ? String(origin) !== state.control : event.connectParams?.host !== new URL(state.control).host) return;
+      httpEvents.push({ at: new Date().toISOString(), event: name, path: event.request?.path,
+        localPort: event.socket?.localPort, error: event.error?.message });
+      if (httpEvents.length > 64) httpEvents.shift();
+    };
+    subscribe(`undici:${name}`, observe);
+    return observe;
+  });
   const control = async (endpoint, body) => {
-    const response = await fetch(`${state.control}/${endpoint}`, { method: body === undefined ? 'GET' : 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) });
-    assert(response.ok, `${endpoint}: HTTP ${response.status}`);
-    const result = await response.json();
-    if (endpoint === 'diagnostics') {
-      assert.equal(result.windowsTCP.error, 0, 'GetTcpStatistics failed; retransmit evidence is unavailable');
-      assert(!result.ring.error, `GetIfEntry2Ex failed: ${result.ring.error}`);
+    const started = performance.now();
+    let phase = 'request';
+    try {
+      const response = await fetch(`${state.control}/${endpoint}`, { method: body === undefined ? 'GET' : 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) });
+      phase = 'response';
+      assert(response.ok, `${endpoint}: HTTP ${response.status}`);
+      const result = await response.json();
+      if (endpoint === 'diagnostics') {
+        assert.equal(result.windowsTCP.error, 0, 'GetTcpStatistics failed; retransmit evidence is unavailable');
+        assert(!result.ring.error, `GetIfEntry2Ex failed: ${result.ring.error}`);
+      }
+      return result;
+    } catch (cause) {
+      const evidence = { endpoint, phase, at: new Date().toISOString(), url: state?.control,
+        elapsedMs: performance.now() - started, pid: processHandle.pid,
+        exitCode: processHandle.exitCode, signal: processHandle.signalCode,
+        code: cause.cause?.code ?? cause.code, cause: cause.cause?.message ?? cause.message,
+        httpEvents: [...httpEvents],
+        log: await readFile(path.join(dir, 'testisp.log'), 'utf8').then((value) => value.split('\n').slice(-40).join('\n')).catch(String) };
+      // This is a separate read-only diagnostic request, never a retry of the
+      // failed operation. Preserve the original error even if it succeeds.
+      if (!['diagnostics', 'stop'].includes(endpoint) && processHandle.exitCode === null) {
+        evidence.gateway = await control('diagnostics').then(({ at, heartbeat, gc, ring, session, windowsTCP }) =>
+          ({ at, heartbeat, gc, ring, session, windowsTCP })).catch((error) => ({ error: error.message }));
+      }
+      console.error(`TestISP control failure ${JSON.stringify(evidence)}`);
+      throw new Error(`TestISP ${endpoint}: ${JSON.stringify(evidence)}`, { cause });
     }
-    return result;
   };
   // A caller's finally may close again after a failure. Preserve the first
   // pre-recovery snapshot and error instead of inspecting a recovered device.
@@ -107,6 +142,7 @@ export async function startHarness(directory) {
       await exited; clearTimeout(timer);
     }
     log.end();
+    channels.forEach((name, i) => unsubscribe(`undici:${name}`, observers[i]));
     if (!crash) {
       try {
         // Get-PnpDevice includes non-present devices. Capture this before the
@@ -149,7 +185,9 @@ export async function startHarness(directory) {
     await network('configure');
     await writeFile(path.join(dir, 'network.json'), JSON.stringify({ uplink, testisp: state }, null, 2));
     const probe = async (line, failure = false) => {
+      console.log(`TestISP probe start ${JSON.stringify({ at: new Date().toISOString(), line, failure })}`);
       const result = await run(probeExe, ['probe', ...(line ? ['--interface', String(line.index), '--source', line.address] : [])], { failure, timeout: 10_000 });
+      console.log(`TestISP probe end ${JSON.stringify(result)}`);
       if (!failure) {
         const response = JSON.parse(result.stdout);
         assert.match(response.body, /(?:^|\n)ip=/, 'Real HTTPS trace body missing');
