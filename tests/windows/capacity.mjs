@@ -15,10 +15,17 @@ export async function capacity({ server, harness, directory, line }) {
     // Earlier UDP cases and Windows' adapter-connectivity probes can leave
     // legitimate idle flows. Close that measured setup explicitly through the
     // real protocol; waiting 30 seconds cannot expire a five-minute UDP NAT.
-    const preparation = { before: await engineStats(), closed: [] };
-    for (const source of ['198.18.0.1', 'fdfe:dcba:9876::1']) {
+    const preparation = { before: await engineStats(), flows: [], closed: [] };
+    let cursor = '';
+    do {
+      const page = await server.api('engine-command', { method: 'flows', fields: { cursor } });
+      preparation.flows.push(...page.flows);
+      cursor = page.cursor ?? '';
+    } while (cursor);
+    for (let at = 0; at < preparation.flows.length; at += 256) {
+      const ids = preparation.flows.slice(at, at + 256).map((flow) => flow.id);
       preparation.closed.push(await server.api('engine-command', { method: 'closeFlows',
-        fields: { opId: randomUUID(), selector: { source } } }));
+        fields: { opId: randomUUID(), selector: { ids } } }));
     }
     console.log(`WINDOWS CAPACITY PREPARATION ${JSON.stringify(preparation)}`);
     const before = await until(async () => {

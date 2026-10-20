@@ -73,6 +73,21 @@ func (s measuredJournalStore) Append(record journal.Record) error {
 	defer s.timings.begin("journal." + record.Phase)()
 	return s.Store.Append(record)
 }
+func (s measuredJournalStore) AppendBatch(records []journal.Record) error {
+	if len(records) == 0 {
+		return nil
+	}
+	defer s.timings.begin("journal." + records[0].Phase)()
+	if batch, ok := s.Store.(journal.BatchStore); ok {
+		return batch.AppendBatch(records)
+	}
+	for _, record := range records {
+		if err := s.Store.Append(record); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 type measuredTun struct {
 	*wintun.Session

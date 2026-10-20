@@ -216,10 +216,12 @@ func (r *Routes) Capture(ctx context.Context) error {
 	defer r.timings.begin("route.capture.total")()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	capture := make([]journal.Creation, 0, len(r.capture))
 	for _, fp := range r.capture {
-		if err := r.session.Create(ctx, "route", fp); err != nil {
-			return err
-		}
+		capture = append(capture, journal.Creation{Kind: "route", Fingerprint: fp})
+	}
+	if err := r.session.CreateBatch(ctx, capture); err != nil {
+		return err
 	}
 	run, cancel := context.WithCancel(context.Background())
 	r.cancel, r.done = cancel, make(chan struct{})

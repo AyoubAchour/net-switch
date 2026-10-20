@@ -14,7 +14,7 @@ const directory = path.resolve('dist/windows-udp-quote');
 await mkdir(directory, { recursive: true });
 const log = createWriteStream(path.join(directory, 'server-output.log'));
 const result = { architecture: process.arch, complete: false, acceptanceSuite: false };
-let harness, responder, server, traceStarted = false, captureSince;
+let harness, responder, server, traceStarted = false, captureSince, lines;
 try {
   result.executables = await recordLaunch(options);
   harness = await startHarness(path.join(directory, 'testisp'));
@@ -30,6 +30,7 @@ try {
   await server.api('lines/add', { alias: 'TestISP' });
   const second = (await server.on()).lines.find((line) => line.alias === 'TestISP');
   assert(second);
+  lines = { main, second };
   await run('auditpol.exe', ['/set', '/subcategory:Filtering Platform Packet Drop', '/success:enable', '/failure:enable']);
   captureSince = new Date().toISOString();
   await run('netsh.exe', ['trace', 'start', 'scenario=InternetClient', 'capture=no', 'report=no',
@@ -75,6 +76,22 @@ try {
   console.error(error);
   console.error(`WINDOWS UDP QUOTE FAILURE ${JSON.stringify(result)}`);
   process.exitCode = 1;
+  // ETW proved STATUS_FWP_DROP_NOICMP after a successful Wintun write. This
+  // isolated A/B rule diagnoses filtering; it cannot turn the original case
+  // green and is never installed by production or full acceptance.
+  if (lines && error.message.includes('never received an ICMP refusal')) {
+    const name = 'NetSwitch-Quote-Diagnostic';
+    try {
+      await run('netsh.exe', ['advfirewall', 'firewall', 'add', 'rule', `name=${name}`, 'dir=in',
+        'action=allow', 'protocol=icmpv4:3,3', 'localip=198.18.0.1', 'remoteip=198.19.128.2', 'profile=any']);
+      result.allowRuleDiagnostic = await udpIdentity({ server, responder, directory, ...lines, blocked: true })
+        .then((value) => ({ passed: true, refusals: value.next.events.filter((event) => event.outcome === 'refused').length }))
+        .catch((error) => ({ passed: false, error: error.stack }));
+      console.log(`WINDOWS UDP ALLOW-RULE DIAGNOSTIC ${JSON.stringify(result.allowRuleDiagnostic)}`);
+    } finally {
+      await run('netsh.exe', ['advfirewall', 'firewall', 'delete', 'rule', `name=${name}`]);
+    }
+  }
 } finally {
   if (traceStarted) {
     await run('netsh.exe', ['trace', 'stop'], { timeout: 120_000 }).catch((error) => { result.traceError = error.message; });

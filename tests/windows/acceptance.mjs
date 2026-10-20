@@ -8,6 +8,7 @@ import { launchOptions, recordLaunch, startServer, verifyEngineProcess } from '.
 import { BaselineDefect, Report } from './report.mjs';
 import { targets } from './targets.mjs';
 import { lifecycleOutput, timedPhase } from './lifecycle.mjs';
+import { startInspection } from './inspection.mjs';
 import { hostedOnly, identity, run, startHarness, until } from './testisp/harness.mjs';
 
 hostedOnly();
@@ -21,7 +22,7 @@ const output = createWriteStream(path.join(dir, 'server-output.log'));
 const serverOutput = lifecycleOutput((chunk) => output.write(chunk));
 const clientExe = path.join(dir, 'acceptance-app.exe');
 await copyFile(process.execPath, clientExe);
-let harness, responder, server, worker, dnsAdapter, quicServer, quic, restoreDNS = false;
+let harness, responder, server, worker, dnsAdapter, quicServer, quic, inspection, restoreDNS = false;
 const quicExe = path.resolve('dist/windows-test/quicprobe.exe');
 const mtuExe = path.resolve('dist/windows-test/mtuprobe.exe');
 const udpRejectExe = path.resolve('dist/windows-test/udpreject.exe');
@@ -75,6 +76,7 @@ function client(command, args = {}, timeout = 120_000) {
 }
 
 async function network(action, adapter) {
+  if (action === 'state' && inspection) return inspection.query('network');
   const result = await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.resolve('scripts/tun-test-network.ps1'), '-Action', action], {
     env: { NETSWITCH_TEST_ADAPTER: String(adapter?.index ?? ''), NETSWITCH_TEST_STATIC_DNS: adapter?.staticDns ?? '' },
   });
@@ -91,8 +93,9 @@ async function clean() {
 }
 
 async function pnpDevices() {
-  const result = await run('powershell.exe', ['-NoProfile', '-File', path.resolve('tests/windows/pnp.ps1')]);
-  const value = result.stdout ? JSON.parse(result.stdout) : [];
+  const value = inspection ? await inspection.query('pnp') :
+    await run('powershell.exe', ['-NoProfile', '-File', path.resolve('tests/windows/pnp.ps1')])
+      .then((result) => result.stdout ? JSON.parse(result.stdout) : []);
   return Array.isArray(value) ? value : [value];
 }
 
@@ -222,6 +225,7 @@ async function udpReject(target, count = 100, timeout = 5000) {
 }
 
 try {
+  inspection = await startInspection();
   await recordLaunch(options, path.join(dir, 'executables.json'));
   await report.test('clean before start', 'harness-baseline', clean);
   dnsAdapter = await network('inspect');
@@ -837,6 +841,7 @@ try {
   if (responder) { await writeFile(path.join(dir, 'target-observations.json'), JSON.stringify(responder.seen, null, 2)); await responder.close(); }
   output.end();
   await report.save(path.join(dir, 'report.json'));
+  if (inspection) await inspection.close().catch((error) => { console.error(error); process.exitCode = 1; });
   if (options.profile === 'v1' && report.results.some((result) => ['deferred', 'blocked', 'pending-shared-hook'].includes(result.status))) {
     console.error('The v1 profile cannot pass while required gates are deferred, blocked or pending the shared hook.'); process.exitCode = 1;
   }
