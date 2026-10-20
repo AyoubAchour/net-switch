@@ -56,7 +56,7 @@ try {
   await check('block direct probe leaves TestISP working', async () => {
     await network('block-direct');
     const failed = await probe(uplink, true);
-    const virtual = await probe(testisp, false, responder);
+    const virtual = await probe(testisp);
     await network('unblock-direct');
     return { failed, virtual, recovered: await probe(uplink) };
   });

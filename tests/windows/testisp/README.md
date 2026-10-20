@@ -35,13 +35,15 @@ gateway exits, a fresh process calls `internal/wintun.RecoverAfterCrash` with
 TestISP's own fixed GUID. It refuses present adapters and never loads the DLL.
 
 `proof.mjs` keeps public HTTPS baselines on both explicitly bound interfaces.
-Pause, drop, withdrawal, TestISP recovery and the unaffected TestISP path during
-the direct firewall block use the same local TLS endpoint. Before those cases,
-the exact bound endpoint must fail with TestISP's default route withdrawn and
-recover on restoration; counters and responder nonces prove the path. No host
-route is added. The direct path still uses public HTTPS: its assertion means
-physical egress, which a same-runner responder cannot prove. A process-and-interface-scoped
-firewall rule then stops only the direct probe; the gateway can still relay local TLS. These are
+Pause, drop, withdrawal and TestISP recovery use the same local TLS endpoint.
+Before those cases, the exact bound endpoint must fail with TestISP's default
+route withdrawn and recover on restoration; counters and responder nonces prove
+the path. No host route is added. The direct path still uses public HTTPS: its
+assertion means physical egress, which a same-runner responder cannot prove.
+A process-and-interface-scoped firewall rule then stops only the direct probe.
+The unaffected TestISP probe in that case stays public too: it checks isolation
+between two programs sharing the real uplink, so the gateway must still cross
+that uplink, which a local relay delivered on the runner would not show. These are
 software failure domains sharing one real uplink. The proof checks actual packet
 counters; two outbound labels or identical public source IPs are not evidence.
 In drop mode the zero-change destination counter proves nothing: discard happens

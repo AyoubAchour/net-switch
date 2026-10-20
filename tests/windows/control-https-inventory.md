@@ -100,8 +100,10 @@ pin-change survival, combining and recovered TestISP traffic to local TLS;
 failover onto main and both main-line cap cases stay on `1.0.0.1`.
 Public `1.1.1.1` baselines and post-crash connectivity also remain.
 
-TestISP pause/drop/withdrawal, recovery, and the unaffected TestISP side of the
-direct firewall block use local TLS. Their direct physical probes stay public.
+TestISP pause/drop/withdrawal and recovery use local TLS. Their direct physical
+probes stay public. The direct firewall block keeps both probes public: it tests
+isolation between two programs sharing the real uplink, so the unaffected
+TestISP relay must still cross that uplink.
 Both suites require the exact local TLS endpoint to fail with TestISP's default
 route withdrawn, without a request reaching the responder or a new TestISP
 destination count, then recover on restoration. There is no target host route.
