@@ -48,7 +48,9 @@ func TestCloseRetainedHalfCloseRead(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	ackGate, gotFIN := make(chan struct{}), make(chan struct{})
 	releaseACK := sync.OnceFunc(func() { close(ackGate) })
+	notifyFIN := sync.OnceFunc(func() { close(gotFIN) })
 	var finalACK atomic.Uint32
+	var fins atomic.Uint32
 	var wg sync.WaitGroup
 	t.Cleanup(func() {
 		releaseACK()
@@ -69,7 +71,13 @@ func TestCloseRetainedHalfCloseRead(t *testing.T) {
 			h := header.TCP(raw[ip.HeaderLength():])
 			fin := toApp && h.Flags().Contains(header.TCPFlagFin)
 			if fin {
-				finalACK.Store(h.SequenceNumber() + uint32(len(h)-int(h.DataOffset())) + 1)
+				ack := h.SequenceNumber() + uint32(len(h)-int(h.DataOffset())) + 1
+				if h.DestinationPort() != p.port || (finalACK.Load() != 0 && finalACK.Load() != ack) {
+					t.Errorf("unexpected FIN in app bridge: %s", segmentDescription(h))
+					return
+				}
+				finalACK.Store(ack)
+				fins.Add(1)
 			}
 			if !toApp && finalACK.Load() != 0 && h.AckNumber() == finalACK.Load() {
 				select {
@@ -82,7 +90,10 @@ func TestCloseRetainedHalfCloseRead(t *testing.T) {
 			to.InjectInbound(header.IPv4ProtocolNumber, pkt)
 			pkt.DecRef()
 			if fin {
-				close(gotFIN) // Manual clock: no retransmissions before read.
+				// TCP may send the same FIN again without a clock advance
+				// (for example during fast recovery). Deliver every copy;
+				// only the test's first-arrival notification is one-shot.
+				notifyFIN()
 			}
 		}
 	}
@@ -154,7 +165,7 @@ func TestCloseRetainedHalfCloseRead(t *testing.T) {
 	if !closedEndpoint(ep) || p.table.Stats().ClosingOverflow != 0 || p.stack.Stats().TCP.ResetsSent.Value() != 0 {
 		t.Fatal("final ACK did not close cleanly", p.diagnostics())
 	}
-	t.Logf("app half-closed, left %d reply bytes unread through FIN at full cap, then read every byte with matching SHA-256; RST=0", len(reply))
+	t.Logf("app half-closed, left %d reply bytes unread through FIN at full cap, then read every byte with matching SHA-256; FIN packets=%d; RST=0", len(reply), fins.Load())
 }
 
 func closedEndpoint(ep *tcp.Endpoint) bool {
