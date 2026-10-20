@@ -136,6 +136,9 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
       assert.equal(stats.udpReadErrors, evidence.before.udpReadErrors, 'UDP reads failed during the mixed cap');
       assert.equal(stats.udpOversize, evidence.before.udpOversize, 'UDP packetization failed during the mixed cap');
       assert(stats.flows.UDPReplyBytes <= 8 * 1024 * 1024);
+      assert(stats.flows.UDPReplyPeakBytes <= 8 * 1024 * 1024);
+      assert(stats.tcpRelayBytes <= 16 * 1024 * 1024 && stats.tcpRelayPeakBytes <= 16 * 1024 * 1024,
+        'The shared TCP relay exceeded its retained-buffer loan bound');
     };
     const verify = async () => {
       const results = [];
