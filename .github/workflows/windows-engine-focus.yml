@@ -1,0 +1,98 @@
+name: Windows engine focus
+
+on:
+  push:
+    branches: [engine/windows-platform-ci, engine/windows-platform-ci-x64]
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Native Windows architecture
+        type: choice
+        options: [ARM64, x64]
+        default: ARM64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-engine-focus-${{ github.ref }}-${{ inputs.arch || 'ARM64' }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    name: Windows engine / ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'x64' || 'ARM64' }}
+    runs-on: ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'windows-latest' || 'windows-11-arm' }}
+    timeout-minutes: 40
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Verify the generated dependency trees
+        run: |
+          node scripts/generate-gvisor.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go mod vendor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --exit-code -- third_party/gvisor vendor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build engine and native fixtures
+        id: build
+        run: |
+          go build -o dist/windows-test/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/recovery/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/quicprobe.exe ./tests/windows/quicprobe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/mtuprobe.exe ./tests/windows/mtuprobe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/udpreject.exe ./tests/windows/udpreject
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
+      - name: Native and shared engine regressions
+        run: |
+          go test -count=1 -v ./internal/engine/... ./internal/journal ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows race checks
+        if: ${{ !cancelled() && (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && steps.build.outcome == 'success' }}
+        run: |
+          go test -race -count=1 -v ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Cold owner attribution and timing
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        env:
+          NETSWITCH_LOOKUP_GATE: '1'
+        run: |
+          go test -count=1 -v -run '^TestOwnerColdBurstTiming$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Real TUN 1.0 acceptance and flow-cap measurement
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Keep every observed result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-engine-focus-${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'x64' || 'ARM64' }}
+          path: dist/windows-acceptance/
+          retention-days: 14

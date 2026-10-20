@@ -708,6 +708,34 @@ try {
     return { engine, restarted, response };
   });
   if (options.profile === 'v1') {
+    await report.test('engine crash without restart removes its observed phantom through the journal without loading Wintun', 'parity', async () => {
+      const engine = await verifyEngineProcess(options, dataDir);
+      const before = await pnpDevices();
+      assert(before.some((device) => device.present && appDeviceIDs.has(device.instanceId)), 'Crash cleanup needs the live owned device first');
+      server.child.kill('SIGKILL');
+      await until(() => server.child.exitCode !== null || server.child.signalCode !== null, 'controller stopped before engine crash');
+      process.kill(engine.pid, 'SIGKILL');
+      await until(() => {
+        try { process.kill(engine.pid, 0); return false; }
+        catch (error) { if (error.code !== 'ESRCH') throw error; return true; }
+      }, 'crashed engine exited');
+      const crashed = await stoppedSnapshot();
+      assert(crashed.pnp.some((device) => appDeviceIDs.has(device.instanceId) && !device.present),
+        `No owned phantom existed before recovery; cleanup cannot receive credit: ${JSON.stringify(crashed)}`);
+      const direct = await harness.probe();
+      const recoveryExe = path.resolve('dist/windows-test/recovery/netswitch-engine.exe');
+      await assert.rejects(readFile(path.join(path.dirname(recoveryExe), 'wintun.dll')), { code: 'ENOENT' });
+      const binary = await identity(recoveryExe);
+      const recovery = await run(recoveryExe, ['cleanup', '--state-dir', path.join(dataDir, 'native-state')]);
+      const cleaned = await clean();
+      // Repeat the real recovery operation; it must not require another
+      // adapter or erase another program's state.
+      await run(recoveryExe, ['cleanup', '--state-dir', path.join(dataDir, 'native-state')]);
+      await start();
+      return { engine, before, crashed, direct, binary, recovery, cleaned };
+    });
+  }
+  if (options.profile === 'v1') {
     await report.test('a restarted controller reattaches within the lease without closing held flows', 'parity', async () => {
       await client('close');
       await pin(second.id);

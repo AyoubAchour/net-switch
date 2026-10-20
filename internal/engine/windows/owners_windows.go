@@ -366,7 +366,7 @@ func parseUDP(b []byte, v6 bool, rows map[netip.AddrPort][]socketOwner) error {
 	return nil
 }
 
-func (o *Owners) udpOwner(key netip.AddrPort, rows map[netip.AddrPort][]socketOwner) (platform.Owner, error) {
+func udpCandidate(key netip.AddrPort, rows map[netip.AddrPort][]socketOwner) (socketOwner, error) {
 	candidates := rows[key]
 	if len(candidates) == 0 {
 		any := netip.IPv4Unspecified()
@@ -376,12 +376,19 @@ func (o *Owners) udpOwner(key netip.AddrPort, rows map[netip.AddrPort][]socketOw
 		candidates = rows[netip.AddrPortFrom(any, key.Port())]
 	}
 	if len(candidates) > 1 {
-		return platform.Owner{}, platform.ErrAmbiguous
+		return socketOwner{}, platform.ErrAmbiguous
 	}
 	if len(candidates) == 0 || candidates[0].created == 0 {
-		return platform.Owner{}, errOwnerMissing
+		return socketOwner{}, errOwnerMissing
 	}
-	r := candidates[0]
+	return candidates[0], nil
+}
+
+func (o *Owners) udpOwner(key netip.AddrPort, rows map[netip.AddrPort][]socketOwner) (platform.Owner, error) {
+	r, err := udpCandidate(key, rows)
+	if err != nil {
+		return platform.Owner{}, err
+	}
 	owner, err := o.process(r.pid)
 	owner.Generation = strconv.FormatUint(r.created, 16)
 	return owner, err
@@ -428,14 +435,33 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 		}
 	}
 	out := make(map[netip.AddrPort]platform.Owner, len(keys))
+	// A dump validates each process generation once. Opening the same process
+	// handle for every one of its 4,096 sockets would consume the reconciliation
+	// interval without adding any socket-generation evidence.
+	type processResult struct {
+		owner platform.Owner
+		err   error
+	}
+	processes := make(map[uint32]processResult)
 	for _, key := range keys {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		owner, err := o.udpOwner(key, rows)
-		if err == nil {
-			out[key] = owner
+		row, err := udpCandidate(key, rows)
+		if err != nil {
+			continue
 		}
+		result, ok := processes[row.pid]
+		if !ok {
+			result.owner, result.err = o.process(row.pid)
+			processes[row.pid] = result
+		}
+		if result.err != nil {
+			continue
+		}
+		owner := result.owner
+		owner.Generation = strconv.FormatUint(row.created, 16)
+		out[key] = owner
 	}
 	return out, nil
 }

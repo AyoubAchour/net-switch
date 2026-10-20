@@ -74,7 +74,12 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	owners := NewOwners()
-	dialer := &Dialer{Routes: routes}
+	// Allocate the completion service before any capture can start. A failure
+	// here leaves ordinary OS routing in place instead of rejecting every flow.
+	dialer, err := NewDialer(routes)
+	if err != nil {
+		return fmt.Errorf("initialize Windows socket readiness: %w", err)
+	}
 	defer func() { err = errors.Join(err, dialer.Close()) }()
 	e := engine.New(ctx, engine.Dependencies{OpenTun: routes.OpenTun, Routes: routes, Dialer: dialer, Owners: owners, Identities: owners},
 		flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncParent})

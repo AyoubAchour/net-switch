@@ -72,8 +72,10 @@ func deniedPipeClient() error {
 func restrictedPeerToken(t *testing.T) windows.Token {
 	t.Helper()
 	var original windows.Token
-	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ASSIGN_PRIMARY, &original); err != nil {
-		t.Fatal(err)
+	// CreateRestrictedToken preserves the handle's access rights. The fixture
+	// needs ADJUST_DEFAULT to lower integrity before starting the negative peer.
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_QUERY|windows.TOKEN_ASSIGN_PRIMARY|windows.TOKEN_ADJUST_DEFAULT, &original); err != nil {
+		t.Fatalf("open parent token: %v", err)
 	}
 	defer original.Close()
 	admin, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
@@ -85,7 +87,7 @@ func restrictedPeerToken(t *testing.T) windows.Token {
 	ok, _, err := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken").Call(
 		uintptr(original), 1, 1, uintptr(unsafe.Pointer(&disabled)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&token)))
 	if ok == 0 {
-		t.Fatal(err)
+		t.Fatalf("create restricted peer token: %v", err)
 	}
 	medium, err := windows.StringToSid("S-1-16-8192")
 	if err != nil {
@@ -95,7 +97,7 @@ func restrictedPeerToken(t *testing.T) windows.Token {
 	label := windows.Tokenmandatorylabel{Label: windows.SIDAndAttributes{Sid: medium, Attributes: windows.SE_GROUP_INTEGRITY}}
 	if err := windows.SetTokenInformation(token, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), uint32(unsafe.Sizeof(label))+uint32(medium.Len())); err != nil {
 		token.Close()
-		t.Fatal(err)
+		t.Fatalf("lower peer integrity to Medium: %v", err)
 	}
 	return token
 }
