@@ -11,18 +11,38 @@ const held = new Map();
 let next = 0;
 async function requestOn(item) {
   const nonce = randomBytes(16).toString('hex');
-  const label = 'Local HTTPS';
+  const label = item.target.publicTrace ? 'Public HTTPS through TUN' : 'Local HTTPS';
+  const started = performance.now();
+  const event = (name, extra = {}) => {
+    const detail = { at: new Date().toISOString(), event: name, id: item.id, request: nonce,
+      ms: Math.round(performance.now() - started), port: item.port ?? item.socket?.localPort,
+      connection: item.connection, ...extra };
+    item.events.push(detail);
+    console.log(`TLS socket: ${JSON.stringify(detail)}`);
+  };
+  event('request');
   return new Promise((resolve, reject) => {
     const req = request({ ...item.target,
-      path: `/?nonce=${nonce}`,
-      agent: item.agent, signal: AbortSignal.timeout(10_000) }, (res) => {
+      path: item.target.publicTrace ? '/cdn-cgi/trace' : `/?nonce=${nonce}`,
+      headers: { Host: item.target.servername },
+      agent: item.agent, signal: AbortSignal.timeout(item.target.publicTrace ? 20_000 : 10_000) }, (res) => {
       const port = res.socket.localPort;
+      const verified = res.socket.authorized;
       let body = '';
       res.setEncoding('utf8');
       res.on('data', (chunk) => { body += chunk; });
-      res.on('error', reject);
+      res.on('error', (cause) => reject(new Error(`HTTPS response interrupted (origin unproven): ${cause.message}`, { cause })));
       res.on('end', () => {
         try {
+          if (item.target.publicTrace) {
+            assert(verified, 'Public HTTPS TLS identity was not verified');
+            assert.equal(res.statusCode, 200,
+              `${res.statusCode >= 500 && res.statusCode < 600 ? 'public target unavailable' : 'public HTTPS response failed'}: HTTP ${res.statusCode}`);
+            assert(/(?:^|\n)ip=[^\r\n]+\r?\n/.test(body), 'Public HTTPS trace has no ip= result');
+            item.port = port;
+            resolve({ id: item.id, port, bytes: body.length, verified, publicTrace: true });
+            return;
+          }
           assert.equal(res.statusCode, 200, `${label} HTTP ${res.statusCode}: ${body.slice(0, 100)}`);
           const reply = JSON.parse(body);
           assert.equal(reply.nonce, nonce, 'Local HTTPS response did not echo this request');
@@ -39,19 +59,26 @@ async function requestOn(item) {
       });
     });
     req.on('socket', (socket) => {
-      if (item.socket === socket) return;
+      if (item.socket === socket) {
+        event('reused socket', { connectAt: item.connectAt, secureConnectAt: item.secureConnectAt });
+        return;
+      }
       item.socket = socket;
-      const event = (name, extra = {}) => {
-        const detail = { at: new Date().toISOString(), event: name, id: item.id,
-          port: item.port ?? socket.localPort, connection: item.connection, ...extra };
-        item.events.push(detail);
-        console.log(`TLS socket: ${JSON.stringify(detail)}`);
-      };
+      item.connectAt = null; item.secureConnectAt = null;
+      socket.once('connect', () => { item.connectAt = new Date().toISOString(); event('connect'); });
+      socket.once('secureConnect', () => {
+        item.secureConnectAt = new Date().toISOString();
+        event('secureConnect', { authorized: socket.authorized });
+      });
       socket.on('end', () => event('peer FIN'));
       socket.on('error', (error) => event('error', { code: error.code, message: error.message }));
       socket.on('close', (hadError) => event('close', { hadError, requestedByTest: !!item.closing }));
     });
-    req.on('error', (cause) => reject(new Error(`${label} ${item.target.host}:${item.target.port}, connection ${item.id}: ${cause.message}`, { cause })));
+    req.on('error', (cause) => {
+      event('request error', { code: cause.code, message: cause.message });
+      const phase = cause.code === 'ECONNRESET' ? 'transport reset (origin unproven)' : 'request failed';
+      reject(new Error(`${label} ${phase}, ${item.target.host}:${item.target.port}, connection ${item.id}: ${cause.message}`, { cause }));
+    });
     req.end();
   });
 }
@@ -152,11 +179,18 @@ process.on('message', async ({ id, command, count, ids, size, target, localAddre
   try {
     let result;
     if (command === 'open') result = await open(count, target);
+    else if (command === 'public') {
+      const item = { id: ++next, events: [], agent: new Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 }),
+        target: { host: '1.1.1.1', port: 443, servername: 'one.one.one.one', publicTrace: true } };
+      held.set(item.id, item);
+      result = await requestOn(item);
+    }
     else if (command === 'refresh') result = await Promise.all(ids.map((key) => requestOn(held.get(key))));
     else if (command === 'reuse') result = await reuseProbe(target, localAddress);
     else if (command === 'udp') result = await udp(size, target, localAddress);
-    else if (command === 'diagnostics') result = [...held.values()].map(({ id, port, connection, events, socket }) =>
-      ({ id, port, connection, events, destroyed: socket?.destroyed, bytesRead: socket?.bytesRead, bytesWritten: socket?.bytesWritten }));
+    else if (command === 'diagnostics') result = [...held.values()].map(({ id, port, connection, events, socket, connectAt, secureConnectAt }) =>
+      ({ id, port: port ?? socket?.localPort, connection, events, connectAt, secureConnectAt,
+        destroyed: socket?.destroyed, bytesRead: socket?.bytesRead, bytesWritten: socket?.bytesWritten }));
     else if (command === 'close') { for (const item of held.values()) { item.closing = true; item.agent.destroy(); } held.clear(); result = true; }
     else throw new Error(`Unknown command ${command}`);
     process.send({ id, result });

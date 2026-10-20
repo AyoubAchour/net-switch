@@ -60,6 +60,15 @@ func (f httpsConfigFiles) WriteFile(name string, data []byte, mode os.FileMode) 
 	if err != nil {
 		return err
 	}
+	var logConfig map[string]json.RawMessage
+	if err := json.Unmarshal(config["log"], &logConfig); err != nil {
+		return err
+	}
+	logConfig["level"] = json.RawMessage(`"info"`)
+	config["log"], err = json.Marshal(logConfig)
+	if err != nil {
+		return err
+	}
 	data, err = json.Marshal(config)
 	if err != nil {
 		return err

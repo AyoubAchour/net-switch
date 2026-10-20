@@ -21,6 +21,7 @@ export function installHttpsConfigWriter(directory) {
         const rule = JSON.parse(marker);
         await write(path.join(directory, 'traffic-product-config.json'), data);
         config.route.rules.unshift(rule);
+        config.log.level = 'info';
         data = JSON.stringify(config, null, 2);
       }
     }

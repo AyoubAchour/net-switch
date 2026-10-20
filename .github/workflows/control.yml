@@ -4,7 +4,7 @@ on:
   push:
     branches: [port/control-service]
   pull_request:
-    paths: ['internal/**', 'cmd/**', 'assets.go', 'go.mod', 'go.sum', 'scripts/*e2e*', 'scripts/*under-test*', 'scripts/tun-*.mjs', 'scripts/tun-*.ps1', 'scripts/control-test-https.mjs', 'scripts/win32-parity.mjs', 'tests/oracle/**', '.github/workflows/control.yml']
+    paths: ['internal/**', 'cmd/**', 'assets.go', 'go.mod', 'go.sum', 'scripts/*e2e*', 'scripts/*under-test*', 'scripts/tun-*.mjs', 'scripts/tun-*.ps1', 'scripts/control-test-https.mjs', 'scripts/win32-parity.mjs', 'tests/oracle/**', 'tests/windows/**', '.github/workflows/control.yml']
 
 permissions:
   contents: read
@@ -61,7 +61,7 @@ jobs:
       - name: Routing against the selected control executable
         run: |
           $server = if ('${{ matrix.control }}' -eq 'go') { (Resolve-Path bin/netswitch.exe).Path } else { (Get-Command node).Source }
-          node scripts/e2e-routing.mjs --server-executable $server
+          node scripts/e2e-routing.mjs --server-executable $server --public-via-tun
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: TUN against the selected control executable
         run: |

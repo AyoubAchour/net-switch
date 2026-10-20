@@ -13,12 +13,13 @@ changed here; their public egress checks need individual decisions.
 | 100 aa sockets before/after selector PUT, then three new bb sockets | Same | Local TLS |
 | Five held sockets during DNS change, new socket after restoring DNS | Same | Local TLS |
 | Proxy routing: default (3), pinned (3), combined (12), pinned while combining (6) | Same | Local TLS through the selected Control proxy |
-| Real internet egress through the Control proxy | Previously implicit in every request | Exactly one independent public trace request |
+| Real internet egress through Control | Previously implicit in every request | Exactly one independent public trace through the TUN on physical line aa |
 
 The TUN client still connects to `203.0.113.44:443`. The same non-final
 `route-options` rule used by the engine fixture changes only the destination.
 The app's own process rules, selectors and interface-bound outbounds choose
-the route. Config comparisons reject any other change. TestISP destination
+the route. The traffic run also sets `log.level=info`; config comparisons
+reject any other change. TestISP destination
 counters require +3 for the first bb sockets, +0 for the 100 aa sockets and +3
 for the new bb sockets. Engine metadata must identify the copied client, its
 source port, `tun/tun-in`, and the expected line. Refresh checks require the
@@ -38,8 +39,9 @@ newly claimed assertion that sing-box preserves those connections.
 
 The retained public request uses `https://1.1.1.1/cdn-cgi/trace`, verified TLS
 and an `ip=` response. It proves external internet egress, which a same-runner
-responder cannot prove. HTTP 5xx and resets have the distinct
-`public target unavailable` label and still fail the test. They are never
+responder cannot prove. Only HTTP 5xx received over that verified TLS session
+gets the `public target unavailable` label. Resets and early closes have an
+unproven origin; proxy CONNECT errors identify the local proxy. All fail the test and are never
 retried or counted as a pass.
 
 ## Other public traffic: follow-up decisions
@@ -48,7 +50,7 @@ retried or counted as a pass.
 | --- | --- | --- |
 | CI Windows acceptance: physical and TestISP public egress baselines | `https://1.1.1.1/cdn-cgi/trace`, one on each path | **Keep public.** These explicitly establish real internet on both independently bound paths. |
 | Windows acceptance: pins on both interfaces; old sockets after a pin change; 40-flow combining | `https://1.0.0.1/cdn-cgi/trace` | **Can move local.** Keep actual interface counters and original-socket identity. Do not replace their preceding public egress baselines. |
-| Windows acceptance: route-withdrawal/dead-gateway failover and restoration | `1.0.0.1:443` for fresh traffic, plus product health endpoints below | **Traffic can move local.** Keep real internet health/failover evidence public; a reachable local machine does not prove an ISP is working. |
+| Windows acceptance: route-withdrawal/dead-gateway failover and restoration | `1.0.0.1:443` for fresh traffic, plus product health endpoints below | **Traffic can move local.** Keep real internet health/failover evidence public; a reachable local machine does not prove an ISP is working. The local target must still depend on the line's default route; a local host route would invalidate withdrawal coverage. |
 | Windows acceptance: main-line held sockets during cap exhaustion, and main-line exception after the rejection burst | `1.0.0.1:443` | **Can move local.** The proof concerns connection survival and cap policy, not internet reachability. |
 | Windows acceptance: control crash restores direct connectivity | `https://1.1.1.1/cdn-cgi/trace` through normal Windows routing | **Keep public.** It proves usable internet after the TUN disappears, rather than only local reachability. |
 | CI TestISP proof: direct uplink baseline and TestISP egress/reverse relay | `https://1.1.1.1/cdn-cgi/trace` | **Keep public.** Both are explicit internet egress proofs; preserve the TestISP destination/byte counters. |
@@ -58,8 +60,9 @@ retried or counted as a pass.
 | CI/release installer smoke: the installed app's background update timer | `https://api.github.com/repos/AyoubAchour/net-switch/releases/latest` | **Can isolate locally or disable in the test setup.** The smoke script starts the real installed app with default settings, so a long-lived instance can check releases; no installer assertion requires a real release response. The installer itself is unchanged here. |
 
 Every retained public dependency in that follow-up needs a distinct
-`public target unavailable` classification for HTTP 5xx and resets, with the
-endpoint and phase recorded. The acceptance client and TestISP probe currently
+`public target unavailable` classification only for HTTP 5xx received over a
+verified public TLS session, with the endpoint and phase recorded. Resets and
+early closes must retain an unproven-origin label. The acceptance client and TestISP probe currently
 lack that label. Add it at the test-reporting boundary; do not waive a failed
 case, retry it into green, or blame a public endpoint for an unproven engine
 failure. Background health failures need correlation with independent public

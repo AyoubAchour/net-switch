@@ -16,6 +16,7 @@ import { recordLaunch } from '../tests/windows/launch.mjs';
 import { startHarness } from '../tests/windows/testisp/harness.mjs';
 import { targets } from '../tests/windows/targets.mjs';
 import { localHttps, startTrafficEngine } from './tun-test-https.mjs';
+import { diagnoseControl } from './tun-test-diagnostics.mjs';
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
   throw new Error('TUN tests may run only on disposable GitHub-hosted Windows runners.');
@@ -149,9 +150,7 @@ try {
   if (engineAdapter) await startTrafficEngine(engine, lines, httpsResponder);
   else await engine.start({ lines, httpsResponder });
   alive();
-  // The app's warn-level log can legitimately be empty. Keep a marked test
-  // header so the artifact exists even when the engine emitted no warnings.
-  await engine.log.append(`[test] Engine ${pins.singBox.version} started; subsequent engine output uses the app's warn level.`);
+  await engine.log.append(`[test] Engine ${pins.singBox.version} started; traffic fixture uses info-level output.`);
   const state = await network('state');
   assert(state.adapters.some((item) => item.Name === 'NetSwitch' && item.Status === 'Up'), JSON.stringify(state));
   assert(state.routes.length > 0, 'No TUN routes installed');
@@ -174,6 +173,14 @@ try {
     return all.some((c) => Number(c.metadata.sourcePort) === changed[0].port && c.chains.includes(lineOutbound('aa')));
   }, 'rewritten app rule taking effect');
   await routed(changed, 'aa');
+  if (!engineAdapter) {
+    // Exactly one public request, with verified TLS and no retry. It uses the
+    // copied app through the TUN, on aa before that lane is pointed at bb.
+    const publicTrace = await client('public');
+    const publicConnections = await routed([publicTrace], 'aa');
+    const record = publicConnections.find((c) => Number(c.metadata.sourcePort) === publicTrace.port);
+    log(`ok - one public HTTPS trace through TUN on physical line aa: ${JSON.stringify({ ...publicTrace, engine: record })}`);
+  }
   await client('refresh', { ids: first.map(({ id }) => id) });
   await routed(first, 'bb');
   log('ok - rewritten rules route new connections to aa; old bb connections still carry traffic');
@@ -181,18 +188,21 @@ try {
 
   const beforeMany = await tlsCount();
   const many = await client('open', { count: 100 });
-  await routed(many, 'aa');
+  const manyRouted = await routed(many, 'aa');
   assert.equal(await tlsCount(), beforeMany, 'The aa TLS sockets must use the physical line');
   const beforeSelector = await engine.connections();
   const oldIds = new Set(beforeSelector.filter((c) => many.some(({ port }) => port === Number(c.metadata.sourcePort))).map((c) => c.id));
   assert.equal(oldIds.size, 100, `Before selector PUT: missing sockets ${JSON.stringify(many.filter(({ port }) =>
-    !beforeSelector.some((c) => Number(c.metadata.sourcePort) === port)))}`);
+    !beforeSelector.some((c) => Number(c.metadata.sourcePort) === port)).map((item) => ({ ...item,
+      lastEngineRecord: manyRouted.find((c) => Number(c.metadata.sourcePort) === item.port) })))}`);
   const started = performance.now();
   await engine.pointLaneAt('aa', 'bb');
   const elapsed = performance.now() - started;
   assert(elapsed < 1000, `Selector PUT took ${elapsed.toFixed(1)} ms`);
   const after = await engine.connections();
-  assert([...oldIds].every((id) => after.some((c) => c.id === id)), 'Selector closed existing connections');
+  const missing = beforeSelector.filter((c) => oldIds.has(c.id) && !after.some((current) => current.id === c.id));
+  assert.equal(missing.length, 0, `Selector closed existing connections: ${JSON.stringify(missing.map((c) =>
+    ({ id: c.id, sourcePort: c.metadata.sourcePort, chains: c.chains, lastEngineRecord: c })))}`);
   await client('refresh', { ids: many.map(({ id }) => id) });
   await routed(many, 'aa');
   const beforeNew = await tlsCount();
@@ -251,17 +261,21 @@ try {
   log('TUN end-to-end test passed');
 } catch (error) {
   log(`FAIL: ${error.stack}`);
+  // Start all live reads immediately, before waiting on the client or cleanup.
+  const liveDiagnostics = engineAdapter ? Promise.resolve() : diagnoseControl(engine, worker.pid, httpsResponder, log)
+    .catch((cause) => log(`Control diagnostics failed: ${cause.stack}`));
   const sockets = await client('diagnostics').catch((cause) => ({ error: cause.message }));
   log(`TLS sockets at failure: ${JSON.stringify(sockets)}`);
   await writeFile(path.join(dir, 'https-client-failure.json'), JSON.stringify(sockets, null, 2));
-  // Keep the actual stop state and warnings beside the error. An unlink error
-  // does not prove the engine survived, and warn-level output can be empty.
-  log(`Engine at failure: ${JSON.stringify({ status: engine.status, error: engine.error,
-    childPid: engine.child?.pid ?? null, exitCode: engine.child?.exitCode ?? null })}`);
-  log(`PID file at failure: ${await readFile(engine.pidPath ?? path.join(dir, 'engine.pid'), 'utf8').catch((error) => error.code)}`);
-  for (const file of ['server.log', 'engine.log']) {
+  if (engineAdapter) {
+    log(`Engine adapter at failure: ${JSON.stringify({ status: engine.status, error: engine.error,
+      childPid: engine.child?.pid ?? null, exitCode: engine.child?.exitCode ?? null })}`);
+  }
+  await liveDiagnostics;
+  log(`TLS responder events at failure: ${JSON.stringify(httpsResponder?.events ?? [])}`);
+  for (const file of ['server.log', 'engine.log', 'traffic-engine.log']) {
     const text = await readFile(path.join(dir, file), 'utf8').catch(() => 'unavailable');
-    log(`${file}:\n${text.split('\n').slice(-50).join('\n')}`);
+    log(`${file}:\n${file === 'server.log' ? text.split('\n').slice(-50).join('\n') : text}`);
   }
   log(`Control output:\n${engine.output}`);
   process.exitCode = 1;
@@ -284,6 +298,7 @@ try {
     await writeFile(path.join(dir, 'https-observations.json'), JSON.stringify(httpsResponder.seen, null, 2));
     log(`Local HTTPS responder: ${httpsResponder.seen.length} requests, ${new Set(httpsResponder.seen.map((item) => item.connection)).size} TLS sockets`);
     await httpsResponder.close();
+    await writeFile(path.join(dir, 'https-events.json'), JSON.stringify(httpsResponder.events, null, 2));
   }
   await writeFile(path.join(dir, 'report.txt'), `${report.join('\n')}\n`);
 }

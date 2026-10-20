@@ -118,8 +118,8 @@ function connectThroughProxy(proxyPort, target = localTarget) {
       settled = true;
       clearTimeout(timer);
       for (const socket of sockets) socket.destroy();
-      reject(target.publicTrace && error.code === 'ECONNRESET'
-        ? new Error(`public target unavailable: ${target.host}:${target.port} reset (${error.message})`, { cause: error }) : error);
+      reject(error.code === 'ECONNRESET'
+        ? new Error(`transport reset (origin unproven): ${target.host}:${target.port} (${error.message})`, { cause: error }) : error);
     };
     const timer = setTimeout(() => fail(new Error('the request through the proxy took too long')), REQUEST_TIMEOUT_MS);
     const tunnel = request({ host: '127.0.0.1', port: proxyPort, method: 'CONNECT', path: `${target.host}:${target.port}` });
@@ -127,12 +127,11 @@ function connectThroughProxy(proxyPort, target = localTarget) {
     tunnel.on('connect', (response, socket) => {
       sockets.push(socket);
       if (response.statusCode !== 200) {
-        const label = target.publicTrace && response.statusCode >= 500 && response.statusCode < 600
-          ? 'public target unavailable: ' : '';
-        fail(new Error(`${label}the proxy CONNECT answered ${response.statusCode}`));
+        fail(new Error(`local proxy CONNECT failed: HTTP ${response.statusCode}`));
         return;
       }
       const secure = tlsConnect({ socket, servername: target.servername, ca: target.ca }, () => {
+        if (!secure.authorized) { fail(new Error(`TLS verification failed: ${secure.authorizationError}`)); return; }
         secure.write(`GET ${target.path ?? `/?nonce=${nonce}`} HTTP/1.1\r\nHost: ${target.servername}\r\nConnection: keep-alive\r\n\r\n`);
       });
       sockets.push(secure);
@@ -143,7 +142,7 @@ function connectThroughProxy(proxyPort, target = localTarget) {
         if (!text.includes('\r\n\r\n')) return;
         const status = /^HTTP\/1\.[01] (\d{3})/.exec(text)?.[1];
         if (status !== '200') {
-          const label = target.publicTrace && /^5\d\d$/.test(status) ? 'public target unavailable: ' : '';
+          const label = target.publicTrace && secure.authorized && /^5\d\d$/.test(status) ? 'public target unavailable: ' : '';
           fail(new Error(`${label}the site answered ${status ?? 'something unreadable'}`));
           return;
         }
@@ -162,7 +161,8 @@ function connectThroughProxy(proxyPort, target = localTarget) {
         open.push(secure);
         resolve(secure);
       });
-      secure.on('end', () => fail(new Error(`${target.publicTrace ? 'public target unavailable: ' : ''}the site closed the connection before answering`)));
+      secure.on('end', () => fail(new Error('early close (origin unproven): connection ended before the HTTPS answer')));
+      secure.on('close', () => fail(new Error('early close (origin unproven): connection closed before the HTTPS answer')));
       secure.on('error', fail);
     });
     tunnel.end();
@@ -245,9 +245,11 @@ try {
   localTarget = { ...httpsResponder.target, host: address, port: httpsResponder.port };
   // Exactly one public request: a local peer cannot prove real internet egress.
   // No held-socket/count assertion relies on this independently owned server.
-  await connectThroughProxy(proxyPort, publicTarget);
-  check(true, 'one public HTTPS trace proves real internet egress through the selected Control proxy');
-  await closeAll();
+  if (!process.argv.includes('--public-via-tun')) {
+    await connectThroughProxy(proxyPort, publicTarget);
+    check(true, 'one public HTTPS trace proves real internet egress through the selected Control proxy');
+    await closeAll();
+  }
 
   await openMany(3, proxyPort);
   let counts = await connectionsPerLine(3);

@@ -65,10 +65,14 @@ export class ControlUnderTest {
           const product = JSON.parse(await readFile(path.join(this.dir, 'traffic-product-config.json'), 'utf8'));
           const actual = structuredClone(this.config);
           assert.deepEqual(actual.route.rules.shift(), httpsRoute(httpsResponder), 'Missing local TLS destination rewrite');
+          assert.equal(actual.log.level, 'info', 'Traffic must have info-level engine evidence');
+          actual.log.level = product.log.level;
           assert.deepEqual(actual, product, 'The fixture must preserve the entire selected Control configuration');
+          console.log('ok - traffic config differs only by the local TLS rewrite and log.level=info');
         } else {
           assert(!this.config.route.rules.some((rule) => rule.action === 'route-options'),
             'Lifecycle cycles must use the ordinary product configuration');
+          assert.equal(this.config.log.level, 'warn', 'Lifecycle cycles must restore the product log level');
         }
         return;
       }
