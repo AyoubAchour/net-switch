@@ -25,6 +25,7 @@ func TestOnlyLoadAttributionGatesAreReleaseBlockers(t *testing.T) {
 		"overload.tun-write-queue":           false,
 		"overload.memory-at-limit":           false,
 		"protocol.flows-pagination":          false,
+		"capacity.mixed-caps":                false,
 	}
 	cases := Cases(Config{})
 	for _, c := range cases {
