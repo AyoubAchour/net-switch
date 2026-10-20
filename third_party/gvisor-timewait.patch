@@ -326,6 +326,66 @@ index a3c8295..9d37e9a 100644
  // Number returns the tcp protocol number.
  func (*protocol) Number() tcpip.TransportProtocolNumber {
  	return ProtocolNumber
+diff --git a/pkg/tcpip/transport/tcp/rack.go b/pkg/tcpip/transport/tcp/rack.go
+--- a/pkg/tcpip/transport/tcp/rack.go
++++ b/pkg/tcpip/transport/tcp/rack.go
+@@ -12,6 +12,8 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++// Modified by Net Switch, 2026-10-20: preserve timeout recovery until its flight drains.
++
+ package tcp
+ 
+ import (
+@@ -403,7 +405,9 @@ func (rc *rackControl) reorderTimerExpired() tcpip.Error {
+ 	// retransmits and recovery on a path with little or no real loss
+ 	// (gvisor#9707/#9778). detectLoss arms the timer from rcvdTime-derived
+ 	// values, so evaluating it at the timer target keeps the two consistent.
+ 	numLost := rc.detectLoss(rc.snd.reorderTimer.target)
+-	if numLost == 0 {
++	// A queued reordering timer must not replace RTO slow start with a
++	// second fast-recovery episode for the same unacknowledged flight.
++	if numLost == 0 || rc.snd.state == tcpip.RTORecovery {
+ 		return nil
+ 	}
+diff --git a/pkg/tcpip/transport/tcp/snd.go b/pkg/tcpip/transport/tcp/snd.go
+--- a/pkg/tcpip/transport/tcp/snd.go
++++ b/pkg/tcpip/transport/tcp/snd.go
+@@ -12,6 +12,8 @@
+ // See the License for the specific language governing permissions and
+ // limitations under the License.
+ 
++// Modified by Net Switch, 2026-10-20: keep ACK-driven RTO recovery out of fast recovery.
++
+ package tcp
+ 
+ import (
+@@ -1273,6 +1275,12 @@ func (s *sender) detectLoss(seg *segment) (fastRetransmit bool) {
+ 	// We're not in fast recovery yet.
+ 
++	// A timeout already owns recovery of this flight. Duplicate ACKs
++	// must not replace that state with Disorder before it is acknowledged.
++	if s.state == tcpip.RTORecovery {
++		return false
++	}
++
+ 	// If RACK is enabled and there is no reordering we should honor the
+ 	// three duplicate ACK rule to enter recovery.
+ 	// See: https://tools.ietf.org/html/draft-ietf-tcpm-rack-08#section-4
+ 	if s.ep.SACKPermitted && s.ep.tcpRecovery&tcpip.TCPRACKLossDetection != 0 {
+@@ -1775,7 +1783,10 @@ func (s *sender) handleRcvdSegment(rcvdSeg *segment) {
+ 		// After the reorder window is calculated, detect any loss by checking
+ 		// if the time elapsed after the segments are sent is greater than the
+ 		// reorder window.
+-		if numLost := s.rc.detectLoss(rcvdSeg.rcvdTime); numLost > 0 && !s.FastRecovery.Active {
++		// During RTO recovery, sendData advances from the retransmission
++		// cursor as ACKs arrive. Starting fast recovery here would count the
++		// old flight against its reduced window again and stop that progress.
++		if numLost := s.rc.detectLoss(rcvdSeg.rcvdTime); numLost > 0 && !s.FastRecovery.Active && s.state != tcpip.RTORecovery {
+ 			// If any segment is marked as lost by
+ 			// RACK, enter recovery and retransmit
+ 			// the lost segments.
 diff --git a/pkg/tcpip/transport/tcp/rcv.go b/pkg/tcpip/transport/tcp/rcv.go
 index 6bb5252..34dda4f 100644
 --- a/pkg/tcpip/transport/tcp/rcv.go

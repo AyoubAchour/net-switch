@@ -15,9 +15,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 )
 
-func sackSYN(b []byte) []byte {
-	// Advertise 1460-byte segments and selective acknowledgements.
-	options := []byte{2, 4, 5, 180, 4, 2, 1, 1}
+func tcpWithOptions(b, options []byte) []byte {
 	result := append(bytes.Clone(b), options...)
 	ip := header.IPv4(result)
 	binary.BigEndian.PutUint16(result[2:4], uint16(len(result)))
@@ -32,7 +30,7 @@ func sackSYN(b []byte) []byte {
 }
 
 func TestTCPRecoveryAfterLostWindow(t *testing.T) {
-	for _, mode := range []string{"rack", "sack"} {
+	for _, mode := range []string{"rack", "sack", "rack_reordered"} {
 		t.Run(mode, func(t *testing.T) { tcpRecoveryAfterLostWindow(t, mode) })
 	}
 }
@@ -51,7 +49,8 @@ func tcpRecoveryAfterLostWindow(t *testing.T, mode string) {
 	}
 	p.fixedSendBuffer = 64 << 10
 	p.openWith(1000, func(b []byte) {
-		p.inject(sackSYN(b))
+		// Advertise 1460-byte segments and selective acknowledgements.
+		p.inject(tcpWithOptions(b, []byte{2, 4, 5, 180, 4, 2, 1, 1}))
 	})
 	p.upload([]byte("download"))
 	ep := p.endpoint()
@@ -126,6 +125,27 @@ func tcpRecoveryAfterLostWindow(t *testing.T, mode string) {
 		}
 		clock.Advance(time.Millisecond)
 		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+		if mode == "rack_reordered" && len(received) == mss {
+			// Deliver the third retransmitted segment before the second.
+			// This is a legitimate new SACK during RTO recovery, followed
+			// by a cumulative ACK once the gap is filled.
+			second, third := p.read(time.Second), p.read(time.Second)
+			if second == nil || third == nil || second.SequenceNumber() != p.ack || third.SequenceNumber() != p.ack+uint32(mss) {
+				t.Fatal("timeout recovery did not produce the next two segments")
+			}
+			secondData, thirdData := second[second.DataOffset():], third[third.DataOffset():]
+			if len(secondData) != mss || len(thirdData) != mss {
+				t.Fatal("unexpected retransmission payload size")
+			}
+			sack := []byte{1, 1, 5, 10, 0, 0, 0, 0, 0, 0, 0, 0}
+			binary.BigEndian.PutUint32(sack[4:8], third.SequenceNumber())
+			binary.BigEndian.PutUint32(sack[8:12], third.SequenceNumber()+uint32(len(thirdData)))
+			p.inject(tcpWithOptions(p.packet(p.seq, p.ack, header.TCPFlagAck, nil), sack))
+			received = append(received, secondData...)
+			received = append(received, thirdData...)
+			p.ack += uint32(len(secondData) + len(thirdData))
+			p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+		}
 		if len(received) == len(payload) {
 			break
 		}
