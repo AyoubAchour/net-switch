@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      generate_loss_fix:
+        description: Regenerate and test the pinned TCP recovery patch in CI
+        type: boolean
+        default: false
       loss_probe:
         description: Exercise TCP retransmission with a controlled packet peer
         type: boolean
@@ -32,6 +36,37 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  generate-loss-fix:
+    if: github.event_name == 'workflow_dispatch' && inputs.generate_loss_fix
+    name: Regenerate TCP recovery dependency
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+      TARGET_BRANCH: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - run: |
+          node scripts/generate-gvisor.mjs
+          go mod verify
+          go mod vendor
+          go test -v -count=1 -timeout=30s -run '^TestTCPRecoveryAfterLostWindow$' ./internal/engine/stack
+      - name: Save only reproducible dependency output
+        run: |
+          git add third_party/gvisor vendor
+          if ! git diff --cached --quiet; then
+            git -c user.name="$(git show -s --format=%an HEAD)" -c user.email="$(git show -s --format=%ae HEAD)" commit -m "Regenerate the pinned dependency with the TCP recovery fix"
+            git push origin "HEAD:$TARGET_BRANCH"
+          fi
+
   loss-probe:
     if: github.event_name == 'workflow_dispatch' && inputs.loss_probe
     name: TCP lost-window reproduction
@@ -95,7 +130,7 @@ jobs:
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.tcp_probe && !inputs.loss_probe
+    if: github.event_name == 'workflow_dispatch' && !inputs.tcp_probe && !inputs.loss_probe && !inputs.generate_loss_fix
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
