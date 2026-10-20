@@ -56,6 +56,7 @@ type Platform struct {
 	lines                map[string]lineState
 	owned                map[string]ownedObject
 	captureOwned         map[string]ownedObject
+	captureOrder         []ownedObject
 	observed             map[string]bool
 	ipv4Only             bool
 	journalDirty         bool
@@ -488,13 +489,13 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			}
 			for _, a := range addrs {
 				ip, ok := netip.AddrFromSlice(a.IP)
-				if ok && a.Flags&unix.IFA_F_TENTATIVE == 0 {
+				if ok && a.Flags&unix.IFA_F_TENTATIVE == 0 && (!p.ipv4Only || ip.Is4() || ip.Is4In6()) {
 					l.Addresses = append(l.Addresses, ip.Unmap())
 				}
 			}
 		}
 		for _, r := range routes {
-			if !l.Up || r.LinkIndex != l.Index || r.Type != unix.RTN_UNICAST || r.Table == unix.RT_TABLE_LOCAL || (r.Table >= 21000+p.base && r.Table <= 21255+p.base) || r.Flags&unix.RTM_F_CLONED != 0 {
+			if !l.Up || (p.ipv4Only && r.Family == unix.AF_INET6) || r.LinkIndex != l.Index || r.Type != unix.RTN_UNICAST || r.Table == unix.RT_TABLE_LOCAL || (r.Table >= 21000+p.base && r.Table <= 21255+p.base) || r.Flags&unix.RTM_F_CLONED != 0 {
 				continue
 			}
 			if r.Dst == nil || r.Dst.String() == defaultCIDR(r.Family) {
@@ -571,7 +572,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 	}
 	// Restore bypass and capture only after physical tables are complete.
 	for _, kind := range []string{"route", "rule"} {
-		for _, object := range p.captureOwned {
+		for _, object := range p.captureOrder {
 			if object.kind == kind {
 				if err := p.add(ctx, kind, object.fp); err != nil {
 					return err
@@ -603,11 +604,13 @@ func (p *Platform) Capture(ctx context.Context) error {
 		return nil
 	}
 	p.captureOwned = make(map[string]ownedObject)
+	p.captureOrder = nil
 	create := func(kind string, fp journal.Fingerprint) error {
 		if err := p.add(ctx, kind, fp); err != nil {
 			return err
 		}
 		p.captureOwned[kind+fp["object"]] = ownedObject{kind, fp}
+		p.captureOrder = append(p.captureOrder, ownedObject{kind, fp})
 		return nil
 	}
 	for _, cidr := range bypass {
@@ -733,6 +736,7 @@ func (p *Platform) Cleanup(ctx context.Context) error {
 	if err == nil {
 		p.owned = map[string]ownedObject{}
 		p.captureOwned = nil
+		p.captureOrder = nil
 		p.lines = map[string]lineState{}
 		p.capturing = false
 		p.allocated = false
