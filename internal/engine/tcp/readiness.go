@@ -86,7 +86,11 @@ func (w *relayWorkers) borrow(r *readyRelay) bool {
 		r.waitBuffer = true
 		return false
 	}
-	delete(w.waiting, r)
+	// The other direction may already be waiting in this same step. A
+	// successful borrow here must not erase that direction's only wakeup.
+	if !r.waitBuffer {
+		delete(w.waiting, r)
+	}
 	w.loans++
 	w.bufferPeak = max(w.bufferPeak, w.loans)
 	return true
@@ -95,11 +99,21 @@ func (w *relayWorkers) borrow(r *readyRelay) bool {
 func (w *relayWorkers) giveBack() {
 	w.bufferMu.Lock()
 	w.loans--
+	w.bufferMu.Unlock()
+	w.kickWaiting()
+}
+
+func (w *relayWorkers) kickWaiting() {
+	w.bufferMu.Lock()
 	var next *readyRelay
-	for r := range w.waiting {
-		next = r
-		delete(w.waiting, r)
-		break
+	if w.loans < RelayHeldBudget/RelayBuffer {
+		for r := range w.waiting {
+			delete(w.waiting, r)
+			if !r.closed.Load() {
+				next = r
+				break
+			}
+		}
 	}
 	w.bufferMu.Unlock()
 	if next != nil {
@@ -228,6 +242,9 @@ func (r *readyRelay) close(abort bool) {
 	r.workers.bufferMu.Lock()
 	delete(r.workers.waiting, r)
 	r.workers.bufferMu.Unlock()
+	// A previously selected waiter may be cancelled before consuming its
+	// available slot. Pass the wakeup on even if this relay owns no buffer.
+	r.workers.kickWaiting()
 	if abort {
 		r.remote.SetLinger(0)
 		if closeAdmissionEnabled {

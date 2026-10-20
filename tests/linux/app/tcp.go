@@ -201,8 +201,10 @@ type Held struct {
 
 // HeldList is tcphold's "held {...}" line, with --tuples.
 type HeldList struct {
-	Established int    `json:"established"`
-	Conns       []Held `json:"conns"`
+	Established int            `json:"established"`
+	Conns       []Held         `json:"conns"`
+	Errors      map[string]int `json:"errors,omitempty"`
+	FailedMS    Stats          `json:"failedMs"`
 }
 
 // runTCPHold opens many connections and keeps them open (a connection storm,
@@ -273,7 +275,7 @@ func runTCPHold(args []string) (any, error) {
 				mu.Lock()
 				if err != nil {
 					r.Errors[code]++
-					failed = append(failed, ms)
+					failed = append(failed, msSince(start))
 				} else {
 					conns = append(conns, conn)
 					if *probe {
@@ -298,7 +300,7 @@ func runTCPHold(args []string) (any, error) {
 	r.Connect, r.FailedMS = Summarise(connect), Summarise(failed)
 	fmt.Printf("holding %d\n", r.Established)
 	if *tuples {
-		list := HeldList{Established: len(conns), Conns: make([]Held, 0, len(conns))}
+		list := HeldList{Established: len(conns), Conns: make([]Held, 0, len(conns)), Errors: r.Errors, FailedMS: r.FailedMS}
 		for _, conn := range conns {
 			list.Conns = append(list.Conns, Held{Local: addrString(conn.LocalAddr()), Remote: addrString(conn.RemoteAddr()), Seen: observed[conn]})
 		}

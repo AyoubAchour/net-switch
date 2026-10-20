@@ -48,7 +48,7 @@ func (p *socketPoller) run() {
 			continue
 		}
 		if err != nil {
-			panic("TCP readiness poller: " + err.Error())
+			panic("socket readiness poller: " + err.Error())
 		}
 		for _, event := range events[:n] {
 			id := uint64(uint32(event.Fd)) | uint64(uint32(event.Pad))<<32

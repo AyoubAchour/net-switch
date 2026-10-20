@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -131,5 +132,47 @@ func TestPendingFloodCannotConsumeEstablishedReplyBudget(t *testing.T) {
 	waitReplyState(t, func() bool { return link.Queued() == 2 })
 	if c.Pending.Load() != 32<<20 || c.Reply.Load() == 0 || n.Dropped.Load() != 0 {
 		t.Fatal("new-session pressure consumed established receive capacity")
+	}
+}
+
+type installingDatagram struct {
+	*readyDatagram
+	installing, resume chan struct{}
+	closedBeforeDetach atomic.Bool
+}
+
+func (s *installingDatagram) Watch(wake func()) (platform.Readiness, error) {
+	close(s.installing)
+	<-s.resume
+	return s.readyDatagram.Watch(wake)
+}
+
+func (s *installingDatagram) Close() error {
+	s.mu.Lock()
+	detached := s.detached
+	s.mu.Unlock()
+	if !detached {
+		s.closedBeforeDetach.Store(true)
+	}
+	return s.socket.Close()
+}
+
+func TestReadyUDPSetupCancellationDetachesBeforeSocketClose(t *testing.T) {
+	c := &testfake.Controller{}
+	socket := &installingDatagram{readyDatagram: &readyDatagram{socket: newSocket()}, installing: make(chan struct{}), resume: make(chan struct{})}
+	d := testfake.Dialer{UDPFunc: func(context.Context, string, bool) (platform.UDPConn, error) { return socket, nil }}
+	link := ns.NewLink()
+	defer link.Close()
+	n := New(context.Background(), nil, c, &testfake.Owners{Value: owner}, nil, d, link, 9000)
+	send(n, dest, []byte("cancel during registration"))
+	await(t, socket.installing)
+	done := make(chan struct{})
+	go func() { n.Close(); close(done) }()
+	// Establish that cancellation began while Watch was still installing.
+	await(t, n.ctx.Done())
+	close(socket.resume)
+	await(t, done)
+	if socket.closedBeforeDetach.Load() || c.Closed.Load() != 1 || c.Pending.Load() != 0 {
+		t.Fatalf("setup cancellation violated ownership: early close=%t tickets=%d pending=%d", socket.closedBeforeDetach.Load(), c.Closed.Load(), c.Pending.Load())
 	}
 }

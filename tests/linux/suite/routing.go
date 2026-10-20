@@ -55,8 +55,10 @@ func ipv6DisabledDefault(e *Env) {
 		from := e.Mark()
 		tcp := e.TCP("bravo", AsUser, "--to", To(topo.Server6, wire.PortWhoami), "--count", "3", "--timeout", "3000")
 		var udp app.UDPResult
-		e.RunJSON(Run{App: "bravo", Args: []string{"udp", "--to", To(topo.Server6, wire.PortUDPEcho), "--count", "3", "--timeout", "1000", "--connect"}}, &udp)
-		e.T.Check(tcp.OK == 0 && tcp.FailedMS.Max < 1000 && udp.Received == 0, "%s refuses IPv6 TCP and UDP (%d/%d replies)", label, tcp.OK, udp.Received)
+		e.RunJSON(Run{App: "bravo", Args: []string{"udp", "--to", To(topo.Server6, wire.PortUDPEcho), "--count", "3", "--wait", "1000", "--connect"}}, &udp)
+		refused := udp.RecvErrors["ECONNREFUSED"] + udp.SendErrors["ECONNREFUSED"]
+		e.T.Check(tcp.OK == 0 && tcp.FailedMS.Max < 1000 && tcp.Errors["ECONNREFUSED"]+tcp.Errors["ECONNRESET"] == 3 && udp.Received == 0 && refused == 3,
+			"%s promptly refuses every IPv6 TCP and UDP attempt (%d/%d replies, %d UDP refusals)", label, tcp.OK, udp.Received, refused)
 		escaped := Select(e.Records(), func(r inet.Record) bool {
 			return r.T >= from && (r.Kind == "tcp" || r.Kind == "udp") && strings.HasPrefix(r.Dst, "[")
 		})

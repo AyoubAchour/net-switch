@@ -44,18 +44,21 @@ func newUDPWorkers() *udpWorkers {
 
 func (s *session) startReady(socket platform.ReadyUDP) bool {
 	r := &readySession{s: s, socket: socket, initializing: true}
+	// Serialize Watch installation with close. An adapter may register OS
+	// resources inside Watch, so even setup cancellation must detach before
+	// closing its socket. Readiness callbacks take only the worker queue lock.
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false
+	}
 	watch, err := socket.Watch(r.notify)
 	if err != nil {
+		s.mu.Unlock()
 		s.n.ReadErrors.Add(1)
 		return false
 	}
 	r.watch = watch
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		watch.Detach()
-		return false
-	}
 	s.cancel = nil
 	s.ready.Store(r)
 	s.mu.Unlock()

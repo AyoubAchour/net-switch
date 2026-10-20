@@ -300,3 +300,22 @@ func TestStalledDirectionsStopReadingAtTheirSharedBufferBound(t *testing.T) {
 		t.Fatal("stalled relay loans were not returned")
 	}
 }
+
+func TestOneDirectionCannotEraseTheOtherDirectionsBudgetWakeup(t *testing.T) {
+	w := &relayWorkers{waiting: make(map[*readyRelay]struct{}), wake: make(chan struct{}, 1), loans: RelayHeldBudget / RelayBuffer}
+	r := &readyRelay{workers: w}
+	if w.borrow(r) {
+		t.Fatal("fixture failed to block the first direction at capacity")
+	}
+	// A different direction's pending write drains and obtains the freed
+	// slot before the first direction is retried. Its successful borrow
+	// must preserve the first direction's queued interest.
+	w.loans--
+	if !w.borrow(r) {
+		t.Fatal("second direction could not consume the free slot")
+	}
+	w.giveBack()
+	if w.head != r {
+		t.Fatal("first direction was stranded with no readiness or budget wakeup")
+	}
+}
