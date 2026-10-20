@@ -15,7 +15,7 @@ on:
       flake_suites:
         description: Full suites or cold control clients only
         type: choice
-        options: [both, cold]
+        options: [both, cold, cap]
         default: both
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
@@ -43,7 +43,7 @@ jobs:
       max-parallel: 4
       matrix:
         arch: [x64, ARM64]
-        suite: ${{ fromJSON(inputs.flake_suites == 'cold' && '["cold"]' || '["proof","acceptance"]') }}
+        suite: ${{ fromJSON(inputs.flake_suites == 'cold' && '["cold"]' || inputs.flake_suites == 'cap' && '["cap"]' || '["proof","acceptance"]') }}
         include:
           - arch: x64
             runner: windows-latest
@@ -78,7 +78,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Build helper and fetch engine
-        if: matrix.suite == 'acceptance'
+        if: matrix.suite == 'acceptance' || matrix.suite == 'cap'
         env:
           GOFLAGS: -mod=readonly -p=2
         run: |
@@ -87,9 +87,10 @@ jobs:
       - name: Repeat without hiding failed rounds
         env:
           FLAKE_SUITE: ${{ matrix.suite }}
+          FLAKE_CAP_SETUP_ROUNDS: ${{ matrix.suite == 'cap' && '100' || '1' }}
         run: |
           $failures = 0
-          $rounds = if ($env:FLAKE_SUITE -eq 'proof') { 6 } elseif ($env:FLAKE_SUITE -eq 'cold') { 1 } else { 3 }
+          $rounds = if ($env:FLAKE_SUITE -eq 'proof') { 6 } else { 1 }
           for ($i = 1; $i -le $rounds; $i++) {
             Write-Host "FLAKE ROUND $i START $env:FLAKE_SUITE"
             if ($env:FLAKE_SUITE -eq 'cold') {

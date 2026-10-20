@@ -547,19 +547,29 @@ try {
           diagnostics: harness.control('diagnostics'),
           heartbeat: client('heartbeat', {}, 5000),
           requests: client('requests', {}, 5000),
-          logs: Promise.all(['server.log', 'engine.log'].map(async (name) => [name,
-            await readFile(path.join(dataDir, name), 'utf8').then((value) => value.split('\n').slice(-30).join('\n')).catch(String)])).then(Object.fromEntries),
+          logs: Promise.all([
+            ['server', path.join(dataDir, 'server.log')],
+            ['engine', path.join(dataDir, 'engine.log')],
+            ['gateway', path.join(dir, 'testisp', 'testisp.log')],
+          ].map(async ([name, file]) => [name,
+            await readFile(file, 'utf8').then((value) => value.split('\n').slice(-30).join('\n')).catch(String)])).then(Object.fromEntries),
         }).map(async ([name, promise]) => [name, await promise.catch((error) => ({ error: error.message }))]))));
         console.error(`CAP SETUP FAILURE ${JSON.stringify(error.evidence)}`);
         throw error;
       }
     };
-    await pin(main.id);
-    const mainHeld = await prepare('opening the main-line HTTPS flows', () => client('open', { count: 2 }));
-    await pinApp(clientExe, second.id);
-    const secondHeld = await prepare('opening the controlled secondary-line HTTP flows',
-      () => client('open', { count: 2, target: responder.virtual }));
-    await counts(4);
+    let mainHeld, secondHeld;
+    const setupRounds = Number(process.env.FLAKE_CAP_SETUP_ROUNDS ?? 1);
+    assert(Number.isInteger(setupRounds) && setupRounds >= 1 && setupRounds <= 100);
+    for (let round = 1; round <= setupRounds; round++) {
+      await pin(main.id);
+      mainHeld = await prepare(`round ${round}: opening the main-line HTTPS flows`, () => client('open', { count: 2 }));
+      await pinApp(clientExe, second.id);
+      secondHeld = await prepare(`round ${round}: opening the controlled secondary-line HTTP flows`,
+        () => client('open', { count: 2, target: responder.virtual }));
+      await counts(4);
+      console.log(`CAP SETUP ROUND ${round} ${JSON.stringify({ mainHeld, secondHeld })}`);
+    }
     try {
       // Main has no stand-in, so its exception must preserve these sockets.
       await applied('lines/update', { id: second.id, strict: true }, (state) => state.lines.find((line) => line.id === second.id)?.strict);
