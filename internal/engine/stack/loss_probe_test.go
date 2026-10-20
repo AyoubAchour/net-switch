@@ -58,7 +58,12 @@ func tcpRecoveryAfterLostWindow(t *testing.T, mode string) {
 	if !ep.SACKPermitted {
 		t.Fatal("SACK was not negotiated")
 	}
-	const mss, segments = 1460, 16
+	var initial tcpip.TCPInfoOption
+	if err := ep.GetSockOpt(&initial); err != nil || initial.SndMss == 0 {
+		t.Fatalf("negotiated TCP MSS: %+v, %v", initial, err)
+	}
+	mss := int(initial.SndMss)
+	const segments = 16
 	payload := make([]byte, mss*segments)
 	for i := range payload {
 		payload[i] = byte(i*17 + i/251)
