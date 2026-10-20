@@ -54,6 +54,8 @@ jobs:
           go-version-file: go.mod
           cache: false
       - run: go test ${{ matrix.race }} -v -count=10000 -timeout=10m -run '^TestTimeWaitSYNBeforeRemoval$' ./internal/engine/stack
+      - if: always()
+        run: go test -mod=mod ${{ matrix.race }} -v -count=1000 -run '^TestConnectedDispatchAfterTimeWait$' gvisor.dev/gvisor/pkg/tcpip/transport/tcp
 
   control-security:
     name: Control security / Windows x64
@@ -383,6 +385,8 @@ jobs:
           node --test scripts/gvisor-diff.test.mjs scripts/repeat-close-tests.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: go vet ./internal/... ./cmd/... ./tests/...
+      - name: Deterministic gVisor dispatch regression
+        run: go test -mod=mod -v -count=1 gvisor.dev/gvisor/pkg/tcpip/transport/tcp
       - run: go test -v ./internal/... ./cmd/... ./tests/...
       - run: go build ./internal/... ./cmd/... ./tests/...
       - name: Install pinned govulncheck

@@ -16,6 +16,7 @@ function diff(env) {
 
 test('gVisor patch keeps apply -p1 format under custom diff settings', () => {
   const expected = diff(process.env);
+  assert.match(expected, /new file mode 100644\n[\s\S]*dispatcher_netswitch_test\.go/);
   const settings = {
     'diff.noprefix': 'true',
     'diff.mnemonicPrefix': 'true',
