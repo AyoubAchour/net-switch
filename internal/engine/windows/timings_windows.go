@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"os"
 	"runtime"
 	"sync"
 	"time"
@@ -125,6 +126,15 @@ type measuredTun struct {
 	*wintun.Session
 	timings *phaseTimings
 	trace   *packetTrace
+}
+
+func (s *measuredTun) BeginClose() {
+	// Hosted ordering experiment only. Adapter removal and the final Close
+	// still join the actual session teardown, including on cleanup failure.
+	if hostedTraceEnabled() && os.Getenv("NETSWITCH_ENGINE_CLOSE_AFTER_ROUTES") == "1" {
+		return
+	}
+	s.Session.BeginClose()
 }
 
 func (s *measuredTun) ReadPacket(ctx context.Context, packet []byte) (int, error) {
