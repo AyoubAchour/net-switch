@@ -255,7 +255,8 @@ func TestWintunUDPClient(t *testing.T) {
 	fmt.Printf("UDP_CLIENT_RESULT %.9f\n", rate)
 }
 
-func shortLatency(t *testing.T, mode string) float64 {
+func shortLatency(t *testing.T, mode string, session *Session) float64 {
+	before := observeSession(session)
 	c := udpSocket(t)
 	defer c.Close()
 	samples := make([]time.Duration, 20000)
@@ -298,8 +299,12 @@ func shortLatency(t *testing.T, mode string) float64 {
 			samples[i] = elapsed(start)
 		}
 	}
-	report(t, map[string]any{"test": "burst_latency_sample", "arch": runtime.GOARCH, "mode": mode, "measured_round_trips": len(samples), "warmup_round_trips": 1000, "timeout_rescues": rescues})
+	after := observeSession(session)
 	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	// Report after measurement. A p95 alone cannot distinguish a wider latency
+	// distribution from a long stall; do not stop the world in the timed loop.
+	over50 := len(samples) - sort.Search(len(samples), func(i int) bool { return samples[i] > 50*time.Millisecond })
+	report(t, map[string]any{"test": "burst_latency_sample", "arch": runtime.GOARCH, "mode": mode, "measured_round_trips": len(samples), "warmup_round_trips": 1000, "timeout_rescues": rescues, "p50_us": float64(samples[len(samples)/2]) / 1000, "p95_us": float64(samples[len(samples)*95/100]) / 1000, "p99_us": float64(samples[len(samples)*99/100]) / 1000, "max_ms": samples[len(samples)-1].Seconds() * 1000, "over_50_ms": over50, "state_before": before, "state_after": after})
 	return float64(samples[len(samples)*95/100]) / 1000
 }
 
@@ -352,7 +357,8 @@ func TestWintunPerformance(t *testing.T) {
 					results[mode][name] = append(results[mode][name], value)
 					report(t, map[string]any{"test": "performance", "arch": runtime.GOARCH, "trial": trial, "mode": mode, "metric": name, "value": value})
 				}
-				measure("udp_p95_us", shortLatency(t, mode))
+				session, _ := f.io.(*Session)
+				measure("udp_p95_us", shortLatency(t, mode, session))
 				for _, streams := range []int{1, 8} {
 					var before Stats
 					if s, ok := f.io.(*Session); ok {
