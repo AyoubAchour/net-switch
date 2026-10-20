@@ -36,6 +36,8 @@ func (r *Runtime) Stats() any {
 	stats["lifecyclePhases"] = r.routes.timings.snapshot()
 	if trace := r.routes.trace.snapshot(); trace != nil {
 		stats["packetTrace"] = trace
+		stats["nativeSocketState"] = nativeSocketState()
+		stats["nativeReadiness"] = r.dialer.pool.stats()
 	}
 	if memory, err := processMemory(); err == nil {
 		stats["processMemory"] = memory

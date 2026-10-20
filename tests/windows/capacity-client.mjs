@@ -16,7 +16,7 @@ const closeSocket = (socket) => new Promise((resolve) => {
   if (socket.destroyed) { resolve(); return; }
   expectedClose.add(socket);
   socket.once('close', resolve);
-  socket.resetAndDestroy();
+  socket.end();
 });
 function echo(socket, value, timeout = 1000) {
   return new Promise((resolve, reject) => {
@@ -98,8 +98,9 @@ process.on('message', async ({ id, command, host, ports, count, localPort = 4500
       process.send({ id, result: status() });
     } else if (command === 'release') {
       const removed = sockets.splice(0, count);
+      const localPorts = removed.map((socket) => socket.localPort);
       await Promise.all(removed.map(closeSocket));
-      process.send({ id, result: { ...status(), released: removed.length } });
+      process.send({ id, result: { ...status(), released: removed.length, localPorts } });
     } else if (command === 'status') {
       process.send({ id, result: status() });
     } else if (command === 'close') {

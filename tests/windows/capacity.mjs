@@ -46,10 +46,72 @@ function refusalPackets(stats, refusals) {
   });
 }
 
+async function waitForReturnedPorts({ engineStats, before, released, target, nativeExpiryMs, children, evidence }) {
+  const started = performance.now(), appPorts = new Set(released.localPorts);
+  const ownPID = before.nativeSocketState.pid;
+  const egressGroups = before.nativeSocketState.groups.filter((g) => g.pid === ownPID && g.state === 5 &&
+    g.destination === target.host && target.ports.includes(g.remotePort));
+  assert.equal(new Set(egressGroups.map((g) => g.source)).size, 1, 'Capacity egress escaped its one pinned line');
+  const egress = new Set(egressGroups.flatMap((g) => g.ports));
+  assert(egress.size >= released.released, 'Native established socket precondition missing');
+  const ranges = before.socketResources.configuration.filter((s) => s.DynamicPortRangeNumberOfPorts > 0);
+  assert(ranges.length);
+  const { DynamicPortRangeStartPort: start, DynamicPortRangeNumberOfPorts: size } = ranges[0];
+  evidence.nativeExpiryMs = nativeExpiryMs;
+  evidence.boundMs = Math.max(30_000, nativeExpiryMs + 10_000);
+  evidence.observations = [];
+  for (;;) {
+    const stats = await engineStats(), native = stats.nativeSocketState;
+    assert(native && !native.error && !native.handleError, JSON.stringify(native));
+    const rows = native.groups.filter((g) => g.destination === target.host && target.ports.includes(g.remotePort));
+    const liveEgress = new Set(rows.filter((g) => g.pid === ownPID && g.state === 5).flatMap((g) => g.ports));
+    const releasedEgress = new Set([...egress].filter((port) => !liveEgress.has(port)));
+    const stateCounts = (ports, source) => {
+      const states = {};
+      for (const group of rows) {
+        if (source && group.source !== source) continue;
+        if (!source && group.source === '198.18.0.1') continue;
+        for (const port of group.ports) if (ports.has(port)) states[group.state] = (states[group.state] ?? 0) + 1;
+      }
+      return states;
+    };
+    const appStates = stateCounts(appPorts, '198.18.0.1'), engineStates = stateCounts(releasedEgress);
+    const retainedWatches = stats.nativeReadiness.ports.filter((port) => releasedEgress.has(port)).length;
+    const used = new Set(native.usedLocalPorts.filter((port) => port >= start && port < start + size));
+    const elapsedMs = performance.now() - started;
+    const observation = { elapsedMs, appStates, engineStates, releasedEgress: releasedEgress.size,
+      retainedWatches, handles: native.handles, handlesReleased: before.nativeSocketState.handles - native.handles,
+      flows: stats.flows.Flows, tableFreePortUpperBound: size - used.size,
+      heapBytes: stats.heapBytes, stackBytes: stats.stackBytes, runtimeBytes: stats.runtimeBytes, gcCPUppm: stats.gcCPUppm };
+    evidence.observations.push(observation);
+    console.log(`WINDOWS CAPACITY PORT RETURN ${JSON.stringify(observation)}`);
+    assert(stats.runtimeBytes <= 512 * 1024 * 1024, 'Memory budget exceeded while waiting for Windows port release');
+    const clients = await Promise.all(children.map((app) => app.call('status')));
+    assert(clients.every((state) => state.held === state.live && state.lost === 0), 'Held flow lost during OS TIME_WAIT');
+    assert(clients[0].survival.live && !clients[0].survival.error && clients[0].survival.maxMs <= 1000,
+      'Survival stream stalled during OS TIME_WAIT');
+    if (elapsedMs >= 2000) {
+      assert.equal(releasedEgress.size, released.released, 'Engine left released outbound connections established');
+      assert.equal(retainedWatches, 0, 'Engine retained a readiness socket after normal close');
+      assert(observation.handlesReleased >= released.released, 'Engine retained handles after normal close');
+    }
+    if (releasedEgress.size === released.released && retainedWatches === 0 &&
+        Object.keys(appStates).length === 0 && Object.keys(engineStates).length === 0) {
+      evidence.returnedAfterMs = elapsedMs;
+      evidence.releasedEgress = [...releasedEgress];
+      evidence.egressSource = egressGroups[0].source;
+      return;
+    }
+    assert(elapsedMs <= evidence.boundMs, 'Released ports outlived the measured native TIME_WAIT bound');
+    await delay(1000); // Observe the OS; do not retry failed connection attempts.
+  }
+}
+
 export async function capacity({ server, harness, directory, line }) {
   hostedOnly();
   const target = await harness.control('capacity', {});
   const children = [];
+  const progress = {};
   const engineStats = async () => (await server.api('engine-command', { method: 'stats' })).engine;
   try {
     // Measure this runner's available native pool with routing stopped. No
@@ -61,14 +123,19 @@ export async function capacity({ server, harness, directory, line }) {
     const refusalLimitMs = Math.max(...refusalBaseline.map((sample) => sample.ms)) + 500;
     console.log(`WINDOWS NATIVE REFUSAL BASELINE ${JSON.stringify({ refusalBaseline, refusalLimitMs })}`);
     const nativeOutput = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
-      ['-test.v', '-test.run=^TestNativeBoundPortCapacity$', '-test.timeout=5m'],
-      { env: { NETSWITCH_PORT_GATE: '1' }, timeout: 300_000 });
+      ['-test.v', '-test.run=^TestNativeBoundPortCapacity$', '-test.timeout=6m'],
+      { env: { NETSWITCH_PORT_GATE: '1', NETSWITCH_PORT_BASELINE: 'production' }, timeout: 360_000 });
     const marker = 'WINDOWS NATIVE PORT CAPACITY ';
     const nativeSamples = nativeOutput.stdout.split(/\r?\n/).filter((text) => text.includes(marker))
       .map((text) => JSON.parse(text.slice(text.indexOf(marker) + marker.length)));
     const native = nativeSamples.find((sample) => sample.reuseUnicastPort);
     assert(native && native.connected === native.accepted && native.connected > 0, nativeOutput.stdout);
     const layoutCapacity = Math.floor(native.connected / 2), floor = Math.ceil(layoutCapacity * 0.95);
+    const releaseMarker = 'WINDOWS NATIVE PORT RELEASE ';
+    const nativeRelease = nativeOutput.stdout.split(/\r?\n/).filter((text) => text.includes(releaseMarker))
+      .map((text) => JSON.parse(text.slice(text.indexOf(releaseMarker) + releaseMarker.length)));
+    assert(nativeRelease.length && nativeRelease.at(-1).remaining === 0);
+    Object.assign(progress, { nativeSamples, nativeRelease, refusalBaseline, refusalLimitMs, floor, layoutCapacity });
     await server.api('routing', { on: true });
     await server.on();
     const engineBefore = await server.api('engine-command', { method: 'hello' });
@@ -148,6 +215,7 @@ export async function capacity({ server, harness, directory, line }) {
       `The limit was a stall or unrelated failure: ${JSON.stringify(firstLimit)}`);
     assert(held >= floor, `Held ${held}, below 95% of this runner's isolated two-half layout ${layoutCapacity}: ${JSON.stringify(nativeSamples)}`);
     const ordinaryHeld = held;
+    progress.ordinaryHeld = ordinaryHeld;
     const limitStats = await engineStats();
     const refusals = [], extraAdmissions = [], resetTimings = [];
     // Failed ordinary connects release their app-side ports; unrelated OS
@@ -168,6 +236,7 @@ export async function capacity({ server, harness, directory, line }) {
       resetTimings.push(...refusalPackets(await engineStats(), rejected));
     }
     assert.equal(refusals.length, 128, 'Did not establish the actual native allocation limit');
+    Object.assign(progress, { held, firstLimit, refusals, resetTimings, extraAdmissions });
     const refusedStats = await engineStats();
     assert(refusedStats.socketResources.exhaustions >= 128, 'Native bind failures were not counted');
     assert(refusedStats.tcpDialFailed - limitStats.tcpDialFailed >= 128, 'Refused app flows were not counted by the engine');
@@ -200,11 +269,23 @@ export async function capacity({ server, harness, directory, line }) {
       samples.push(stats);
       await delay(1000);
     }
+    const beforeRelease = await engineStats();
     const released = await children[0].call('release', { count: 512 });
     assert.equal(released.released, 512);
+    const portReturn = progress.portReturn = { released, beforeHandles: beforeRelease.nativeSocketState.handles };
+    await waitForReturnedPorts({ engineStats, before: beforeRelease, released, target,
+      nativeExpiryMs: nativeRelease.at(-1).elapsedMS, children, evidence: portReturn });
+    const returnedPortProbe = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
+      ['-test.v', '-test.run=^TestReturnedPortsBindWithoutReuse$', '-test.timeout=30s'],
+      { env: { NETSWITCH_RETURNED_PORTS: JSON.stringify([
+        { source: '198.18.0.1', ports: released.localPorts },
+        { source: portReturn.egressSource, ports: portReturn.releasedEgress },
+      ]) }, timeout: 30_000 });
+    portReturn.nativeBindEvidence = returnedPortProbe.stdout;
     const recoveryStarted = performance.now();
     const recovered = await children[0].call('open', { ...target, count: 256, timeout: refusalLimitMs });
     const recoveryMs = performance.now() - recoveryStarted;
+    Object.assign(progress, { recovered, recoveryMs });
     assert.equal(recovered.opened, 256, 'Capacity did not return after ports were freed');
     assert.equal(recovered.failures.length, 0, JSON.stringify(recovered.failures));
     const verifiedAfter = await Promise.all(children.map((app) => app.call('verify')));
@@ -214,7 +295,8 @@ export async function capacity({ server, harness, directory, line }) {
     assert.equal(engineAfter.engineInstanceId, engineBefore.engineInstanceId, 'The engine restarted under port pressure');
     const last = samples.at(-1);
     const evidence = { nativeSamples, layoutCapacity, floor, ordinaryHeld, held, firstLimit, extraAdmissions, refusals,
-      refusalBaseline, refusalLimitMs, resetTimings, oldEchoBasedLimitMs, controlReservation,
+      nativeRelease, refusalBaseline, refusalLimitMs, resetTimings, oldEchoBasedLimitMs, controlReservation, portReturn,
+      oldImmediateRecoveryCheckWouldPass: portReturn.returnedAfterMs + recoveryMs <= refusalLimitMs,
       oldOneSecondCheckWouldPass: [...firstLimit, ...refusals].every((failure) => failure.ms <= 1000),
       oldEchoBasedCheckWouldPass: refusals.every((failure) => failure.ms <= oldEchoBasedLimitMs), portStats,
       portConfiguration, preparation, before, samples, observed, verifiedBefore, verifiedAfter, released, recovered, recoveryMs,
@@ -231,6 +313,7 @@ export async function capacity({ server, harness, directory, line }) {
     // Read this before closing fixture sockets: teardown would erase the
     // held-flow state and overwrite a bounded SYN/RST boundary capture.
     error.evidence = {
+      progress,
       statsBeforeCleanup: await engineStats().catch((failure) => ({ error: failure.message })),
       clientsBeforeCleanup: await Promise.all(children.map(({ call }) => call('status').catch((failure) => ({ error: failure.message })))),
     };
