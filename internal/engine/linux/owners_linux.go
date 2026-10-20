@@ -94,6 +94,7 @@ type lookupStats struct {
 	BatchDescriptors, BatchSockets, BatchQueueFull, AbortedBatches                       uint64
 	BatchQueueNanos, BatchServiceNanos, BatchMaxQueueNanos, BatchMaxServiceNanos         uint64
 	ReusedBatches, StaleBatchRetries, ConflictBatchWaits                                 uint64
+	InlineBatches                                                                        uint64
 	BatchCompletionNanos, BatchResumeNanos, BatchMaxCompletionNanos, BatchMaxResumeNanos uint64
 }
 
@@ -109,6 +110,7 @@ func (o *Owners) Stats() any {
 	s.BatchQueueFull, s.AbortedBatches = o.batches.full.Load(), o.batches.aborted.Load()
 	s.BatchQueueNanos, s.BatchServiceNanos = o.batches.queueNanos.Load(), o.batches.serviceNanos.Load()
 	s.ReusedBatches, s.StaleBatchRetries, s.ConflictBatchWaits = o.batches.reused.Load(), o.batches.staleRetries.Load(), o.batches.conflictWaits.Load()
+	s.InlineBatches = o.batches.inline.Load()
 	s.BatchCompletionNanos, s.BatchResumeNanos = o.batches.completionNanos.Load(), o.batches.resumeNanos.Load()
 	s.BatchMaxCompletionNanos, s.BatchMaxResumeNanos = o.batches.maxCompletion.Load(), o.batches.maxResume.Load()
 	s.BatchMaxQueueNanos, s.BatchMaxServiceNanos = o.batches.maxQueue.Load(), o.batches.maxService.Load()
@@ -826,7 +828,7 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			key := descriptorBatchKey{pid: pid, uid: r.uid, start: start, directory: metadata.Ino, offset: offset, limit: limit, advance: advancing, cacheAll: canIndex}
 		acquire:
 			for !expired() {
-				job, err := o.descriptorBatch(key, requested)
+				job, err := o.descriptorBatch(ctx, key, requested, result.AppID != "")
 				if err != nil {
 					var busy *descriptorQueueBusy
 					if errors.As(err, &busy) {

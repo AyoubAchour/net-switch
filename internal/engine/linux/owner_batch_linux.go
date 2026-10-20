@@ -43,6 +43,7 @@ type descriptorBatch struct {
 	key       descriptorBatchKey
 	queued    time.Time
 	deadline  time.Time
+	caller    context.Context // non-nil only for caller-owned conflict scans
 	done      chan struct{}
 	completed time.Time
 	result    descriptorBatchResult // immutable after done closes
@@ -59,6 +60,7 @@ type descriptorBatches struct {
 	started, shared, early, fds, sockets, full, aborted    atomic.Uint64
 	queueNanos, serviceNanos, maxQueue, maxService         atomic.Uint64
 	reused, staleRetries, conflictWaits                    atomic.Uint64
+	inline                                                 atomic.Uint64
 	completionNanos, resumeNanos, maxCompletion, maxResume atomic.Uint64
 }
 
@@ -70,11 +72,11 @@ func (*descriptorQueueBusy) Error() string { return "descriptor scanner queue is
 // published match immediately while the worker continues serving neighbours.
 // Workers only touch kernel proc directories; process-root metadata stays in
 // the caller, outside the shared worker pool.
-func (o *Owners) descriptorBatch(key descriptorBatchKey, requested time.Time) (*descriptorBatch, error) {
+func (o *Owners) descriptorBatch(ctx context.Context, key descriptorBatchKey, requested time.Time, inline bool) (*descriptorBatch, error) {
 	b := &o.batches
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if b.closed.Load() {
+		b.mu.Unlock()
 		return nil, context.Canceled
 	}
 	// An overlapping lookup may reach this range after the worker finished.
@@ -83,10 +85,12 @@ func (o *Owners) descriptorBatch(key descriptorBatchKey, requested time.Time) (*
 	// to the caller's normal live FD and process identity checks.
 	if previous := b.recent[maphash.Comparable(o.indexSeed, key)%uint64(len(b.recent))]; previous != nil && previous.key == key && !previous.result.began.Before(requested) {
 		b.reused.Add(1)
+		b.mu.Unlock()
 		return previous, nil
 	}
 	if previous := b.live[key]; previous != nil {
 		b.shared.Add(1)
+		b.mu.Unlock()
 		return previous, nil
 	}
 	if b.jobs == nil {
@@ -100,14 +104,37 @@ func (o *Owners) descriptorBatch(key descriptorBatchKey, requested time.Time) (*
 	}
 	queued := time.Now()
 	job := &descriptorBatch{key: key, queued: queued, deadline: queued.Add(8 * time.Millisecond), done: make(chan struct{})}
+	if inline && len(b.jobs) < cap(b.jobs) {
+		// Once the primary owner is known, these bounded windows only check
+		// other possible holders. Doing each on a worker and parking again
+		// multiplies scheduler handoffs by the number of processes in scope.
+		// The first caller performs that work; overlapping callers still share
+		// the same live job and fresh completed result. Keep the queue bound
+		// and the caller's original deadline, including cancellation.
+		job.caller = ctx
+		if deadline, ok := ctx.Deadline(); ok && deadline.Before(job.deadline) {
+			job.deadline = deadline
+		}
+		b.live[key] = job
+		b.started.Add(1)
+		b.inline.Add(1)
+		b.workers.Add(1)
+		b.mu.Unlock()
+		o.completeDescriptorBatch(job)
+		b.workers.Done()
+		return job, nil
+	}
 	select {
 	case b.jobs <- job:
 		b.live[key] = job
 		b.started.Add(1)
+		b.mu.Unlock()
 		return job, nil
 	default:
 		b.full.Add(1)
-		return nil, &descriptorQueueBusy{ready: b.available}
+		err := &descriptorQueueBusy{ready: b.available}
+		b.mu.Unlock()
+		return nil, err
 	}
 }
 
@@ -127,39 +154,40 @@ func (o *Owners) runDescriptorBatches() {
 	b := &o.batches
 	defer b.workers.Done()
 	for job := range b.jobs {
-		started := time.Now()
-		queued := uint64(started.Sub(job.queued))
-		b.queueNanos.Add(queued)
-		recordLookupMaximum(&b.maxQueue, queued)
-		job.result = o.readDescriptorBatch(job)
-		serviced := time.Now()
-		service := uint64(serviced.Sub(started))
-		b.serviceNanos.Add(service)
-		recordLookupMaximum(&b.maxService, service)
-		if errors.Is(job.result.err, context.DeadlineExceeded) || errors.Is(job.result.err, context.Canceled) {
-			b.aborted.Add(1)
-		}
-		b.mu.Lock()
-		delete(b.live, job.key)
-		if b.available != nil {
-			close(b.available)
-			b.available = make(chan struct{})
-		}
-		if job.result.err == nil || errors.Is(job.result.err, io.EOF) {
-			b.recent[maphash.Comparable(o.indexSeed, job.key)%uint64(len(b.recent))] = job
-		}
-		job.completed = time.Now()
-		completion := uint64(job.completed.Sub(serviced))
-		b.completionNanos.Add(completion)
-		recordLookupMaximum(&b.maxCompletion, completion)
-		close(job.done)
-		b.mu.Unlock()
-		// Publishing a shared batch makes its callers runnable. Under a SYN
-		// burst, immediately taking more queued work repeatedly replaces that
-		// handoff. Let callers validate the finished result within their own
-		// deadline before this worker takes another bounded directory window.
-		runtime.Gosched()
+		o.completeDescriptorBatch(job)
 	}
+}
+
+func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
+	b := &o.batches
+	started := time.Now()
+	queued := uint64(started.Sub(job.queued))
+	b.queueNanos.Add(queued)
+	recordLookupMaximum(&b.maxQueue, queued)
+	job.result = o.readDescriptorBatch(job)
+	job.caller = nil
+	serviced := time.Now()
+	service := uint64(serviced.Sub(started))
+	b.serviceNanos.Add(service)
+	recordLookupMaximum(&b.maxService, service)
+	if errors.Is(job.result.err, context.DeadlineExceeded) || errors.Is(job.result.err, context.Canceled) {
+		b.aborted.Add(1)
+	}
+	b.mu.Lock()
+	delete(b.live, job.key)
+	if b.available != nil {
+		close(b.available)
+		b.available = make(chan struct{})
+	}
+	if job.result.err == nil || errors.Is(job.result.err, io.EOF) {
+		b.recent[maphash.Comparable(o.indexSeed, job.key)%uint64(len(b.recent))] = job
+	}
+	job.completed = time.Now()
+	completion := uint64(job.completed.Sub(serviced))
+	b.completionNanos.Add(completion)
+	recordLookupMaximum(&b.maxCompletion, completion)
+	close(job.done)
+	b.mu.Unlock()
 }
 
 func (b *descriptorBatches) resumed(job *descriptorBatch, waiting time.Time) {
@@ -173,7 +201,9 @@ func (b *descriptorBatches) resumed(job *descriptorBatch, waiting time.Time) {
 func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult {
 	k := job.key
 	out := descriptorBatchResult{lastFD: -1, began: time.Now()}
-	expired := func() bool { return o.batches.closed.Load() || !time.Now().Before(job.deadline) }
+	expired := func() bool {
+		return o.batches.closed.Load() || !time.Now().Before(job.deadline) || (job.caller != nil && job.caller.Err() != nil)
+	}
 	if expired() {
 		out.err = context.DeadlineExceeded
 		return out
