@@ -12,10 +12,31 @@ import (
 	"slices"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"golang.org/x/sys/windows"
 )
+
+// Diagnose clock resolution without changing the existing gate. The pinned Go
+// runtime reads KUSER_SHARED_DATA interrupt time on Windows; compare QPC on
+// these same cold calls before attributing a quantized sample to the lookup.
+func lookupPerformanceClock(t *testing.T) (func() int64, int64) {
+	t.Helper()
+	dll := windows.NewLazySystemDLL("kernel32.dll")
+	counter, frequency := dll.NewProc("QueryPerformanceCounter"), dll.NewProc("QueryPerformanceFrequency")
+	var hz int64
+	if ok, _, err := frequency.Call(uintptr(unsafe.Pointer(&hz))); ok == 0 || hz <= 0 {
+		t.Fatalf("QueryPerformanceFrequency: %d %v", hz, err)
+	}
+	return func() int64 {
+		var ticks int64
+		if ok, _, err := counter.Call(uintptr(unsafe.Pointer(&ticks))); ok == 0 {
+			t.Fatalf("QueryPerformanceCounter: %v", err)
+		}
+		return ticks
+	}, hz
+}
 
 func nativeTCPRowCounts(t *testing.T) (total, timeWait int) {
 	t.Helper()
@@ -101,8 +122,10 @@ func TestOwnerSteadyColdTiming(t *testing.T) {
 		held = append(held, [2]net.Conn{client, server})
 	}
 	owners := NewOwners()
+	counter, frequency := lookupPerformanceClock(t)
 	const count = 500
-	var samples []time.Duration
+	var samples, preciseSamples []time.Duration
+	var clockDifferences [][2]int64
 	minRows, maxRows := uint64(^uint64(0)), uint64(0)
 	for range count {
 		client, server := openPair()
@@ -112,8 +135,13 @@ func TestOwnerSteadyColdTiming(t *testing.T) {
 		// reuse are production behavior and remain enabled.
 		owners.snapshot[0].Store(nil)
 		started := time.Now()
+		preciseStarted := counter()
 		owner, err := owners.TCP(ctx, tuple)
+		preciseElapsed := time.Duration((counter() - preciseStarted) * int64(time.Second) / frequency)
 		elapsed := time.Since(started)
+		if elapsed >= 5*time.Millisecond || preciseElapsed >= 5*time.Millisecond {
+			clockDifferences = append(clockDifferences, [2]int64{elapsed.Microseconds(), preciseElapsed.Microseconds()})
+		}
 		snapshot := owners.snapshot[0].Load()
 		if err != nil || owner.PID != uint32(os.Getpid()) || snapshot == nil {
 			closePair(client, server)
@@ -130,12 +158,22 @@ func TestOwnerSteadyColdTiming(t *testing.T) {
 		}
 		minRows, maxRows = min(minRows, rows), max(maxRows, rows)
 		samples = append(samples, elapsed)
+		preciseSamples = append(preciseSamples, preciseElapsed)
 	}
 	slices.Sort(samples)
+	slices.Sort(preciseSamples)
 	p95 := samples[(95*count+99)/100-1]
+	preciseP95 := preciseSamples[(95*count+99)/100-1]
 	histogram, _ := json.Marshal(owners.Stats())
 	t.Logf("WINDOWS OWNER LATENCY samples=%d found=%d raw_rows_min=%d raw_rows_max=%d baseline=%d baseline_timewait=%d p95_us=%d processors=%d cpus=%d histogram=%s",
 		count, len(samples), minRows, maxRows, baseline, timeWait, p95.Microseconds(), runtime.GOMAXPROCS(0), runtime.NumCPU(), histogram)
+	t.Logf("WINDOWS OWNER CLOCK COMPARISON samples=%d frequency=%d go_p95_us=%d qpc_p95_us=%d go_zero_samples=%d qpc_zero_samples=%d slow_pairs_go_qpc_us=%v",
+		count, frequency, p95.Microseconds(), preciseP95.Microseconds(),
+		slices.IndexFunc(samples, func(d time.Duration) bool { return d > 0 }),
+		slices.IndexFunc(preciseSamples, func(d time.Duration) bool { return d > 0 }), clockDifferences)
+	if preciseP95 >= 5*time.Millisecond {
+		t.Errorf("high-resolution cold owner latency at 2000 rows: p95=%s, requires under 5ms", preciseP95)
+	}
 	if p95 >= 5*time.Millisecond {
 		t.Fatalf("cold owner latency at 2000 rows: p95=%s, requires under 5ms", p95)
 	}
