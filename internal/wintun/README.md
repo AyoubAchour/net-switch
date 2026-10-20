@@ -130,8 +130,13 @@ TCP failures report session counters and ring cursors before socket or stack
 teardown, along with transferred byte counts and one goroutine snapshot.
 Both comparison paths use the engine's TCP stack: a TCP timeout is not evidence
 of a DLL missed wake. A deterministic stack test loses an entire TCP window and
-requires ACK-driven recovery after one timeout, including a new SACK during
-recovery. No TCP deadline or session gate is relaxed for the DLL comparison.
+requires ACK-driven recovery after one timeout, including a new SACK and a
+real reordering-timer expiry during recovery. In the
+[round-2 mutation proof](https://github.com/AyoubAchour/net-switch/actions/runs/39439354881/job/118684802958),
+the fixed stack passed all four cases 25 times each; removing each of the
+three guards independently failed its targeted case all ten times. The SACK
+control passed in every mutation. The temporary switches were removed after
+this proof. No TCP deadline or session gate is relaxed for the DLL comparison.
 
 Parallel senders verify every test payload. Deterministic malformed-entry tests
 independently prove recovery, even if the driver corruption does not occur in a

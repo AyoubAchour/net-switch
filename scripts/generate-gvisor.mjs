@@ -73,23 +73,6 @@ try {
       '--unsafe-paths', '--whitespace=nowarn', path.join(root, 'third_party', patch)], staging);
     if (diffOnly && patch === selected) break;
   }
-  // Temporary round-2 mutation proof; removed after the hosted evidence is saved.
-  const mutation = process.env.NETSWITCH_RTO_MUTATION;
-  if (mutation) {
-    if (diffOnly) throw new Error('Mutation is not allowed in patch diff mode');
-    const mutations = {
-      ack: ['snd.go', 'numLost > 0 && !s.FastRecovery.Active && s.state != tcpip.RTORecovery', 'numLost > 0 && !s.FastRecovery.Active'],
-      timer: ['rack.go', 'numLost == 0 || rc.snd.state == tcpip.RTORecovery', 'numLost == 0'],
-      duplicate: ['snd.go', '\tif s.state == tcpip.RTORecovery {\n\t\treturn false\n\t}\n', ''],
-    };
-    if (!Object.hasOwn(mutations, mutation)) throw new Error(`Unknown mutation: ${mutation}`);
-    const [name, before, after] = mutations[mutation];
-    const file = path.join(staging, 'pkg/tcpip/transport/tcp', name);
-    const content = fs.readFileSync(file, 'utf8');
-    if (content.split(before).length !== 2) throw new Error(`Mutation ${mutation} must match exactly once`);
-    fs.writeFileSync(file, content.replace(before, after));
-    console.log(`MUTATION: removed only the ${mutation} timeout-recovery guard`);
-  }
   if (diffOnly) {
     // Include regression tests introduced by the patch, not just upstream files.
     run('git', ['-c', 'core.autocrlf=false', 'add', '--intent-to-add', '.'], staging);
