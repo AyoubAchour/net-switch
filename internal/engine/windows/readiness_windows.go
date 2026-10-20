@@ -9,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -30,6 +31,7 @@ type readiness struct {
 	writers map[uintptr]*socketWatch
 	stop    chan struct{}
 	wg      sync.WaitGroup
+	thread  atomic.Uint32
 }
 
 type socketWatch struct {
@@ -37,6 +39,7 @@ type socketWatch struct {
 	pool                     *readiness
 	socket                   windows.Handle
 	key                      uintptr
+	localPort                uint16
 	wake                     func()
 	op                       windows.Overlapped
 	flags                    uint32
@@ -57,6 +60,12 @@ func newReadiness() (*readiness, error) {
 }
 
 func (p *readiness) completions() {
+	// IOCP association belongs to an OS thread, not a goroutine. Without
+	// pinning, unrelated Go work can keep that thread counted against this
+	// port's concurrency limit and delay later completion/cancellation packets.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	p.thread.Store(windows.GetCurrentThreadId())
 	for {
 		var count uint32
 		var key uintptr
@@ -93,6 +102,16 @@ func (p *readiness) completions() {
 			wake()
 		}
 	}
+}
+
+func (p *readiness) stats() map[string]any {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	ports := make([]uint16, 0, len(p.watches))
+	for _, watch := range p.watches {
+		ports = append(ports, watch.localPort)
+	}
+	return map[string]any{"sockets": len(p.watches), "ports": ports, "blockedWriters": len(p.writers), "completionThread": p.thread.Load()}
 }
 
 type pollFD struct {
@@ -141,11 +160,11 @@ func (p *readiness) pollWrites() {
 	}
 }
 
-func (p *readiness) watch(socket windows.Handle, wake func()) (*socketWatch, error) {
+func (p *readiness) watch(socket windows.Handle, localPort uint16, wake func()) (*socketWatch, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.next++
-	w := &socketWatch{pool: p, socket: socket, key: p.next, wake: wake}
+	w := &socketWatch{pool: p, socket: socket, key: p.next, localPort: localPort, wake: wake}
 	if _, err := windows.CreateIoCompletionPort(socket, p.port, w.key, 0); err != nil {
 		return nil, err
 	}
@@ -271,7 +290,7 @@ func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
 		windows.Closesocket(h)
 		return nil, callErr
 	}
-	w, err := c.pool.watch(h, wake)
+	w, err := c.pool.watch(h, uint16(c.local.(*net.TCPAddr).Port), wake)
 	if err != nil {
 		windows.Closesocket(h)
 		return nil, err
