@@ -121,6 +121,18 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
       records.push(...page.flows.filter((flow) => flow.protocol === 'udp' && flow.destination === `${target.host}:${target.port}`));
       cursor = page.cursor ?? '';
     } while (cursor);
+    const clientSources = new Set(clients.flatMap((app) => app.admissions.map((item) => item.Local)));
+    const refusedSources = new Set(failed.map((item) => item.Local).filter(Boolean));
+    const countsBySource = new Map();
+    for (const record of records) countsBySource.set(record.source, (countsBySource.get(record.source) ?? 0) + 1);
+    evidence.flowComparison = {
+      clientHeld: held, serverHeld: Object.keys(observed.seen).length, engineRows: records.length,
+      excess: records.filter((record) => !clientSources.has(record.source)).map((record) => ({
+        ...record, sourceWasRefused: refusedSources.has(record.source),
+      })),
+      duplicateSources: [...countsBySource].filter(([, count]) => count > 1),
+      missingClientSources: [...clientSources].filter((source) => !countsBySource.has(source)),
+    };
     assert.equal(records.length, held, 'Client/server/engine UDP session counts differ');
     const bySource = new Map(records.map((flow) => [flow.source, flow]));
     for (const app of clients) for (const item of app.admissions) {
