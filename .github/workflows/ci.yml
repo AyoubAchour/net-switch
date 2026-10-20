@@ -12,10 +12,6 @@ on:
         description: Run only the focused Windows control security regressions
         type: boolean
         default: false
-      wintun_recovery:
-        description: Repeat Wintun recovery with diagnostics on four disposable runners
-        type: boolean
-        default: false
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -55,54 +51,9 @@ jobs:
       - name: Native migration, uninstall and token regressions with race checks
         run: go test -race -v -count=1 ./internal/platform/windows ./internal/platform/worker
 
-  wintun-recovery:
-    name: Wintun recovery repeat / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && inputs.wintun_recovery
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        repeat: [1, 2]
-        arch: [x64, arm64]
-        include:
-          - arch: x64
-            runner: windows-latest
-          - arch: arm64
-            runner: windows-11-arm
-    env:
-      GOTOOLCHAIN: local
-      GOMAXPROCS: '4'
-      GOFLAGS: -mod=vendor -p=2
-      NETSWITCH_WINTUN_CI: '1'
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
-      - uses: ./.github/actions/cache-pinned-archive
-        with:
-          artifact: wintun
-      - run: ./scripts/prepare-wintun-tests.ps1
-      - name: Check downloads under both PowerShell versions
-        run: |
-          powershell.exe -NoProfile -File scripts/test-build-download.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/test-build-download.ps1
-      - name: Repeat recovery and the injection regression ten times
-        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.count=10' '-test.run=^TestWintunRecoveryLeak$|^TestRingRecoveryInjectionSurvivesPublication$'
-
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.control_security && !inputs.wintun_recovery
+    if: github.event_name == 'workflow_dispatch' && !inputs.control_security
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
