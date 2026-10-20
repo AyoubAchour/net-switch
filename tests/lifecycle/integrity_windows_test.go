@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -25,6 +26,7 @@ func lowPipeClient() error {
 	}
 	path, _ := windows.UTF16PtrFromString(localipc.DefaultPath("desktop"))
 	var held []windows.Handle
+	readDenied, zeroDenied := 0, 0
 	defer func() {
 		for _, h := range held {
 			windows.CloseHandle(h)
@@ -39,14 +41,22 @@ func lowPipeClient() error {
 		if err != windows.ERROR_ACCESS_DENIED && err != windows.ERROR_PIPE_BUSY {
 			return err
 		}
+		if err == windows.ERROR_ACCESS_DENIED {
+			readDenied++
+		}
 		h, err = windows.CreateFile(path, 0, 0, nil, windows.OPEN_EXISTING, windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
 		if err == nil {
 			held = append(held, h)
+		} else if err == windows.ERROR_ACCESS_DENIED {
+			zeroDenied++
 		} else if err != windows.ERROR_ACCESS_DENIED && err != windows.ERROR_PIPE_BUSY {
 			return err
 		}
 	}
-	fmt.Println("low integrity handles held")
+	if readDenied == 0 || zeroDenied+len(held) == 0 {
+		return errors.New("pipe busy responses did not prove integrity enforcement")
+	}
+	fmt.Printf("low integrity access checked: read_denied=%d zero_denied=%d zero_held=%d\n", readDenied, zeroDenied, len(held))
 	_, err := io.Copy(io.Discard, os.Stdin)
 	return err
 }
@@ -84,11 +94,12 @@ func lowIntegrityCapacity(t *testing.T, owner actor) {
 	}
 	defer func() { in.Close(); _ = attack.Wait() }()
 	line, err := bufio.NewReader(out).ReadString('\n')
-	if err != nil || line != "low integrity handles held\n" {
+	if err != nil || !strings.HasPrefix(line, "low integrity access checked:") {
 		t.Fatal("low integrity attack precondition", line, err)
 	}
 	fresh := openClient(t, owner, false)
 	defer fresh.input.Close()
 	fresh.must(t, "session", nil, nil)
-	t.Log("medium owner connected while low-integrity read-only/zero-access attack handles remained open")
+	t.Log(strings.TrimSpace(line))
+	t.Log("medium owner connected before the probe released any permitted zero-access handles")
 }
