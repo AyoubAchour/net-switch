@@ -58,7 +58,7 @@ func mixedCaps(e *Env) {
 	for _, result := range udpHeld {
 		udpRefused += result.refused
 	}
-	udpCredit := e.capacityAccounting("mixed UDP", "udp", baseline, udpStats, 20000, int(udpStats.UDP), udpRefused, false)
+	udpCredit := e.capacityAccounting("mixed UDP", "udp", baseline, udpStats, 20000, int(udpStats.UDP), udpRefused, capacityTotal)
 	e.exactCapacity("mixed UDP", int(udpStats.UDP), udpSessionsTotal, udpCredit)
 	e.T.Require(udpStats.UDP > 0 && udpStats.Flows == udpStats.UDP, "all initial held flows are UDP (%d sessions, %d flows)", udpStats.UDP, udpStats.Flows)
 	e.T.Logf("MIXED UDP COST: heap/session=%.2f managed/session=%.2f stack/session=%.2f",
@@ -102,7 +102,7 @@ func mixedCaps(e *Env) {
 	for _, list := range held {
 		refused += list.Errors["ECONNREFUSED"] + list.Errors["ECONNRESET"]
 	}
-	tcpCredit := e.capacityAccounting("mixed TCP", "tcp", withTW, full, 80000+capacityTailAttempts, total, refused, false)
+	tcpCredit := e.capacityAccounting("mixed TCP", "tcp", withTW, full, 80000+capacityTailAttempts, total, refused, capacityMixed)
 	e.T.Check(full.Flows == int64(total)+udpStats.UDP, "mixed accounting matches every held TCP and UDP socket (%d = %d + %d)", full.Flows, total, udpStats.UDP)
 	e.exactCapacity("mixed total", int(full.Flows), tcpFlowsTotal, tcpCredit)
 	e.T.Logf("CAP OLD VERDICT full mixed corner: TCP=%d UDP=%d TIME_WAIT=%d old-exact-count=%t",
