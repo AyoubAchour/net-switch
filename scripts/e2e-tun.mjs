@@ -1,6 +1,6 @@
 // NEVER run this on a developer's PC. It changes routes and briefly changes DNS.
-// The guard also excludes self-hosted runners. Engine uses the app's unchanged
-// config, auto_route, checksum verification, rule writes and start/stop lifecycle.
+// The guard also excludes self-hosted runners. Traffic adds a non-final local
+// destination rewrite; all 20 lifecycle cycles use the unchanged app config.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -121,6 +121,7 @@ try {
   harness = await startHarness(path.join(dir, 'testisp'));
   responder = await targets(harness.uplink.address);
   httpsResponder = await localHttps(harness.uplink.address);
+  log(`Local HTTPS fixture: ${httpsResponder.target.host}:443 -> ${httpsResponder.address}:${httpsResponder.port}; certificate name netswitch.invalid`);
   await harness.control('targets', { ports: [responder.direct.http, ...responder.direct.udp] });
   const udpTarget = { host: responder.virtual.host, port: responder.virtual.udp[0] };
   log(`Physical adapter: ${JSON.stringify(adapter)}`);
@@ -182,6 +183,7 @@ try {
   const newer = await client('open', { count: 3 });
   await routed(newer, 'bb');
   assert.equal(await tlsCount() - beforeNew, 3, 'New TLS sockets must physically cross bb after the selector change');
+  log('ok - TLS path counters: initial bb +3, 100 aa sockets +0, new bb +3 through TestISP');
   log(`ok - selector PUT ${elapsed.toFixed(1)} ms with 100 open connections; all old sockets reused, new connections use bb`);
   await client('close');
 
@@ -260,6 +262,7 @@ try {
   }
   if (responder) await responder.close();
   if (httpsResponder) {
+    await writeFile(path.join(dir, 'https-observations.json'), JSON.stringify(httpsResponder.seen, null, 2));
     log(`Local HTTPS responder: ${httpsResponder.seen.length} requests, ${new Set(httpsResponder.seen.map((item) => item.connection)).size} TLS sockets`);
     await httpsResponder.close();
   }

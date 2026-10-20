@@ -305,6 +305,7 @@ jobs:
             dist/tun-test/udp/*.log*
             dist/tun-test/report.txt
             dist/tun-test/executables.json
+            dist/tun-test/https-observations.json
             dist/tun-test/testisp/*.json
             dist/tun-test/testisp/*.log*
           retention-days: 14

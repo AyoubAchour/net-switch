@@ -43,6 +43,7 @@ export async function localHttps(address) {
 export async function startTrafficEngine(engine, lines, responder) {
   hostedOnly();
   assert.equal(engine.child, null);
+  engine.setStatus('starting');
   await engine.verifyEngineFiles();
   await engine.setLines(lines);
   engine.apiPort = await freePort();
@@ -58,7 +59,10 @@ export async function startTrafficEngine(engine, lines, responder) {
   });
   engine.child = child;
   const collect = (chunk) => {
-    for (const line of chunk.toString().split(/\r?\n/).filter(Boolean)) engine.log.append(line);
+    const lines = chunk.toString().split(/\r?\n/).filter(Boolean);
+    engine.output.push(...lines);
+    engine.output = engine.output.slice(-40);
+    for (const line of lines) engine.log.append(line);
   };
   child.stdout.on('data', collect);
   child.stderr.on('data', collect);
