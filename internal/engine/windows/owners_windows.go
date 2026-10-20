@@ -128,6 +128,9 @@ type LookupHistogram struct {
 	TCPPeakRows        uint64    `json:"tcpPeakRows"`
 	TCPRowsByFamily    [2]uint64 `json:"tcpRowsByFamily"`
 	TCPFamiliesSampled [2]bool   `json:"tcpFamiliesSampled"`
+	UDPRefreshes       uint64    `json:"udpRefreshes"`
+	UDPReadNanos       uint64    `json:"udpReadNanos"`
+	UDPIndexNanos      uint64    `json:"udpIndexNanos"`
 }
 
 var lookupBounds = [...]uint64{100, 250, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, ^uint64(0)}
@@ -137,7 +140,11 @@ type Owners struct {
 	snapshot                                                      [2]atomic.Pointer[ownerSnapshot]
 	refresh                                                       [2]atomic.Pointer[tcpRefresh]
 	paths                                                         map[processKey]platform.Owner
-	tcpBuffers                                                    [2][]byte
+	tcpBuffers                                                    [2][]uint64
+	udpSnapshots                                                  [2]atomic.Pointer[udpOwnerSnapshot]
+	udpRefreshes                                                  [2]atomic.Pointer[udpOwnerRefresh]
+	udpBuffers                                                    [2][]uint64
+	udpDumps, udpReadNanos, udpIndexNanos                         atomic.Uint64
 	hist                                                          [len(lookupBounds)]atomic.Uint64
 	snapshotHist, processHist                                     [len(lookupBounds)]atomic.Uint64
 	refreshHist                                                   [len(lookupBounds)]atomic.Uint64
@@ -187,6 +194,7 @@ func (o *Owners) Stats() LookupHistogram {
 		TCPRetries: o.tcpRetries.Load(), SnapshotBuckets: make([]uint64, len(lookupBounds)), ProcessBuckets: make([]uint64, len(lookupBounds)), RefreshBuckets: make([]uint64, len(lookupBounds))}
 	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
 	h.TCPPeakRows = o.tcpPeakRows.Load()
+	h.UDPRefreshes, h.UDPReadNanos, h.UDPIndexNanos = o.udpDumps.Load(), o.udpReadNanos.Load(), o.udpIndexNanos.Load()
 	for family := range o.snapshot {
 		if snapshot := o.snapshot[family].Load(); snapshot != nil {
 			h.TCPRowsByFamily[family] = snapshot.rawRows
@@ -203,12 +211,12 @@ func (o *Owners) Stats() LookupHistogram {
 }
 
 func readOwnerTable(ctx context.Context, proc *windows.LazyProc, family, class uint32) ([]byte, error) {
-	var scratch []byte
+	var scratch []uint64
 	return readOwnerTableInto(ctx, proc, family, class, &scratch)
 }
 
-func readOwnerTableInto(ctx context.Context, proc *windows.LazyProc, family, class uint32, scratch *[]byte) ([]byte, error) {
-	size := uint32(max(32<<10, cap(*scratch)))
+func readOwnerTableInto(ctx context.Context, proc *windows.LazyProc, family, class uint32, scratch *[]uint64) ([]byte, error) {
+	size := uint32(max(32<<10, cap(*scratch)*8))
 	for attempt := 0; attempt < 8; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -216,10 +224,12 @@ func readOwnerTableInto(ctx context.Context, proc *windows.LazyProc, family, cla
 		if size < 4 || size > 64<<20 {
 			return nil, errors.New("IP Helper table size outside budget")
 		}
-		if cap(*scratch) < int(size) {
-			*scratch = make([]byte, size)
+		if cap(*scratch)*8 < int(size) {
+			*scratch = make([]uint64, (int(size)+7)/8)
 		}
-		b := (*scratch)[:size]
+		// OWNER_MODULE rows contain 64-bit timestamps. Preserve their native
+		// alignment explicitly, independently of a byte allocator's choices.
+		b := unsafe.Slice((*byte)(unsafe.Pointer(&(*scratch)[0])), int(size))
 		code, _, _ := proc.Call(uintptr(unsafe.Pointer(&b[0])), uintptr(unsafe.Pointer(&size)), 0, uintptr(family), uintptr(class), 0)
 		if code == uintptr(windows.ERROR_INSUFFICIENT_BUFFER) {
 			// Leave room for endpoints admitted between the sizing call and
@@ -550,19 +560,20 @@ func (o *Owners) udpOwner(key netip.AddrPort, rows map[netip.AddrPort][]socketOw
 func (o *Owners) UDP(ctx context.Context, key netip.AddrPort) (owner platform.Owner, err error) {
 	start := winclock.Now()
 	defer func() { o.measure(start, err) }()
-	family := uint32(windows.AF_INET)
+	ctx, cancel := winclock.System.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	family := 0
 	if key.Addr().Is6() {
-		family = windows.AF_INET6
+		family = 1
 	}
-	b, err := readOwnerTable(ctx, udpTable, family, udpOwnerModule)
+	// Require a native read started after this call. Reusing an earlier
+	// positive row would artificially lengthen the socket-generation collision
+	// window. Concurrent calls still share the next in-flight native dump.
+	snapshot, err := o.udpSnapshot(ctx, start, family)
 	if err != nil {
 		return owner, err
 	}
-	rows := make(map[netip.AddrPort][]socketOwner)
-	if err = parseUDP(b, key.Addr().Is6(), rows); err != nil {
-		return owner, err
-	}
-	return o.udpOwner(key, rows)
+	return o.udpOwner(key, snapshot.rows)
 }
 
 // The NAT invokes this once per second, even in the absence of traffic. One
