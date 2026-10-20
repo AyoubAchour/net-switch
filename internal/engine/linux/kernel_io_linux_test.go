@@ -12,12 +12,12 @@ import (
 )
 
 func TestKernelMetadataFastPathsStayOutsideProcessRoots(t *testing.T) {
-	for _, path := range []string{"/proc/1/root/stat", "/proc/self/root/.flatpak-info", "/proc/1/fd/3", "/proc/../stat", "/proc/1/../2/stat", "/sys/fs/cgroup/../other/cgroup.procs", "/sys/fs/cgroup/./cgroup.procs", "/sys/fs/cgroup-other/cgroup.procs"} {
+	for _, path := range []string{"/proc/self/environ", "/proc/1/root/stat", "/proc/self/root/.flatpak-info", "/proc/1/fd/3", "/proc/../stat", "/proc/1/../2/stat", "/sys/fs/cgroup/../other/cgroup.procs", "/sys/fs/cgroup/./cgroup.procs", "/sys/fs/cgroup-other/cgroup.procs"} {
 		if kernelLookupPath(path) {
 			t.Fatalf("process-controlled or noncanonical path entered direct kernel I/O: %s", path)
 		}
 	}
-	for _, path := range []string{"/proc/self/stat", "/proc/self/environ", "/proc/self/fd", "/sys/fs/cgroup/cgroup.procs", "/sys/fs/cgroup/apps/example/cgroup.procs"} {
+	for _, path := range []string{"/proc/self/stat", "/proc/self/fd", "/sys/fs/cgroup/cgroup.procs", "/sys/fs/cgroup/apps/example/cgroup.procs"} {
 		if !kernelLookupPath(path) {
 			t.Fatalf("fixed kernel path was not recognized: %s", path)
 		}
@@ -56,6 +56,16 @@ func TestKernelMetadataFastPathsStayOutsideProcessRoots(t *testing.T) {
 	wantExe, err := os.Readlink("/proc/self/exe")
 	if err != nil || exe != wantExe {
 		t.Fatalf("direct executable link changed: %q/%q %v", exe, wantExe, err)
+	}
+	// Opening environ can wait for another process's exec, before any read
+	// begins. Keep the actual kernel open on the runtime's scheduling path.
+	envFD, envDirect, err := openKernelFile("/proc/self/environ", unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOFOLLOW)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeKernelFile(envFD, envDirect)
+	if envDirect {
+		t.Fatal("environment open held the lookup processor")
 	}
 
 	// A regular fixture outside the fixed kernel trees keeps ordinary I/O;
