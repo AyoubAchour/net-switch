@@ -16,6 +16,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	gu "gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -117,13 +118,27 @@ func (n *NAT) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) bool {
 		n.Invalid.Add(1)
 		return true
 	}
-	n.receive(source, destination, dataSize, func() ([]byte, []byte, bool) {
+	network := p.NetworkHeader().Slice()
+	headerBytes := len(network) + len(h)
+	originalSize := headerBytes + p.Data().Size()
+	n.receive(source, destination, dataSize+originalSize, func() ([]byte, []byte, bool) {
 		payload := p.Data().AsRange().Capped(dataSize).ToSlice()
-		original := packet.UDP(source, destination, payload)
+		// ICMP must quote the triggering headers, including the IPv4 ID,
+		// options/flags and the original UDP checksum (which may be zero on
+		// IPv4). Retain IP padding too, so the original length stays valid.
+		original := make([]byte, originalSize)
+		copy(original, network)
+		copy(original[len(network):], h)
+		writer := tcpip.SliceWriter(original[headerBytes:])
+		_, _ = p.Data().ReadTo(&writer, true) // destination has exactly Data().Size() bytes
 		df := false
 		if src.Is4() {
-			ip := header.IPv4(p.NetworkHeader().Slice())
+			ip := header.IPv4(network)
 			df = ip.Flags()&header.IPv4FlagDontFragment != 0
+			// Reassembly updates total length and fragment flags in gVisor's
+			// header. Repair its checksum; an ordinary packet stays identical.
+			original[10], original[11] = 0, 0
+			binary.BigEndian.PutUint16(original[10:], ^packet.Sum(original[:len(network)], 0))
 		} else {
 			// IPv6 has no DF bit. An unfragmented packet must learn a smaller
 			// path through PTB; once the host sends fragments, preserve that
@@ -162,7 +177,7 @@ func ipv6Fragmented(ip []byte) bool {
 	return false
 }
 
-func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket func() ([]byte, []byte, bool)) {
+func (n *NAT) receive(source, destination netip.AddrPort, ownedBytes int, copyPacket func() ([]byte, []byte, bool)) {
 	b := n.bucket(source)
 	b.Lock()
 	if n.closed.Load() {
@@ -202,8 +217,9 @@ func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket f
 		}
 		return
 	}
-	// Reserve all owned copies, including the quoted packet used for errors.
-	bytes := 2*size + 48
+	// Reserve both exact owned copies. IPv4 options and IPv6 extensions make
+	// the quotation's header larger than the old fixed 48-byte allowance.
+	bytes := ownedBytes
 	if s.closed || len(s.queue) >= PendingPackets || s.bytes+bytes > PendingBytes || !n.control.ReservePending(bytes) {
 		s.mu.Unlock()
 		n.Dropped.Add(1)
