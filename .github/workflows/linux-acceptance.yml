@@ -165,6 +165,7 @@ jobs:
           GOFLAGS: -mod=vendor
         run: |
           go test -count=1 -v ./tests/linux/harness ./tests/linux/suite
+          go test -count=1 -v ./internal/journal
           go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
           go build -trimpath -o "$RUNNER_TEMP/netswitch-engine" ./cmd/netswitch-engine
           go build -trimpath -tags acceptance -o "$RUNNER_TEMP/netswitch-engine-faults" ./cmd/netswitch-engine
@@ -180,7 +181,7 @@ jobs:
           CGO_ENABLED: '1'
           GOMAXPROCS: '4'
           GOFLAGS: -mod=vendor -p=2
-        run: go test -race -v -count=1 ./internal/engine/tcp ./internal/engine/linux
+        run: go test -race -v -count=1 ./internal/engine/tcp ./internal/engine/linux ./internal/journal
       - name: Check repeated Wait and close admission at capacity
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && !cancelled() && steps.harness.outcome == 'success' }}
         env:
