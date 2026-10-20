@@ -345,6 +345,7 @@ func TestRealServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner, other := newActor(t, "NSLifecycleOwner"), newActor(t, "NSLifecycleOther")
+	realWTSOwner := ""
 	t.Cleanup(owner.close)
 	t.Cleanup(other.close)
 	if runtime.GOOS == "windows" {
@@ -358,6 +359,23 @@ func TestRealServices(t *testing.T) {
 				t.Fatal(err, string(b))
 			}
 			t.Log(string(b))
+			if strings.Contains(string(b), "hosted runner has no real signed-in WTS user") {
+				t.Skip("runner has no real WTS user; actual-service probe unavailable")
+			}
+			if !strings.Contains(string(b), "--- PASS: TestRealWindowsOwnerSession") {
+				t.Fatal("real WTS probe did not run and pass")
+			}
+			for _, field := range strings.Fields(string(b)) {
+				if strings.HasPrefix(field, "REAL_WTS_OWNER=") {
+					realWTSOwner = strings.TrimPrefix(field, "REAL_WTS_OWNER=")
+				}
+			}
+			if realWTSOwner == "" {
+				t.Fatal("real WTS probe returned no owner SID")
+			}
+			if err := lifecycle.Save(filepath.Join(data, "fault-real-session.json"), realWTSOwner); err != nil {
+				t.Fatal(err)
+			}
 		})
 	}
 	adapter := fixture(t, dir)
@@ -391,6 +409,25 @@ func TestRealServices(t *testing.T) {
 	})
 	if err := service.Start(ctx, service.Control); err != nil {
 		t.Fatal(err)
+	}
+	if realWTSOwner != "" {
+		t.Run("real-WTS-query-inside-Control", func(t *testing.T) {
+			var result struct {
+				PID     uint32 `json:"pid"`
+				Owner   string `json:"owner"`
+				Present bool   `json:"present"`
+				Error   string `json:"error"`
+			}
+			wait(t, "real WTS result from installed Control", 10*time.Second, func() bool {
+				b, err := os.ReadFile(filepath.Join(data, "fault-real-session-result.json"))
+				return err == nil && json.Unmarshal(b, &result) == nil
+			})
+			status, err := service.Query(service.Control)
+			if err != nil || result.PID != status.PID || result.Owner != realWTSOwner || !result.Present || result.Error != "" {
+				t.Fatalf("real WTS service-token probe: result=%+v service=%+v error=%v", result, status, err)
+			}
+			t.Logf("REAL_WTS_SERVICE pid=%d owner=%s present=true", result.PID, result.Owner)
+		})
 	}
 	t.Run("pending-enrollment-and-sign-in", func(t *testing.T) {
 		readonly := openClient(t, other, true)
@@ -541,6 +578,9 @@ func TestRealServices(t *testing.T) {
 			b, err := exec.Command(filepath.Join(dir, "ipc.test.exe"), "-test.v", "-test.run=^(TestClientClosesBeforePipeAccept|TestPipeIdentityUsesEffectiveClientToken)$", "-test.count=1").CombinedOutput()
 			if err != nil || !strings.Contains(string(b), "--- PASS: TestClientClosesBeforePipeAccept") {
 				t.Fatal("SYSTEM pipe regression did not pass", err, string(b))
+			}
+			if realWTSOwner != "" && !strings.Contains(string(b), "--- PASS: TestPipeIdentityUsesEffectiveClientToken") {
+				t.Fatal("effective-token identity probe did not run despite a real WTS session", string(b))
 			}
 			t.Log(string(b))
 		})

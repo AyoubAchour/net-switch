@@ -47,3 +47,29 @@ func OwnerSession(data, user string) (bool, bool) {
 	present, known := sessions[user]
 	return present, known
 }
+
+// ProbeSession exercises the real query with the installed service's token.
+// Unlike OwnerSession this observes the OS and does not inject a result.
+func ProbeSession(data string, query func(string, uint32) (bool, error)) error {
+	b, err := os.ReadFile(filepath.Join(data, "fault-real-session.json"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var owner string
+	if err := json.Unmarshal(b, &owner); err != nil {
+		return err
+	}
+	present, queryErr := query(owner, ^uint32(0))
+	message := ""
+	if queryErr != nil {
+		message = queryErr.Error()
+	}
+	b, err = json.Marshal(map[string]any{"pid": os.Getpid(), "owner": owner, "present": present, "error": message})
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(data, "fault-real-session-result.json"), b, 0600)
+}

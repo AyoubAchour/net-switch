@@ -24,6 +24,9 @@ import (
 func ControlService(serviceCtx context.Context, ready func(), c Config, log func(string)) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	if err := faultpoint.ProbeSession(c.Data, ownerSessionPresent); err != nil {
+		return fmt.Errorf("hosted real-session probe: %w", err)
+	}
 	owner, err := LoadOwner(c.Data)
 	if err != nil {
 		return err

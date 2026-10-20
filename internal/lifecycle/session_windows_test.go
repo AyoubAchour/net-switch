@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"errors"
 	"golang.org/x/sys/windows"
 	"os"
 	"testing"
@@ -16,7 +17,7 @@ func TestRealWindowsOwnerSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
-		t.Skip("SYSTEM harness owns the real WTS probe")
+		t.Fatal("hosted real WTS probe must run under SYSTEM")
 	}
 	var sessions *windows.WTS_SESSION_INFO
 	var count uint32
@@ -30,7 +31,10 @@ func TestRealWindowsOwnerSession(t *testing.T) {
 		}
 		var token windows.Token
 		if err := windows.WTSQueryUserToken(s.SessionID, &token); err != nil {
-			continue
+			if errors.Is(err, windows.ERROR_NO_TOKEN) {
+				continue
+			}
+			t.Fatalf("WTS token for session %d: %v", s.SessionID, err)
 		}
 		user, err := token.GetTokenUser()
 		token.Close()
@@ -42,6 +46,7 @@ func TestRealWindowsOwnerSession(t *testing.T) {
 			t.Fatal("real WTS owner was not found", err)
 		}
 		t.Logf("real WTS owner matched in session %d", s.SessionID)
+		t.Logf("REAL_WTS_OWNER=%s", user.User.Sid.String())
 		return
 	}
 	t.Skip("hosted runner has no real signed-in WTS user; synthetic session events are tested separately")
