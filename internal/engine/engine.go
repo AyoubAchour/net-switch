@@ -313,6 +313,7 @@ func (e *Engine) Stats() any {
 	s["gcCPUppm"] = uint64(memory.GCCPUFraction * 1_000_000)
 	s["runtimeBytes"] = memory.Sys - memory.HeapReleased
 	s["goroutines"] = uint64(runtime.NumGoroutine())
+	s["gomaxprocs"] = uint64(runtime.GOMAXPROCS(0))
 	samples := []metrics.Sample{{Name: "/gc/stack/starting-size:bytes"}, {Name: "/gc/heap/live:bytes"}, {Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/total:cpu-seconds"}}
 	metrics.Read(samples)
 	s["stackStartBytes"] = samples[0].Value.Uint64()
@@ -324,10 +325,14 @@ func (e *Engine) Stats() any {
 	}
 	if e.link != nil {
 		s["tunDropped"] = e.link.Dropped.Load()
+		for kind, count := range e.link.DropCounts() {
+			s["tunDropped."+kind] = count
+		}
 		s["tunQueued"] = e.link.Queued()
 		s["tunPeakQueued"] = e.link.PeakQueued()
 	}
 	if e.tcp != nil {
+		s["tcpRelayBytes"], s["tcpRelayPeakBytes"] = e.tcp.RelayBufferBytes()
 		s["tcpRejected"] = e.tcp.Rejected.Load()
 		s["tcpInvalid"] = e.tcp.Invalid.Load()
 		s["tcpDialFailed"] = e.tcp.DialFailed.Load()

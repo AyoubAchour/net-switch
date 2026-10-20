@@ -23,6 +23,37 @@ type errorBatchTun struct {
 	reads int
 }
 
+type failingReadTun struct {
+	tun.Device
+	reads int
+}
+
+func (d *failingReadTun) Read(_ [][]byte, _ []int, _ int) (int, error) {
+	d.reads++
+	return 0, errors.New("persistent device failure")
+}
+
+func TestPersistentTunReadFailureBacksOffAndCancels(t *testing.T) {
+	d := &failingReadTun{}
+	tun := &Tun{device: d, sizes: make([]int, 1), bufs: [][]byte{make([]byte, 16)}}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	// Bind the same context identity so the minimal fake need not implement
+	// device.Close; ReadPacket itself must interrupt its backoff on cancel.
+	tun.ioDone = ctx.Done()
+	var buf [16]byte
+	start := time.Now()
+	for ctx.Err() == nil {
+		_, _ = tun.ReadPacket(ctx, buf[:])
+	}
+	if d.reads > 9 || d.reads < 5 || tun.readBackoffs.Load() != uint64(d.reads) || tun.readErrors.Load() != uint64(d.reads) {
+		t.Fatalf("persistent read spun or lost its count: %d reads, %d backoffs, %d errors", d.reads, tun.readBackoffs.Load(), tun.readErrors.Load())
+	}
+	if time.Since(start) > 300*time.Millisecond {
+		t.Fatal("read backoff ignored cancellation")
+	}
+}
+
 type groCountingTun struct {
 	tun.Device
 	runs []int

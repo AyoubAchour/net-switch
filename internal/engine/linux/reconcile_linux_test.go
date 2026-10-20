@@ -5,7 +5,9 @@ package linux
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -206,6 +208,14 @@ func TestKernelReconcileDoesNotBlockDials(t *testing.T) {
 }
 
 func TestKernelMonitorRepairsRulesRoutesAndReplug(t *testing.T) {
+	testKernelReplug(t, false)
+}
+
+func TestKernelAddressSelectedLineRecoversWithNewNameAndIndex(t *testing.T) {
+	testKernelReplug(t, true)
+}
+
+func testKernelReplug(t *testing.T, byAddress bool) {
 	requireKernelNamespace(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -218,8 +228,9 @@ func TestKernelMonitorRepairsRulesRoutesAndReplug(t *testing.T) {
 	if _, err := p.OpenTun(ctx); err != nil {
 		t.Fatal(err)
 	}
+	lineName := "repair-line"
 	makeLine := func() *netlink.Dummy {
-		l := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "repair-line"}}
+		l := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: lineName}}
 		if err := netlink.LinkAdd(l); err != nil {
 			t.Fatal(err)
 		}
@@ -237,7 +248,12 @@ func TestKernelMonitorRepairsRulesRoutesAndReplug(t *testing.T) {
 	}
 	line := makeLine()
 	defer func() { netlink.LinkDel(line) }()
-	if err := p.Prepare(ctx, []platform.Line{{ID: "line", Interface: line.Name}}); err != nil {
+	selector := platform.Line{ID: "line", Interface: line.Name}
+	if byAddress {
+		selector.Interface = ""
+		selector.Addresses = []netip.Addr{netip.MustParseAddr("192.0.2.1")}
+	}
+	if err := p.Prepare(ctx, []platform.Line{selector}); err != nil {
 		t.Fatal(err)
 	}
 	fatal := make(chan error, 1)
@@ -292,6 +308,9 @@ func TestKernelMonitorRepairsRulesRoutesAndReplug(t *testing.T) {
 	if err := netlink.LinkDel(line); err != nil {
 		t.Fatal(err)
 	}
+	if byAddress {
+		lineName = "new-line"
+	}
 	line = makeLine()
 	if line.Index == before {
 		t.Fatal("replug fixture did not change ifindex")
@@ -318,6 +337,53 @@ func TestKernelMonitorRepairsRulesRoutesAndReplug(t *testing.T) {
 	records, err := (diskStore{filepath.Join(dir, "engine-journal.json")}).Records()
 	if err != nil || len(records) != 0 {
 		t.Fatalf("cleanup did not compact journal: %d %v", len(records), err)
+	}
+}
+
+func TestReconcileRetriesTransientErrorsAndBoundsPersistentFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail int
+		err  error
+		want int
+	}{{"temporary", 2, unix.ETIMEDOUT, 3}, {"persistent", 10, unix.ENOBUFS, 3}, {"collision", 10, errors.New("foreign rule"), 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			err := retryReconcile(context.Background(), func(context.Context) error {
+				calls++
+				if calls <= tc.fail {
+					return tc.err
+				}
+				return nil
+			})
+			if calls != tc.want || (err == nil) != (tc.fail < tc.want) {
+				t.Fatalf("retry calls=%d error=%v", calls, err)
+			}
+		})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	start := time.Now()
+	err := retryReconcile(ctx, func(context.Context) error { cancel(); return unix.ETIMEDOUT })
+	if err == nil || time.Since(start) > 50*time.Millisecond {
+		t.Fatal("shutdown waited through a reconciliation backoff")
+	}
+}
+
+func TestKernelSocketDirectoryRejectsForeignOwnerEvenWithSafeMode(t *testing.T) {
+	requireKernelNamespace(t)
+	path := t.TempDir()
+	if err := os.Chmod(path, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkSocketDirectory(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(path, 12345, 12345); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chown(path, os.Geteuid(), os.Getegid())
+	if err := checkSocketDirectory(path); err == nil {
+		t.Fatal("foreign owner may replace the control socket despite a safe directory mode")
 	}
 }
 

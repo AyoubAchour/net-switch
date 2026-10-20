@@ -218,12 +218,20 @@ func stream(conn net.Conn) {
 	}
 }
 
-// holdOpen keeps a connection until the client closes it, sending nothing:
-// tens of thousands of them cost a socket and a small goroutine each.
+// A holder can request one source observation, then keep the socket idle.
+// The full address/port correlates its exact tuple with our accept record.
 func holdOpen(conn net.Conn) {
+	reader := bufio.NewReaderSize(conn, 128)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return
+	}
+	if strings.HasPrefix(line, "ping ") {
+		_, _ = fmt.Fprintf(conn, "pong %s %s\n", strings.TrimSpace(strings.TrimPrefix(line, "ping ")), addrString(conn.RemoteAddr()))
+	}
 	var b [1]byte
 	for {
-		if _, err := conn.Read(b[:]); err != nil {
+		if _, err := reader.Read(b[:]); err != nil {
 			return
 		}
 	}

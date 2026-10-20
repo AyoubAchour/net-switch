@@ -83,7 +83,7 @@ func pendingBytes(e *Env) {
 	var alive Stream
 	stream.WaitJSON(e, 15*time.Second, &alive)
 	e.CheckStreamSurvived("existing stream during pending overload", alive, "c")
-	e.ExpectTCP("new traffic after pending overload", "bravo", AsUser, "b", topo.Server4, 3)
+	e.expectRecoveryTCP("new traffic after pending overload")
 }
 func unknownLimits(e *Env) {
 	e.StartEngine(e.DefaultConfig())
@@ -119,7 +119,7 @@ func unknownLimits(e *Env) {
 	e.T.Check(r.Refused >= 188, "unknown UDP excess receives refusal (%d)", r.Refused)
 	e.holding(bgs, release)
 	fault(e, s, "owner-lookups", "off")
-	e.ExpectTCP("normal attribution after unknown overload", "bravo", AsUser, "b", topo.Server4, 3)
+	e.expectRecoveryTCP("normal attribution after unknown overload")
 }
 func tunQueue(e *Env) {
 	e.StartEngine(e.DefaultConfig())
@@ -136,7 +136,7 @@ func tunQueue(e *Env) {
 	fault(e, s, "tun-writer", "off")
 	release.Open(e)
 	bg.Wait(e, 30*time.Second)
-	e.ExpectTCP("routing after the writer resumes", "bravo", AsUser, "b", topo.Server4, 3)
+	e.expectRecoveryTCP("routing after the writer resumes")
 }
 func memoryLimit(e *Env) {
 	e.StartEngine(e.DefaultConfig())

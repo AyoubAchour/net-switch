@@ -77,12 +77,22 @@ func startProfiles(dir string, cpu, execution bool) (func(), error) {
 	done := make(chan struct{})
 	var worker sync.WaitGroup
 	worker.Go(func() {
+		captures := 0
 		for {
 			select {
 			case <-done:
 				return
 			case <-signals:
-				if err := writeProfiles(dir); err != nil {
+				captures++
+				target := dir
+				if captures > 1 {
+					target = filepath.Join(dir, fmt.Sprintf("sample-%03d", captures))
+					if err := os.Mkdir(target, 0700); err != nil {
+						fmt.Fprintln(os.Stderr, "capture profiles:", err)
+						continue
+					}
+				}
+				if err := writeProfiles(target); err != nil {
 					fmt.Fprintln(os.Stderr, "capture profiles:", err)
 				}
 			}

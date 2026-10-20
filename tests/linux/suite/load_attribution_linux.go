@@ -92,12 +92,63 @@ func (e *Env) expectLoadTCP(label, name string, user User, want engine.LineID, d
 		attempts = append(attempts, app.Attempt{I: i, To: c.Remote, Seen: c.Seen, Port: int(local.Port()), Connected: true})
 	}
 	e.T.Check(invalid == 0, "%s: every identified probe uses %s and every explicit unknown uses main, verified against its own server reply (%d invalid)", label, want, invalid)
-	e.T.ReleaseCheck(known == n, "%s: all %d probe owners are identified (%d identified, %d unknown); original all-on-%s check would pass: %t", label, n, known, len(held.Conns)-known, want, held.Established == n && Lines(seen)[want] == n)
+	e.checkLoadIdentity(known == n, "%s: all %d probe owners are identified (%d identified, %d unknown); original all-on-%s check would pass: %t", label, n, known, len(held.Conns)-known, want, held.Established == n && Lines(seen)[want] == n)
 	release.Open(e)
 	var result app.HoldResult
 	bg.WaitJSON(e, time.Minute, &result)
 	e.T.Check(result.Established == n && result.StillOpen == n, "%s: every probe stayed open until inspected (%d of %d)", label, result.StillOpen, n)
 	return app.TCPResult{Count: n, OK: result.Established, Errors: result.Errors, Seen: seen, Connect: result.Connect, FailedMS: result.FailedMS, Attempts: attempts}
+}
+
+// A load declaration never covers recovery after that load has ended.
+func (e *Env) expectRecoveryTCP(label string) {
+	deferred := e.deferAttribution
+	e.deferAttribution = false
+	defer func() { e.deferAttribution = deferred }()
+	e.expectLoadTCP(label, "bravo", AsUser, "b", topo.Server4, 3)
+}
+
+// Correlate each client's own local/remote tuple, its engine row, the source
+// returned over that very connection, and the server's independent accept log.
+// Opposite routing mistakes cannot disappear in aggregate line counts.
+func (e *Env) checkHeldTCP(held map[string]app.HeldList, apps map[string]*Bg) {
+	rows := make(map[string]engine.Flow)
+	duplicates := 0
+	for _, f := range e.Flows() {
+		if f.Protocol == "tcp" {
+			key := f.Source.String() + " " + f.Destination.String()
+			if _, exists := rows[key]; exists {
+				duplicates++
+			}
+			rows[key] = f
+		}
+	}
+	accepted := make(map[string]int)
+	for _, rec := range e.Records() {
+		if rec.Kind == "tcp" {
+			accepted[rec.Src+" "+rec.Dst]++
+		}
+	}
+	invalid, total := duplicates, 0
+	seen := map[string]bool{}
+	for name, list := range held {
+		e.T.Check(list.Established == len(list.Conns), "%s reports every held tuple (%d/%d)", name, len(list.Conns), list.Established)
+		for _, c := range list.Conns {
+			key := c.Local + " " + c.Remote
+			f, present := rows[key]
+			line, _, err := loadFlowLine(f, AppPath(name), apps[name].Pid(), e.loadLine(name))
+			serverKey := c.Seen + " " + c.Remote
+			if !present || err != nil || topo.LineOfText(c.Seen) != line || accepted[serverKey] != 1 || seen[key] {
+				if invalid < 5 {
+					e.T.Logf("held tuple %s: present=%t identity=%v server=%s records=%d", key, present, err, c.Seen, accepted[serverKey])
+				}
+				invalid++
+			}
+			seen[key] = true
+			total++
+		}
+	}
+	e.T.Check(invalid == 0, "all %d held TCP tuples match their own identity, route and server accept record (%d invalid)", total, invalid)
 }
 
 func (e *Env) expectLoadUDP(label, name string, user User, want engine.LineID, dst netip.Addr, count int) app.UDPResult {

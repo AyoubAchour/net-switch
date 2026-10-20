@@ -522,6 +522,7 @@ func dnsChange(e *Env) {
 		e.T.Require(streams[name] != nil, "%s has a live data-carrying stream on %s before the DNS change", name, line)
 	}
 	e.T.Logf("DNS precondition retried %d explicitly unknown streams; the original no-retry precondition would pass: %t", retries, retries == 0)
+	e.T.Check(retries == 0, "DNS survival requires zero discarded precondition streams (%d retries)", retries)
 	e.Sleep(2 * time.Second)
 	if err := os.WriteFile(conf, []byte("nameserver "+topo.Server4b.String()+"\nnameserver "+topo.Server6.String()+"\n"), 0o644); err != nil {
 		e.T.Fatalf("%v", err)

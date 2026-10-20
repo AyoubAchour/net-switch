@@ -24,7 +24,16 @@ type relayWorkers struct {
 	stop       chan struct{}
 	stopOnce   sync.Once
 	wg         sync.WaitGroup
+	bufferMu   sync.Mutex
+	loans      int
+	bufferPeak int
+	waiting    map[*readyRelay]struct{}
 }
+
+// Stalled writes retain at most 16 MiB across both directions of every flow.
+// Reserve before reading: when full, leave bytes on their original socket and
+// wake a waiting relay when a loan returns. No flow is cut to reclaim storage.
+const RelayHeldBudget = 16 << 20
 
 type relayDirection struct {
 	buffer        *[]byte
@@ -54,6 +63,7 @@ type readyRelay struct {
 	entry                          waiter.Entry
 	up, down                       relayDirection
 	finish                         func()
+	waitBuffer                     bool // worker only
 }
 
 func newRelayWorkers() *relayWorkers {
@@ -61,11 +71,47 @@ func newRelayWorkers() *relayWorkers {
 	// ACK processing. Relay work alone must not occupy every processor while
 	// its writes wait for those same consumers to make progress.
 	n := min(8, max(1, (runtime.GOMAXPROCS(0)+1)/2))
-	w := &relayWorkers{wake: make(chan struct{}, n), stop: make(chan struct{})}
+	w := &relayWorkers{wake: make(chan struct{}, n), stop: make(chan struct{}), waiting: make(map[*readyRelay]struct{})}
 	for range n {
 		w.wg.Go(w.run)
 	}
 	return w
+}
+
+func (w *relayWorkers) borrow(r *readyRelay) bool {
+	w.bufferMu.Lock()
+	defer w.bufferMu.Unlock()
+	if w.loans == RelayHeldBudget/RelayBuffer {
+		w.waiting[r] = struct{}{}
+		r.waitBuffer = true
+		return false
+	}
+	delete(w.waiting, r)
+	w.loans++
+	w.bufferPeak = max(w.bufferPeak, w.loans)
+	return true
+}
+
+func (w *relayWorkers) giveBack() {
+	w.bufferMu.Lock()
+	w.loans--
+	var next *readyRelay
+	for r := range w.waiting {
+		next = r
+		delete(w.waiting, r)
+		break
+	}
+	w.bufferMu.Unlock()
+	if next != nil {
+		next.notify()
+	}
+}
+
+func (f *Forwarder) RelayBufferBytes() (int, int) {
+	w := f.relays
+	w.bufferMu.Lock()
+	defer w.bufferMu.Unlock()
+	return w.loans * RelayBuffer, w.bufferPeak * RelayBuffer
 }
 
 func (r *readyRelay) notify() {
@@ -179,6 +225,9 @@ func (r *readyRelay) close(abort bool) {
 	}
 	r.watch.Detach()
 	r.wq.EventUnregister(&r.entry)
+	r.workers.bufferMu.Lock()
+	delete(r.workers.waiting, r)
+	r.workers.bufferMu.Unlock()
 	if abort {
 		r.remote.SetLinger(0)
 		if closeAdmissionEnabled {
@@ -190,6 +239,7 @@ func (r *readyRelay) close(abort bool) {
 		if d.buffer != nil {
 			relayBuffers.Put(d.buffer)
 			d.buffer = nil
+			r.workers.giveBack()
 		}
 	}
 	r.finish()
@@ -236,13 +286,22 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 	// other readiness events, the ordered TUN reader, or process lookups.
 	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
 		var pending []byte
+		borrowed := false
 		if d.buffer != nil {
 			pending = (*d.buffer)[d.start:d.end]
 		} else if !d.eof {
+			if !r.workers.borrow(r) {
+				return false, nil
+			}
+			borrowed = true
 			// A worker owns this scratch until step returns. The usual full
 			// write needs no pool access or allocation, even during repeated
 			// collections. Only blocked/short writes retain a private buffer.
 			n, err := r.read(up, scratch.buffer[:], scratch)
+			if n == 0 || (err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, platform.ErrWouldBlock)) {
+				r.workers.giveBack()
+				borrowed = false
+			}
 			pending = scratch.buffer[:n]
 			if errors.Is(err, io.EOF) {
 				d.eof = true
@@ -273,10 +332,13 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 				if d.start == d.end {
 					relayBuffers.Put(d.buffer)
 					d.buffer = nil
+					r.workers.giveBack()
 				}
 			} else if n < len(pending) {
 				d.buffer = relayBuffers.Get().(*[]byte)
 				d.start, d.end = 0, copy(*d.buffer, pending[n:])
+			} else if borrowed {
+				r.workers.giveBack()
 			}
 			if errors.Is(err, platform.ErrWouldBlock) {
 				return false, nil
@@ -313,6 +375,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 }
 
 func (r *readyRelay) step(scratch *relayScratch) {
+	r.waitBuffer = false
 	if r.cancelled.Load() || r.ctx.Err() != nil {
 		r.close(true)
 		return
@@ -331,7 +394,7 @@ func (r *readyRelay) step(scratch *relayScratch) {
 		r.close(false)
 		return
 	}
-	if err := r.watch.Arm(!r.down.finished && r.down.buffer == nil, r.up.buffer != nil); err != nil {
+	if err := r.watch.Arm(!r.waitBuffer && !r.down.finished && r.down.buffer == nil, r.up.buffer != nil); err != nil {
 		r.close(true)
 		return
 	}
