@@ -38,7 +38,7 @@ on:
         required: false
         default: ''
       shared_tests:
-        description: 'Also run shared TCP and Linux lookup race regressions in this focused job'
+        description: 'Also run shared relay, UDP and Linux lookup race regressions'
         type: boolean
         required: false
         default: false
@@ -188,6 +188,13 @@ jobs:
           GOMAXPROCS: '4'
           GOFLAGS: -mod=vendor -p=2
         run: go test -v -count=1 -run '^TestCloseAtCapUnderLoad$' ./internal/engine/stack
+      - name: Check shared UDP quotations and packet races
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && !cancelled() && steps.harness.outcome == 'success' }}
+        env:
+          CGO_ENABLED: '1'
+          GOMAXPROCS: '4'
+          GOFLAGS: -mod=vendor -p=2
+        run: go test -race -v -count=1 ./internal/engine/udp ./internal/engine/packet
       # The QUIC fixture is its own module at a pinned quic-go, so QUIC never
       # enters Net Switch's go.mod or vendor/.
       - name: Check and build the QUIC fixture
