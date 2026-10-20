@@ -236,7 +236,7 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 					break
 				}
 				if !found || !maps.Equal(live, fp) {
-					err = errors.New("owned capture route changed or disappeared")
+					err = fmt.Errorf("owned capture route changed: found=%t expected=%v observed=%v", found, fp, live)
 					break
 				}
 			}
