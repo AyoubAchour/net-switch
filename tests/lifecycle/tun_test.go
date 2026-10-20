@@ -47,6 +47,7 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 	defer cancel()
 	for _, failure := range []string{"engine-kill", "lease-expiry"} {
 		t.Run(failure, func(t *testing.T) {
+			resetControlRecoveryWindow(t)
 			if err := service.Start(ctx, service.Control); err != nil {
 				t.Fatal(err)
 			}

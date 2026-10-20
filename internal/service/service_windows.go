@@ -64,8 +64,16 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 				} // PBT_APMRESUMEAUTOMATIC
 			case svc.SessionChange:
 				if request.EventType == 6 && request.EventData != 0 { // WTS_SESSION_LOGOFF
-					data := (*struct{ Size, Session uint32 })(unsafe.Pointer(request.EventData))
-					events <- Event{Logoff: true, Session: data.Session}
+					var data struct{ Size, Session uint32 }
+					var read uintptr
+					// svc exposes the callback buffer as uintptr. Copy it
+					// through the OS instead of manufacturing a Go pointer.
+					if err := windows.ReadProcessMemory(windows.CurrentProcess(), request.EventData, (*byte)(unsafe.Pointer(&data)), unsafe.Sizeof(data), &read); err == nil && read == unsafe.Sizeof(data) && data.Size >= uint32(read) {
+						events <- Event{Logoff: true, Session: data.Session}
+					} else {
+						fmt.Fprintln(os.Stderr, "session-change data unavailable; checking all owner sessions")
+						events <- Event{Logoff: true, Session: ^uint32(0)}
+					}
 				}
 			case svc.Interrogate:
 				updates <- status

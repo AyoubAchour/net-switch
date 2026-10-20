@@ -338,7 +338,7 @@ func TestRealServices(t *testing.T) {
 	if err := service.Install(service.Config{Directory: dir, Data: data}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 14*time.Minute)
 	defer cancel()
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 45*time.Second)
@@ -498,6 +498,15 @@ func TestRealServices(t *testing.T) {
 	c.must(t, "signin", nil, nil)
 	wait(t, "routing on", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	first := getStatus(t, c)
+	if runtime.GOOS == "windows" {
+		t.Run("system-pipe-accept-race", func(t *testing.T) {
+			b, err := exec.Command(filepath.Join(dir, "ipc.test.exe"), "-test.v", "-test.run=^TestClientClosesBeforePipeAccept$", "-test.count=1").CombinedOutput()
+			if err != nil || !strings.Contains(string(b), "--- PASS: TestClientClosesBeforePipeAccept") {
+				t.Fatal("SYSTEM pipe regression did not pass", err, string(b))
+			}
+			t.Log(string(b))
+		})
+	}
 	t.Run("non-owner-connect-close-preserves-routing", func(t *testing.T) {
 		exe, _ := os.Executable()
 		if b, err := other.command(exe, "client", "disconnect-burst").CombinedOutput(); err != nil {
@@ -775,6 +784,7 @@ func TestRealServices(t *testing.T) {
 		}
 	})
 	t.Run("enrollment-preserves-routing-and-same-owner-is-noop", func(t *testing.T) {
+		resetControlRecoveryWindow(t)
 		before := getStatus(t, c)
 		stream := proxyStream(t, session.URL, session.Token, echo)
 		defer stream.Close()
@@ -996,6 +1006,7 @@ func TestRealServices(t *testing.T) {
 		}
 		wait(t, "clean engine exit", 10*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
 	})
+	t.Run("control-start-limit-fails-open", func(t *testing.T) { controlStartLimit(t, ctx, owner, echo) })
 	t.Run("real-tun-fail-open", func(t *testing.T) { tunServices(t, config, owner) })
 }
 func binary(name string) string {
@@ -1005,6 +1016,14 @@ func binary(name string) string {
 	return name
 }
 func kill(t *testing.T, pid uint32) {
+	// Independent fault cases must not consume one another's SCM rate window.
+	// The separate start-limit case uses killUnreset to test a crash storm.
+	if s, err := service.Query(service.Control); err == nil && s.PID == pid {
+		resetControlRecoveryWindow(t)
+	}
+	killUnreset(t, pid)
+}
+func killUnreset(t *testing.T, pid uint32) {
 	t.Helper()
 	if pid == 0 {
 		t.Fatal("refusing to kill PID 0")

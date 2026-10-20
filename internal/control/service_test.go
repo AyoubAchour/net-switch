@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	"github.com/AyoubAchour/net-switch/internal/platform"
 )
 
 func TestServiceJournalFailureDoesNotReachEngine(t *testing.T) {
@@ -149,5 +152,51 @@ func TestSecondOwnerSignInPreservesFailureBudget(t *testing.T) {
 	}
 	if len(c.failureTimes) != 1 {
 		t.Fatal("second session erased the crash budget")
+	}
+}
+
+type blockedInstalledApps struct {
+	platform.System
+	entered, release chan struct{}
+	calls            atomic.Int32
+}
+
+func (p *blockedInstalledApps) Call(ctx context.Context, op string, args map[string]any) (any, error) {
+	if op != "installed-apps" {
+		return p.System.Call(ctx, op, args)
+	}
+	if p.calls.Add(1) == 1 {
+		close(p.entered)
+		<-p.release
+	}
+	return []any{}, nil
+}
+func TestDesktopHandshakeDoesNotWaitForItsOwnPendingWork(t *testing.T) {
+	c, _, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.op.AutostartAllowed = false
+	p := &blockedInstalledApps{System: c.op.Platform, entered: make(chan struct{}), release: make(chan struct{})}
+	c.op.Platform = p
+	listed := make(chan error, 1)
+	go func() { _, err := c.InstalledApps(context.Background()); listed <- err }()
+	<-p.entered
+	connected := make(chan struct{})
+	go func() { c.DesktopConnected(); close(connected) }()
+	select {
+	case <-connected:
+	case <-time.After(time.Second):
+		close(p.release)
+		<-listed
+		<-connected
+		t.Fatal("desktop cannot poll its pending work because the handshake waits on that work")
+	}
+	close(p.release)
+	if err := <-listed; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.InstalledApps(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if p.calls.Load() != 2 {
+		t.Fatal("previous session's in-flight reply was cached as current")
 	}
 }

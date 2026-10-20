@@ -128,6 +128,8 @@ type Core struct {
 	infoRunning                                  bool
 	installedMu                                  sync.Mutex
 	installedCached                              []any
+	installedSession                             atomic.Uint64
+	installedCachedSession                       uint64
 	installedExpires                             int64
 	events                                       []map[string]any
 	generation                                   uint64

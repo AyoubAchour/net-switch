@@ -14,6 +14,13 @@ func TestClientClosesBeforePipeAccept(t *testing.T) {
 	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 		t.Skip("pipe race is exercised on hosted runners")
 	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Skip("the lifecycle SYSTEM harness runs this test with the real pipe server identity")
+	}
 	path := fmt.Sprintf(`\\.\pipe\netswitch-accept-race-%d`, os.Getpid())
 	l, err := Listen(Endpoint{Path: path, Kind: "status"})
 	if err != nil {

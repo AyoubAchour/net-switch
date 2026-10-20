@@ -125,7 +125,7 @@ func prepareTUN(t *testing.T, _, data string) tunFixture {
 			if len(diff) == 0 || !strings.Contains(strings.Join(diff, "\n"), "NetSwitch") {
 				t.Fatal("no real TUN objects", diff)
 			}
-			t.Log("TUN installed routing state", diff)
+			t.Logf("TUN installed %d adapter/address/route/rule changes", len(diff))
 			records, err := (&journal.FileStore{Path: filepath.Join(data, "engine-journal.json")}).Records()
 			if err != nil {
 				t.Fatal(err)

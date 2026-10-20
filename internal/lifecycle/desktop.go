@@ -105,6 +105,7 @@ func Desktop(ctx context.Context, show bool) error {
 			continue
 		}
 		backoff = time.Second
+		registered := false
 		// Keep the sign-in intent until the server has acknowledged it.
 		if first {
 			signCtx, stop := context.WithTimeout(ctx, 40*time.Second)
@@ -118,8 +119,9 @@ func Desktop(ctx context.Context, show bool) error {
 				continue
 			}
 			first = false
+			registered = true
 		}
-		err = desktopSession(ctx, rpc, show, first)
+		err = desktopSession(ctx, rpc, show, registered)
 		rpc.Close()
 		if ctx.Err() != nil {
 			return nil
@@ -132,7 +134,7 @@ func Desktop(ctx context.Context, show bool) error {
 	}
 	return nil
 }
-func desktopSession(ctx context.Context, rpc *RPC, show, signIn bool) error {
+func desktopSession(ctx context.Context, rpc *RPC, show, registered bool) error {
 	var session struct {
 		Token string `json:"token"`
 		URL   string `json:"url"`
@@ -141,11 +143,7 @@ func desktopSession(ctx context.Context, rpc *RPC, show, signIn bool) error {
 	if err := rpc.Call(ctx, map[string]any{"method": "session"}, &session); err != nil {
 		return err
 	}
-	if signIn {
-		if err := rpc.Call(ctx, map[string]any{"method": "signin"}, nil); err != nil {
-			return err
-		}
-	} else {
+	if !registered {
 		// Reconnect metadata without turning routing back on after the owner
 		// explicitly stopped it.
 		if err := rpc.Call(ctx, map[string]any{"method": "desktop-connect"}, nil); err != nil {
