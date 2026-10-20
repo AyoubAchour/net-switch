@@ -35,7 +35,8 @@ type Access struct {
 }
 
 func (a *Access) status() any {
-	return map[string]any{"owner": a.Owner, "pending": a.Owner.User == "", "routing": a.Remote.Snapshot().Status, "error": a.Remote.Snapshot().Error, "controlPID": os.Getpid(), "engineInstanceId": a.Remote.Snapshot().Instance, "desktopPID": a.Desktop.PID(), "earlyDisconnects": localipc.EarlyDisconnects.Load()}
+	snapshot := a.Remote.Snapshot()
+	return map[string]any{"owner": a.Owner, "pending": a.Owner.User == "", "routing": snapshot.Status, "error": snapshot.Error, "controlPID": os.Getpid(), "engineInstanceId": snapshot.Instance, "desktopPID": a.Desktop.PID(), "earlyDisconnects": localipc.EarlyDisconnects.Load()}
 }
 func (a *Access) request(ctx context.Context, peer localipc.Peer, statusOnly bool, session string, r controlRequest) (any, error) {
 	if r.Method == "status" {

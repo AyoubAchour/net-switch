@@ -7,9 +7,43 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/buildinfo"
+	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
+
+func TestStatusSnapshotDoesNotMixEngineInstances(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	defer func() { cancel(); <-done }()
+	r := NewRemote(ctx, func(string) {})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			r.mu.Lock()
+			r.snapshot = ce.Snapshot{Status: "on", Instance: "live"}
+			r.mu.Unlock()
+			r.mu.Lock()
+			r.snapshot = ce.Snapshot{Status: "off", Instance: "stopped"}
+			r.mu.Unlock()
+		}
+	}()
+	a := &Access{Remote: r, Desktop: &DesktopBridge{}}
+	for range 10000 {
+		s := a.status().(map[string]any)
+		if s["engineInstanceId"] == "" {
+			continue
+		}
+		if (s["routing"] == "on") != (s["engineInstanceId"] == "live") {
+			t.Fatal("mixed engine snapshots", s)
+		}
+	}
+}
 
 type healthFunc func(context.Context) error
 
