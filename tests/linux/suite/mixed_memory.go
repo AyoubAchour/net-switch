@@ -149,7 +149,7 @@ func mixedCaps(e *Env) {
 	fullCombinedApp := false
 	for _, name := range udpNames {
 		ok, tcpOn, udpOn := fullIdentifiedApp(held[name], udpHeld[name], e.loadLine(name))
-		e.T.Logf("MIXED APP POOL %s: servers saw %d TCP and %d UDP sockets from line %s, full=%t; old engine-inclusive verdict=%t",
+		e.T.Logf("MIXED APP POOL %s: servers saw %d TCP and %d UDP sockets from line %s, full=%t; old all-sockets verdict=%t",
 			name, tcpOn, udpOn, e.loadLine(name), ok, held[name].Established+udpHeld[name].gotOut == tcpFlowsPerApp)
 		fullCombinedApp = fullCombinedApp || ok
 	}

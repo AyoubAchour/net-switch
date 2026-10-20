@@ -67,7 +67,7 @@ func (e *Env) capacityAccounting(label, protocol string, before, after engine.St
 		(r.UnknownUDP == 0 || after.PeakUnknownUDP == 512)
 	e.T.Check(occupied, "%s: every reported cap refusal has a matching engine peak", label)
 	independentApp := scope != capacityMixed || r.PerApp == 0 || (len(fullCombinedApp) == 1 && fullCombinedApp[0])
-	e.T.Check(independentApp, "%s: mixed per-app refusals require a UDP-holding client app with exactly 8192 held TCP plus UDP sockets", label)
+	e.T.Check(independentApp, "%s: mixed per-app refusals require a UDP-holding client app with exactly 8192 identified TCP plus UDP sockets independently observed on its pinned line", label)
 	// The UDP fixture sends exactly one datagram from each fresh socket.
 	// Unlike SYNs it has no transport retransmission that can repeat a decision.
 	if protocol == "udp" {
