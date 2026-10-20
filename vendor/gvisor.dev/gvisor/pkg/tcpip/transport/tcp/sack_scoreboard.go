@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-10-20: share the bounded SACK node free list.
+
 package tcp
 
 import (
@@ -33,6 +35,11 @@ const (
 	// tree.
 	defaultBtreeDegree = 2
 )
+
+// FreeListG permits concurrent trees. Idle connections need no private
+// 32-pointer free list; active trees retain their own nodes and ordering.
+// The shared cache is bounded independently of the number of connections.
+var sackNodePool = btree.NewFreeListG[header.SACKBlock](1024)
 
 // sackBlockLess is the comparison function for BTreeG, replacing the
 // btree.Item interface method.
@@ -61,14 +68,14 @@ type SACKScoreboard struct {
 func NewSACKScoreboard(smss uint16, iss seqnum.Value) *SACKScoreboard {
 	return &SACKScoreboard{
 		smss:      smss,
-		ranges:    btree.NewG[header.SACKBlock](defaultBtreeDegree, sackBlockLess),
+		ranges:    btree.NewWithFreeListG(defaultBtreeDegree, sackBlockLess, sackNodePool),
 		maxSACKED: iss,
 	}
 }
 
 // Reset erases all known range information from the SACK scoreboard.
 func (s *SACKScoreboard) Reset() {
-	s.ranges = btree.NewG[header.SACKBlock](defaultBtreeDegree, sackBlockLess)
+	s.ranges = btree.NewWithFreeListG(defaultBtreeDegree, sackBlockLess, sackNodePool)
 	s.sacked = 0
 }
 

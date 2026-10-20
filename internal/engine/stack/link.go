@@ -12,8 +12,17 @@ import (
 
 const QueuePackets = 1024
 
-var smallOutput = sync.Pool{New: func() any { return new([256]byte) }}
-var largeOutput = sync.Pool{New: func() any { return new([MTU]byte) }}
+// GC must not evict the output cache precisely when the engine hits its
+// memory target. Keep at most one queue plus one writer batch of each size,
+// allocate lazily, and release the cache with its link. A link that only
+// carries small packets never reserves a queue's worth of MTU-sized storage.
+type outputBuffers struct {
+	mu                     sync.Mutex
+	small                  [QueuePackets + 64]*[256]byte
+	large                  [QueuePackets + 64]*[MTU]byte
+	smallCount, largeCount int
+	closed                 bool
+}
 
 // OutputPacket transfers one queue buffer to the TUN writer. Release exactly
 // once after the synchronous device write, including error paths. The small
@@ -21,28 +30,68 @@ var largeOutput = sync.Pool{New: func() any { return new([MTU]byte) }}
 type OutputPacket struct {
 	Bytes   []byte
 	storage any
+	pool    *outputBuffers
 }
 
-func outputPacket(size int) OutputPacket {
+func (pool *outputBuffers) packet(size int) OutputPacket {
 	if size <= 256 {
-		b := smallOutput.Get().(*[256]byte)
-		return OutputPacket{b[:size], b}
+		var b *[256]byte
+		pool.mu.Lock()
+		if pool.smallCount > 0 {
+			pool.smallCount--
+			b, pool.small[pool.smallCount] = pool.small[pool.smallCount], nil
+		}
+		pool.mu.Unlock()
+		if b == nil {
+			b = new([256]byte)
+		}
+		return OutputPacket{b[:size], b, pool}
 	}
 	if size <= MTU {
-		b := largeOutput.Get().(*[MTU]byte)
-		return OutputPacket{b[:size], b}
+		var b *[MTU]byte
+		pool.mu.Lock()
+		if pool.largeCount > 0 {
+			pool.largeCount--
+			b, pool.large[pool.largeCount] = pool.large[pool.largeCount], nil
+		}
+		pool.mu.Unlock()
+		if b == nil {
+			b = new([MTU]byte)
+		}
+		return OutputPacket{b[:size], b, pool}
 	}
 	return OutputPacket{Bytes: make([]byte, size)}
 }
 
 func (p *OutputPacket) Release() {
-	switch b := p.storage.(type) {
-	case *[256]byte:
-		smallOutput.Put(b)
-	case *[MTU]byte:
-		largeOutput.Put(b)
+	if pool := p.pool; pool != nil {
+		pool.mu.Lock()
+		if !pool.closed {
+			switch b := p.storage.(type) {
+			case *[256]byte:
+				if pool.smallCount < len(pool.small) {
+					pool.small[pool.smallCount] = b
+					pool.smallCount++
+				}
+			case *[MTU]byte:
+				if pool.largeCount < len(pool.large) {
+					pool.large[pool.largeCount] = b
+					pool.largeCount++
+				}
+			}
+		}
+		pool.mu.Unlock()
 	}
 	*p = OutputPacket{}
+}
+
+func (pool *outputBuffers) close() {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	pool.closed = true
+	clear(pool.small[:])
+	clear(pool.large[:])
+	pool.smallCount, pool.largeCount = 0, 0
 }
 
 // Link owns its output buffers. A slot is reserved before copying a packet;
@@ -54,6 +103,7 @@ type Link struct {
 	observer     func(*gv.PacketBuffer)
 	afterInbound func()
 	queue        [QueuePackets]OutputPacket
+	buffers      outputBuffers
 	head, count  int
 	peak         int
 	mtu          uint32
@@ -77,7 +127,7 @@ func (l *Link) enqueue(size int, copyInto func([]byte)) bool {
 		l.Dropped.Add(1)
 		return false
 	}
-	p := outputPacket(size)
+	p := l.buffers.packet(size)
 	copyInto(p.Bytes)
 	l.queue[(l.head+l.count)%QueuePackets] = p
 	l.count++
@@ -250,6 +300,7 @@ func (l *Link) Close() {
 	for i := range l.queue {
 		l.queue[i].Release()
 	}
+	l.buffers.close()
 	l.count = 0
 	close(l.done)
 	f := l.onClose
