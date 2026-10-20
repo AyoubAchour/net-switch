@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"sync"
 	"unsafe"
 
@@ -16,6 +17,8 @@ import (
 
 const EnginePipe = `\\.\pipe\ProtectedPrefix\Administrators\NetSwitch\engine`
 
+var errPeerRefused = errors.New("engine pipe peer refused")
+
 type Pipe struct {
 	name       string
 	standalone bool
@@ -23,6 +26,7 @@ type Pipe struct {
 	pending    windows.Handle
 	closed     bool
 	first      bool
+	accepting  bool
 }
 
 func ListenPipe(name string, standalone bool) (*Pipe, error) {
@@ -69,29 +73,54 @@ func (p *Pipe) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
 		return nil, os.ErrClosed
 	}
 	h := p.pending
+	p.accepting = true
 	p.mu.Unlock()
+	defer func() {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		p.accepting = false
+		if p.closed && p.pending != 0 {
+			windows.CloseHandle(p.pending)
+			p.pending = 0
+		}
+	}()
 	event, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer windows.CloseHandle(event)
 	op := windows.Overlapped{HEvent: event}
+	var pinned runtime.Pinner
+	pinned.Pin(&op)
+	defer pinned.Unpin()
 	err = windows.ConnectNamedPipe(h, &op)
 	if errors.Is(err, windows.ERROR_IO_PENDING) {
-		stop := context.AfterFunc(ctx, func() { windows.CancelIoEx(h, &op) })
+		p.mu.Lock()
+		if p.closed {
+			windows.CancelIoEx(h, &op)
+		}
+		p.mu.Unlock()
+		cancelDone := make(chan struct{})
+		stop := context.AfterFunc(ctx, func() { windows.CancelIoEx(h, &op); close(cancelDone) })
 		var bytes uint32
 		err = windows.GetOverlappedResult(h, &op, &bytes, true)
-		stop()
+		if !stop() {
+			<-cancelDone
+		}
 	}
 	if errors.Is(err, windows.ERROR_PIPE_CONNECTED) {
 		err = nil
+	}
+	if errors.Is(err, windows.ERROR_NO_DATA) {
+		windows.DisconnectNamedPipe(h)
+		return nil, fmt.Errorf("%w: client disconnected before accept", errPeerRefused)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if err := authenticatePipe(h, p.standalone); err != nil {
 		windows.DisconnectNamedPipe(h)
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errPeerRefused, err)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -103,6 +132,9 @@ func (p *Pipe) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
 	next, err := p.create()
 	if err != nil {
 		windows.DisconnectNamedPipe(h)
+		if errors.Is(err, windows.ERROR_PIPE_BUSY) {
+			return nil, fmt.Errorf("%w: four control connections are already active", errPeerRefused)
+		}
 		return nil, err
 	}
 	p.pending = next
@@ -147,5 +179,12 @@ func (p *Pipe) Close() error {
 	}
 	p.closed = true
 	windows.CancelIoEx(p.pending, nil)
-	return windows.CloseHandle(p.pending)
+	if !p.accepting {
+		err := windows.CloseHandle(p.pending)
+		p.pending = 0
+		return err
+	}
+	// Accept owns the pending OVERLAPPED until cancellation completes. Closing
+	// its handle here would make GetOverlappedResult race the final completion.
+	return nil
 }

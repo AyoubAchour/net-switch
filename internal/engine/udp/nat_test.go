@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -27,17 +28,37 @@ type socket struct {
 	out, in chan wire
 	done    chan struct{}
 	once    sync.Once
+	ready   *wire
 }
 
 func newSocket() *socket {
 	return &socket{out: make(chan wire, 256), in: make(chan wire, 256), done: make(chan struct{})}
 }
+func (s *socket) WaitReadable(ctx context.Context) error {
+	if s.ready != nil {
+		return nil
+	}
+	select {
+	case w := <-s.in:
+		s.ready = &w
+		return nil
+	case <-s.done:
+		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 func (s *socket) ReadFrom(b []byte) (int, netip.AddrPort, error) {
+	if s.ready != nil {
+		w := *s.ready
+		s.ready = nil
+		return copy(b, w.b), w.addr, nil
+	}
 	select {
 	case w := <-s.in:
 		return copy(b, w.b), w.addr, nil
 	case <-s.done:
-		return 0, netip.AddrPort{}, io.EOF
+		return 0, netip.AddrPort{}, net.ErrClosed
 	}
 }
 func (s *socket) WriteTo(b []byte, a netip.AddrPort, _ bool) (int, error) {
@@ -55,11 +76,13 @@ type identity struct {
 	mu    sync.Mutex
 	value platform.Owner
 	err   error
+	keys  []netip.AddrPort
 }
 
-func (i *identity) Snapshot(context.Context, []netip.AddrPort) (map[netip.AddrPort]platform.Owner, error) {
+func (i *identity) Snapshot(_ context.Context, keys []netip.AddrPort) (map[netip.AddrPort]platform.Owner, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.keys = append([]netip.AddrPort(nil), keys...)
 	return map[netip.AddrPort]platform.Owner{local: i.value}, i.err
 }
 func (i *identity) set(o platform.Owner) { i.mu.Lock(); i.value = o; i.mu.Unlock() }
@@ -124,6 +147,29 @@ func TestOneMappingAcross50DestinationsAndUnsolicitedReply(t *testing.T) {
 	n.Close()
 	if c.Pending.Load() != 0 || c.Begun.Load() != c.Closed.Load() {
 		t.Fatal("reservation leaked")
+	}
+}
+
+func TestPendingSessionRetainsItsIdentityCacheReference(t *testing.T) {
+	gate := make(chan struct{})
+	n, c, sockets, _, ids, _ := setup(t, &testfake.Owners{Value: owner, Gate: gate})
+	send(n, dest, []byte("pending"))
+	if c.Pending.Load() == 0 {
+		t.Fatal("pending packet wasn't present before reconciliation")
+	}
+	ids.set(platform.Owner{})
+	n.Reconcile(context.Background())
+	ids.mu.Lock()
+	keys := append([]netip.AddrPort(nil), ids.keys...)
+	ids.mu.Unlock()
+	if len(keys) != 1 || keys[0] != local {
+		t.Fatalf("pending cache reference omitted: %v", keys)
+	}
+	ids.set(owner)
+	close(gate)
+	s := await(t, sockets)
+	if sent := await(t, s.out); string(sent.b) != "pending" {
+		t.Fatalf("pending mapping didn't survive reconciliation: %+v", sent)
 	}
 }
 

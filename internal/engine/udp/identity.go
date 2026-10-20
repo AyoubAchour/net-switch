@@ -37,15 +37,21 @@ func (n *NAT) Reconcile(ctx context.Context) {
 	active := make([]*session, 0, len(sessions))
 	for _, s := range sessions {
 		s.mu.Lock()
-		ready := (s.active || s.rejected) && !s.closed
+		closed := s.closed
+		ready := (s.active || s.rejected) && !closed
 		idle := started.Sub(s.last) >= IdleTimeout || (s.rejected && started.Sub(s.rejectedAt) >= RejectLifetime)
 		s.mu.Unlock()
 		if idle {
 			s.close()
 			continue
 		}
-		if ready {
+		// Pending lookups may already have published their owner before the
+		// egress socket is ready. Keep that cache reference too, while only
+		// validating active/rejected sessions below.
+		if !closed {
 			keys = append(keys, s.source)
+		}
+		if ready {
 			active = append(active, s)
 		}
 	}
@@ -56,7 +62,13 @@ func (n *NAT) Reconcile(ctx context.Context) {
 		n.IdentityErrors.Add(1)
 		return
 	}
-	owners, err := n.identities.Snapshot(ctx, keys)
+	var owners map[netip.AddrPort]platform.Owner
+	var err error
+	if timed, ok := n.identities.(platform.UDPIdentityAt); ok {
+		owners, err = timed.SnapshotAt(ctx, keys, started)
+	} else {
+		owners, err = n.identities.Snapshot(ctx, keys)
+	}
 	if err != nil {
 		n.IdentityErrors.Add(1)
 		return
@@ -78,6 +90,21 @@ func (n *NAT) Reconcile(ctx context.Context) {
 // Destroy matches the generation, never just the reused port. A dropped event
 // or listener restart calls RefreshNow; the periodic dump remains the bound.
 func (n *NAT) Destroy(source netip.AddrPort, generation string) {
+	if source.Addr().IsUnspecified() {
+		b := n.bucket(source)
+		b.Lock()
+		var keys []netip.AddrPort
+		for key := range b.m {
+			if key.Port() == source.Port() {
+				keys = append(keys, key)
+			}
+		}
+		b.Unlock()
+		for _, key := range keys {
+			n.Destroy(key, generation)
+		}
+		return
+	}
 	b := n.bucket(source)
 	b.Lock()
 	s := b.m[source]
@@ -86,6 +113,16 @@ func (n *NAT) Destroy(source netip.AddrPort, generation string) {
 		return
 	}
 	s.mu.Lock()
+	if !s.closed && s.owner.Generation == "" && generation != "" {
+		// Lookup may have read this cookie before the destroy notification
+		// arrived. Keep it until lookup publishes the generation. Bound the
+		// queue; an overflow requires a fresh kernel snapshot before dialing.
+		if len(s.pendingDestroys) < 32 {
+			s.pendingDestroys = append(s.pendingDestroys, generation)
+		} else {
+			s.destroyOverflow = true
+		}
+	}
 	match := s.owner.Generation == generation && generation != ""
 	s.mu.Unlock()
 	if match {

@@ -78,6 +78,7 @@ type udpSocket struct {
 	mu   sync.Mutex
 	v6   bool
 	mtu  uint32
+	luid uint64
 }
 
 func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UDPConn, error) {
@@ -100,7 +101,7 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 		u.Close()
 		return nil, err
 	}
-	return &udpSocket{conn: u, raw: raw, v6: v6, mtu: a.MTU}, nil
+	return &udpSocket{conn: u, raw: raw, v6: v6, mtu: a.MTU, luid: a.LUID}, nil
 }
 func (s *udpSocket) Close() error              { return s.conn.Close() }
 func (s *udpSocket) LocalAddr() netip.AddrPort { return s.conn.LocalAddr().(*net.UDPAddr).AddrPort() }
@@ -159,16 +160,46 @@ func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) 
 	}
 	n, err := s.conn.WriteToUDPAddrPort(b, dst)
 	if platform.IsTooBig(err) {
-		mtu := s.mtu
-		// GetBestRoute2 is constrained to our interface by the source address.
-		// An unconnected UDP socket cannot query a single IP_MTU; use the
-		// interface MTU as the safe local ceiling when Winsock rejects a send.
-		if mtu == 0 {
-			mtu = 1280
-		}
-		err = &platform.TooBig{MTU: mtu}
+		err = &platform.TooBig{MTU: s.pathMTU(dst.Addr())}
 	}
 	return n, err
+}
+
+// MIB_IPPATH_ROW, from netioapi.h. Both supported architectures use the same
+// 136-byte layout; SOCKADDR_INET has four-byte alignment and NET_LUID has eight.
+type pathRow struct {
+	Source, Destination                       windows.RawSockaddrInet
+	LUID                                      uint64
+	Index                                     uint32
+	NextHop                                   windows.RawSockaddrInet
+	MTU, RTTMean, RTTDeviation, LastReachable uint32
+	Reachable                                 byte
+	TransmitSpeed, ReceiveSpeed               uint64
+}
+
+func (s *udpSocket) pathMTU(destination netip.Addr) uint32 {
+	mtu := s.mtu
+	family := uint16(windows.AF_INET)
+	if s.v6 {
+		family = windows.AF_INET6
+	}
+	iface := windows.MibIpInterfaceRow{Family: family, InterfaceLuid: s.luid}
+	if err := windows.GetIpInterfaceEntry(&iface); err == nil && iface.NlMtu != 0 {
+		mtu = iface.NlMtu
+	}
+	row := pathRow{Source: sockaddr(s.LocalAddr().Addr()), Destination: sockaddr(destination), LUID: s.luid}
+	if err := api("GetIpPathEntry", uintptr(unsafe.Pointer(&row))); err == nil && row.MTU != 0 {
+		if mtu == 0 || row.MTU < mtu {
+			mtu = row.MTU
+		}
+	}
+	if mtu == 0 {
+		if s.v6 {
+			return 1280
+		}
+		return 576
+	}
+	return mtu
 }
 
 // Avoid importing a second Winsock binding package for the two ICMP APIs.

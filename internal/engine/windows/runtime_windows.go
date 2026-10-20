@@ -10,8 +10,6 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
-	"runtime"
-	"runtime/metrics"
 	"sync"
 	"time"
 
@@ -31,17 +29,7 @@ func (r *Runtime) Stats() any {
 	stats := r.Engine.Stats().(map[string]any)
 	stats["ownerLookup"] = r.owners.Stats()
 	stats["bindings"] = r.routes.Bindings()
-	var memory runtime.MemStats
-	runtime.ReadMemStats(&memory)
-	stats["heapBytes"], stats["stackBytes"] = memory.HeapAlloc, memory.StackInuse
-	stats["runtimeBytes"] = memory.Sys - memory.HeapReleased
-	stats["gcCPUppm"] = uint64(memory.GCCPUFraction * 1e6)
-	stats["goroutines"] = runtime.NumGoroutine()
-	samples := []metrics.Sample{{Name: "/gc/heap/live:bytes"}, {Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/total:cpu-seconds"}}
-	metrics.Read(samples)
-	stats["heapLiveBytes"] = samples[0].Value.Uint64()
-	stats["gcCPUNanos"] = uint64(samples[1].Value.Float64() * 1e9)
-	stats["totalCPUNanos"] = uint64(samples[2].Value.Float64() * 1e9)
+	stats["wintun"] = r.routes.TunStats()
 	return stats
 }
 
@@ -119,6 +107,10 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 		for {
 			conn, err := pipe.Accept(ctx)
 			if err != nil {
+				if errors.Is(err, errPeerRefused) {
+					log.Print(err)
+					continue
+				}
 				if ctx.Err() == nil {
 					fail(fmt.Errorf("engine pipe: %w", err))
 				}
