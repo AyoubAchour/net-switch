@@ -5,7 +5,7 @@ import path from 'node:path';
 import { launchOptions, recordLaunch, startServer } from './launch.mjs';
 import { targets } from './targets.mjs';
 import { udpIdentity } from './udp-identity.mjs';
-import { hostedOnly, startHarness } from './testisp/harness.mjs';
+import { hostedOnly, run, startHarness } from './testisp/harness.mjs';
 
 hostedOnly();
 const options = launchOptions();
@@ -14,7 +14,7 @@ const directory = path.resolve('dist/windows-udp-quote');
 await mkdir(directory, { recursive: true });
 const log = createWriteStream(path.join(directory, 'server-output.log'));
 const result = { architecture: process.arch, complete: false, acceptanceSuite: false };
-let harness, responder, server;
+let harness, responder, server, traceStarted = false, captureSince;
 try {
   result.executables = await recordLaunch(options);
   harness = await startHarness(path.join(directory, 'testisp'));
@@ -30,6 +30,11 @@ try {
   await server.api('lines/add', { alias: 'TestISP' });
   const second = (await server.on()).lines.find((line) => line.alias === 'TestISP');
   assert(second);
+  await run('auditpol.exe', ['/set', '/subcategory:Filtering Platform Packet Drop', '/success:enable', '/failure:enable']);
+  captureSince = new Date().toISOString();
+  await run('netsh.exe', ['trace', 'start', 'scenario=InternetClient', 'capture=no', 'report=no',
+    'persistent=no', 'correlation=no', 'maxsize=16', `tracefile=${path.join(directory, 'udp-network.etl')}`]);
+  traceStarted = true;
   // Run the exact acceptance case, including its old-socket positive control,
   // one-second invalidation bound and real SIO_UDP_CONNRESET refusal assertion.
   result.reuse = await udpIdentity({ server, responder, directory, main, second, blocked: true });
@@ -71,6 +76,18 @@ try {
   console.error(`WINDOWS UDP QUOTE FAILURE ${JSON.stringify(result)}`);
   process.exitCode = 1;
 } finally {
+  if (traceStarted) {
+    await run('netsh.exe', ['trace', 'stop'], { timeout: 120_000 }).catch((error) => { result.traceError = error.message; });
+    await run('netsh.exe', ['trace', 'convert', `input=${path.join(directory, 'udp-network.etl')}`,
+      `output=${path.join(directory, 'udp-network.txt')}`, 'dump=TXT', 'report=no', 'overwrite=yes'],
+    { timeout: 120_000 }).catch((error) => { result.traceConvertError = error.message; });
+    const events = await run('powershell.exe', ['-NoProfile', '-File', path.resolve('tests/windows/udp-drop-events.ps1')],
+      { env: { NETSWITCH_UDP_CAPTURE_SINCE: captureSince } }).catch((error) => ({ stdout: JSON.stringify({ error: error.message }) }));
+    result.firewallDrops = JSON.parse(events.stdout || '[]');
+    console.log(`WINDOWS UDP FIREWALL EVENTS ${JSON.stringify(result.firewallDrops)}`);
+    await run('netsh.exe', ['wfp', 'show', 'state', `file=${path.join(directory, 'wfp-state.xml')}`])
+      .catch((error) => { result.firewallStateError = error.message; });
+  }
   if (server) await server.quit().catch((error) => { result.quitError = error.stack; process.exitCode = 1; });
   if (responder) await responder.close();
   if (harness) await harness.close().catch((error) => { result.cleanupError = error.stack; process.exitCode = 1; });

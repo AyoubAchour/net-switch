@@ -56,7 +56,10 @@ try {
     for (const pending of calls.values()) { clearTimeout(pending.timer); pending.reject(new Error('Profile client exited')); }
     calls.clear();
   });
-  for (const [name, options] of [['0.3.x', legacy], ['1.0', native]]) {
+  // The legacy engine leaves a non-present adapter after stop. Measure 1.0
+  // first so that its intentional refusal to adopt a foreign adapter cannot
+  // turn the legacy cleanup defect into a failed 1.0 startup precondition.
+  for (const [name, options] of [['1.0', native], ['0.3.x', legacy]]) {
     const data = path.join(directory, name);
     await mkdir(data, { recursive: true });
     await writeFile(path.join(data, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
