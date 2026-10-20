@@ -42,6 +42,7 @@ type fdWindow struct {
 	directory  uint64 // inode of the pinned kernel proc fd directory
 	fdCount    int64  // descriptor count at the last complete pass; ordering hint only
 	next       int64
+	probeNext  int64
 	high       int64 // end of the sequentially indexed range; tail probes cannot advance it
 	extent     int64 // largest descriptor observed, including tail probes
 	lastFD     int64
@@ -60,6 +61,7 @@ type Owners struct {
 	cgroupStats     [3]atomic.Uint64
 	sharedScans     atomic.Uint64
 	assistedScans   atomic.Uint64
+	targetedProbes  atomic.Uint64
 	metadataPasses  atomic.Uint64
 	sharedMetadata  atomic.Uint64
 	lastLookupError atomic.Pointer[string]
@@ -85,6 +87,7 @@ type lookupStats struct {
 	LastMetadataError                            string
 	SharedScans                                  uint64
 	AssistedScans                                uint64
+	TargetedProbes                               uint64
 	MetadataPasses, SharedMetadata               uint64
 }
 
@@ -94,6 +97,7 @@ func (o *Owners) Stats() any {
 	s.MetadataRejected = rejectedMetadata.Load()
 	s.SharedScans = o.sharedScans.Load()
 	s.AssistedScans = o.assistedScans.Load()
+	s.TargetedProbes = o.targetedProbes.Load()
 	s.MetadataPasses, s.SharedMetadata = o.metadataPasses.Load(), o.sharedMetadata.Load()
 	if p := lastRejectedMetadata.Load(); p != nil {
 		s.LastMetadataError = *p
@@ -697,22 +701,15 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 			if notice != nil && result.AppID == "" {
 				ready = notice.ready
 			}
-			var timer *time.Timer
-			var timeToAssist <-chan time.Time
-			if assisting == nil {
-				timer = time.NewTimer(max(0, time.Until(assistAfter)))
-				timeToAssist = timer.C
-			}
+			timer := time.NewTimer(max(0, time.Until(assistAfter)))
 			select {
 			case <-busy:
 			case <-assisting:
 			case <-ready:
-			case <-timeToAssist:
+			case <-timer.C:
 			case <-ctx.Done():
 			}
-			if timer != nil {
-				timer.Stop()
-			}
+			timer.Stop()
 			scanWait += time.Since(waiting)
 			if err := checkHints(); err != nil {
 				return err
@@ -726,6 +723,56 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (platform.Owner, erro
 				o.mu.Unlock()
 				o.sharedScans.Add(1)
 				return o.indexed(r.inode).visit(accept)
+			}
+			if current.scanning != nil && current.assisting != nil && !time.Now().Before(assistAfter) {
+				// Neither long scanner owns our progress. Reserve a small,
+				// disjoint rotating probe in this PID rather than waiting until
+				// the caller times out or walking unrelated processes.
+				position := int64(0)
+				nextPosition := int64(0)
+				if current.directory == metadata.Ino {
+					position = current.probeNext
+					end := max(current.extent+3, metadata.Size+2)
+					current.probeNext = (position + 64) % max(end, 64)
+					nextPosition = current.probeNext
+					o.windows[pid] = current
+				}
+				o.mu.Unlock()
+				o.targetedProbes.Add(1)
+				if _, err := f.Seek(position, 0); err == nil {
+					_, probeErr := f.Visit(64, func(fd []byte) bool {
+						if expired() {
+							return false
+						}
+						scannedFDs++
+						inode, ok := socketInodeAt(descriptor, string(fd))
+						if ok && (canIndex || inode == r.inode) {
+							remember[inode] = holder{pid, start, string(fd)}
+						}
+						if len(remember) >= 32 {
+							o.publish(remember)
+							clear(remember)
+						}
+						return true
+					})
+					if errors.Is(probeErr, io.EOF) {
+						o.mu.Lock()
+						window := o.windows[pid]
+						if window.directory == metadata.Ino && window.probeNext == nextPosition {
+							window.probeNext = 0
+							o.windows[pid] = window
+						}
+						o.mu.Unlock()
+					}
+				}
+				o.publish(remember)
+				if err := checkHints(); err != nil {
+					return err
+				}
+				if result.AppID == "" {
+					heavy = append(heavy, pid)
+				}
+				return nil
 			}
 			if current.scanning != nil && current.assisting == nil && !time.Now().Before(assistAfter) {
 				assist = true
