@@ -18,6 +18,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/AyoubAchour/net-switch/internal/winclock"
 )
 
 type Runtime struct {
@@ -84,13 +85,13 @@ func Recover(dir string) error {
 }
 
 func Serve(parent context.Context, dir string, standalone bool) (err error) {
-	initStarted := time.Now()
+	initStarted := winclock.Now()
 	if !Elevated() {
 		return errors.New("engine requires SYSTEM or an elevated administrator")
 	}
-	stateStarted := time.Now()
+	stateStarted := winclock.Now()
 	state, err := StateDirectory(dir)
-	stateElapsed := time.Since(stateStarted)
+	stateElapsed := winclock.Since(stateStarted)
 	if err != nil {
 		return err
 	}
@@ -134,7 +135,7 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 	defer pipe.Close()
 	stopListen := context.AfterFunc(ctx, func() { pipe.Close() })
 	defer stopListen()
-	routes.timings.record("engine.init.total", time.Since(initStarted))
+	routes.timings.record("engine.init.total", winclock.Since(initStarted))
 	go server.RunLease(ctx)
 	var clients sync.WaitGroup
 	acceptDone := make(chan struct{})

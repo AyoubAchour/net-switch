@@ -73,15 +73,15 @@ jobs:
         if: ${{ !endsWith(github.ref, '-lifecycle') }}
         run: |
           if ('${{ github.ref }}'.Contains('windows-platform-native')) {
-            go test -count=1 -v ./internal/engine/windows
+            go test -count=1 -v ./internal/engine/windows ./internal/winclock
           } else {
-            go test -count=1 -v ./internal/engine/... ./internal/journal ./tests/windows/testisp
+            go test -count=1 -v ./internal/engine/... ./internal/journal ./internal/winclock ./tests/windows/testisp
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Windows race checks
         if: ${{ !cancelled() && (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
         run: |
-          go test -race -count=1 -v ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp
+          go test -race -count=1 -v ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp ./internal/winclock
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Cold owner latency at 1950–2100 actual TCP rows
         if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}

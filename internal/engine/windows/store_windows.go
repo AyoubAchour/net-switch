@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -267,15 +266,4 @@ func bootIdentity() (string, error) {
 
 func Elevated() bool {
 	return windows.GetCurrentProcessToken().IsElevated()
-}
-
-func waitContext(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }

@@ -221,8 +221,10 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 	}
 	rowsBefore, timeWaitBefore := nativeTCPRowCounts(t)
 	o := NewOwners()
+	counter, frequency := lookupPerformanceClock(t)
 	var mu sync.Mutex
-	var durations []time.Duration
+	var durations, oldDurations []time.Duration
+	var dialErrors []string
 	misses := 0
 	work := make(chan int, 1000)
 	for i := range 1000 {
@@ -251,15 +253,21 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 				if err != nil {
 					mu.Lock()
 					misses++
+					if len(dialErrors) < 8 {
+						dialErrors = append(dialErrors, err.Error())
+					}
 					mu.Unlock()
 					continue
 				}
 				start := time.Now()
+				preciseStart := counter()
 				owner, err := o.TCP(ctx, platform.Tuple{Source: c.LocalAddr().(*net.TCPAddr).AddrPort(), Destination: c.RemoteAddr().(*net.TCPAddr).AddrPort()})
+				preciseElapsed := time.Duration((counter() - preciseStart) * int64(time.Second) / frequency)
 				elapsed := time.Since(start)
 				mu.Lock()
 				held = append(held, c)
-				durations = append(durations, elapsed)
+				durations = append(durations, preciseElapsed)
+				oldDurations = append(oldDurations, elapsed)
 				if err != nil || owner.PID != uint32(os.Getpid()) {
 					misses++
 				}
@@ -271,13 +279,15 @@ func TestOwnerColdBurstTiming(t *testing.T) {
 	listener.Close()
 	accepts.Wait()
 	slices.Sort(durations)
+	slices.Sort(oldDurations)
 	if len(durations) != 1000 {
-		t.Fatalf("only %d/1000 cold socket lookups ran", len(durations))
+		t.Fatalf("only %d/1000 cold socket lookups ran; dial failures: %v", len(durations), dialErrors)
 	}
 	p95 := durations[949]
+	oldP95 := oldDurations[949]
 	rowsAfter, timeWaitAfter := nativeTCPRowCounts(t)
 	raw, _ := json.Marshal(o.Stats())
-	t.Logf("WINDOWS OWNER BURST cold=1000 found=%d p95_us=%d raw_rows_before=%d raw_rows_after=%d timewait_before=%d timewait_after=%d processors=%d cpus=%d old_combined_gate_would_pass=%t histogram=%s", 1000-misses, p95.Microseconds(), rowsBefore, rowsAfter, timeWaitBefore, timeWaitAfter, runtime.GOMAXPROCS(0), runtime.NumCPU(), misses <= 5 && p95 < 5*time.Millisecond, raw)
+	t.Logf("WINDOWS OWNER BURST cold=1000 found=%d p95_us=%d old_go_p95_us=%d raw_rows_before=%d raw_rows_after=%d timewait_before=%d timewait_after=%d processors=%d cpus=%d old_combined_gate_would_pass=%t histogram=%s", 1000-misses, p95.Microseconds(), oldP95.Microseconds(), rowsBefore, rowsAfter, timeWaitBefore, timeWaitAfter, runtime.GOMAXPROCS(0), runtime.NumCPU(), misses <= 5 && oldP95 < 5*time.Millisecond, raw)
 	if misses > 5 {
 		t.Fatalf("owner burst gate: found=%d/1000 (requires at least 995), p95=%s", 1000-misses, p95)
 	}
@@ -323,7 +333,7 @@ func TestOwnerConcurrentSnapshots(t *testing.T) {
 	work.Wait()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := owners.tcpSnapshot(ctx, time.Time{}, 0); !errors.Is(err, context.Canceled) {
+	if _, err := owners.tcpSnapshot(ctx, 0, 0); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled snapshot returned %v", err)
 	}
 }

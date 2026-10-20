@@ -494,12 +494,8 @@ func (s *session) read(ctx context.Context) {
 				n.ReadErrors.Add(1)
 			}
 			// A permanently failing adapter must not turn this into a busy loop.
-			timer := time.NewTimer(time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			if !waitReadRetry(ctx) {
 				return
-			case <-timer.C:
 			}
 			continue
 		}

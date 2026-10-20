@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"golang.org/x/sys/windows"
 )
 
@@ -229,14 +230,10 @@ func (s *Session) maintain() {
 }
 
 func waitRetry(stop <-chan struct{}, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-stop:
+	if !winclock.System.WaitDone(stop, delay) {
 		return net.ErrClosed
-	case <-timer.C:
-		return nil
 	}
+	return nil
 }
 
 // 0.14.1 returns STATUS_ALREADY_INITIALIZED while removal owns RegistrationLock.
