@@ -33,24 +33,45 @@ async function exitWithin(run, ms) {
 }
 
 // The frozen 0.3.x AnyCPU tray loads the emulated x64 CLR on ARM64. On fresh
-// runners, cold CLR startup/JIT took 5-14.6 seconds before Main ran. Launch it
-// once outside the behaviour tests' clocks, with a 60-second cold-start budget.
-// Bad arguments return before touching any data folder. This is not a retry:
-// a failed warm-up fails the suite, and all existing case deadlines stay put.
-// Keep its duration visible rather than hiding cold-start cost in a timeout.
+// runners, warming only argument rejection leaves the WinForms startup path
+// cold: the next launch has exceeded 20 seconds without reaching "started".
+// Exercise the complete absent-server path once, outside the behaviour tests'
+// clocks, with a 60-second cold-start budget and a fresh temporary data folder.
+// This is not a retry: a failed warm-up fails the suite, and all existing case
+// deadlines stay put. Keep startup and shutdown times visible in the log.
 before(async () => {
   if (needsTray.skip) return;
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'netswitch-tray-warmup-'));
+  const logFile = path.join(dir, 'tray.log');
+  const startedAt = Date.now();
   const started = performance.now();
-  const child = spawn(TRAY, ['--data-dir'], { stdio: 'ignore' });
+  // Match the relative -DataDir used by the absent-server case. There is no
+  // server.json here, and this folder cannot launch the owner's Net Switch.
+  const child = spawn(TRAY, ['-DataDir', path.relative(ROOT, dir)], { stdio: 'ignore' });
   const run = { exited: once(child, 'exit').then(([code]) => code) };
   try {
-    assert.equal(await exitWithin(run, 60_000), 2, 'tray warm-up must exit with code 2 within 60 seconds');
+    assert.equal(await exitWithin(run, 60_000), 0, 'tray warm-up must exit with code 0 within 60 seconds');
+    assertAbsentServerLog(readFileSync(logFile, 'utf8'));
   } finally {
-    console.log(`tray warm-up: ${Math.round(performance.now() - started)} ms; exit=${child.exitCode}; signal=${child.signalCode}`);
+    console.log(`tray warm-up (absent server): ${Math.round(performance.now() - started)} ms; exit=${child.exitCode}; signal=${child.signalCode}`);
     if (child.exitCode === null && child.signalCode === null) child.kill();
     assert.notEqual(await exitWithin(run, 5000), 'still running', 'tray warm-up survived cleanup');
+    // Read after exit, so diagnostics cannot race the tray's log writer.
+    const log = existsSync(logFile) ? readFileSync(logFile, 'utf8') : '';
+    console.log(`tray warm-up log: ${log || '(not written)'}`);
+    for (const line of log.trim().split(/\r?\n/)) {
+      const [timestamp, ...message] = line.split(' ');
+      if (timestamp) console.log(`tray warm-up phase: ${message.join(' ')} at ${Date.parse(timestamp) - startedAt} ms`);
+    }
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 }, { timeout: 70_000 });
+
+function assertAbsentServerLog(log) {
+  assert.match(log, / started\r?\n/);
+  assert.match(log, / Net Switch is no longer running\r?\n/);
+  assert.match(log, / stopped\r?\n/);
+}
 
 // A temporary data folder, and a start() whose processes are stopped (only
 // if still running) and waited for before the folder is removed.
@@ -121,9 +142,7 @@ test('with no Net Switch to watch, the tray program starts, logs it, and leaves 
   const run = start(TRAY, ['-DataDir', path.relative(ROOT, dir)]);
   // No server.json on two readings a second apart means Net Switch isn't running.
   assert.equal(await exitWithin(run, 20_000), 0);
-  assert.match(log(), / started\r?\n/);
-  assert.match(log(), / Net Switch is no longer running\r?\n/);
-  assert.match(log(), / stopped\r?\n/);
+  assertAbsentServerLog(log());
 });
 
 test('one icon per data folder: another copy, or tray.ps1, leaves at once while the first keeps running', needsTray, async (t) => {
