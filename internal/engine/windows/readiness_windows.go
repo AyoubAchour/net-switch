@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -322,21 +323,42 @@ func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
 }
 
 func duplicateForReadiness(file *os.File) (windows.Handle, error) {
-	var info windows.WSAProtocolInfo
-	if err := windows.WSADuplicateSocket(windows.Handle(file.Fd()), uint32(os.Getpid()), &info); err != nil {
-		return windows.InvalidHandle, err
-	}
-	h, err := windows.WSASocket(-1, -1, -1, &info, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
+	// File's descriptor conversion disassociates Go's IOCP. Its returned
+	// integer is not an ownership reference: borrow the descriptor through
+	// RawConn while the native duplicate and its nonblocking mode are created.
+	file.Fd()
+	raw, err := file.SyscallConn()
 	if err != nil {
 		return windows.InvalidHandle, err
 	}
-	var nonblocking uint32 = 1
-	code, _, callErr := winsock.NewProc("ioctlsocket").Call(uintptr(h), 0x8004667e, uintptr(unsafe.Pointer(&nonblocking)))
-	if int32(code) != 0 {
-		windows.Closesocket(h)
-		return windows.InvalidHandle, callErr
+	return duplicateBorrowedSocket(raw)
+}
+
+func duplicateBorrowedSocket(raw syscall.RawConn) (windows.Handle, error) {
+	duplicate := windows.InvalidHandle
+	var nativeError error
+	borrowError := raw.Control(func(descriptor uintptr) {
+		var protocol windows.WSAProtocolInfo
+		nativeError = windows.WSADuplicateSocket(windows.Handle(descriptor), uint32(os.Getpid()), &protocol)
+		if nativeError != nil {
+			return
+		}
+		duplicate, nativeError = windows.WSASocket(-1, -1, -1, &protocol, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
+		if nativeError != nil {
+			return
+		}
+		var nonblocking uint32 = 1
+		code, _, failure := winsock.NewProc("ioctlsocket").Call(uintptr(duplicate), 0x8004667e, uintptr(unsafe.Pointer(&nonblocking)))
+		if int32(code) != 0 {
+			nativeError = failure
+			windows.Closesocket(duplicate)
+			duplicate = windows.InvalidHandle
+		}
+	})
+	if err := errors.Join(borrowError, nativeError); err != nil {
+		return windows.InvalidHandle, err
 	}
-	return h, nil
+	return duplicate, nil
 }
 
 func socketIO(h windows.Handle, name string, b []byte) (int, error) {
