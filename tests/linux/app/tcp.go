@@ -196,6 +196,7 @@ type HoldResult struct {
 type Held struct {
 	Local  string `json:"local"`
 	Remote string `json:"remote"`
+	Seen   string `json:"seen,omitempty"` // stream server's source observation, with --probe
 }
 
 // HeldList is tcphold's "held {...}" line, with --tuples.
@@ -217,6 +218,7 @@ func runTCPHold(args []string) (any, error) {
 	hold := fs.Int("hold", 5000, "ms to keep them open (without --release-file)")
 	release := fs.String("release-file", "", "keep them open until this file exists")
 	tuples := fs.Bool("tuples", false, "print the held connections' addresses")
+	probe := fs.Bool("probe", false, "exchange one stream ping before holding, and report the server-observed source")
 	window := fs.Int("window", 0, "classify attempts by what had happened this many ms after each started")
 	if err := parse(fs, args); err != nil {
 		return nil, err
@@ -228,6 +230,10 @@ func runTCPHold(args []string) (any, error) {
 	r := HoldResult{Count: *count, Errors: map[string]int{}, WindowMS: *window}
 	var mu sync.Mutex
 	var conns []net.Conn
+	var observed map[net.Conn]string
+	if *probe {
+		observed = map[net.Conn]string{}
+	}
 	var connect, failed []float64
 	var next atomic.Int64
 	var wg sync.WaitGroup
@@ -243,6 +249,26 @@ func runTCPHold(args []string) (any, error) {
 				start := time.Now()
 				conn, err := net.DialTimeout("tcp", list[i%len(list)].String(), time.Duration(*timeout)*time.Millisecond)
 				ms := msSince(start)
+				seen := ""
+				if err == nil && *probe {
+					_ = conn.SetDeadline(start.Add(time.Duration(*timeout) * time.Millisecond))
+					if _, err = io.WriteString(conn, "ping 1\n"); err == nil {
+						var line string
+						line, err = bufio.NewReader(io.LimitReader(conn, 256)).ReadString('\n')
+						fields := strings.Fields(line)
+						if err == nil {
+							if len(fields) != 3 || fields[0] != "pong" || fields[1] != "1" {
+								err = fmt.Errorf("invalid stream probe response %q", line)
+							} else {
+								seen = fields[2]
+							}
+						}
+					}
+					_ = conn.SetDeadline(time.Time{})
+					if err != nil {
+						conn.Close()
+					}
+				}
 				code := Code(err)
 				mu.Lock()
 				if err != nil {
@@ -250,6 +276,9 @@ func runTCPHold(args []string) (any, error) {
 					failed = append(failed, ms)
 				} else {
 					conns = append(conns, conn)
+					if *probe {
+						observed[conn] = seen
+					}
 					connect = append(connect, ms)
 				}
 				if *window > 0 {
@@ -271,7 +300,7 @@ func runTCPHold(args []string) (any, error) {
 	if *tuples {
 		list := HeldList{Established: len(conns), Conns: make([]Held, 0, len(conns))}
 		for _, conn := range conns {
-			list.Conns = append(list.Conns, Held{Local: addrString(conn.LocalAddr()), Remote: addrString(conn.RemoteAddr())})
+			list.Conns = append(list.Conns, Held{Local: addrString(conn.LocalAddr()), Remote: addrString(conn.RemoteAddr()), Seen: observed[conn]})
 		}
 		line, err := json.Marshal(list)
 		if err != nil {

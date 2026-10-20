@@ -1,7 +1,7 @@
 name: Acceptance
 
 # The 1.0 profile runs the real Linux engine in isolated namespaces. Every
-# ordinary assertion remains mandatory. Three explicitly declared attribution
+# ordinary assertion remains mandatory. Explicitly declared load-attribution
 # requirements are reported as release blockers until the eBPF follow-up lands.
 on:
   push:

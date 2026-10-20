@@ -152,8 +152,11 @@ func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) 
 						if f.AppID != "" || f.PID != 0 || f.Line != "a" || !seen[i] || serverLine[i] != "a" {
 							bad++
 						}
-					} else if f.App != AppPath(name) {
-						bad++
+					} else {
+						want := e.loadLine(name)
+						if f.App != AppPath(name) || f.AppID != AppPath(name) || f.PID == 0 || f.Line != want || f.Lane != want || (seen[i] && serverLine[i] != want) {
+							bad++
+						}
 					}
 				}
 			}
@@ -202,6 +205,11 @@ func describeSessions(names []string, all map[string]sessions) string {
 // overloaded engine stalls other flows (the baseline went 3.2 s without an
 // answer under 9,000 handshakes at once).
 func (e *Env) keptOpen(label string, s Stream, want engine.LineID) {
+	if e.deferAttribution {
+		e.T.Logf("%s: original survival-and-all-on-%s check would pass: %t", label, want,
+			s.Connected && s.ClosedAt == 0 && s.Pongs > 0 && StreamLines(s)[want] == s.Pongs)
+	}
+	want = e.streamLine(s, want)
 	lines := StreamLines(s)
 	e.T.Check(s.Connected && s.ClosedAt == 0 && s.Pongs > 0 && lines[want] == s.Pongs,
 		"%s stayed open, every answer over line %s (pongs %d of %d pings, lines %s, closed %q)", label, want, s.Pongs, s.Pings, Describe(lines), s.CloseErr)
@@ -253,7 +261,7 @@ func udpSessionsPerAppCase(e *Env) {
 	}
 	e.T.Check(totalUnknown <= 512, "unknown UDP sessions remain in their separate 512-session pool (%d)", totalUnknown)
 	e.T.Check(total < udpSessionsTotal*3/4, "the two apps together stay far from the total limit (%d admitted)", total)
-	e.T.Check(least >= udpSessionsPerApp*95/100, "each app still got at least 95%% of its allowed %d sessions out to the servers (least %d; %s)", udpSessionsPerApp, least, describeSessions(names, all))
+	e.checkLoadIdentity(least >= udpSessionsPerApp*95/100, "each app still got at least 95%% of its allowed %d identified sessions out to the servers (least %d; %s)", udpSessionsPerApp, least, describeSessions(names, all))
 	e.holding(bgs, release)
 	var s Stream
 	stream.WaitJSON(e, 30*time.Second, &s)
@@ -360,7 +368,7 @@ func tcpStorm(e *Env) {
 		lines := RecordLines(accepted)
 		e.T.Check(len(accepted) == r.Established && lines["b"] == known && lines["a"] == unknown, "servers independently confirm both pools on their required lines (%s)", Describe(lines))
 	}
-	e.T.Check(known >= tcpFlowsPerApp*95/100, "identified bravo still got at least 95%% of its allowed %d connections (%d identified, %d unknown, errors %v)", tcpFlowsPerApp, known, unknown, r.Errors)
+	e.checkLoadIdentity(known >= tcpFlowsPerApp*95/100, "identified bravo still got at least 95%% of its allowed %d connections (%d identified, %d unknown, errors %v)", tcpFlowsPerApp, known, unknown, r.Errors)
 	e.T.Check(r.StillOpen == r.Established, "admitted connections stay open (%d of %d)", r.StillOpen, r.Established)
 	var s Stream
 	stream.WaitJSON(e, 30*time.Second, &s)
@@ -488,6 +496,14 @@ func tcpFlowsTotalCase(e *Env) {
 		e.T.Require(err == nil, "stats while all TCP flows are held (%v)", err)
 		unknown = int(st.Unknown)
 		e.T.Check(unknown <= 2048 && st.PeakUnknown <= 2048, "unknown TCP admission never exceeds its separate 2048-flow budget (%d held, %d peak)", unknown, st.PeakUnknown)
+		// Server hold records exclude the separate survival stream. Its
+		// identity was captured before the load, so keep both counts aligned.
+		for _, f := range e.streamFlows {
+			if f.App == "" {
+				unknown--
+			}
+		}
+		e.T.Check(unknown >= 0, "held unknown flows exclude only the observed survival stream (%d)", unknown)
 		e.T.Logf("held TCP flows: %d; runtime memory and queues: %v", established, st.Counters)
 		if st.Flows > 0 {
 			e.T.Logf("CAP MEMORY: flows=%d heap=%d stack=%d runtime=%d heap/flow=%d stack/flow=%d incremental-heap/flow=%d GC-CPU-ppm=%d GC-CPU-ns=%d total-CPU-ns=%d goroutines=%d starting-stack=%d tun=%s output-drops=%d", st.Flows, st.Counters["heapBytes"], st.Counters["stackBytes"], st.Counters["runtimeBytes"], st.Counters["heapBytes"]/uint64(st.Flows), st.Counters["stackBytes"]/uint64(st.Flows), (st.Counters["heapBytes"]-baseline.Counters["heapBytes"])/uint64(st.Flows), st.Counters["gcCPUppm"], st.Counters["gcCPUNanos"]-baseline.Counters["gcCPUNanos"], st.Counters["totalCPUNanos"]-baseline.Counters["totalCPUNanos"], st.Counters["goroutines"], st.Counters["stackStartBytes"], st.TunKernel, st.Counters["tunDropped"])

@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -98,8 +99,12 @@ func runUDP(args []string) (any, error) {
 	connect := fs.Bool("connect", false, "use a connected socket (one server), so ICMP errors are reported")
 	wait := fs.Int("wait", 1500, "ms to wait for the last replies")
 	localPort := fs.Int("local-port", 0, "source port")
+	release := fs.String("release-file", "", "keep the single socket open for flow inspection after reporting held results")
 	if err := parse(fs, args); err != nil {
 		return nil, err
+	}
+	if *release != "" && *sockets != 1 {
+		return nil, usageError{fmt.Errorf("UDP flow inspection requires one socket")}
 	}
 	list, err := targets(*to)
 	if err != nil {
@@ -173,6 +178,22 @@ func runUDP(args []string) (any, error) {
 				break
 			}
 			time.Sleep(20 * time.Millisecond)
+		}
+		if *release != "" {
+			mu.Lock()
+			data, marshalErr := json.Marshal(r)
+			mu.Unlock()
+			if marshalErr != nil {
+				conn.Close()
+				<-done
+				return nil, marshalErr
+			}
+			fmt.Printf("held %s\n", data)
+			if err := waitFile(*release, ReleaseTimeout); err != nil {
+				conn.Close()
+				<-done
+				return nil, err
+			}
 		}
 		_ = conn.Close()
 		<-done

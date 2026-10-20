@@ -42,20 +42,30 @@ func TestReleaseBlockerCannotWaiveOtherFailures(t *testing.T) {
 }
 
 func TestReleaseBlockerMustBeDeclaredAndActuallyMeasured(t *testing.T) {
-	for _, count := range []int{0, 2} {
-		r := run(t, V1, &Case{ID: "storm", Title: "storm", Label: Parity, ReleaseBlocker: "eBPF follow-up", Run: func(t *T) {
-			t.Check(true, "ordinary assertion")
-			for range count {
-				t.ReleaseCheck(false, "threshold")
-			}
-		}})
-		if !r.JobFailed || r.Cases[0].Outcome != Error {
-			t.Fatalf("declared gate with %d measurements passed: %+v", count, r.Cases[0])
-		}
+	r := run(t, V1, &Case{ID: "storm", Title: "storm", Label: Parity, ReleaseBlocker: "eBPF follow-up", Run: func(t *T) {
+		t.Check(true, "ordinary assertion")
+	}})
+	if !r.JobFailed || r.Cases[0].Outcome != Error {
+		t.Fatalf("unmeasured declared gate passed: %+v", r.Cases[0])
 	}
-	r := run(t, V1, &Case{ID: "undeclared", Title: "undeclared", Label: Parity, Run: func(t *T) { t.ReleaseCheck(false, "cannot waive this") }})
+	r = run(t, V1, &Case{ID: "undeclared", Title: "undeclared", Label: Parity, Run: func(t *T) { t.ReleaseCheck(false, "cannot waive this") }})
 	if !r.JobFailed || r.Cases[0].Outcome != Error {
 		t.Fatal("an undeclared release check waived a failure")
+	}
+}
+
+func TestEveryReleaseMeasurementRemainsVisible(t *testing.T) {
+	r := run(t, V1, &Case{ID: "load", Title: "load", Label: Parity, ReleaseBlocker: "eBPF follow-up", Run: func(t *T) {
+		t.Check(true, "routing is correct")
+		t.ReleaseCheck(true, "stream owner found")
+		t.ReleaseCheck(false, "eleven of eighty-six lookups missed")
+	}})
+	if r.JobFailed || r.Cases[0].Outcome != ReleaseBlocked || len(r.Cases[0].Checks) != 3 {
+		t.Fatalf("multiple attribution measurements were lost: %+v", r)
+	}
+	detail := r.Cases[0].Detail()
+	if !strings.Contains(detail, "threshold met: stream owner found") || !strings.Contains(detail, "threshold failed: eleven of eighty-six lookups missed") {
+		t.Fatalf("a passing first measurement hid the later failure: %s", detail)
 	}
 }
 
