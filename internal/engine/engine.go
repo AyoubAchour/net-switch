@@ -261,8 +261,14 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	if e.udp != nil {
 		e.udp.Close()
 	}
+	joinTun := func() error { return nil }
 	if e.tun != nil {
-		e.tun.Close()
+		if starter, ok := e.tun.(platform.TunCloseStarter); ok {
+			starter.BeginClose()
+			joinTun = e.tun.Close
+		} else {
+			e.tun.Close()
+		}
 	}
 	e.pumps.Wait()
 	if e.stack != nil {
@@ -281,10 +287,11 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	e.tun = nil
 	e.cancel = nil
 	e.lines = nil
+	var cleanup error
 	if e.deps.Routes != nil {
-		return e.deps.Routes.Cleanup(ctx)
+		cleanup = e.deps.Routes.Cleanup(ctx)
 	}
-	return nil
+	return errors.Join(cleanup, joinTun())
 }
 
 func cloneLines(lines []platform.Line) []platform.Line {
