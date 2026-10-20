@@ -108,6 +108,38 @@ destination count, then recover on restoration. There is no target host route.
 Product health traffic is untouched. Installer smoke setup seeds the existing
 update preference off before the installed shortcut first runs.
 
+The [default-route proof dispatch](https://github.com/AyoubAchour/net-switch/actions/runs/39508044986)
+passed on x64 (job 118921850928) and ARM64 (118921850646). For each local TLS
+destination, the counter was 0 before, 1 after the working request, still 1
+during withdrawal, and 2 after recovery. Withdrawal returned an unreachable
+network/host error and no responder request. Pause/drop, direct-only firewall
+isolation, recovery, normal cleanup and observed-orphan recovery also passed.
+
+The [temporary diagnostics dispatch](https://github.com/AyoubAchour/net-switch/actions/runs/39508070773)
+failed deliberately on both runners after suspending the owned CI engine.
+The final diagnostics implementation, including `signal.aborted`, the 90-second
+PowerShell budget and the PID 0 filter, was unchanged during this proof:
+
+```text
+x64 job 118921943287 / ARM64 job 118921943051
+request 4: ABORT_ERR after 10002 / 10005 ms
+PID file at failure: engine 5704 / 8700
+Control /state: answered in 11 / 19 ms; routing on
+engine /version and /connections: timed out in 2511 / 2508 ms
+CPU delta: 0 s over 2025 / 2037 ms; process alive
+TCP: three established responder upstreams; no PID 0 rows
+NetSwitch: zero discards/errors
+engine resumed; final cleanup passed on both
+```
+
+The injection and temporary dispatch code are removed from the final tree.
+The [ten-job repeat](https://github.com/AyoubAchour/net-switch/actions/runs/39510714152)
+is pinned to `5d8ef68a3c75b5b5ac48ef95630c99aa1344266f`: three complete acceptance
+jobs and two complete TestISP proof jobs per architecture, at most four at once.
+Proof and acceptance retain their separate 15- and 25-minute limits.
+See [PR #53](https://github.com/AyoubAchour/net-switch/pull/53) for its results and
+final-head CI; an intentional diagnostic failure is not a passing traffic run.
+
 ## What the 99/100 failure actually shows
 
 [Run 39469242976](https://github.com/AyoubAchour/net-switch/actions/runs/39469242976),
