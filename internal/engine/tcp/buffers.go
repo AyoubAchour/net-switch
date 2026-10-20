@@ -1,6 +1,7 @@
 package tcp
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,29 +19,41 @@ type connection struct {
 	up, down         atomic.Uint64
 	lastUp, lastDown uint64
 	last             time.Time
+	clock            tcpip.Clock
+	overflowDeadline atomic.Int64
 }
 
 // One clock for all flows. Socket limits disable unaccounted autotuning.
 // Only the snapshot uses f.mu; endpoint and table work cannot hold up Handle.
-func (f *Forwarder) maintain() {
-	tick := time.NewTicker(250 * time.Millisecond)
-	defer tick.Stop()
-	defer func() {
+func (f *Forwarder) startMaintenance() {
+	// Use the stack's clock for both the deadline and the sweep. A single
+	// timer does the work off ingress; a manual clock exercises real expiry.
+	var mu sync.Mutex
+	var timer tcpip.Timer
+	mu.Lock()
+	timer = f.stack.Clock().AfterFunc(250*time.Millisecond, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if f.ctx.Err() != nil {
+			return
+		}
+		f.sweep(f.stack.Clock().Now())
+		timer.Reset(250 * time.Millisecond)
+	})
+	mu.Unlock()
+	f.wg.Go(func() {
+		<-f.ctx.Done()
+		mu.Lock()
+		timer.Stop()
+		mu.Unlock()
 		for _, c := range f.connectionSnapshot() {
+			c.ticket.Retire()
 			c.ep.Abort()
 			<-c.done
 			c.ticket.Close()
 			f.removeConnection(c)
 		}
-	}()
-	for {
-		select {
-		case <-f.ctx.Done():
-			return
-		case now := <-tick.C:
-			f.sweep(now)
-		}
-	}
+	})
 }
 
 func (f *Forwarder) connectionSnapshot() []*connection {
@@ -70,6 +83,7 @@ func (f *Forwarder) sweep(now time.Time) {
 	for _, c := range f.connectionSnapshot() {
 		state := gtcp.EndpointState(c.ep.State())
 		if state == gtcp.StateClose || state == gtcp.StateError {
+			c.releaseAdmission()
 			select {
 			case <-c.done:
 				c.ticket.Close()
@@ -77,6 +91,14 @@ func (f *Forwarder) sweep(now time.Time) {
 			default:
 			}
 			continue
+		}
+		if state == gtcp.StateLastAck || state == gtcp.StateClosing {
+			c.releaseAdmission()
+			if deadline := c.overflowDeadline.Load(); deadline != 0 && c.clock.NowMonotonic().Sub(tcpip.MonotonicTime{}) >= time.Duration(deadline) {
+				// Recheck state and payload under the endpoint lock. An ACK
+				// racing expiry must never reset a cleanly closed endpoint.
+				c.ep.(*gtcp.Endpoint).CloseRetained()
+			}
 		}
 		c.resize(now)
 	}

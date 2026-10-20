@@ -22,7 +22,20 @@ import (
 	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
-type channelOut struct{ link *channel.Endpoint }
+type orderedChannel struct {
+	*channel.Endpoint
+	after func()
+}
+
+func (l *orderedChannel) SetAfterInbound(after func()) { l.after = after }
+func (l *orderedChannel) InjectInbound(protocol tcpip.NetworkProtocolNumber, p *gv.PacketBuffer) {
+	l.Endpoint.InjectInbound(protocol, p)
+	l.after()
+}
+
+type channelOut struct{ link *orderedChannel }
+
+func (o channelOut) SetAfterInbound(after func()) { o.link.SetAfterInbound(after) }
 
 func (o channelOut) Send(b []byte) bool {
 	p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b)})
@@ -40,7 +53,7 @@ func harness(t *testing.T, c flowapi.Controller, d testfake.Dialer) (*Forwarder,
 func harnessPackets(t *testing.T, c flowapi.Controller, d testfake.Dialer, observe func(*Forwarder, []byte)) (*Forwarder, func() (*gonet.TCPConn, error)) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	links := [2]*channel.Endpoint{channel.New(1024, ns.MTU, ""), channel.New(1024, ns.MTU, "")}
+	links := [2]*orderedChannel{{Endpoint: channel.New(1024, ns.MTU, "")}, {Endpoint: channel.New(1024, ns.MTU, "")}}
 	var stacks [2]*gv.Stack
 	for i, l := range links {
 		s, err := ns.New(l, ns.DefaultOptions())

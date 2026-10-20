@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: local-app TIME_WAIT and buffer accounting.
+// Modified by Net Switch, 2026-10-19: local-app close admission, TIME_WAIT and buffer accounting.
 
 // Package tcp contains the implementation of the TCP transport protocol.
 package tcp
@@ -90,8 +90,10 @@ const (
 
 // +stateify savable
 type protocol struct {
-	stack           *stack.Stack
-	timeWaitHandler atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
+	stack             *stack.Stack
+	timeWaitHandler   atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
+	localClose        atomic.Pointer[Endpoint]                                                  `state:"nosave"`
+	localCloseEnabled atomic.Bool                                                               `state:"nosave"`
 
 	mu protocolRWMutex `state:"nosave"`
 
@@ -167,7 +169,8 @@ func SetTimeWaitHandler(s *stack.Stack, handler func(stack.TransportEndpointID, 
 
 // SetTimeWaitPolicy installs a per-endpoint close-time budget. enter runs once
 // before publishing TIME_WAIT or its final ACK; false closes silently after
-// the current segment. After a successful enter, leave runs once on removal.
+// the current segment. leave runs once before unregistering or sending a
+// reset, including non-TIME_WAIT closes, without scanning endpoints.
 // Both callbacks run under the endpoint lock and must not block or call
 // endpoint methods. Install before shutdown.
 // A per-endpoint decision avoids changing the stack-wide 60-second protection
@@ -176,6 +179,67 @@ func (e *Endpoint) SetTimeWaitPolicy(enter func() bool, leave func()) {
 	e.LockUser()
 	defer e.UnlockUser()
 	e.timeWaitEnter, e.timeWaitLeave = enter, leave
+}
+
+// +checklocks:e.mu
+func (e *Endpoint) leaveTimeWaitPolicy() {
+	leave := e.timeWaitLeave
+	e.timeWaitEnter, e.timeWaitLeave = nil, nil
+	if leave != nil {
+		leave()
+	}
+}
+
+// SetLocalCloseFence explicitly enables ordered close processing independently
+// of TIME_WAIT reuse. Cache the returned drain before starting ingress.
+func SetLocalCloseFence(s *stack.Stack, enabled bool) func() *Endpoint {
+	p := protocolFromStack(s)
+	p.localCloseEnabled.Store(enabled)
+	return p.drainLocalClose
+}
+
+// drainLocalClose finishes validated close work after demux locks are released.
+// Call after every DeliverNetworkPacket, before the next, from one ingress owner.
+// The returned endpoint can be inspected for admission accounting.
+func (p *protocol) drainLocalClose() *Endpoint {
+	ep := p.localClose.Swap(nil)
+	if ep == nil {
+		return nil
+	}
+	for {
+		ep.mu.Lock()
+		switch state := ep.EndpointState(); {
+		case state.connecting():
+			handleConnectingLocked(ep)
+		case state.connected() && state != StateTimeWait:
+			handleConnectedLocked(ep)
+		default:
+			ep.mu.Unlock()
+			if state == StateClose || state == StateError {
+				// Finish a concurrent processor's hangup before admission.
+				ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
+			}
+			return ep
+		}
+		if ep.segmentQueue.empty() {
+			return ep
+		}
+	}
+}
+
+// CloseRetained resets a payload-free LAST_ACK/CLOSING endpoint when the
+// retained-endpoint budget is exhausted and the caller's FIN-ACK grace has
+// expired. Never call at FIN emission: the app may have unread received data.
+func (e *Endpoint) CloseRetained() {
+	e.LockUser()
+	defer e.UnlockUser()
+	state := e.EndpointState()
+	_, send := e.BufferUsage()
+	if (state == StateLastAck || state == StateClosing) && send <= 0 {
+		e.resetConnectionLocked(&tcpip.ErrAborted{})
+		e.drainClosingSegmentQueue()
+		e.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
+	}
 }
 
 // BufferUsage reports receive-segment memory (including out-of-order and

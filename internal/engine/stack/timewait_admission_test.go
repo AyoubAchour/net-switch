@@ -9,6 +9,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -52,7 +53,7 @@ func TestTimeWaitFinalACKReleasesAdmission(t *testing.T) {
 			unblock := sync.OnceFunc(func() { close(barrier.release) })
 			defer unblock()
 			link.barrier.Store(barrier)
-			p.closeActive()
+			p.closeActiveWire()
 			select {
 			case <-barrier.entered:
 			case <-time.After(time.Second):
@@ -66,7 +67,15 @@ func TestTimeWaitFinalACKReleasesAdmission(t *testing.T) {
 			}
 			p.port++
 			p.openWith(500, func(syn []byte) {
-				p.inject(syn)
+				// Exercise admission itself while the output writer is paused.
+				// Production ingress additionally fences the preceding FIN.
+				pkt := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(syn)})
+				defer pkt.DecRef()
+				pkt.NetworkHeader().Consume(header.IPv4MinimumSize)
+				pkt.TransportHeader().Consume(header.TCPMinimumSize)
+				pkt.NetworkProtocolNumber = header.IPv4ProtocolNumber
+				pkt.NICID = ns.NIC
+				p.forward.Handle(gv.TransportEndpointID{LocalAddress: remoteAddr, LocalPort: 443, RemoteAddress: appAddr, RemotePort: p.port}, pkt)
 				unblock()
 			})
 			p.upload([]byte("replacement"))

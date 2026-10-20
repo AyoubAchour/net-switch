@@ -55,7 +55,6 @@ func TestTimeWaitReleasesAdmissionAndHidesFlows(t *testing.T) {
 		})
 	}
 }
-
 func TestTimeWaitSkipLogsAreRateLimited(t *testing.T) {
 	l := Defaults()
 	l.TimeWait = 0
@@ -78,5 +77,38 @@ func TestTimeWaitSkipLogsAreRateLimited(t *testing.T) {
 	x.Close()
 	if len(f.events) != 2 {
 		t.Fatal("next second did not log")
+	}
+}
+
+func TestClosingOverflowAccounting(t *testing.T) {
+	for _, end := range []string{"removal", "time_wait", "close"} {
+		t.Run(end, func(t *testing.T) {
+			l := Defaults()
+			l.TimeWait = 0
+			f := table(t, l)
+			x := admit(t, f, "tcp", "pinned").(*ticket)
+			if x.Closing() || x.Closing() {
+				t.Fatal("zero cap retained a slot")
+			}
+			if g := f.Stats(); g.Flows != 0 || g.TimeWait != 0 || g.ClosingOverflow != 1 || g.ClosingOverflowPeak != 1 || g.TimeWaitSkipped != 1 {
+				t.Fatal("overflow not counted exactly once", g)
+			}
+			switch end {
+			case "removal":
+				x.EndTimeWait()
+			case "time_wait":
+				if x.TimeWait() {
+					t.Fatal("overflow acquired a TIME_WAIT slot")
+				}
+			case "close":
+				x.Close()
+			}
+			x.Closing() // A delayed release cannot resurrect a removed slot.
+			x.EndTimeWait()
+			x.Close()
+			if g := f.Stats(); g.Flows != 0 || g.TimeWait != 0 || g.ClosingOverflow != 0 || g.ClosingOverflowPeak != 1 || g.TimeWaitSkipped != 1 {
+				t.Fatal("overflow released twice or resurrected", g)
+			}
+		})
 	}
 }

@@ -90,7 +90,7 @@ dependencies; this does not replace the 0.3.x programs listed above.
 - gvisor.dev/gvisor `v0.0.0-20261017122056-1b7906fdee8c`, Apache-2.0.
   Copyright The gVisor Authors. License and authors are preserved in
   `third_party/gvisor/LICENSE` and `AUTHORS`, and in the generated vendor tree.
-  Net Switch modifies five TCP files for opt-in local-app TIME_WAIT handling and buffer accounting;
+  Net Switch modifies five TCP files for opt-in local-app close admission, TIME_WAIT handling and buffer accounting;
   each has a modification notice. The reproducible patch is
   `third_party/gvisor-timewait.patch`.
 - github.com/google/btree v1.1.2, Apache-2.0; see

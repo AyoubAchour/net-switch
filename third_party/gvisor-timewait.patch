@@ -1,5 +1,5 @@
 diff --git a/pkg/tcpip/transport/tcp/connect.go b/pkg/tcpip/transport/tcp/connect.go
-index 62f42f4..89820c7 100644
+index 62f42f4..b42da44 100644
 --- a/pkg/tcpip/transport/tcp/connect.go
 +++ b/pkg/tcpip/transport/tcp/connect.go
 @@ -12,6 +12,8 @@
@@ -11,7 +11,15 @@ index 62f42f4..89820c7 100644
  package tcp
  
  import (
-@@ -1195,6 +1197,21 @@ func (e *Endpoint) tryDeliverSegmentFromClosedEndpoint(s *segment) {
+@@ -1095,6 +1097,7 @@ func (e *Endpoint) sendData(next *segment) {
+ // indicating that the connection is being reset due to receiving a RST.
+ // +checklocks:e.mu
+ func (e *Endpoint) resetConnectionLocked(err tcpip.Error) {
++	e.leaveTimeWaitPolicy()
+ 	// Only send a reset if the connection is being aborted for a reason
+ 	// other than receiving a reset.
+ 	e.hardError = err
+@@ -1195,6 +1198,21 @@ func (e *Endpoint) tryDeliverSegmentFromClosedEndpoint(s *segment) {
  //
  // +checklocksexclude:e.segmentQueue.mu
  func (e *Endpoint) drainClosingSegmentQueue() {
@@ -33,7 +41,7 @@ index 62f42f4..89820c7 100644
  	for {
  		s := e.segmentQueue.dequeue()
  		if s == nil {
-@@ -1537,11 +1554,18 @@ func (e *Endpoint) handleTimeWaitSegments() (extendTimeWait bool, reuseTW func()
+@@ -1537,11 +1555,18 @@ func (e *Endpoint) handleTimeWaitSegments() (extendTimeWait bool, reuseTW func()
  						}
  						// We explicitly do not DecRef the segment as it's still valid and
  						// being reflected to a listening endpoint.
@@ -53,19 +61,45 @@ index 62f42f4..89820c7 100644
  			extendTimeWait = true
  		}
 diff --git a/pkg/tcpip/transport/tcp/dispatcher.go b/pkg/tcpip/transport/tcp/dispatcher.go
-index d138e3b..4e07948 100644
+index d138e3b..ace2723 100644
 --- a/pkg/tcpip/transport/tcp/dispatcher.go
 +++ b/pkg/tcpip/transport/tcp/dispatcher.go
 @@ -12,6 +12,8 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
-+// Modified by Net Switch, 2026-10-19: skip TIME_WAIT silently when its close-time budget is full.
++// Modified by Net Switch, 2026-10-19: opt-in ordered close processing and TIME_WAIT cap.
 +
  package tcp
  
  import (
-@@ -235,6 +237,12 @@ func handleConnected(ep *Endpoint) {
+@@ -157,6 +159,12 @@ func handleConnecting(ep *Endpoint) {
+ 	if !ep.TryLock() {
+ 		return
+ 	}
++	handleConnectingLocked(ep)
++}
++
++// +checklocks:ep.mu
++// +checklocksrelease:ep.mu
++func handleConnectingLocked(ep *Endpoint) {
+ 	cleanup := func() {
+ 		ep.mu.Unlock()
+ 		ep.drainClosingSegmentQueue()
+@@ -202,6 +210,12 @@ func handleConnected(ep *Endpoint) {
+ 	if !ep.TryLock() {
+ 		return
+ 	}
++	handleConnectedLocked(ep)
++}
++
++// +checklocks:ep.mu
++// +checklocksrelease:ep.mu
++func handleConnectedLocked(ep *Endpoint) {
+ 
+ 	if !ep.EndpointState().connected() {
+ 		// If the endpoint has already transitioned out of a connected
+@@ -235,6 +249,12 @@ func handleConnected(ep *Endpoint) {
  //
  // +checklocks:ep.mu
  func startTimeWait(ep *Endpoint) {
@@ -78,20 +112,36 @@ index d138e3b..4e07948 100644
  	// Disable close timer as we are now entering real TIME_WAIT.
  	if ep.finWait2Timer != nil {
  		ep.finWait2Timer.Stop()
+@@ -501,6 +521,15 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
+ 		return
+ 	}
+ 
++	// FIN_WAIT_1 ACKs can drive megabytes of download data. Leave those
++	// on the TCP processor; FINs themselves always fence the state change.
++	state := ep.EndpointState()
++	closingACK := s.flags.Contains(header.TCPFlagAck) && (state == StateLastAck || state == StateClosing)
++	canDrain := state.connecting() || (state.connected() && state != StateTimeWait)
++	if ep.protocol.localCloseEnabled.Load() && canDrain && (s.flags&(header.TCPFlagRst|header.TCPFlagFin) != 0 || closingACK) {
++		ep.protocol.localClose.Store(ep)
++	}
++
+ 	// Only wakeup the processor if endpoint lock is not held by a user
+ 	// goroutine as endpoint.UnlockUser will wake up the processor if the
+ 	// segment queue is not empty.
 diff --git a/pkg/tcpip/transport/tcp/endpoint.go b/pkg/tcpip/transport/tcp/endpoint.go
-index 788a2f2..705eb1e 100644
+index 788a2f2..f732204 100644
 --- a/pkg/tcpip/transport/tcp/endpoint.go
 +++ b/pkg/tcpip/transport/tcp/endpoint.go
 @@ -12,6 +12,8 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
-+// Modified by Net Switch, 2026-10-19: close-time TIME_WAIT budget and single SYN handoff.
++// Modified by Net Switch, 2026-10-19: TIME_WAIT budget, removal accounting and single SYN handoff.
 +
  package tcp
  
  import (
-@@ -480,7 +482,16 @@ type Endpoint struct {
+@@ -480,7 +482,14 @@ type Endpoint struct {
  	// segmentQueue is used to hand received segments to the protocol
  	// goroutine. Segments are queued as long as the queue is not full,
  	// and dropped when it is.
@@ -103,13 +153,11 @@ index 788a2f2..705eb1e 100644
 +	// +checklocks:mu
 +	timeWaitLeave func() `state:"nosave"`
 +	// +checklocks:mu
-+	timeWaitReserved bool
-+	// +checklocks:mu
 +	timeWaitSkipped bool
  
  	// userMSS if non-zero is the MSS value explicitly set by the user
  	// for this endpoint using the TCP_MAXSEG setsockopt.
-@@ -780,6 +791,14 @@ func (e *Endpoint) TryLock() bool {
+@@ -780,6 +789,13 @@ func (e *Endpoint) TryLock() bool {
  //
  // +checklocks:e.mu
  func (e *Endpoint) setEndpointState(state EndpointState) {
@@ -118,33 +166,28 @@ index 788a2f2..705eb1e 100644
 +	if state == StateTimeWait && e.timeWaitEnter != nil {
 +		enter := e.timeWaitEnter
 +		e.timeWaitEnter = nil
-+		e.timeWaitReserved = enter()
-+		e.timeWaitSkipped = !e.timeWaitReserved
++		e.timeWaitSkipped = !enter()
 +	}
  	oldstate := EndpointState(e.state.Swap(uint32(state)))
  	switch state {
  	case StateEstablished:
-@@ -1258,6 +1277,11 @@ func (e *Endpoint) cleanupLocked() {
- 		e.purgeReadQueue()
- 	}
- 	e.stack.CompleteTransportEndpointCleanup(e)
-+	if e.timeWaitReserved && e.timeWaitLeave != nil {
-+		e.timeWaitLeave()
-+	}
-+	e.timeWaitReserved = false
-+	e.timeWaitEnter, e.timeWaitLeave = nil, nil
- 	tcpip.DeleteDanglingEndpoint(e)
- }
- 
+@@ -1196,6 +1212,7 @@ func (e *Endpoint) closePendingAcceptableConnectionsLocked() {
+ // cleanupLocked frees all resources associated with the endpoint.
+ // +checklocks:e.mu
+ func (e *Endpoint) cleanupLocked() {
++	e.leaveTimeWaitPolicy()
+ 	if e.snd != nil {
+ 		e.snd.resendTimer.cleanup()
+ 		e.snd.probeTimer.cleanup()
 diff --git a/pkg/tcpip/transport/tcp/protocol.go b/pkg/tcpip/transport/tcp/protocol.go
-index a3c8295..fedc28b 100644
+index a3c8295..9d37e9a 100644
 --- a/pkg/tcpip/transport/tcp/protocol.go
 +++ b/pkg/tcpip/transport/tcp/protocol.go
 @@ -12,6 +12,8 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
-+// Modified by Net Switch, 2026-10-19: local-app TIME_WAIT and buffer accounting.
++// Modified by Net Switch, 2026-10-19: local-app close admission, TIME_WAIT and buffer accounting.
 +
  // Package tcp contains the implementation of the TCP transport protocol.
  package tcp
@@ -157,17 +200,19 @@ index a3c8295..fedc28b 100644
  	"time"
  
  	"gvisor.dev/gvisor/pkg/tcpip"
-@@ -87,7 +90,8 @@ const (
+@@ -87,7 +90,10 @@ const (
  
  // +stateify savable
  type protocol struct {
 -	stack *stack.Stack
-+	stack           *stack.Stack
-+	timeWaitHandler atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
++	stack             *stack.Stack
++	timeWaitHandler   atomic.Pointer[func(stack.TransportEndpointID, *stack.PacketBuffer) bool] `state:"nosave"`
++	localClose        atomic.Pointer[Endpoint]                                                  `state:"nosave"`
++	localCloseEnabled atomic.Bool                                                               `state:"nosave"`
  
  	mu protocolRWMutex `state:"nosave"`
  
-@@ -139,6 +143,51 @@ type protocol struct {
+@@ -139,6 +145,113 @@ type protocol struct {
  	tsOffsetSecret [16]byte `state:"nosave"`
  }
  
@@ -195,7 +240,8 @@ index a3c8295..fedc28b 100644
 +
 +// SetTimeWaitPolicy installs a per-endpoint close-time budget. enter runs once
 +// before publishing TIME_WAIT or its final ACK; false closes silently after
-+// the current segment. After a successful enter, leave runs once on removal.
++// the current segment. leave runs once before unregistering or sending a
++// reset, including non-TIME_WAIT closes, without scanning endpoints.
 +// Both callbacks run under the endpoint lock and must not block or call
 +// endpoint methods. Install before shutdown.
 +// A per-endpoint decision avoids changing the stack-wide 60-second protection
@@ -204,6 +250,67 @@ index a3c8295..fedc28b 100644
 +	e.LockUser()
 +	defer e.UnlockUser()
 +	e.timeWaitEnter, e.timeWaitLeave = enter, leave
++}
++
++// +checklocks:e.mu
++func (e *Endpoint) leaveTimeWaitPolicy() {
++	leave := e.timeWaitLeave
++	e.timeWaitEnter, e.timeWaitLeave = nil, nil
++	if leave != nil {
++		leave()
++	}
++}
++
++// SetLocalCloseFence explicitly enables ordered close processing independently
++// of TIME_WAIT reuse. Cache the returned drain before starting ingress.
++func SetLocalCloseFence(s *stack.Stack, enabled bool) func() *Endpoint {
++	p := protocolFromStack(s)
++	p.localCloseEnabled.Store(enabled)
++	return p.drainLocalClose
++}
++
++// drainLocalClose finishes validated close work after demux locks are released.
++// Call after every DeliverNetworkPacket, before the next, from one ingress owner.
++// The returned endpoint can be inspected for admission accounting.
++func (p *protocol) drainLocalClose() *Endpoint {
++	ep := p.localClose.Swap(nil)
++	if ep == nil {
++		return nil
++	}
++	for {
++		ep.mu.Lock()
++		switch state := ep.EndpointState(); {
++		case state.connecting():
++			handleConnectingLocked(ep)
++		case state.connected() && state != StateTimeWait:
++			handleConnectedLocked(ep)
++		default:
++			ep.mu.Unlock()
++			if state == StateClose || state == StateError {
++				// Finish a concurrent processor's hangup before admission.
++				ep.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
++			}
++			return ep
++		}
++		if ep.segmentQueue.empty() {
++			return ep
++		}
++	}
++}
++
++// CloseRetained resets a payload-free LAST_ACK/CLOSING endpoint when the
++// retained-endpoint budget is exhausted and the caller's FIN-ACK grace has
++// expired. Never call at FIN emission: the app may have unread received data.
++func (e *Endpoint) CloseRetained() {
++	e.LockUser()
++	defer e.UnlockUser()
++	state := e.EndpointState()
++	_, send := e.BufferUsage()
++	if (state == StateLastAck || state == StateClosing) && send <= 0 {
++		e.resetConnectionLocked(&tcpip.ErrAborted{})
++		e.drainClosingSegmentQueue()
++		e.waiterQueue.Notify(waiter.EventHUp | waiter.EventErr | waiter.ReadableEvents | waiter.WritableEvents)
++	}
 +}
 +
 +// BufferUsage reports receive-segment memory (including out-of-order and
@@ -220,40 +327,43 @@ index a3c8295..fedc28b 100644
  func (*protocol) Number() tcpip.TransportProtocolNumber {
  	return ProtocolNumber
 diff --git a/pkg/tcpip/transport/tcp/rcv.go b/pkg/tcpip/transport/tcp/rcv.go
-index 6bb5252..308bd09 100644
+index 6bb5252..34dda4f 100644
 --- a/pkg/tcpip/transport/tcp/rcv.go
 +++ b/pkg/tcpip/transport/tcp/rcv.go
-@@ -12,6 +12,8 @@
+@@ -12,6 +12,9 @@
  // See the License for the specific language governing permissions and
  // limitations under the License.
  
-+// Modified by Net Switch, 2026-10-19: opt-in local SYN reuse without ISN checks.
++// Modified by Net Switch, 2026-10-19: a TIME_WAIT policy defers FIN ACK until
++// after reader notification and the close-state transition. Opt-in local SYN reuse.
 +
  package tcp
  
  import (
-@@ -249,9 +251,6 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
- 	if s.flags.Contains(header.TCPFlagFin) {
+@@ -250,7 +253,10 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
  		r.RcvNxt++
  
--		// Send ACK immediately.
+ 		// Send ACK immediately.
 -		r.ep.snd.sendAck()
--
++		deferACK := r.ep.timeWaitEnter != nil
++		if !deferACK {
++			r.ep.snd.sendAck()
++		}
+ 
  		// Tell any readers that no more data will come.
  		r.closed = true
- 		r.ep.readyToRead(nil)
-@@ -273,6 +272,10 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
+@@ -273,6 +279,10 @@ func (r *receiver) consumeSegment(s *segment, segSeq seqnum.Value, segLen seqnum
  			r.ep.setEndpointState(StateTimeWait)
  		}
  
-+		// Publish the close transition and release admission before the app
-+		// can observe this ACK and immediately open another connection.
-+		r.ep.snd.sendAck()
++		if deferACK {
++			r.ep.snd.sendAck()
++		}
 +
  		// Flush out any pending segments, except the very first one if
  		// it happens to be the one we're handling now because the
  		// caller is using it.
-@@ -589,6 +592,10 @@ func (r *receiver) handleTimeWaitSegment(s *segment) (resetTimeWait bool, newSyn
+@@ -589,6 +599,10 @@ func (r *receiver) handleTimeWaitSegment(s *segment) (resetTimeWait bool, newSyn
  
  	//    (2) returns to TIME-WAIT state if the SYN turns out
  	//      to be an old duplicate".

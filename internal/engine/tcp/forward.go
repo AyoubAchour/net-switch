@@ -27,7 +27,7 @@ type Forwarder struct {
 	ctx                           context.Context
 	cancel                        context.CancelFunc
 	mu                            sync.Mutex
-	pending                       map[stack.TransportEndpointID]flowapi.Ticket
+	pending                       map[stack.TransportEndpointID]*pendingOpen
 	wg                            sync.WaitGroup
 	forwarder                     *gtcp.Forwarder
 	stack                         *stack.Stack
@@ -41,13 +41,24 @@ type Forwarder struct {
 	Rejected, Invalid, DialFailed atomic.Uint64
 }
 
-func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Controller, owners platform.OwnerLookup, dialer platform.LineDialer, out flowapi.Output) *Forwarder {
+type orderedOutput interface {
+	flowapi.Output
+	SetAfterInbound(func())
+}
+
+func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Controller, owners platform.OwnerLookup, dialer platform.LineDialer, out orderedOutput) *Forwarder {
 	ctx, cancel := context.WithCancel(ctx)
-	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]flowapi.Ticket), connections: make(map[stack.TransportEndpointID]*connection), retired: make(map[*connection]struct{}), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
+	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]*pendingOpen), connections: make(map[stack.TransportEndpointID]*connection), retired: make(map[*connection]struct{}), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 2*inFlight, f.open)
 	s.SetTransportProtocolHandler(gtcp.ProtocolNumber, f.Handle)
 	gtcp.SetTimeWaitHandler(s, f.Handle)
-	f.wg.Go(f.maintain)
+	drain := gtcp.SetLocalCloseFence(s, localCloseFenceEnabled)
+	out.SetAfterInbound(func() {
+		if ep := drain(); ep != nil {
+			f.finishClose(ep)
+		}
+	})
+	f.startMaintenance()
 	return f
 }
 
@@ -122,7 +133,7 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		reject()
 		return true
 	}
-	f.pending[id] = ticket
+	f.pending[id] = &pendingOpen{ticket: ticket}
 	f.wg.Add(1)
 	dropped := f.stack.Stats().TCP.ForwardMaxInFlightDrop.Value()
 	if !f.forwarder.HandlePacket(id, p) || f.stack.Stats().TCP.ForwardMaxInFlightDrop.Value() != dropped {
@@ -138,8 +149,10 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	defer f.wg.Done()
 	id := r.ID()
 	f.mu.Lock()
-	ticket := f.pending[id]
+	pending := f.pending[id]
+	pending.request = r
 	f.mu.Unlock()
+	ticket := pending.ticket
 	owned := true
 	defer func() {
 		if owned {
@@ -148,20 +161,21 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	}()
 	// Complete exactly once, on every return path. Retain the deduplication
 	// entry until Complete has removed gVisor's own in-flight entry.
-	completed := false
 	complete := func(reset bool) {
-		if completed {
-			return
+		f.complete(id, pending, reset)
+	}
+	discardHandshake := func() {
+		if closeAdmissionEnabled {
+			ticket.Retire()
 		}
-		completed = true
-		r.Complete(reset)
-		f.mu.Lock()
-		delete(f.pending, id)
-		f.mu.Unlock()
+		complete(false)
 	}
 	owner := platform.Owner{}
 	defer func() {
-		if !completed {
+		if owned && closeAdmissionEnabled {
+			ticket.Retire()
+		}
+		if !pending.completed.Load() {
 			complete(f.control.AllowReject(owner.AppID))
 		}
 	}()
@@ -204,31 +218,56 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		return
 	}
 	var wq waiter.Queue
+	// A closing queue can hand off a SYN before its drain returns. A tuple
+	// lookup can then find a newer pending request. Only this request's own
+	// endpoint notification authorizes retiring it from the ingress fence.
+	closed := waiter.NewFunctionEntry(waiter.EventHUp, func(waiter.EventMask) { pending.hungUp.Store(true) })
+	wq.EventRegister(&closed)
+	defer wq.EventUnregister(&closed)
 	ep, errTCP := r.CreateEndpoint(&wq)
 	if errTCP != nil {
+		// TCP already handled the failed handshake. In particular an app RST
+		// must not receive another reset from admission during deferred cleanup.
+		// Retire before removing pending: the ingress fence may arrive after
+		// Complete, while remote.Close still holds up this goroutine's defers.
+		discardHandshake()
 		return
+	}
+	abort := func() {
+		if closeAdmissionEnabled {
+			ticket.Retire()
+		}
+		ep.Abort()
 	}
 	closeEndpoint := sync.OnceFunc(ep.Close)
 	defer closeEndpoint()
-	stopApp := context.AfterFunc(ctx, ep.Abort)
+	stopApp := context.AfterFunc(ctx, abort)
 	defer stopApp()
 	if ctx.Err() != nil {
 		// The handshake succeeded; Abort owns the reset, not admission.
-		complete(false)
-		ep.Abort()
+		discardHandshake()
+		abort()
 		return
 	}
 	rx, tx := ticket.Buffers()
 	ep.SocketOptions().SetReceiveBufferSize(int64(rx), true)
 	ep.SocketOptions().SetSendBufferSize(int64(tx), true)
 	ep.SocketOptions().SetKeepAlive(true)
-	ep.(*gtcp.Endpoint).SetTimeWaitPolicy(ticket.TimeWait, ticket.EndTimeWait)
-	c := &connection{id: id, ep: ep, ticket: ticket, last: time.Now(), done: make(chan struct{})}
+	// Removal releases this endpoint's slot directly, including timer closes.
+	// The callback runs under the endpoint lock: bookkeeping only, no scans
+	// or calls back into any endpoint. TIME_WAIT release predates this fix.
+	ep.(*gtcp.Endpoint).SetTimeWaitPolicy(ticket.TimeWait, func() {
+		if closeAdmissionEnabled {
+			ticket.Retire()
+		}
+		ticket.EndTimeWait()
+	})
+	c := &connection{id: id, ep: ep, ticket: ticket, clock: f.stack.Clock(), last: f.stack.Clock().Now(), done: make(chan struct{})}
 	f.mu.Lock()
-	if f.ctx.Err() != nil {
+	if f.ctx.Err() != nil || closedState(ep) {
 		f.mu.Unlock()
-		complete(false)
-		ep.Abort()
+		discardHandshake()
+		abort()
 		return
 	}
 	f.connections[id] = c
@@ -238,19 +277,21 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	// must see either pending or connections, never a gap between them.
 	complete(false)
 	defer close(c.done)
-	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint}
+	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission}
 	if a, ok := remote.LocalAddr().(*net.TCPAddr); ok {
 		ticket.Established(a.AddrPort().Addr())
 	} else {
 		ticket.Established(netip.Addr{})
 	}
 	count := func(u, d uint64) { c.up.Add(u); c.down.Add(d); ticket.Add(u, d) }
-	if err := Splice(ctx, app, remote, count, ep.Abort); err != nil {
-		ep.Abort()
+	if err := Splice(ctx, app, remote, count, abort); err != nil {
+		abort()
 	}
 	app.Close()
-	// TIME_WAIT releases admission at the state transition. The monitor keeps
-	// this ticket until removal and relay completion for final byte accounting.
+	c.releaseAdmission()
+	// TCP releases admission once both directions end and payload drains, or
+	// on reset/removal. Keep the ticket until removal and relay completion
+	// for final byte accounting.
 }
 
 // Stop cancels dials and relays. The owner must close the stack before Wait,
@@ -262,7 +303,16 @@ func (f *Forwarder) Wait() { f.wg.Wait() }
 // Cancellation, splice errors and normal cleanup share this single owner.
 type onceCloseConn struct {
 	*gonet.TCPConn
-	close func()
+	close           func()
+	afterCloseWrite func()
 }
 
 func (c *onceCloseConn) Close() error { c.close(); return nil }
+
+func (c *onceCloseConn) CloseWrite() error {
+	err := c.TCPConn.CloseWrite()
+	if c.afterCloseWrite != nil {
+		c.afterCloseWrite()
+	}
+	return err
+}

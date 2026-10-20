@@ -1097,6 +1097,7 @@ func (e *Endpoint) sendData(next *segment) {
 // indicating that the connection is being reset due to receiving a RST.
 // +checklocks:e.mu
 func (e *Endpoint) resetConnectionLocked(err tcpip.Error) {
+	e.leaveTimeWaitPolicy()
 	// Only send a reset if the connection is being aborted for a reason
 	// other than receiving a reset.
 	e.hardError = err

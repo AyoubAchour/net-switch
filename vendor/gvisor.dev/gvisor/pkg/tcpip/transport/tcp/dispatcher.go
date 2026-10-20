@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: skip TIME_WAIT silently when its close-time budget is full.
+// Modified by Net Switch, 2026-10-19: opt-in ordered close processing and TIME_WAIT cap.
 
 package tcp
 
@@ -159,6 +159,12 @@ func handleConnecting(ep *Endpoint) {
 	if !ep.TryLock() {
 		return
 	}
+	handleConnectingLocked(ep)
+}
+
+// +checklocks:ep.mu
+// +checklocksrelease:ep.mu
+func handleConnectingLocked(ep *Endpoint) {
 	cleanup := func() {
 		ep.mu.Unlock()
 		ep.drainClosingSegmentQueue()
@@ -204,6 +210,12 @@ func handleConnected(ep *Endpoint) {
 	if !ep.TryLock() {
 		return
 	}
+	handleConnectedLocked(ep)
+}
+
+// +checklocks:ep.mu
+// +checklocksrelease:ep.mu
+func handleConnectedLocked(ep *Endpoint) {
 
 	if !ep.EndpointState().connected() {
 		// If the endpoint has already transitioned out of a connected
@@ -507,6 +519,15 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
 
 	if !ep.enqueueSegment(s) {
 		return
+	}
+
+	// FIN_WAIT_1 ACKs can drive megabytes of download data. Leave those
+	// on the TCP processor; FINs themselves always fence the state change.
+	state := ep.EndpointState()
+	closingACK := s.flags.Contains(header.TCPFlagAck) && (state == StateLastAck || state == StateClosing)
+	canDrain := state.connecting() || (state.connected() && state != StateTimeWait)
+	if ep.protocol.localCloseEnabled.Load() && canDrain && (s.flags&(header.TCPFlagRst|header.TCPFlagFin) != 0 || closingACK) {
+		ep.protocol.localClose.Store(ep)
 	}
 
 	// Only wakeup the processor if endpoint lock is not held by a user

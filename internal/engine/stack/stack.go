@@ -35,7 +35,13 @@ func DefaultOptions() Options {
 	return o
 }
 
-func New(link gv.LinkEndpoint, o Options) (*gv.Stack, error) {
+// OrderedLink completes close processing before admitting the next packet.
+type OrderedLink interface {
+	gv.LinkEndpoint
+	SetAfterInbound(func())
+}
+
+func New(link OrderedLink, o Options) (*gv.Stack, error) {
 	s := gv.New(gv.Options{
 		NetworkProtocols:   []gv.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []gv.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6},
@@ -73,5 +79,7 @@ func New(link gv.LinkEndpoint, o Options) (*gv.Stack, error) {
 		{Destination: header.IPv4EmptySubnet, NIC: NIC},
 		{Destination: header.IPv6EmptySubnet, NIC: NIC},
 	})
+	// Forwarders explicitly install the close fence before ingress starts.
+	link.SetAfterInbound(func() {})
 	return s, nil
 }

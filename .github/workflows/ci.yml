@@ -280,7 +280,7 @@ jobs:
     if: github.event_name != 'workflow_dispatch'
     name: Go 1.0 / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -326,7 +326,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $untracked = git ls-files --others --exclude-standard -- third_party/gvisor vendor
           if ($untracked) { throw "Untracked generated dependencies: $untracked" }
-          node --test scripts/gvisor-diff.test.mjs
+          node --test scripts/gvisor-diff.test.mjs scripts/repeat-close-tests.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: go vet ./internal/... ./cmd/... ./tests/...
       - run: go test -v ./internal/... ./cmd/... ./tests/...
@@ -356,13 +356,20 @@ jobs:
         run: go test -race -v ./internal/... ./cmd/... ./tests/...
       - name: Record the complete TIME_WAIT acceptance gate under race detection
         if: matrix.name != 'Windows ARM64'
-        run: go test -race -v -count=1 -run 'TimeWait|PacketOrderPerTuple' ./internal/engine/stack
+        run: go test -race -v -count=1 -run 'TimeWait|Close|PacketOrderPerTuple' ./internal/engine/stack
       # Sustained default-limit load and full heap sampling run once, separately
       # from the race suite so timing and memory measurements stay meaningful.
       - name: Sustain 1000 successful connections per second at default limits
         env:
           NETSWITCH_TIMEWAIT_GATE: '1'
-        run: go test -v -count=1 -run '^TestTimeWait(ThousandPerSecondSuccess|SameTupleUnderLoad)$' ./internal/engine/stack
+        run: go test -v -count=1 -run '^Test(TimeWait(ThousandPerSecondSuccess|SameTupleUnderLoad)|CloseAtCapUnderLoad|CloseRetainedOverflowLoad)$' ./internal/engine/stack
+      - name: Measure other-flow latency during a closing 100 MB download
+        run: go test -run '^$' -bench '^BenchmarkCloseDownloadOtherFlow$' -benchtime=3x -count=1 ./internal/engine/stack
+      - name: Measure SYN admission at total and handshake caps with 65536 flows
+        run: go test -run '^$' -bench '^BenchmarkSYNAtCapacity$' -benchtime=1000x -count=1 ./internal/engine/tcp
+      - name: Prove every close path fails without admission release
+        if: matrix.name == 'Linux x64'
+        run: node scripts/prove-close-release.mjs
       - name: Measure retained TIME_WAIT memory after payload buffers drain
         env:
           NETSWITCH_TIMEWAIT_PROFILE: timewait.pprof
@@ -375,7 +382,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
       - name: Repeat clock and reopen boundaries 1000 times
-        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^TestTimeWait(BlockedAndBudgetReuse|FinalACKReleasesAdmission|LostFinalACK|SYNBetweenRemovalAndHook|LateHookDoesNotReadmitLiveFlow|ClosingQueue|SYNBeforeCloseState|SYNBeforeRemoval|ZeroCapClosingBatch)$' ./internal/engine/stack
+        run: node scripts/repeat-close-tests.mjs ${{ matrix.name != 'Windows ARM64' && '--race' || '' }}
+      - name: Check 1000 close repeats in one process without race instrumentation
+        run: node scripts/repeat-close-tests.mjs --batches=1 --count=1000
       - name: Repeat endpoint setup deduplication and cancellation 1000 times
         run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths

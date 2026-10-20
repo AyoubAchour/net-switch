@@ -50,6 +50,7 @@ type Gauges struct {
 	DoubleReleases                                                                                    uint64
 	TimeWait                                                                                          int
 	TimeWaitSkipped                                                                                   uint64
+	ClosingOverflow, ClosingOverflowPeak                                                              int
 	EventsDropped                                                                                     uint64
 	Flows, Handshakes, UDP, Unknown, UnknownUDP                                                       int
 	TCPBytes, PendingBytes, SnapshotBytes                                                             int64
@@ -192,6 +193,7 @@ type ticket struct {
 	accountClosed                       bool
 	up, down                            atomic.Uint64
 	retired, timeWait, timeWaitReserved bool
+	closingOverflow                     bool
 	lineAddresses                       []netip.Addr
 	table                               *Table
 	record                              Record
@@ -286,13 +288,27 @@ func (f *ticket) Shrink(receive, send int) {
 	t.gauges.TCPBytes -= delta
 }
 
-// TimeWait exchanges the live-flow reservation for a separate endpoint slot.
-// Called at the actual TCP transition, never by a delayed monitor sweep.
-// False means close this endpoint without a reset; it cannot reject a new flow.
+// TimeWait exchanges live admission for a retained-endpoint slot. This includes
+// payload-free LAST_ACK/CLOSING endpoints as well as TIME_WAIT. A transition
+// between these states keeps the same reservation.
+// False skips TIME_WAIT; it cannot reject a new flow.
 func (f *ticket) TimeWait() bool {
+	return f.retain(false)
+}
+
+// Closing counts FIN-only overflow until removal or entry into TIME_WAIT.
+// The forwarder's sweep grants it one second for the FIN to be acknowledged.
+func (f *ticket) Closing() bool {
+	return f.retain(true)
+}
+
+func (f *ticket) retain(closing bool) bool {
 	t := f.table
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if !closing {
+		f.endOverflowLocked()
+	}
 	if f.closed || f.timeWait {
 		return f.timeWaitReserved
 	}
@@ -300,10 +316,15 @@ func (f *ticket) TimeWait() bool {
 	f.retireLocked()
 	if t.gauges.TimeWait >= t.limits.TimeWait {
 		t.gauges.TimeWaitSkipped++
+		if closing {
+			f.closingOverflow = true
+			t.gauges.ClosingOverflow++
+			t.gauges.ClosingOverflowPeak = max(t.gauges.ClosingOverflowPeak, t.gauges.ClosingOverflow)
+		}
 		second := t.now().Unix()
 		if t.gauges.TimeWaitSkipped == 1 || second != t.timeWaitLogSecond {
 			t.timeWaitLogSecond = second
-			t.Emit(flowapi.Event{Type: "log", Message: "TIME_WAIT cap reached; closing without waiting", App: f.record.Owner.AppID})
+			t.Emit(flowapi.Event{Type: "log", Message: "retained TCP endpoint cap reached; skipping TIME_WAIT, allowing FIN ACKs one second before reset", App: f.record.Owner.AppID})
 		}
 		return false
 	}
@@ -320,9 +341,17 @@ func (f *ticket) EndTimeWait() {
 }
 
 func (f *ticket) endTimeWaitLocked() {
+	f.endOverflowLocked()
 	if f.timeWaitReserved {
 		f.timeWaitReserved = false
 		f.table.gauges.TimeWait--
+	}
+}
+
+func (f *ticket) endOverflowLocked() {
+	if f.closingOverflow {
+		f.closingOverflow = false
+		f.table.gauges.ClosingOverflow--
 	}
 }
 

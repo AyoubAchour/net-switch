@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
@@ -31,17 +33,49 @@ var appAddr = tcpip.AddrFrom4([4]byte{198, 18, 0, 2})
 var remoteAddr = tcpip.AddrFrom4([4]byte{203, 0, 113, 7})
 
 type accepted struct {
-	conn        *testfake.Conn
-	relayClosed <-chan struct{}
+	conn         *testfake.Conn
+	relayClosed  <-chan struct{}
+	sentEOF      <-chan struct{}
+	closeEntered <-chan struct{}
 }
 
 type observedRemote struct {
 	*testfake.Conn
-	closed chan struct{}
-	once   sync.Once
+	closed       chan struct{}
+	once         sync.Once
+	closeGate    *atomic.Pointer[chan struct{}]
+	sentEOF      chan struct{}
+	eofOnce      sync.Once
+	readEOF      atomic.Bool
+	closeEntered chan struct{}
+	enterOnce    sync.Once
+}
+
+func (c *observedRemote) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	if err == io.EOF {
+		c.readEOF.Store(true)
+	}
+	return n, err
+}
+
+func (c *observedRemote) CloseRead() error {
+	err := c.Conn.CloseRead()
+	c.eofOnce.Do(func() { close(c.sentEOF) })
+	// Hold the copy goroutine after CloseWrite but before Splice can return.
+	// Blocking only remote.Close is too late: c.done may already be closed,
+	// allowing the monitor to release the ticket during a negative test.
+	if gate := c.closeGate.Load(); gate != nil && c.readEOF.Load() {
+		<-*gate
+	}
+	return err
 }
 
 func (c *observedRemote) Close() error {
+	c.enterOnce.Do(func() { close(c.closeEntered) })
+	if gate := c.closeGate.Load(); gate != nil {
+		<-*gate
+	}
 	err := c.Conn.Close()
 	c.once.Do(func() { close(c.closed) })
 	return err
@@ -50,7 +84,7 @@ func (c *observedRemote) Close() error {
 // The peer is a wire-level TCP driver, so it can retain and replay exact old
 // segments, lose the final ACK and choose overlapping sequence spaces.
 type peer struct {
-	t                  *testing.T
+	t                  testing.TB
 	link               *ns.Link
 	stack              *gv.Stack
 	accepted           chan accepted
@@ -65,19 +99,70 @@ type peer struct {
 	forward            *ntcp.Forwarder
 	phase              string
 	lastSent           []byte
+	owners             *testfake.Owners
+	relayCloseGate     atomic.Pointer[chan struct{}]
+	fixedSendBuffer    int
+	setupGate          <-chan struct{}
+	setupEntered       chan struct{}
 }
 
-func newPeer(t *testing.T, timestamps bool) *peer {
+type peerControl struct {
+	*flows.Table
+	peer *peer
+}
+
+func (c peerControl) Begin(proto string, tuple platform.Tuple) (flowapi.Ticket, error) {
+	ticket, err := c.Table.Begin(proto, tuple)
+	if err != nil {
+		return ticket, err
+	}
+	if c.peer.fixedSendBuffer != 0 {
+		ticket = &fixedBufferTicket{Ticket: ticket, send: c.peer.fixedSendBuffer}
+	}
+	if c.peer.setupGate != nil {
+		ticket = &setupBufferTicket{Ticket: ticket, gate: c.peer.setupGate, entered: c.peer.setupEntered}
+	}
+	return ticket, nil
+}
+
+type setupBufferTicket struct {
+	flowapi.Ticket
+	gate    <-chan struct{}
+	entered chan<- struct{}
+}
+
+func (t *setupBufferTicket) Buffers() (int, int) {
+	t.entered <- struct{}{}
+	<-t.gate
+	return t.Ticket.Buffers()
+}
+
+// Reserve the benchmark's fixed buffer, then hide Grow/Shrink from the monitor
+// so it cannot resize the deliberately queued tail while the window is zero.
+type fixedBufferTicket struct {
+	flowapi.Ticket
+	send int
+}
+
+func (t *fixedBufferTicket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
+	d, err := t.Ticket.Resolve(owner)
+	if err == nil && !t.Ticket.(interface{ Grow(int, int) bool }).Grow(64<<10, t.send) {
+		return d, flows.ErrBudget
+	}
+	return d, err
+}
+
+func newPeer(t testing.TB, timestamps bool) *peer {
 	return newPeerOptions(t, timestamps, flows.Defaults(), ns.DefaultOptions())
 }
 
-func newPeerOptions(t *testing.T, timestamps bool, limits flows.Limits, options ns.Options) *peer {
+func newPeerOptions(t testing.TB, timestamps bool, limits flows.Limits, options ns.Options) *peer {
 	t.Helper()
 	l := ns.NewLink()
 	return newPeerLink(t, timestamps, limits, options, l, l)
 }
 
-func newPeerLink(t *testing.T, timestamps bool, limits flows.Limits, options ns.Options, l *ns.Link, endpoint gv.LinkEndpoint) *peer {
+func newPeerLink(t testing.TB, timestamps bool, limits flows.Limits, options ns.Options, l *ns.Link, endpoint ns.OrderedLink) *peer {
 	t.Helper()
 	s, err := ns.New(endpoint, options)
 	if err != nil {
@@ -93,13 +178,36 @@ func newPeerLink(t *testing.T, timestamps bool, limits flows.Limits, options ns.
 		p.dials.Add(1)
 		a, b := testfake.Pair()
 		closed := make(chan struct{})
-		p.accepted <- accepted{b, closed}
-		return &observedRemote{Conn: a, closed: closed}, nil
+		eof := make(chan struct{})
+		entered := make(chan struct{})
+		p.accepted <- accepted{conn: b, relayClosed: closed, sentEOF: eof, closeEntered: entered}
+		return &observedRemote{Conn: a, closed: closed, closeGate: &p.relayCloseGate, sentEOF: eof, closeEntered: entered}, nil
 	}}
-	f := ntcp.New(context.Background(), s, limits.Handshakes, table, &testfake.Owners{Value: platform.Owner{AppID: "peer"}}, d, l)
+	p.owners = &testfake.Owners{Value: platform.Owner{AppID: "peer"}}
+	f := ntcp.New(context.Background(), s, limits.Handshakes, peerControl{Table: table, peer: p}, p.owners, d, l)
 	p.forward = f
-	t.Cleanup(func() { f.Stop(); s.Close(); s.Wait(); f.Wait(); l.Close() })
+	t.Cleanup(func() {
+		// A stuck teardown otherwise hides behind the whole suite's timeout,
+		// or a runner shutdown. Capture the blocked goroutines while alive.
+		deadline := time.AfterFunc(30*time.Second, func() {
+			buf := make([]byte, 4<<20)
+			n := runtime.Stack(buf, true)
+			panic("peer cleanup did not finish within 30 seconds:\n" + string(buf[:n]))
+		})
+		defer deadline.Stop()
+		f.Stop()
+		s.Close()
+		s.Wait()
+		f.Wait()
+		l.Close()
+	})
 	return p
+}
+
+func (p *peer) holdRelayCleanup() func() {
+	gate := make(chan struct{})
+	p.relayCloseGate.Store(&gate)
+	return sync.OnceFunc(func() { p.relayCloseGate.Store(nil); close(gate) })
 }
 
 func (p *peer) packet(seq, ack uint32, flags header.TCPFlags, payload []byte) []byte {
@@ -126,6 +234,10 @@ func (p *peer) packet(seq, ack uint32, flags header.TCPFlags, payload []byte) []
 
 func (p *peer) inject(b []byte) {
 	p.lastSent = b
+	p.deliver(b)
+}
+
+func (p *peer) deliver(b []byte) {
 	pkt := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b)})
 	p.link.InjectInbound(ipv4.ProtocolNumber, pkt)
 	pkt.DecRef()
@@ -162,6 +274,9 @@ func (p *peer) wait(flags header.TCPFlags) header.TCP {
 		}
 		if h.Flags().Contains(header.TCPFlagRst) {
 			p.t.Fatalf("unexpected RST, waiting for %v; reply=%s; %s", flags, segmentDescription(h), p.diagnostics())
+		}
+		if h.DestinationPort() != p.port {
+			continue // Old close traffic is harmless, but its resets are not.
 		}
 		if h.Flags().Contains(flags) {
 			return h
@@ -236,6 +351,16 @@ func (p *peer) upload(payload []byte) []byte {
 
 func (p *peer) closeActive() []byte {
 	p.t.Helper()
+	fin, delivered := p.closeActiveWire()
+	<-delivered
+	return fin
+}
+
+// closeActiveWire exposes the ACK boundary independently of ingress completion.
+// Only a test deliberately holding the output writer should leave it unfenced;
+// timer tests must finish ingress before advancing the clock or arming cleanup.
+func (p *peer) closeActiveWire() ([]byte, <-chan struct{}) {
+	p.t.Helper()
 	if err := p.current.conn.CloseWrite(); err != nil {
 		p.t.Fatal(err)
 	}
@@ -243,7 +368,11 @@ func (p *peer) closeActive() []byte {
 	p.ack = h.SequenceNumber() + 1
 	p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 	fin := p.packet(p.seq, p.ack, header.TCPFlagFin|header.TCPFlagAck, nil)
-	p.inject(fin)
+	// A wire ACK can be visible while ingress is still completing the FIN.
+	// Let barrier tests observe that boundary without sharing peer state.
+	p.lastSent = fin
+	delivered := make(chan struct{})
+	go func() { p.deliver(fin); close(delivered) }()
 	p.seq++
 	for {
 		h = p.wait(header.TCPFlagAck)
@@ -254,5 +383,5 @@ func (p *peer) closeActive() []byte {
 	// Immediately reuse after the wire ACK. Never wait for StateClose or for
 	// endpoint removal; TIME_WAIT must still protect lost final ACKs.
 	p.current.conn.Close()
-	return fin
+	return fin, delivered
 }

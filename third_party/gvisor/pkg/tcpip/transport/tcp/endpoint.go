@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Modified by Net Switch, 2026-10-19: close-time TIME_WAIT budget and single SYN handoff.
+// Modified by Net Switch, 2026-10-19: TIME_WAIT budget, removal accounting and single SYN handoff.
 
 package tcp
 
@@ -489,8 +489,6 @@ type Endpoint struct {
 	// +checklocks:mu
 	timeWaitLeave func() `state:"nosave"`
 	// +checklocks:mu
-	timeWaitReserved bool
-	// +checklocks:mu
 	timeWaitSkipped bool
 
 	// userMSS if non-zero is the MSS value explicitly set by the user
@@ -796,8 +794,7 @@ func (e *Endpoint) setEndpointState(state EndpointState) {
 	if state == StateTimeWait && e.timeWaitEnter != nil {
 		enter := e.timeWaitEnter
 		e.timeWaitEnter = nil
-		e.timeWaitReserved = enter()
-		e.timeWaitSkipped = !e.timeWaitReserved
+		e.timeWaitSkipped = !enter()
 	}
 	oldstate := EndpointState(e.state.Swap(uint32(state)))
 	switch state {
@@ -1215,6 +1212,7 @@ func (e *Endpoint) closePendingAcceptableConnectionsLocked() {
 // cleanupLocked frees all resources associated with the endpoint.
 // +checklocks:e.mu
 func (e *Endpoint) cleanupLocked() {
+	e.leaveTimeWaitPolicy()
 	if e.snd != nil {
 		e.snd.resendTimer.cleanup()
 		e.snd.probeTimer.cleanup()
@@ -1277,11 +1275,6 @@ func (e *Endpoint) cleanupLocked() {
 		e.purgeReadQueue()
 	}
 	e.stack.CompleteTransportEndpointCleanup(e)
-	if e.timeWaitReserved && e.timeWaitLeave != nil {
-		e.timeWaitLeave()
-	}
-	e.timeWaitReserved = false
-	e.timeWaitEnter, e.timeWaitLeave = nil, nil
 	tcpip.DeleteDanglingEndpoint(e)
 }
 
