@@ -28,6 +28,7 @@ func uintField(fp journal.Fingerprint, key string) uint64 {
 type objects struct {
 	adapter    *wintun.Adapter
 	recovering bool
+	timings    *phaseTimings
 }
 type object struct {
 	all  *objects
@@ -298,6 +299,7 @@ func ignoreMissing(err error) error {
 }
 
 func (o object) Create(ctx context.Context, fp journal.Fingerprint) error {
+	defer o.all.timings.begin(o.kind + ".create.api")()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -341,6 +343,7 @@ func (o object) Create(ctx context.Context, fp journal.Fingerprint) error {
 }
 
 func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
+	defer o.all.timings.begin(o.kind + ".remove.api")()
 	live, found, err := o.Inspect(ctx, fp)
 	if err != nil || !found || !maps.Equal(live, fp) {
 		return err
@@ -348,12 +351,15 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 	switch o.kind {
 	case "adapter":
 		if o.all.adapter != nil {
+			finish := o.all.timings.begin("adapter.close")
 			err := o.all.adapter.Close()
+			finish()
 			o.all.adapter = nil
 			if err != nil {
 				return err
 			}
 		}
+		defer o.all.timings.begin("adapter.RecoverAfterCrash")()
 		return wintun.RecoverAfterCrash(wintun.Config{Name: fp["name"], GUID: fp["guid"]})
 	case "route":
 		r := routeRow(fp)

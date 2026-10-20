@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { launchOptions, recordLaunch, startServer, verifyEngineProcess } from './launch.mjs';
 import { BaselineDefect, Report } from './report.mjs';
 import { targets } from './targets.mjs';
+import { lifecycleOutput, timedPhase } from './lifecycle.mjs';
 import { hostedOnly, identity, run, startHarness, until } from './testisp/harness.mjs';
 
 hostedOnly();
@@ -17,6 +18,7 @@ const dataDir = path.join(dir, 'app');
 await mkdir(dataDir, { recursive: true });
 const report = new Report(options.profile, path.join(dir, 'report.json'));
 const output = createWriteStream(path.join(dir, 'server-output.log'));
+const serverOutput = lifecycleOutput((chunk) => output.write(chunk));
 const clientExe = path.join(dir, 'acceptance-app.exe');
 await copyFile(process.execPath, clientExe);
 let harness, responder, server, worker, dnsAdapter, quicServer, quic, restoreDNS = false;
@@ -99,14 +101,15 @@ function rememberAppDevices(devices) {
 }
 
 async function stoppedSnapshot() {
-  const state = await until(async () => {
+  const phases = {};
+  const state = await timedPhase(phases, 'networkCheckMs', () => until(async () => {
     const value = await network('state');
     assert(Object.values(value).every((list) => list.length === 0), JSON.stringify(value));
     return value;
-  }, 'stopped app routes and present adapters disappear', 20000);
-  const pnp = await pnpDevices();
+  }, 'stopped app routes and present adapters disappear', 20000));
+  const pnp = await timedPhase(phases, 'pnpCheckMs', pnpDevices);
   assert(!pnp.some((device) => device.present), `Present device survived stop: ${JSON.stringify(pnp)}`);
-  return { state, pnp };
+  return { state, pnp, phases };
 }
 
 async function recordOrphanPnP(name, label, state, pnp) {
@@ -200,7 +203,7 @@ async function quicProbe(host, source, index) {
 }
 
 async function start() {
-  server = await startServer(options, dataDir, (chunk) => output.write(chunk));
+  server = await startServer(options, dataDir, serverOutput);
   const state = await server.on();
   await verifyEngineProcess(options, dataDir);
   rememberAppDevices(await pnpDevices());
@@ -682,12 +685,17 @@ try {
   await report.test('20 start/stop cycles clean up routes and present adapters', 'parity', async () => {
     const cycles = [], snapshots = [];
     for (let n = 1; n <= 20; n++) {
-      await server.api('routing', { on: false });
-      snapshots.push({ cycle: n, ...await stoppedSnapshot() });
-      await server.api('routing', { on: true }); await server.on();
-      rememberAppDevices(await pnpDevices());
-      await client('open', { target: responder.virtual }); await client('close');
-      cycles.push(n); console.log(`cycle ${n}/20`);
+      const phases = {}, started = performance.now(), eventStart = serverOutput.events.length;
+      await timedPhase(phases, 'routingOffMs', () => server.api('routing', { on: false }));
+      snapshots.push({ cycle: n, ...await timedPhase(phases, 'stoppedChecksMs', stoppedSnapshot) });
+      await timedPhase(phases, 'routingOnMs', () => server.api('routing', { on: true }));
+      await timedPhase(phases, 'routingReadyMs', () => server.on());
+      rememberAppDevices(await timedPhase(phases, 'runningPnPCheckMs', pnpDevices));
+      await timedPhase(phases, 'firstFlowMs', () => client('open', { target: responder.virtual }));
+      await timedPhase(phases, 'clientCloseMs', () => client('close'));
+      const result = { cycle: n, totalMs: performance.now() - started, phases, stoppedChecks: snapshots.at(-1).phases,
+        native: serverOutput.events.slice(eventStart) };
+      cycles.push(result); console.log(`WINDOWS CYCLE ${JSON.stringify(result)}`);
     }
     const devices = [...new Map(snapshots.flatMap((s) => s.pnp).map((device) => [device.instanceId, device])).values()];
     await recordOrphanPnP('PnP cleanup across 20 normal routing stops', 'baseline-defect', { snapshots }, devices);
