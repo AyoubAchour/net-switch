@@ -22,6 +22,12 @@ import (
 
 func sharedBatchSocket(t *testing.T) (socketRow, holder, holder, descriptorBatchKey, descriptorBatchResult) {
 	t.Helper()
+	row, parent, child, key, result, _ := sharedBatchSocketWithParent(t)
+	return row, parent, child, key, result
+}
+
+func sharedBatchSocketWithParent(t *testing.T) (socketRow, holder, holder, descriptorBatchKey, descriptorBatchResult, *net.UDPConn) {
+	t.Helper()
 	c, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +85,7 @@ func sharedBatchSocket(t *testing.T) (socketRow, holder, holder, descriptorBatch
 	if b.pid != pid || b.start != start || len(result.sockets) == 0 {
 		t.Fatalf("child did not hold the real inherited socket: %+v, %v", b, result.err)
 	}
-	return row, a, b, key, result
+	return row, a, b, key, result, c
 }
 
 func TestOtherPIDNotificationCannotHideAConflictingHolder(t *testing.T) {
