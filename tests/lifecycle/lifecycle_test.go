@@ -50,6 +50,13 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 func clientMain(args []string) int {
+	if len(args) > 0 && args[0] == "status-capacity" {
+		if err := statusCapacity(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) > 0 && args[0] == "permissions" {
 		if err := permissionProbe(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -371,6 +378,10 @@ func TestRealServices(t *testing.T) {
 		output, err := other.command(filepath.Join(dir, binary("netswitch-desktop")), "--background").CombinedOutput()
 		if err != nil || !strings.Contains(string(output), "status only") {
 			t.Fatal("non-owner desktop did not offer status only", err, string(output))
+		}
+		exe, _ := os.Executable()
+		if b, err := other.command(exe, "client", "status-capacity").CombinedOutput(); err != nil {
+			t.Fatalf("status listener did not survive excess standard-user connections: %v: %s", err, b)
 		}
 	})
 	t.Run("pairing-and-bearer", func(t *testing.T) {
