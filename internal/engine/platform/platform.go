@@ -23,6 +23,11 @@ type TunDevice interface {
 	Close() error
 }
 
+// TunIOContext optionally installs a single cancellation hook for the forwarding
+// lifetime. Call once before starting I/O. Per-call contexts still work normally;
+// implementations may avoid per-packet hooks only for this same Done channel.
+type TunIOContext interface{ BindIOContext(context.Context) }
+
 // BatchWriter accepts packets already available in the link queue, without
 // waiting to fill a batch. The return count excludes packets dropped under load.
 type BatchWriter interface {
@@ -84,6 +89,9 @@ type TCPConn interface {
 // replaces its one-shot interest; readiness invokes wake without doing I/O.
 // Detach removes the registration before the socket can be closed or reused.
 // TryRead/TryWrite report ErrWouldBlock without waiting or changing deadlines.
+// A successful Watch transfers exclusive I/O ownership: callers then use only
+// TryRead/TryWrite, addresses, shutdown, linger and Close, not blocking I/O or
+// deadlines. An adapter may release its original Go poll descriptor at transfer.
 var ErrWouldBlock = errors.New("socket would block")
 
 type ReadyTCP interface {

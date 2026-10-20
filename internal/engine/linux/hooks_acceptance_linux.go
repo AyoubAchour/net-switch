@@ -201,6 +201,12 @@ type stalledTun struct {
 	gate func() <-chan struct{}
 }
 
+func (t *stalledTun) BindIOContext(ctx context.Context) {
+	if device, ok := t.TunDevice.(platform.TunIOContext); ok {
+		device.BindIOContext(ctx)
+	}
+}
+
 func (t *stalledTun) Stats() any {
 	if s, ok := t.TunDevice.(interface{ Stats() any }); ok {
 		return s.Stats()

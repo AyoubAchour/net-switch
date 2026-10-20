@@ -66,6 +66,9 @@ func (s *tcpSocket) Watch(wake func()) (platform.Readiness, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := s.takeReadiness(); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.next++
@@ -89,7 +92,7 @@ func (w *socketWatch) Arm(read, write bool) error {
 		mask |= unix.EPOLLOUT
 	}
 	var armErr error
-	err := w.s.raw.Control(func(fd uintptr) {
+	err := w.s.control(func(fd uintptr) {
 		if !read && !write {
 			// EPOLLHUP is unconditional, even with an empty mask. Delete the
 			// interest while app-side backpressure prevents consuming EOF.
@@ -120,14 +123,14 @@ func (w *socketWatch) Detach() {
 	w.attached = false
 	delete(w.p.entries, w.id)
 	if w.registered {
-		_ = w.s.raw.Control(func(fd uintptr) { _ = unix.EpollCtl(w.p.fd, unix.EPOLL_CTL_DEL, int(fd), nil) })
+		_ = w.s.control(func(fd uintptr) { _ = unix.EpollCtl(w.p.fd, unix.EPOLL_CTL_DEL, int(fd), nil) })
 	}
 }
 
 func (s *tcpSocket) TryRead(b []byte) (int, error) {
 	var n int
 	var readErr error
-	err := s.raw.Control(func(fd uintptr) {
+	err := s.control(func(fd uintptr) {
 		for {
 			n, readErr = unix.Read(int(fd), b)
 			if readErr != unix.EINTR {
@@ -141,13 +144,16 @@ func (s *tcpSocket) TryRead(b []byte) (int, error) {
 	if err == nil && readErr == nil && n == 0 {
 		readErr = io.EOF
 	}
-	return max(n, 0), errors.Join(err, readErr)
+	if err != nil {
+		return max(n, 0), err
+	}
+	return max(n, 0), readErr
 }
 
 func (s *tcpSocket) TryWrite(b []byte) (int, error) {
 	var n int
 	var writeErr error
-	err := s.raw.Control(func(fd uintptr) {
+	err := s.control(func(fd uintptr) {
 		for {
 			n, writeErr = unix.Write(int(fd), b)
 			if writeErr != unix.EINTR {
@@ -158,5 +164,8 @@ func (s *tcpSocket) TryWrite(b []byte) (int, error) {
 	if writeErr == unix.EAGAIN {
 		writeErr = platform.ErrWouldBlock
 	}
-	return max(n, 0), errors.Join(err, writeErr)
+	if err != nil {
+		return max(n, 0), err
+	}
+	return max(n, 0), writeErr
 }

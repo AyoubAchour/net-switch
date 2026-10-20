@@ -60,6 +60,7 @@ func TestKernelTCPMaxseg88KeepsTunAlive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer device.Close()
+	p.objects.tun.BindIOContext(ctx)
 	link := ns.NewLink()
 	stack, err := ns.New(link, ns.DefaultOptions())
 	if err != nil {

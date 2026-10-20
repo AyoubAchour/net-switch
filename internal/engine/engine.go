@@ -96,6 +96,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	// service context and protocol lease do; reattach keeps these flows alive.
 	run, cancel := context.WithCancel(e.root)
 	e.cancel = cancel
+	if device, ok := tun.(platform.TunIOContext); ok {
+		device.BindIOContext(run)
+	}
 	e.tcp = ntcp.New(run, s, e.limits.Handshakes, e.Table, e.deps.Owners, e.deps.Dialer, link)
 	e.udp = udp.New(run, s, e.Table, e.deps.Owners, e.deps.Identities, e.deps.Dialer, link, tun.MTU())
 	echo := newEcho(run, e.deps.Dialer, e.Table, link)
@@ -137,7 +140,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			} else if b[0]>>4 != 4 {
 				continue
 			}
-			p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), b[:n]...))})
+			// MakeWithData copies into a gVisor-owned chunk before returning.
+			// An extra clone here doubles ingress payload allocations.
+			p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b[:n])})
 			if verified, ok := tun.(platform.ChecksumVerifier); ok {
 				p.RXChecksumValidated = verified.RXChecksumVerified(b[:n])
 			}
@@ -147,10 +152,14 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	})
 	e.pumps.Go(func() {
 		packets := make([][]byte, 64)
+		owned := make([]ns.OutputPacket, len(packets))
 		for {
-			n := link.ReadBatch(run, packets)
+			n := link.ReadOwnedBatch(run, owned)
 			if n == 0 {
 				return
+			}
+			for i := range n {
+				packets[i] = owned[i].Bytes
 			}
 			var err error
 			if batch, ok := tun.(platform.BatchWriter); ok {
@@ -161,6 +170,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 						break
 					}
 				}
+			}
+			for i := range n {
+				owned[i].Release()
 			}
 			clear(packets[:n])
 			if err != nil {

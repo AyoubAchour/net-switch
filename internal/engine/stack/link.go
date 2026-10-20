@@ -12,6 +12,39 @@ import (
 
 const QueuePackets = 1024
 
+var smallOutput = sync.Pool{New: func() any { return new([256]byte) }}
+var largeOutput = sync.Pool{New: func() any { return new([MTU]byte) }}
+
+// OutputPacket transfers one queue buffer to the TUN writer. Release exactly
+// once after the synchronous device write, including error paths. The small
+// class keeps a SYN/ACK burst from reserving 9 KiB for every tiny packet.
+type OutputPacket struct {
+	Bytes   []byte
+	storage any
+}
+
+func outputPacket(size int) OutputPacket {
+	if size <= 256 {
+		b := smallOutput.Get().(*[256]byte)
+		return OutputPacket{b[:size], b}
+	}
+	if size <= MTU {
+		b := largeOutput.Get().(*[MTU]byte)
+		return OutputPacket{b[:size], b}
+	}
+	return OutputPacket{Bytes: make([]byte, size)}
+}
+
+func (p *OutputPacket) Release() {
+	switch b := p.storage.(type) {
+	case *[256]byte:
+		smallOutput.Put(b)
+	case *[MTU]byte:
+		largeOutput.Put(b)
+	}
+	*p = OutputPacket{}
+}
+
 // Link owns its output buffers. A slot is reserved before copying a packet;
 // neither stack writers nor the UDP reply path wait for the TUN consumer.
 type Link struct {
@@ -20,7 +53,7 @@ type Link struct {
 	dispatcher   gv.NetworkDispatcher
 	observer     func(*gv.PacketBuffer)
 	afterInbound func()
-	queue        [QueuePackets][]byte
+	queue        [QueuePackets]OutputPacket
 	head, count  int
 	peak         int
 	mtu          uint32
@@ -44,8 +77,8 @@ func (l *Link) enqueue(size int, copyInto func([]byte)) bool {
 		l.Dropped.Add(1)
 		return false
 	}
-	p := make([]byte, size)
-	copyInto(p)
+	p := outputPacket(size)
+	copyInto(p.Bytes)
 	l.queue[(l.head+l.count)%QueuePackets] = p
 	l.count++
 	l.peak = max(l.peak, l.count)
@@ -77,11 +110,15 @@ func (l *Link) Read(ctx context.Context) []byte {
 		l.mu.Lock()
 		if l.count != 0 {
 			p := l.queue[l.head]
-			l.queue[l.head] = nil
+			l.queue[l.head] = OutputPacket{}
 			l.head = (l.head + 1) % QueuePackets
 			l.count--
 			l.mu.Unlock()
-			return p
+			// This compatibility API gives callers indefinitely owned bytes.
+			// Production uses ReadOwnedBatch to avoid the extra allocation.
+			data := append([]byte(nil), p.Bytes...)
+			p.Release()
+			return data
 		}
 		closed := l.closed
 		l.mu.Unlock()
@@ -102,16 +139,27 @@ func (l *Link) Read(ctx context.Context) []byte {
 // in FIFO order. It never waits to fill a batch. The TUN writer can publish one
 // batch with one driver wake-up without delaying a lone packet.
 func (l *Link) ReadBatch(ctx context.Context, packets [][]byte) int {
-	if len(packets) == 0 {
+	return l.readBatch(ctx, len(packets), func(i int, p OutputPacket) {
+		packets[i] = append([]byte(nil), p.Bytes...)
+		p.Release()
+	})
+}
+
+func (l *Link) ReadOwnedBatch(ctx context.Context, packets []OutputPacket) int {
+	return l.readBatch(ctx, len(packets), func(i int, p OutputPacket) { packets[i] = p })
+}
+
+func (l *Link) readBatch(ctx context.Context, capacity int, consume func(int, OutputPacket)) int {
+	if capacity == 0 {
 		return 0
 	}
 	for {
 		l.mu.Lock()
 		if l.count != 0 {
-			n := min(len(packets), l.count)
+			n := min(capacity, l.count)
 			for i := 0; i < n; i++ {
-				packets[i] = l.queue[l.head]
-				l.queue[l.head] = nil
+				consume(i, l.queue[l.head])
+				l.queue[l.head] = OutputPacket{}
 				l.head = (l.head + 1) % QueuePackets
 			}
 			l.count -= n
@@ -192,7 +240,9 @@ func (l *Link) Close() {
 	}
 	l.closed = true
 	l.dispatcher = nil
-	l.queue = [QueuePackets][]byte{}
+	for i := range l.queue {
+		l.queue[i].Release()
+	}
 	l.count = 0
 	close(l.done)
 	f := l.onClose

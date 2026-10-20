@@ -162,3 +162,46 @@ func TestReadyRelayIdleCloseByPolicy(t *testing.T) {
 		t.Fatal("idle relay lost policy cancellation")
 	}
 }
+
+func TestReadyRelayActiveClosePreservesTimeWait(t *testing.T) {
+	peer := newReadyPeer()
+	control := flows.New(flows.Defaults(), nil)
+	cfg := policy.Config{Lines: []platform.Line{{ID: "A"}}, IPv6: true}
+	if _, err := control.Apply(policy.Revision{N: 1, Hash: policy.Hash(cfg), Config: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	f, dial := harness(t, control, testfake.Dialer{TCPFunc: func(context.Context, string, netip.AddrPort) (platform.TCPConn, error) { return peer, nil }})
+	app, err := dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	app.SetDeadline(time.Now().Add(2 * time.Second))
+	select {
+	case <-peer.watching:
+	case <-time.After(time.Second):
+		t.Fatal("no readiness relay")
+	}
+	peer.mu.Lock()
+	peer.eof = true
+	wake := peer.wake
+	peer.mu.Unlock()
+	wake()
+	if data, err := io.ReadAll(app); err != nil || len(data) != 0 {
+		t.Fatalf("server FIN: %q %v", data, err)
+	}
+	if err := app.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-peer.closed:
+	case <-time.After(time.Second):
+		t.Fatal("relay did not finish")
+	}
+	if got := control.Stats(); got.TimeWait != 1 || got.Flows != 0 {
+		t.Fatalf("normal close lost TIME_WAIT: %+v", got)
+	}
+	if resets := f.stack.Stats().TCP.ResetsSent.Value(); resets != 0 {
+		t.Fatalf("normal close sent %d resets", resets)
+	}
+}

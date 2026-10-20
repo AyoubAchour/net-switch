@@ -77,6 +77,8 @@ func TestEpollReadinessPartialDataEOFAndDetach(t *testing.T) {
 		t.Fatal(err)
 	}
 	socket := &tcpSocket{TCPConn: client, raw: raw}
+	defer socket.Close()
+	local, remote := client.LocalAddr().String(), client.RemoteAddr().String()
 	wakes := make(chan struct{}, 1)
 	w, err := socket.Watch(func() {
 		select {
@@ -88,6 +90,15 @@ func TestEpollReadinessPartialDataEOFAndDetach(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer w.Detach()
+	if socket.TCPConn != nil || socket.raw != nil {
+		t.Fatal("readiness transfer retained Go's connection graph")
+	}
+	if err := client.SetDeadline(time.Now()); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("original poll descriptor remains open: %v", err)
+	}
+	if socket.LocalAddr().String() != local || socket.RemoteAddr().String() != remote {
+		t.Fatal("ownership transfer changed the connected endpoints")
+	}
 	var data [8]byte
 	if _, err := socket.TryRead(data[:]); !errors.Is(err, platform.ErrWouldBlock) {
 		t.Fatalf("idle read: %v", err)
@@ -129,7 +140,7 @@ func TestEpollReadinessPartialDataEOFAndDetach(t *testing.T) {
 		t.Fatalf("half close lost reply: %v", err)
 	}
 	w.Detach()
-	client.Close()
+	socket.Close()
 	if err := w.Arm(true, true); err != nil {
 		t.Fatalf("detached registration rearmed: %v", err)
 	}
