@@ -40,7 +40,7 @@ try {
   for (let round = 1; round <= 10; round++) {
     const before = await harness.control('diagnostics');
     const samples = await client('reuse', { target: { ...responder.virtual, source: harness.testisp.address }, count: 1000,
-      maxMs: 100, diagnostics: harness.diagnosticClient, continueAfterSlow: true });
+      warmup: true, maxMs: 100, diagnostics: harness.diagnosticClient, continueAfterSlow: true });
     const after = await harness.control('diagnostics');
     const slow = samples.filter((s) => s.ms >= 100);
     const failed = samples.filter((s) => s.outcome !== 'closed');

@@ -30,7 +30,7 @@ type observedDevice struct {
 func recoverDevice() error {
 	err := wintun.RecoverAfterCrash(deviceConfig)
 	if err == nil {
-		log.Print("TestISP crash cleanup complete")
+		log.Print("TestISP recovery check complete")
 	}
 	return err
 }
@@ -73,5 +73,7 @@ func (d *observedDevice) Write(data []byte) error {
 func (d *observedDevice) Close() {
 	if err := d.adapter.Close(); err != nil {
 		log.Printf("TestISP session close: %v", err)
+	} else {
+		log.Print("TestISP session and adapter closed normally")
 	}
 }

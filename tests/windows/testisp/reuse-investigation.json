@@ -1,8 +1,17 @@
 {
   "measured": "2026-10-19",
   "diagnosis": "Pinned Wintun 0.14.1 misses a receive-ring wake-up. The original FIN remains queued until another send (the TCP retransmission) wakes the driver; the two copies then enter the Windows NIC together.",
-  "fixed": false,
-  "blocker": "The upstream fix changes both Wintun's userspace API and kernel driver. The official signed download and latest tag are still 0.14.1. No signed binary was replaced, deadline changed, failed round retried, or wake-up traffic added.",
+  "fixed": true,
+  "fix": "PR #35 replaces Wintun 0.14.1's userspace session with our own internal/wintun session and wake-up handling. The signed 0.14.1 driver is unchanged; no deadline was relaxed, failed round retried, or wake-up traffic added.",
+  "postFix": {
+    "pullRequest": "https://github.com/AyoubAchour/net-switch/pull/35",
+    "run": 39307764131,
+    "url": "https://github.com/AyoubAchour/net-switch/actions/runs/39307764131",
+    "totals": [
+      { "architecture": "x64", "attempts": 100000, "atLeast100ms": 0, "nonClosed": 0 },
+      { "architecture": "arm64", "attempts": 100000, "atLeast100ms": 0, "nonClosed": 0 }
+    ]
+  },
   "upstream": {
     "commit": "ec0a6b98456fe1ba52567bb2add4bbf5f64315a1",
     "url": "https://git.zx2c4.com/wintun/commit/?id=ec0a6b98456fe1ba52567bb2add4bbf5f64315a1",

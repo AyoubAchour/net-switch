@@ -45,14 +45,21 @@ async function requestOn(item) {
   const target = item.target;
   const nonce = item.nonce ?? randomBytes(12).toString('hex');
   return new Promise((resolve, reject) => {
+    const started = performance.now();
+    const detail = { id: item.id, host: target.host, port: target.port ?? target.http, tls: !!target.tls,
+      phase: 'waiting for socket', previousPort: item.port, bytesReceived: 0 };
+    const fail = (cause) => reject(new Error(`HTTP request failed: ${JSON.stringify({ ...detail,
+      elapsedMs: performance.now() - started, code: cause.code, error: cause.message })}`, { cause }));
     const request = target.tls ? httpsRequest : httpRequest;
     const req = request({ host: target.host, port: target.port ?? target.http, path: target.path ?? `/echo?nonce=${nonce}`,
       localAddress: target.source,
       servername: target.tls ? 'one.one.one.one' : undefined, agent: item.agent, signal: AbortSignal.timeout(8000) }, (res) => {
+      detail.phase = 'response';
+      detail.statusCode = res.statusCode;
       const port = res.socket.localPort;
       item.socket = res.socket;
       let body = '';
-      res.setEncoding('utf8'); res.on('data', (chunk) => { body += chunk; }); res.on('error', reject);
+      res.setEncoding('utf8'); res.on('data', (chunk) => { body += chunk; detail.bytesReceived += Buffer.byteLength(chunk); }); res.on('error', fail);
       res.on('end', () => {
         try {
           assert.equal(res.statusCode, 200, body);
@@ -63,7 +70,18 @@ async function requestOn(item) {
         } catch (error) { reject(error); }
       });
     });
-    req.on('error', reject); req.end();
+    req.on('socket', (socket) => {
+      const address = () => {
+        detail.localAddress = socket.localAddress ?? detail.localAddress;
+        detail.localPort = socket.localPort ?? detail.localPort;
+      };
+      address();
+      detail.reused = req.reusedSocket;
+      detail.phase = socket.connecting ? 'connecting' : 'tcp-connected';
+      if (socket.connecting) socket.once('connect', () => { address(); detail.phase = 'tcp-connected'; });
+      if (target.tls && !socket.authorized) socket.once('secureConnect', () => { detail.phase = 'tls-connected'; });
+    });
+    req.on('error', fail); req.end();
   });
 }
 
@@ -128,8 +146,15 @@ async function freePort() {
   });
 }
 
-async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, maxMs = Infinity, diagnostics, continueAfterSlow = false }) {
+async function reuse({ target, count = 1000, gap = 0, length = 0, reusePort, maxMs = Infinity, diagnostics, continueAfterSlow = false, warmup = false }) {
   const port = reusePort ?? await freePort();
+  if (warmup) {
+    assert(!target.httpPorts, 'Fixed-tuple warm-up requires one responder port');
+    const [sample] = await reuse({ target, count: 1, reusePort: port, diagnostics });
+    console.log(`REUSE WARMUP ${JSON.stringify(sample)}`);
+    assert.equal(sample.outcome, 'closed', `Warm-up connection failed: ${JSON.stringify(sample)}`);
+    if (gap) await delay(gap);
+  }
   const samples = [];
   if (target.httpPorts) assert.equal(target.httpPorts.length, count, 'Each native reuse needs a distinct responder port');
   for (let i = 0; i < count; i++) {

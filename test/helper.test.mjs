@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { PassThrough } from 'node:stream';
-import { test } from 'node:test';
+import { before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { NetworkMonitor, NetworkUpdates, parseNetworkSnapshot, quickProbe, readPolicyOnce } from '../lib/helper.mjs';
 import { LaneSwitch } from '../lib/lane-switch.mjs';
@@ -14,9 +14,32 @@ const helper = fileURLToPath(new URL('../helper/bin/netswitch-helper.exe', impor
 const needsHelper = { skip: process.platform !== 'win32' || (existsSync(helper) ? false : 'native helper is not built'), timeout: 45_000 };
 const sample = { readAt: 1000, adapters: [{ alias: 'Cable', index: 3, status: 'Up', ipv4s: ['192.168.1.2'] }], defaultRoutes: [], policy: 'absent' };
 
+before(async () => {
+  if (needsHelper.skip) return;
+  // A fresh runner prepares the NetTCPIP/NetAdapter modules and CIM providers
+  // on the first scan. Finish that setup outside the comparison's deadlines.
+  const started = performance.now();
+  let complete = false;
+  try {
+    const adapters = await runPowerShellJson(ADAPTERS_SCRIPT, { timeoutMs: 120_000 });
+    assert(Array.isArray(adapters), 'PowerShell warm-up did not return an adapter list');
+    complete = true;
+  } finally {
+    console.log(`PowerShell scan warm-up ${complete ? 'completed' : 'failed'} in ${(performance.now() - started).toFixed(1)} ms (${process.arch})`);
+  }
+}, { timeout: 130_000 });
+
 test('native adapters match the PowerShell scan field by field', needsHelper, async (t) => {
+  const nativeStarted = performance.now();
   const native = JSON.parse(await runFile(helper, ['network', '--once']));
-  const shell = await runPowerShellJson(ADAPTERS_SCRIPT, { timeoutMs: 30_000 });
+  t.diagnostic(`Native adapter scan: ${(performance.now() - nativeStarted).toFixed(1)} ms`);
+  const shellStarted = performance.now();
+  let shell;
+  try {
+    shell = await runPowerShellJson(ADAPTERS_SCRIPT, { timeoutMs: 30_000 });
+  } finally {
+    t.diagnostic(`PowerShell adapter comparison scan: ${(performance.now() - shellStarted).toFixed(1)} ms (30000 ms deadline)`);
+  }
   assert.deepEqual(native.adapters.map((a) => a.alias).sort(), shell.map((a) => a.alias).sort(),
     `Visible adapter list differs. Native: ${JSON.stringify(native.adapters)}; PowerShell: ${JSON.stringify(shell)}`);
   for (const adapter of shell) {
