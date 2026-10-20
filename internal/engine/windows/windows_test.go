@@ -479,6 +479,14 @@ func TestUDPReadinessDoesNotConsume(t *testing.T) {
 }
 
 func TestReadinessHalfCloseAndCancellation(t *testing.T) {
+	testReadinessHalfClose(t, false)
+}
+
+func TestReadinessHalfCloseAfterCollection(t *testing.T) {
+	testReadinessHalfClose(t, true)
+}
+
+func testReadinessHalfClose(t *testing.T, collect bool) {
 	hosted(t)
 	pool, err := newReadiness()
 	if err != nil {
@@ -518,8 +526,14 @@ func TestReadinessHalfCloseAndCancellation(t *testing.T) {
 			server.Close()
 			t.Fatal(err)
 		}
+		if collect {
+			runtime.GC()
+		}
 		if _, err := c.TryRead(make([]byte, 10)); !errors.Is(err, platform.ErrWouldBlock) {
-			t.Fatal(err)
+			local, localErr := windows.Getsockname(c.handle)
+			kind, kindErr := windows.GetsockoptInt(c.handle, windows.SOL_SOCKET, 0x1008)
+			t.Fatalf("round %d after transfer (GC=%t): %v; descriptor=%d local=%#v/%v type=%d/%v",
+				round, collect, err, c.handle, local, localErr, kind, kindErr)
 		}
 		if err := w.Arm(true, false); err != nil {
 			t.Fatal(err)
@@ -570,6 +584,9 @@ func TestReadinessHalfCloseAndCancellation(t *testing.T) {
 						t.Fatalf("round %d: reverse write readiness timeout", round)
 					}
 				}
+			}
+			if collect {
+				runtime.GC()
 			}
 			if err := c.CloseWrite(); err != nil {
 				// Keep the original failure, but observe the actual peer before
