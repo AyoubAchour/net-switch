@@ -11,10 +11,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/winlock"
 	"golang.org/x/sys/windows"
 )
 
@@ -198,56 +198,53 @@ func SyncParent(string) error { return nil }
 
 type OwnershipLock struct{}
 
-// Win32 mutex ownership belongs to a thread, not a goroutine. The dedicated
-// locked thread acquires AND releases it, including abandoned-owner recovery.
+// The lock is global across standalone state directories, but its name lives
+// in a verified SYSTEM/Administrators folder. Unlike a Global\ mutex, a standard
+// user cannot pre-create and hold it. Windows releases the byte lock on crash.
 func (OwnershipLock) Acquire(ctx context.Context) (func() error, error) {
-	acquired := make(chan error, 1)
-	release := make(chan struct{})
-	result := make(chan error, 1)
-	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		sa, err := security("D:P(A;;GA;;;SY)(A;;GA;;;BA)")
-		if err != nil {
-			acquired <- err
-			return
-		}
-		name, _ := windows.UTF16PtrFromString(`Global\NetSwitchEngineOwnership-` + wintunMutexID)
-		h, err := windows.CreateMutex(sa, false, name)
-		if err != nil && !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-			acquired <- err
-			return
-		}
-		defer windows.CloseHandle(h)
-		for {
-			if err := ctx.Err(); err != nil {
-				acquired <- err
-				return
-			}
-			status, err := windows.WaitForSingleObject(h, 50)
-			if err != nil {
-				acquired <- err
-				return
-			}
-			if status == uint32(windows.WAIT_TIMEOUT) {
-				continue
-			}
-			if status != windows.WAIT_OBJECT_0 && status != windows.WAIT_ABANDONED {
-				acquired <- fmt.Errorf("ownership mutex wait: %d", status)
-				return
-			}
-			break
-		}
-		acquired <- nil
-		<-release
-		result <- windows.ReleaseMutex(h)
-	}()
-	if err := <-acquired; err != nil {
+	root, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
+	if err != nil {
 		return nil, err
 	}
+	directory, err := StateDirectory(filepath.Join(root, "Net Switch Engine Ownership"))
+	if err != nil {
+		return nil, err
+	}
+	p, err := windows.UTF16PtrFromString(filepath.Join(directory.Name(), "ownership-"+wintunMutexID+".lock"))
+	if err != nil {
+		directory.Close()
+		return nil, err
+	}
+	sa, err := security(privateSDDL)
+	if err != nil {
+		directory.Close()
+		return nil, err
+	}
+	handle, err := windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, sa, windows.OPEN_ALWAYS, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		directory.Close()
+		return nil, err
+	}
+	closeHandles := func() error { return errors.Join(windows.CloseHandle(handle), directory.Close()) }
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return nil, errors.Join(err, closeHandles())
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.NumberOfLinks != 1 {
+		return nil, errors.Join(errors.New("ownership lock is not a private regular file"), closeHandles())
+	}
+	if err := winlock.Acquire(ctx, handle); err != nil {
+		return nil, errors.Join(err, closeHandles())
+	}
 	var once sync.Once
-	var err error
-	return func() error { once.Do(func() { close(release); err = <-result }); return err }, nil
+	var releaseErr error
+	return func() error {
+		once.Do(func() {
+			releaseErr = closeHandles()
+		})
+		return releaseErr
+	}, nil
 }
 
 const wintunMutexID = "D9B44E84-B5C7-4DC4-97A4-4E7CA6722686"
