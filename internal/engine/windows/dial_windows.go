@@ -22,12 +22,14 @@ import (
 )
 
 type Dialer struct {
-	Routes         *Routes
-	pool           *readiness
-	udp            *udpReadiness
-	ports          *portDiagnostics
-	udpExhaustions atomic.Uint64
-	udpLastLog     atomic.Int64
+	Routes            *Routes
+	pool              *readiness
+	udp               *udpReadiness
+	ports             *portDiagnostics
+	udpExhaustions    atomic.Uint64
+	udpLastLog        atomic.Int64
+	udpFailureStarted atomic.Bool
+	udpFailure        atomic.Pointer[udpAllocationFailure]
 }
 
 func NewDialer(routes *Routes) (*Dialer, error) {
@@ -136,6 +138,7 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 	if err != nil {
 		if portLimit(err) {
 			total := d.udpExhaustions.Add(1)
+			d.captureUDPAllocationFailure(line, source, err)
 			second := time.Now().Unix()
 			old := d.udpLastLog.Load()
 			if old != second && d.udpLastLog.CompareAndSwap(old, second) {

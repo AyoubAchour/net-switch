@@ -114,24 +114,25 @@ type LookupHistogram struct {
 	Misses    uint64 `json:"misses"`
 	Ambiguous uint64 `json:"ambiguous"`
 	// Non-cumulative buckets, upper bounds in microseconds, last = infinity.
-	UpperUS            []uint64  `json:"upperUS"`
-	Buckets            []uint64  `json:"buckets"`
-	MaxUS              uint64    `json:"maxUS"`
-	TCPRefreshes       uint64    `json:"tcpRefreshes"`
-	TCPReadNanos       uint64    `json:"tcpReadNanos"`
-	TCPIndexNanos      uint64    `json:"tcpIndexNanos"`
-	CacheMissRefreshes uint64    `json:"cacheMissRefreshes"`
-	TCPRetries         uint64    `json:"tcpRetries"`
-	SnapshotBuckets    []uint64  `json:"snapshotBuckets"`
-	ProcessBuckets     []uint64  `json:"processBuckets"`
-	RefreshBuckets     []uint64  `json:"refreshBuckets"`
-	TCPRawRows         uint64    `json:"tcpRawRows"`
-	TCPPeakRows        uint64    `json:"tcpPeakRows"`
-	TCPRowsByFamily    [2]uint64 `json:"tcpRowsByFamily"`
-	TCPFamiliesSampled [2]bool   `json:"tcpFamiliesSampled"`
-	UDPRefreshes       uint64    `json:"udpRefreshes"`
-	UDPReadNanos       uint64    `json:"udpReadNanos"`
-	UDPIndexNanos      uint64    `json:"udpIndexNanos"`
+	UpperUS            []uint64        `json:"upperUS"`
+	Buckets            []uint64        `json:"buckets"`
+	MaxUS              uint64          `json:"maxUS"`
+	TCPRefreshes       uint64          `json:"tcpRefreshes"`
+	TCPReadNanos       uint64          `json:"tcpReadNanos"`
+	TCPIndexNanos      uint64          `json:"tcpIndexNanos"`
+	CacheMissRefreshes uint64          `json:"cacheMissRefreshes"`
+	TCPRetries         uint64          `json:"tcpRetries"`
+	SnapshotBuckets    []uint64        `json:"snapshotBuckets"`
+	ProcessBuckets     []uint64        `json:"processBuckets"`
+	RefreshBuckets     []uint64        `json:"refreshBuckets"`
+	TCPRawRows         uint64          `json:"tcpRawRows"`
+	TCPPeakRows        uint64          `json:"tcpPeakRows"`
+	TCPRowsByFamily    [2]uint64       `json:"tcpRowsByFamily"`
+	TCPFamiliesSampled [2]bool         `json:"tcpFamiliesSampled"`
+	UDPRefreshes       uint64          `json:"udpRefreshes"`
+	UDPReadNanos       uint64          `json:"udpReadNanos"`
+	UDPIndexNanos      uint64          `json:"udpIndexNanos"`
+	Failures           []lookupFailure `json:"failures,omitempty"`
 }
 
 var lookupBounds = [...]uint64{100, 250, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, ^uint64(0)}
@@ -153,6 +154,8 @@ type Owners struct {
 	tcpRefreshes, tcpReadNanos, tcpIndexNanos, cacheMissRefreshes atomic.Uint64
 	tcpRetries                                                    atomic.Uint64
 	tcpPeakRows                                                   atomic.Uint64
+	failures                                                      [16]lookupFailure
+	failureCount                                                  uint64
 }
 
 func NewOwners() *Owners { return &Owners{paths: make(map[processKey]platform.Owner)} }
@@ -196,6 +199,7 @@ func (o *Owners) Stats() LookupHistogram {
 	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
 	h.TCPPeakRows = o.tcpPeakRows.Load()
 	h.UDPRefreshes, h.UDPReadNanos, h.UDPIndexNanos = o.udpDumps.Load(), o.udpReadNanos.Load(), o.udpIndexNanos.Load()
+	h.Failures = o.failureSnapshot()
 	for family := range o.snapshot {
 		if snapshot := o.snapshot[family].Load(); snapshot != nil {
 			h.TCPRowsByFamily[family] = snapshot.rawRows
@@ -403,13 +407,13 @@ func (o *Owners) process(pid uint32) (platform.Owner, error) {
 	}
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
-		return platform.Owner{}, err
+		return platform.Owner{}, fmt.Errorf("OpenProcess PID %d: %w", pid, err)
 	}
 	processOwner := winhandle.Open(h, "owner lookup process open")
 	defer processOwner.HandleClose("owner lookup process close")
 	var creation, exit, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(processOwner.Handle("owner lookup creation time"), &creation, &exit, &kernel, &user); err != nil {
-		return platform.Owner{}, err
+		return platform.Owner{}, fmt.Errorf("GetProcessTimes PID %d: %w", pid, err)
 	}
 	start := uint64(creation.HighDateTime)<<32 | uint64(creation.LowDateTime)
 	key := processKey{pid, start}
@@ -420,7 +424,7 @@ func (o *Owners) process(pid uint32) (platform.Owner, error) {
 		b := make([]uint16, 32768)
 		n := uint32(len(b))
 		if err := windows.QueryFullProcessImageName(processOwner.Handle("owner lookup executable path"), 0, &b[0], &n); err != nil {
-			return platform.Owner{}, err
+			return platform.Owner{}, fmt.Errorf("QueryFullProcessImageName PID %d: %w", pid, err)
 		}
 		path := windows.UTF16ToString(b[:n])
 		cached = platform.Owner{PID: pid, StartTime: start, Path: path, AppID: apppath.Key(path)}
@@ -561,7 +565,11 @@ func (o *Owners) udpOwner(key netip.AddrPort, rows map[netip.AddrPort][]socketOw
 
 func (o *Owners) UDP(ctx context.Context, key netip.AddrPort) (owner platform.Owner, err error) {
 	start := winclock.Now()
-	defer func() { o.measure(start, err) }()
+	stage := "GetExtendedUdpTable snapshot"
+	defer func() {
+		o.measure(start, err)
+		o.noteFailure("udp-lookup", stage, key, owner.Generation, err)
+	}()
 	ctx, cancel := winclock.System.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
 	family := 0
@@ -575,13 +583,24 @@ func (o *Owners) UDP(ctx context.Context, key netip.AddrPort) (owner platform.Ow
 	if err != nil {
 		return owner, err
 	}
+	stage = "socket row and process identity"
 	return o.udpOwner(key, snapshot.rows)
 }
 
 // The NAT invokes this once per second, even in the absence of traffic. One
 // complete read per family covers every session. A partial read fails the whole
 // validation; the NAT's two-second stale guard then stops both directions.
-func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip.AddrPort]platform.Owner, error) {
+func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (result map[netip.AddrPort]platform.Owner, err error) {
+	stage := "GetExtendedUdpTable reconciliation"
+	defer func() {
+		if err != nil {
+			var source netip.AddrPort
+			if len(keys) != 0 {
+				source = keys[0]
+			}
+			o.noteFailure("udp-reconcile", stage, source, "", err)
+		}
+	}()
 	rows := make(map[netip.AddrPort][]socketOwner)
 	families := map[uint32]bool{}
 	for _, key := range keys {
@@ -601,6 +620,7 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 		}
 	}
 	out := make(map[netip.AddrPort]platform.Owner, len(keys))
+	stage = "reconciliation process identities"
 	// A dump validates each process generation once. Opening the same process
 	// handle for every one of its 4,096 sockets would consume the reconciliation
 	// interval without adding any socket-generation evidence.
@@ -621,6 +641,7 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 		if !ok {
 			result.owner, result.err = o.process(row.pid)
 			processes[row.pid] = result
+			o.noteFailure("udp-reconcile-process", stage, key, "", result.err)
 		}
 		if result.err != nil {
 			continue
