@@ -28,6 +28,7 @@ export class Report {
       this.results.push({ name, label, status: error.defectNotReproduced ? 'defect-not-reproduced' : known ? 'confirmed-defect' : 'fail', ms: performance.now() - started,
         error: error.stack, evidence: error.evidence });
       console.error(`${known ? 'BASELINE DEFECT' : 'FAIL'} [${label}] ${name}: ${error.message}`);
+      if (error.evidence) console.error(`FAIL EVIDENCE ${JSON.stringify({ name, evidence: error.evidence })}`);
       if (!known || this.profile !== 'baseline') throw error;
     } finally {
       this.running = parent;

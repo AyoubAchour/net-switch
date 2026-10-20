@@ -379,7 +379,7 @@ func TestReadinessHalfCloseAndCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	for round := range 32 {
+	for round := range 256 {
 		client, err := net.Dial("tcp4", listener.Addr().String())
 		if err != nil {
 			t.Fatal(err)
@@ -389,6 +389,8 @@ func TestReadinessHalfCloseAndCancellation(t *testing.T) {
 			t.Fatal(err)
 		}
 		c := &readySocket{blocking: client.(*net.TCPConn), pool: pool, local: client.LocalAddr(), remote: client.RemoteAddr()}
+		defer c.Close()
+		defer server.Close()
 		wake := make(chan struct{}, 1)
 		w, err := c.Watch(func() {
 			select {
@@ -409,7 +411,9 @@ func TestReadinessHalfCloseAndCancellation(t *testing.T) {
 		}
 		if round%2 == 0 {
 			server.Write([]byte("actual reply"))
-			server.(*net.TCPConn).CloseWrite()
+			if err := server.(*net.TCPConn).CloseWrite(); err != nil {
+				t.Fatalf("round %d: peer half-close: %v", round, err)
+			}
 			var got []byte
 			deadline := time.After(3 * time.Second)
 			for {
@@ -434,13 +438,33 @@ func TestReadinessHalfCloseAndCancellation(t *testing.T) {
 			if string(got) != "actual reply" {
 				t.Fatal(string(got))
 			}
-			if _, err := c.TryWrite([]byte("still writable")); err != nil {
+			remaining := []byte("still writable")
+			for len(remaining) != 0 {
+				n, err := c.TryWrite(remaining)
+				remaining = remaining[n:]
+				if err != nil && !errors.Is(err, platform.ErrWouldBlock) {
+					t.Fatalf("round %d: reverse write: %v", round, err)
+				}
+				if len(remaining) != 0 {
+					if err := w.Arm(false, true); err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case <-wake:
+					case <-deadline:
+						t.Fatalf("round %d: reverse write readiness timeout", round)
+					}
+				}
+			}
+			if err := c.CloseWrite(); err != nil {
+				t.Fatalf("round %d: native half-close: %v", round, err)
+			}
+			if err := server.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 				t.Fatal(err)
 			}
-			c.CloseWrite()
 			reply, err := io.ReadAll(server)
 			if err != nil || string(reply) != "still writable" {
-				t.Fatalf("%q %v", reply, err)
+				t.Fatalf("round %d: native half-close returned success, peer received %q: %v", round, reply, err)
 			}
 		}
 		w.Detach() // Odd rounds cancel a genuinely pending zero-byte receive.
