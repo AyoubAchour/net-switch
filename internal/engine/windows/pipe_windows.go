@@ -12,6 +12,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -23,7 +24,7 @@ type Pipe struct {
 	name       string
 	standalone bool
 	mu         sync.Mutex
-	pending    windows.Handle
+	pending    winhandle.Owner
 	closed     bool
 	first      bool
 	accepting  bool
@@ -42,18 +43,18 @@ func ListenPipe(name string, standalone bool) (*Pipe, error) {
 	return p, nil
 }
 
-func (p *Pipe) create() (windows.Handle, error) {
+func (p *Pipe) create() (winhandle.Owner, error) {
 	acl := "D:P(A;;GA;;;SY)"
 	if p.standalone {
 		acl = "D:P(A;;GA;;;SY)(A;;GRGW;;;BA)"
 	}
 	sa, err := security(acl)
 	if err != nil {
-		return 0, err
+		return winhandle.Owner{}, err
 	}
 	name, err := windows.UTF16PtrFromString(p.name)
 	if err != nil {
-		return 0, err
+		return winhandle.Owner{}, err
 	}
 	mode := uint32(windows.PIPE_ACCESS_DUPLEX | windows.FILE_FLAG_OVERLAPPED)
 	if p.first {
@@ -62,8 +63,9 @@ func (p *Pipe) create() (windows.Handle, error) {
 	h, err := windows.CreateNamedPipe(name, mode, windows.PIPE_TYPE_BYTE|windows.PIPE_READMODE_BYTE|windows.PIPE_REJECT_REMOTE_CLIENTS, 5, 64<<10, 64<<10, 0, sa)
 	if err == nil {
 		p.first = false
+		return winhandle.Open(h, "engine pipe instance open"), nil
 	}
-	return h, err
+	return winhandle.Owner{}, err
 }
 
 func (p *Pipe) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
@@ -79,31 +81,32 @@ func (p *Pipe) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		p.accepting = false
-		if p.closed && p.pending != 0 {
-			windows.CloseHandle(p.pending)
-			p.pending = 0
+		if p.closed && !p.pending.IsZero() {
+			p.pending.HandleClose("engine pipe cancelled accept close")
+			p.pending = winhandle.Owner{}
 		}
 	}()
 	event, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer windows.CloseHandle(event)
-	op := windows.Overlapped{HEvent: event}
+	eventOwner := winhandle.Open(event, "engine pipe accept event open")
+	defer eventOwner.HandleClose("engine pipe accept event close")
+	op := windows.Overlapped{HEvent: eventOwner.Handle("engine pipe accept event")}
 	var pinned runtime.Pinner
 	pinned.Pin(&op)
 	defer pinned.Unpin()
-	err = windows.ConnectNamedPipe(h, &op)
+	err = windows.ConnectNamedPipe(h.Handle("engine pipe accept"), &op)
 	if errors.Is(err, windows.ERROR_IO_PENDING) {
 		p.mu.Lock()
 		if p.closed {
-			windows.CancelIoEx(h, &op)
+			windows.CancelIoEx(h.Handle("engine pipe accept already closed"), &op)
 		}
 		p.mu.Unlock()
 		cancelDone := make(chan struct{})
-		stop := context.AfterFunc(ctx, func() { windows.CancelIoEx(h, &op); close(cancelDone) })
+		stop := context.AfterFunc(ctx, func() { windows.CancelIoEx(h.Handle("engine pipe accept context cancel"), &op); close(cancelDone) })
 		var bytes uint32
-		err = windows.GetOverlappedResult(h, &op, &bytes, true)
+		err = windows.GetOverlappedResult(h.Handle("engine pipe accept completion"), &op, &bytes, true)
 		if !stop() {
 			<-cancelDone
 		}
@@ -112,14 +115,14 @@ func (p *Pipe) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
 		err = nil
 	}
 	if errors.Is(err, windows.ERROR_NO_DATA) {
-		windows.DisconnectNamedPipe(h)
+		windows.DisconnectNamedPipe(h.Handle("engine pipe early disconnect"))
 		return nil, fmt.Errorf("%w: client disconnected before accept", errPeerRefused)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if err := authenticatePipe(h, p.standalone); err != nil {
-		windows.DisconnectNamedPipe(h)
+	if err := authenticatePipe(h.Handle("engine pipe authenticate"), p.standalone); err != nil {
+		windows.DisconnectNamedPipe(h.Handle("engine pipe refused peer"))
 		return nil, fmt.Errorf("%w: %v", errPeerRefused, err)
 	}
 	p.mu.Lock()
@@ -131,14 +134,14 @@ func (p *Pipe) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
 	// let another server race our next CreateNamedPipe.
 	next, err := p.create()
 	if err != nil {
-		windows.DisconnectNamedPipe(h)
+		windows.DisconnectNamedPipe(h.Handle("engine pipe replacement failure"))
 		if errors.Is(err, windows.ERROR_PIPE_BUSY) {
 			return nil, fmt.Errorf("%w: four control connections are already active", errPeerRefused)
 		}
 		return nil, err
 	}
 	p.pending = next
-	return os.NewFile(uintptr(h), p.name), nil
+	return winhandle.NewFile(h, p.name), nil
 }
 
 func authenticatePipe(h windows.Handle, standalone bool) error {
@@ -152,12 +155,15 @@ func authenticatePipe(h windows.Handle, standalone bool) error {
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(process)
+	processOwner := winhandle.Open(process, "pipe client process open")
+	defer processOwner.HandleClose("pipe client process close")
 	var token windows.Token
-	if err := windows.OpenProcessToken(process, windows.TOKEN_QUERY, &token); err != nil {
+	if err := windows.OpenProcessToken(processOwner.Handle("pipe client token open"), windows.TOKEN_QUERY, &token); err != nil {
 		return err
 	}
-	defer token.Close()
+	tokenOwner := winhandle.Open(windows.Handle(token), "pipe client token")
+	defer tokenOwner.CloseGo("pipe client token close", token.Close)
+	tokenOwner.Handle("pipe client token identity")
 	user, err := token.GetTokenUser()
 	if err != nil {
 		return err
@@ -178,10 +184,10 @@ func (p *Pipe) Close() error {
 		return nil
 	}
 	p.closed = true
-	windows.CancelIoEx(p.pending, nil)
+	windows.CancelIoEx(p.pending.Handle("engine pipe listener cancel"), nil)
 	if !p.accepting {
-		err := windows.CloseHandle(p.pending)
-		p.pending = 0
+		err := p.pending.HandleClose("engine pipe listener close")
+		p.pending = winhandle.Owner{}
 		return err
 	}
 	// Accept owns the pending OVERLAPPED until cancellation completes. Closing

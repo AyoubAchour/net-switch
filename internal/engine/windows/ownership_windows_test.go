@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -31,8 +32,9 @@ func ownershipSquatter() error {
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(h)
-	defer windows.ReleaseMutex(h)
+	owner := winhandle.Open(h, "squatter mutex open")
+	defer owner.HandleClose("squatter mutex close")
+	defer func() { windows.ReleaseMutex(owner.Handle("squatter mutex release")) }()
 	fmt.Println("MEDIUM SQUATTER HOLDS GLOBAL MUTEX")
 	_, err = io.Copy(io.Discard, os.Stdin)
 	return err
@@ -50,7 +52,7 @@ func TestOwnershipLockIgnoresGlobalSquatter(t *testing.T) {
 	defer cancel()
 	child := exec.CommandContext(ctx, executable)
 	child.Env = append(os.Environ(), "NETSWITCH_OWNERSHIP_SQUATTER=1")
-	child.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(token), CreationFlags: windows.DETACHED_PROCESS, HideWindow: true}
+	child.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(token.owner.Handle("restricted squatter launch")), CreationFlags: windows.DETACHED_PROCESS, HideWindow: true}
 	input, err := child.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -74,8 +76,9 @@ func TestOwnershipLockIgnoresGlobalSquatter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer windows.CloseHandle(squatted)
-	if result, err := windows.WaitForSingleObject(squatted, 0); err != nil || result != uint32(windows.WAIT_TIMEOUT) {
+	squatterOwner := winhandle.Open(squatted, "squatter mutex observer open")
+	defer squatterOwner.HandleClose("squatter mutex observer close")
+	if result, err := windows.WaitForSingleObject(squatterOwner.Handle("squatter mutex observer wait"), 0); err != nil || result != uint32(windows.WAIT_TIMEOUT) {
 		t.Fatalf("old mutex was not held: result=%d err=%v", result, err)
 	}
 	unlock, err := (OwnershipLock{}).Acquire(ctx)

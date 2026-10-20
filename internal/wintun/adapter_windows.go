@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -59,7 +60,7 @@ var pinnedDLL = map[string]string{
 
 type library struct {
 	module                                  windows.Handle
-	file                                    *os.File // Denies replacement/writes for the lifetime of the loaded DLL.
+	file                                    *winhandle.File // Denies replacement/writes for the lifetime of the loaded DLL.
 	create, open, close, luid, deleteDriver uintptr
 }
 
@@ -110,7 +111,7 @@ func loadVerifiedLibrary() (*library, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(h), path)
+	f := winhandle.NewFile(winhandle.Open(h, "Wintun DLL guard open"), path)
 	ok := false
 	defer func() {
 		if !ok {

@@ -21,6 +21,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"github.com/AyoubAchour/net-switch/internal/wintun"
 	"golang.org/x/sys/windows"
 )
@@ -392,18 +393,19 @@ func TestOwnerIPv6AndMappedIPv4(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer windows.Closesocket(socket)
-			if err := windows.SetsockoptInt(socket, windows.IPPROTO_IPV6, windows.IPV6_V6ONLY, 0); err != nil {
+			socketOwner := winhandle.Open(socket, "mapped TCP regression open")
+			defer socketOwner.SocketClose("mapped TCP regression close")
+			if err := windows.SetsockoptInt(socketOwner.Handle("mapped TCP dual-stack"), windows.IPPROTO_IPV6, windows.IPV6_V6ONLY, 0); err != nil {
 				t.Fatal(err)
 			}
-			if err := windows.SetsockoptLinger(socket, windows.SOL_SOCKET, windows.SO_LINGER, &windows.Linger{Onoff: 1}); err != nil {
+			if err := windows.SetsockoptLinger(socketOwner.Handle("mapped TCP fixture cleanup mode"), windows.SOL_SOCKET, windows.SO_LINGER, &windows.Linger{Onoff: 1}); err != nil {
 				t.Fatal(err)
 			}
-			if err := windows.Bind(socket, &windows.SockaddrInet6{}); err != nil {
+			if err := windows.Bind(socketOwner.Handle("mapped TCP bind"), &windows.SockaddrInet6{}); err != nil {
 				t.Fatal(err)
 			}
 			destination := netip.MustParseAddr(scenario.destination).As16()
-			if err := windows.Connect(socket, &windows.SockaddrInet6{Addr: destination, Port: listener.Addr().(*net.TCPAddr).Port}); err != nil {
+			if err := windows.Connect(socketOwner.Handle("mapped TCP connect"), &windows.SockaddrInet6{Addr: destination, Port: listener.Addr().(*net.TCPAddr).Port}); err != nil {
 				t.Fatal(err)
 			}
 			peer, err := listener.Accept()
@@ -530,10 +532,11 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 			runtime.GC()
 		}
 		if _, err := c.TryRead(make([]byte, 10)); !errors.Is(err, platform.ErrWouldBlock) {
-			local, localErr := windows.Getsockname(c.handle)
-			kind, kindErr := windows.GetsockoptInt(c.handle, windows.SOL_SOCKET, 0x1008)
+			h := c.handle.Handle("TCP initial-read failure diagnostic")
+			local, localErr := windows.Getsockname(h)
+			kind, kindErr := windows.GetsockoptInt(h, windows.SOL_SOCKET, 0x1008)
 			t.Fatalf("round %d after transfer (GC=%t): %v; descriptor=%d local=%#v/%v type=%d/%v",
-				round, collect, err, c.handle, local, localErr, kind, kindErr)
+				round, collect, err, h, local, localErr, kind, kindErr)
 		}
 		if err := w.Arm(true, false); err != nil {
 			t.Fatal(err)
@@ -591,13 +594,14 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 			if err := c.CloseWrite(); err != nil {
 				// Keep the original failure, but observe the actual peer before
 				// deferred close can turn a missing FIN into an apparent EOF.
-				local, localErr := windows.Getsockname(c.handle)
-				peer, peerErr := windows.Getpeername(c.handle)
-				socketError, socketErr := windows.GetsockoptInt(c.handle, windows.SOL_SOCKET, 0x1007) // SO_ERROR (Winsock).
+				h := c.handle.Handle("TCP half-close failure diagnostic")
+				local, localErr := windows.Getsockname(h)
+				peer, peerErr := windows.Getpeername(h)
+				socketError, socketErr := windows.GetsockoptInt(h, windows.SOL_SOCKET, 0x1007) // SO_ERROR (Winsock).
 				server.SetReadDeadline(time.Now().Add(time.Second))
 				reply, readErr := io.ReadAll(server)
 				t.Fatalf("round %d: native half-close: %v; descriptor=%d local=%+v/%v peer=%+v/%v SO_ERROR=%d/%v; before cleanup peer received %q read=%v",
-					round, err, c.handle, local, localErr, peer, peerErr, socketError, socketErr, reply, readErr)
+					round, err, h, local, localErr, peer, peerErr, socketError, socketErr, reply, readErr)
 			}
 			if err := server.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 				t.Fatal(err)
@@ -641,7 +645,7 @@ func TestStateDirectoryHandleExcludesReplacement(t *testing.T) {
 			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 			nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
 		if err == nil {
-			windows.CloseHandle(handle)
+			winhandle.Open(handle, "directory replacement probe open").HandleClose("directory replacement probe close")
 		}
 		return err
 	}

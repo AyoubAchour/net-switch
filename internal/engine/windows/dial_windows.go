@@ -17,6 +17,7 @@ import (
 	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -107,17 +108,18 @@ func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort
 }
 
 type udpSocket struct {
-	conn   *net.UDPConn
-	raw    syscall.RawConn
-	mu     sync.Mutex
-	v6     bool
-	mtu    uint32
-	luid   uint64
-	local  netip.AddrPort
-	pool   *udpReadiness
-	watch  *udpWatch
-	handle windows.Handle
-	closed bool
+	conn    *net.UDPConn
+	raw     syscall.RawConn
+	mu      sync.Mutex
+	v6      bool
+	mtu     uint32
+	luid    uint64
+	local   netip.AddrPort
+	pool    *udpReadiness
+	watch   *udpWatch
+	handle  winhandle.Owner
+	goOwner winhandle.Owner
+	closed  bool
 }
 
 func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UDPConn, error) {
@@ -159,10 +161,17 @@ func (s *udpSocket) Close() error {
 	}
 	s.closed = true
 	if s.watch == nil {
-		return s.conn.Close()
+		if s.goOwner.IsZero() {
+			var err error
+			s.goOwner, err = ownGoDescriptor(s.conn, "UDP Go connection before close")
+			if err != nil {
+				return err
+			}
+		}
+		return s.goOwner.CloseGo("UDP Go connection close", s.conn.Close)
 	}
 	s.watch.Detach()
-	return errors.Join(s.watch.err, windows.Closesocket(s.handle))
+	return errors.Join(s.watch.err, s.handle.SocketClose("UDP native socket close"))
 }
 func (s *udpSocket) LocalAddr() netip.AddrPort { return s.local }
 func (s *udpSocket) WaitReadable(ctx context.Context) error {
@@ -312,12 +321,20 @@ func (d *Dialer) Echo(ctx context.Context, line string, destination netip.Addr, 
 	if h == uintptr(windows.InvalidHandle) {
 		return nil, callErr
 	}
-	defer iphlp.NewProc("IcmpCloseHandle").Call(h)
+	icmpOwner := winhandle.Open(windows.Handle(h), "ICMP echo handle open")
+	defer icmpOwner.Close("ICMP echo handle close", func(value windows.Handle) error {
+		ok, _, err := iphlp.NewProc("IcmpCloseHandle").Call(uintptr(value))
+		if ok == 0 {
+			return err
+		}
+		return nil
+	})
 	event, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
 		return nil, err
 	}
-	defer windows.CloseHandle(event)
+	eventOwner := winhandle.Open(event, "ICMP completion event open")
+	defer eventOwner.HandleClose("ICMP completion event close")
 	payload := request[8:]
 	reply := make([]byte, len(payload)+256)
 	options := ipOptions{TTL: 64}
@@ -336,12 +353,12 @@ func (d *Dialer) Echo(ctx context.Context, line string, destination netip.Addr, 
 			src.Scope_id = a.Index6
 		}
 		dst := windows.RawSockaddrInet6{Family: windows.AF_INET6, Addr: destination.As16()}
-		count, _, callErr = iphlp.NewProc("Icmp6SendEcho2").Call(h, uintptr(event), 0, 0,
+		count, _, callErr = iphlp.NewProc("Icmp6SendEcho2").Call(uintptr(icmpOwner.Handle("ICMPv6 echo")), uintptr(eventOwner.Handle("ICMPv6 completion event")), 0, 0,
 			uintptr(unsafe.Pointer(&src)), uintptr(unsafe.Pointer(&dst)), data, uintptr(len(payload)),
 			uintptr(unsafe.Pointer(&options)), uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)), uintptr(timeout))
 	} else {
 		src, dst := source.As4(), destination.As4()
-		count, _, callErr = iphlp.NewProc("IcmpSendEcho2Ex").Call(h, uintptr(event), 0, 0,
+		count, _, callErr = iphlp.NewProc("IcmpSendEcho2Ex").Call(uintptr(icmpOwner.Handle("ICMPv4 echo")), uintptr(eventOwner.Handle("ICMPv4 completion event")), 0, 0,
 			uintptr(binary.LittleEndian.Uint32(src[:])), uintptr(binary.LittleEndian.Uint32(dst[:])),
 			data, uintptr(len(payload)), uintptr(unsafe.Pointer(&options)), uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)), uintptr(timeout))
 	}
@@ -349,7 +366,7 @@ func (d *Dialer) Echo(ctx context.Context, line string, destination netip.Addr, 
 		return nil, callErr
 	}
 	if count == 0 {
-		status, err := windows.WaitForSingleObject(event, timeout+1000)
+		status, err := windows.WaitForSingleObject(eventOwner.Handle("ICMP completion wait"), timeout+1000)
 		if err != nil {
 			return nil, err
 		}
