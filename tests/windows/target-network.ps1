@@ -1,9 +1,9 @@
-param([ValidateSet('allow', 'ipv6', 'capture', 'clean')] [string] $Action)
+param([ValidateSet('allow', 'ipv6', 'capacity-ipv6', 'capture', 'clean')] [string] $Action)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted Windows runners only.' }
 $names = @('NetSwitch-acceptance-client-udp', 'NetSwitch-acceptance-gateway-udp', 'NetSwitch-acceptance-engine-udp', 'NetSwitch-acceptance-probe-udp')
 $captureNames = @('NetSwitch-acceptance-capture-client', 'NetSwitch-acceptance-capture-mtu', 'NetSwitch-acceptance-capture-quic', 'NetSwitch-acceptance-capture-ping', 'NetSwitch-acceptance-capture-udp')
-if ($Action -eq 'ipv6') {
+if ($Action -in @('ipv6', 'capacity-ipv6')) {
   $primary = [int]$env:ACCEPTANCE_UPLINK
   $virtual = [int]$env:ACCEPTANCE_TESTISP
   if ($primary -le 0 -or $virtual -le 0 -or (Get-NetAdapter -InterfaceIndex $virtual).Name -ne 'TestISP') { throw 'Missing harness interface identities.' }
@@ -14,8 +14,10 @@ if ($Action -eq 'ipv6') {
   New-NetIPAddress -InterfaceIndex $virtual -IPAddress '2001:db8:19::1' -PrefixLength 64 -AddressFamily IPv6 -PolicyStore ActiveStore | Out-Null
   Set-NetIPInterface -InterfaceIndex $virtual -AddressFamily IPv6 -AutomaticMetric Disabled -InterfaceMetric 5500 -NlMtuBytes 1500
   New-NetRoute -InterfaceIndex $virtual -DestinationPrefix '::/0' -NextHop '::' -RouteMetric 5500 -PolicyStore ActiveStore | Out-Null
-  New-NetRoute -InterfaceIndex $virtual -DestinationPrefix '198.19.128.2/32' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
-  New-NetRoute -InterfaceIndex $virtual -DestinationPrefix '2001:db8:198::2/128' -NextHop '::' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
+  if ($Action -eq 'ipv6') {
+    New-NetRoute -InterfaceIndex $virtual -DestinationPrefix '198.19.128.2/32' -NextHop '0.0.0.0' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
+    New-NetRoute -InterfaceIndex $virtual -DestinationPrefix '2001:db8:198::2/128' -NextHop '::' -RouteMetric 1 -PolicyStore ActiveStore | Out-Null
+  }
   $deadline = [DateTime]::UtcNow.AddSeconds(20)
   do {
     $addresses = @(Get-NetIPAddress -IPAddress @('2001:db8:18::1', '2001:db8:19::1') -AddressFamily IPv6)

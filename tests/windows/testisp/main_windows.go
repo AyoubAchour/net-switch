@@ -83,6 +83,7 @@ type gateway struct {
 	uplinkIP     net.IP
 	mode         atomic.Int32 // 0 running, 1 paused, 2 dropping
 	stats        observations
+	udpCapacity  udpCapacityResponder
 	targetMu     sync.RWMutex
 	targets      map[string]string
 	done         chan struct{}
@@ -128,6 +129,7 @@ func serve(args []string) error {
 	defer listener.Close()
 	mux := http.NewServeMux()
 	g.installCapacity(mux)
+	g.installUDPCapacity(mux)
 	mux.HandleFunc("POST /targets", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Ports []int `json:"ports"`

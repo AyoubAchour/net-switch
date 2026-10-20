@@ -39,6 +39,9 @@ func (g *gateway) udpHandler(link *channel.Endpoint) func(stack.TransportEndpoin
 		if !validLength || !validChecksum {
 			return true
 		}
+		if g.capacityUDP(id, packet, link) {
+			return true
+		}
 		key := net.JoinHostPort(id.RemoteAddress.String(), portString(id.RemotePort))
 		destination := net.JoinHostPort(id.LocalAddress.String(), portString(id.LocalPort))
 		mu.Lock()

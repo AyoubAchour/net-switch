@@ -31,6 +31,7 @@ func (r *Runtime) Stats() any {
 	stats := r.Engine.Stats().(map[string]any)
 	stats["ownerLookup"] = r.owners.Stats()
 	stats["socketResources"] = r.dialer.ports.stats()
+	stats["udpSocketExhaustions"] = r.dialer.udpExhaustions.Load()
 	stats["bindings"] = r.routes.Bindings()
 	stats["wintun"] = r.routes.TunStats()
 	stats["lifecyclePhases"] = r.routes.timings.snapshot()

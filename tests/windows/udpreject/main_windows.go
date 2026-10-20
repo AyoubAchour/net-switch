@@ -34,6 +34,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Hosted Windows runners only.")
 		os.Exit(1)
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--capacity" {
+		if err := capacityProbe(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	address := flag.String("address", "", "Controlled UDP target")
 	count := flag.Int("count", 100, "Concurrent UDP sockets")
 	timeout := flag.Duration("timeout", 5*time.Second, "Per-socket refusal deadline")
