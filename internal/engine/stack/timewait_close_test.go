@@ -1,6 +1,7 @@
 package stack_test
 
 import (
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -78,6 +79,12 @@ func TestTimeWaitSYNBeforeRemoval(t *testing.T) {
 	select {
 	case <-clock.entered:
 	case <-time.After(time.Second):
+		clock.mu.Lock()
+		t.Logf("cleanup barrier: target=%p latest=%p state=%s", clock.target.Load(), clock.latest, tcp.EndpointState(ep.State()))
+		clock.mu.Unlock()
+		buf := make([]byte, 1<<20)
+		n := runtime.Stack(buf, true)
+		t.Logf("goroutines:\n%s", buf[:n])
 		t.Fatal("cleanup did not stop its timer")
 	}
 	if got := p.stack.FindTransportEndpoint(header.IPv4ProtocolNumber, tcp.ProtocolNumber, id, ns.NIC); got != ep {

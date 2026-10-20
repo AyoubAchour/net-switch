@@ -61,7 +61,7 @@ index 62f42f4..b42da44 100644
  			extendTimeWait = true
  		}
 diff --git a/pkg/tcpip/transport/tcp/dispatcher.go b/pkg/tcpip/transport/tcp/dispatcher.go
-index d138e3b..ace2723 100644
+index d138e3b..fd89a21 100644
 --- a/pkg/tcpip/transport/tcp/dispatcher.go
 +++ b/pkg/tcpip/transport/tcp/dispatcher.go
 @@ -12,6 +12,8 @@
@@ -86,7 +86,7 @@ index d138e3b..ace2723 100644
  	cleanup := func() {
  		ep.mu.Unlock()
  		ep.drainClosingSegmentQueue()
-@@ -202,6 +210,12 @@ func handleConnected(ep *Endpoint) {
+@@ -202,8 +210,17 @@ func handleConnected(ep *Endpoint) {
  	if !ep.TryLock() {
  		return
  	}
@@ -97,9 +97,15 @@ index d138e3b..ace2723 100644
 +// +checklocksrelease:ep.mu
 +func handleConnectedLocked(ep *Endpoint) {
  
- 	if !ep.EndpointState().connected() {
+-	if !ep.EndpointState().connected() {
++	// Ordered ingress may finish the FIN after the processor selects this
++	// handler but before it acquires mu. TIME_WAIT already owns its timer;
++	// do not restart it. The processor requeues any remaining segments.
++	if state := ep.EndpointState(); !state.connected() || state == StateTimeWait {
  		// If the endpoint has already transitioned out of a connected
-@@ -235,6 +249,12 @@ func handleConnected(ep *Endpoint) {
+ 		// state then just return (only possible if it was closed or
+ 		// timed out by the time we got around to processing the wakeup.
+@@ -235,6 +252,12 @@ func handleConnected(ep *Endpoint) {
  //
  // +checklocks:ep.mu
  func startTimeWait(ep *Endpoint) {
@@ -112,7 +118,7 @@ index d138e3b..ace2723 100644
  	// Disable close timer as we are now entering real TIME_WAIT.
  	if ep.finWait2Timer != nil {
  		ep.finWait2Timer.Stop()
-@@ -501,6 +521,15 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
+@@ -501,6 +524,15 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
  		return
  	}
  
@@ -128,6 +134,82 @@ index d138e3b..ace2723 100644
  	// Only wakeup the processor if endpoint lock is not held by a user
  	// goroutine as endpoint.UnlockUser will wake up the processor if the
  	// segment queue is not empty.
+diff --git a/pkg/tcpip/transport/tcp/dispatcher_netswitch_test.go b/pkg/tcpip/transport/tcp/dispatcher_netswitch_test.go
+new file mode 100644
+index 0000000..2101b3d
+--- /dev/null
++++ b/pkg/tcpip/transport/tcp/dispatcher_netswitch_test.go
+@@ -0,0 +1,70 @@
++package tcp
++
++import (
++	"testing"
++	"time"
++
++	"gvisor.dev/gvisor/pkg/tcpip"
++	"gvisor.dev/gvisor/pkg/tcpip/faketime"
++	"gvisor.dev/gvisor/pkg/tcpip/header"
++	"gvisor.dev/gvisor/pkg/tcpip/stack"
++	"gvisor.dev/gvisor/pkg/waiter"
++)
++
++type dispatchClock struct {
++	*faketime.ManualClock
++}
++
++func (c dispatchClock) AfterFunc(d time.Duration, f func()) tcpip.Timer {
++	return &dispatchTimer{Timer: c.ManualClock.AfterFunc(d, f)}
++}
++
++type dispatchTimer struct {
++	tcpip.Timer
++	stops int
++}
++
++func (t *dispatchTimer) Stop() bool {
++	t.stops++
++	return t.Timer.Stop()
++}
++
++func TestConnectedDispatchAfterTimeWait(t *testing.T) {
++	clock := dispatchClock{faketime.NewManualClock()}
++	s := stack.New(stack.Options{Clock: clock, TransportProtocols: []stack.TransportProtocolFactory{NewProtocol}})
++	defer s.Wait()
++	defer s.Close()
++	ep := newEndpoint(s, protocolFromStack(s), header.IPv4ProtocolNumber, &waiter.Queue{})
++	ep.snd = &sender{}
++	leaves := 0
++	ep.SetTimeWaitPolicy(nil, func() { leaves++ })
++
++	// The processor selected handleConnected while the endpoint was connected.
++	// Before it acquires the lock, ordered ingress completes the FIN transition.
++	ep.mu.Lock()
++	ep.setEndpointState(StateTimeWait)
++	startTimeWait(ep)
++	original := ep.timeWaitTimer.(*dispatchTimer)
++	ep.mu.Unlock()
++	clock.Advance(10 * time.Second)
++
++	// Resume that exact stale dispatch without relying on goroutine scheduling.
++	handleConnected(ep)
++	ep.mu.Lock()
++	replaced := ep.timeWaitTimer != original
++	ep.mu.Unlock()
++	if replaced {
++		t.Error("stale connected dispatch replaced the live TIME_WAIT timer")
++	}
++
++	clock.Advance(50 * time.Second)
++	if original.stops != 1 {
++		t.Errorf("original timer cleanup barrier reached %d times, want 1", original.stops)
++	}
++	if got := ep.EndpointState(); got != StateClose {
++		t.Fatalf("original TIME_WAIT deadline: state=%s, want CLOSED", got)
++	}
++	if leaves != 1 {
++		t.Fatalf("cleanup calls=%d, want 1", leaves)
++	}
++}
 diff --git a/pkg/tcpip/transport/tcp/endpoint.go b/pkg/tcpip/transport/tcp/endpoint.go
 index 788a2f2..f732204 100644
 --- a/pkg/tcpip/transport/tcp/endpoint.go

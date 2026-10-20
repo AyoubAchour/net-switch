@@ -62,6 +62,8 @@ try {
   }
   run('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', 'apply', ...(diffOnly ? ['--recount'] : []), '--unsafe-paths', '--whitespace=nowarn', path.join(root, 'third_party/gvisor-timewait.patch')], staging);
   if (diffOnly) {
+    // Include regression tests introduced by the patch, not just upstream files.
+    run('git', ['-c', 'core.autocrlf=false', 'add', '--intent-to-add', '.'], staging);
     process.stdout.write(run('git', [
       '-c', 'core.autocrlf=false', '-c', 'core.eol=lf',
       '-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false',
