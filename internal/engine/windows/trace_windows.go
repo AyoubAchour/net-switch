@@ -32,10 +32,19 @@ func newPacketTrace() *packetTrace {
 	return &packetTrace{}
 }
 
-// Hosted diagnostics only. Observe the controlled responder's UDP/ICMP headers
+// Hosted diagnostics only. Observe the controlled responder's UDP/ICMP and
+// TCP SYN/RST headers
 // at the real Wintun boundary, without altering packets or doing any I/O here.
 func (t *packetTrace) record(direction string, packet []byte, written, batch int, err error) {
-	if t == nil || len(packet) < 20 || packet[0]>>4 != 4 || (packet[9] != 1 && packet[9] != 17) {
+	if t == nil || len(packet) < 20 || packet[0]>>4 != 4 {
+		return
+	}
+	if packet[9] == 6 {
+		offset := int(packet[0]&15) * 4
+		if offset < 20 || len(packet) < offset+20 || packet[offset+13]&0x06 == 0 {
+			return
+		}
+	} else if packet[9] != 1 && packet[9] != 17 {
 		return
 	}
 	target := [4]byte{198, 19, 128, 2}

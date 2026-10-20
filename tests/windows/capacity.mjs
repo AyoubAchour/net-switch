@@ -170,6 +170,14 @@ export async function capacity({ server, harness, directory, line }) {
     console.log(`WINDOWS OS-LIMIT CAPACITY RESULT ${JSON.stringify(evidence)}`);
     assert(samples.every((s) => s.runtimeBytes <= 512 * 1024 * 1024), `512 MiB runtime budget exceeded: ${JSON.stringify(evidence)}`);
     return evidence;
+  } catch (error) {
+    // Read this before closing fixture sockets: teardown would erase the
+    // held-flow state and overwrite a bounded SYN/RST boundary capture.
+    error.evidence = {
+      statsBeforeCleanup: await engineStats().catch((failure) => ({ error: failure.message })),
+      clientsBeforeCleanup: await Promise.all(children.map(({ call }) => call('status').catch((failure) => ({ error: failure.message })))),
+    };
+    throw error;
   } finally {
     for (const { child, call } of children) {
       if (child.connected) { await call('close').catch(() => {}); child.disconnect(); }

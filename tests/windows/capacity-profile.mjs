@@ -29,6 +29,7 @@ try {
   result.complete = true;
 } catch (error) {
   result.error = error.stack;
+  result.evidence = error.evidence;
   if (server) result.stats = await server.api('engine-command', { method: 'stats' }).catch(String);
   console.error(error);
   console.error(`WINDOWS CAPACITY FAILURE ${JSON.stringify(result)}`);
