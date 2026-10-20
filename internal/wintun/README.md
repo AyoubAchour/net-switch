@@ -81,7 +81,10 @@ recorded, then one retry releases the DLL's queued packet; the slow attempt stay
 in the distribution. Our path must have zero missed-wake rescues, without
 exceptions. Every round trip over 50 ms is classified after the run. A 1 ms
 QPC heartbeat on a locked OS thread uses a native high-resolution timer; an
-independent Go timer sampler detects pauses across the process. Only shared
+independent Go timer sampler detects pauses across the process. Both timestamp
+their observations with QPC. A gap longer than two sampling periods (2 ms)
+means a sample was missed; ordinary 1 ms intervals do not count as pauses.
+The gap retention cutoff is separate from the classification allowance. Only shared
 pause coverage leaving at most five sampling periods (5 ms) unexplained, without
 a rescue, counts as an environment pause. A delayed sampler alone or more than
 5 ms unexplained still fails our session. Coverage is the union of the intersections of
@@ -90,13 +93,53 @@ or split observations cannot count the same time twice. This identifies process/
 not whether the Go runtime, OS or hypervisor caused them; the old uninstrumented
 failure cannot be classified retroactively.
 
-Every slow reply logs both sets of overlapping QPC intervals, our session's
+Every slow reply logs both sets of overlapping QPC intervals, every sampler
+timestamp inside and bracketing the reply, the unexplained duration, our session's
 read waits/wakes, write wakeups and atomic ring head/tail observations at the
 gap endpoints and reply. The native sampler also retains observations during
 in-flight replies older than 25 ms, so unexplained stalls have evidence from
 inside the delay. Observations never block on a session lock. A hosted
 test suspends only its own child process to prove both samplers detect a real
-process pause, and verifies that an idle caller alone is not exempted.
+process pause, and verifies that an idle caller alone is not exempted. Another
+hosted test holds the real session's reader lock, proves a packet is queued
+behind it, then releases it after 80 ms while both samplers continue running.
+That completed reply must still classify as a session stall.
+
+### ARM64 borderline trace
+
+[Job 118761509687](https://github.com/AyoubAchour/net-switch/actions/runs/39461404208/job/118761509687)
+recorded sequence 174468 at QPC frequency 10 MHz:
+the trip was `[3786091692, 3786734914]`, the heartbeat gap was
+`[3786075803, 3786730140]`, and the two scheduler gaps were
+`[3786075928, 3786320714]` and `[3786366941, 3786733534]`.
+Their intersections explain 59.2221 ms of 64.3222 ms. The remaining 5.1001 ms
+consists of a 4.6227 ms hole between scheduler gaps and 0.4774 ms after the
+heartbeat resumed. Adding the two scheduler durations directly would ignore
+clipping to the trip and the heartbeat.
+
+The old monitor discarded every interval of 5 ms or less. It therefore cannot
+tell us whether that hole contained one late sample or several ordinary samples.
+Both histories produce the same old log. The regression replays both possible
+histories: a recorded 4.6227 ms missed sample explains 63.8448 ms and classifies as
+an environment pause; four ordinary samples leave 5.1001 ms unexplained and
+still classify as a session stall. With only the original evidence, the
+classification stays `session_stall`. Nearby gaps are never joined across
+unobserved time.
+
+This is a demonstrated measurement blind spot, not proof that the historical
+trip had no session delay. At the last heartbeat, the send ring still held one
+96-byte entry and one read wait had not returned; at reply that entry was read
+and its echo written. No rescue, drop, corruption or recovery was recorded.
+These snapshots cannot distinguish a descheduled reader from a delayed wake.
+No production session code changes on that evidence.
+
+The pinned Go 1.27.2 ARM64 runtime's `nanotime1` and `time.now` read Windows'
+shared interrupt/system time; `time.Sleep` uses that clock to schedule the Go
+sampler. Socket deadlines also use Go time. Neither provides the timestamps for
+the trip, samples or intersections: those already use QPC throughout. Changing
+the timestamp clock would therefore not repair this trace.
+
+### Performance and lifetime
 
 Throughput uses delivered UDP bytes over a fixed interval and complete, hashed
 TCP transfers, with one and eight streams. The UDP load generator is a separate
