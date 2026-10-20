@@ -13,6 +13,7 @@ import (
 	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"golang.org/x/sys/windows"
 )
 
@@ -100,15 +101,11 @@ type pollFD struct {
 }
 
 func (p *readiness) pollWrites() {
-	tick := time.NewTicker(2 * time.Millisecond)
-	defer tick.Stop()
 	var rows []pollFD
 	var watches []*socketWatch
 	for {
-		select {
-		case <-p.stop:
+		if !winclock.System.WaitDone(p.stop, 2*time.Millisecond) {
 			return
-		case <-tick.C:
 		}
 		rows, watches = rows[:0], watches[:0]
 		p.mu.Lock()

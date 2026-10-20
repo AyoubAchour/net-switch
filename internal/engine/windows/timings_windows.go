@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"github.com/AyoubAchour/net-switch/internal/wintun"
 )
 
@@ -36,8 +37,8 @@ func (p *phaseTimings) record(name string, elapsed time.Duration) {
 	p.values[name] = value
 }
 func (p *phaseTimings) begin(name string) func() {
-	started := time.Now()
-	return func() { p.record(name, time.Since(started)) }
+	started := winclock.Now()
+	return func() { p.record(name, winclock.Since(started)) }
 }
 func (p *phaseTimings) snapshot() map[string]phaseTiming {
 	p.mu.Lock()

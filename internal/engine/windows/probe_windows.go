@@ -16,10 +16,11 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/winclock"
 )
 
 func (d *Dialer) Probe(ctx context.Context, line, operator string) (platform.ProbeResult, error) {
-	start := time.Now()
+	start := winclock.Now()
 	if !d.Routes.active.Load() {
 		return platform.ProbeResult{Outcome: "engineUnavailable", Error: "routing engine is not running"}, nil
 	}
@@ -53,7 +54,7 @@ func (d *Dialer) Probe(ctx context.Context, line, operator string) (platform.Pro
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	result := func(ok bool, err error) (platform.ProbeResult, error) {
-		r := platform.ProbeResult{OK: ok, Outcome: "lineFailed", Latency: time.Since(start)}
+		r := platform.ProbeResult{OK: ok, Outcome: "lineFailed", Latency: winclock.Since(start)}
 		if ok {
 			r.Outcome = "ok"
 		}
