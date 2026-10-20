@@ -115,6 +115,7 @@ was copied or adapted.
 - [Winsock per-socket port reuse](https://learn.microsoft.com/windows/win32/winsock/sol-socket-socket-options)
 - [Datagram event readiness](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsaeventselect) and [WSAPoll](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsapoll)
 - [WSARecv flags and overlapped restrictions](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsarecv) and [WSARecvFrom](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsarecvfrom)
+- [Native socket-address storage and alignment](https://learn.microsoft.com/windows/win32/api/ws2def/ns-ws2def-sockaddr_storage_lh)
 - [WFP conditions and layers](https://learn.microsoft.com/windows/win32/fwp/filtering-conditions-available-at-each-filtering-layer)
 - [WFP filter arbitration](https://learn.microsoft.com/windows/win32/fwp/filter-arbitration)
 - [IP Helper route creation](https://learn.microsoft.com/windows/win32/api/netioapi/nf-netioapi-createipforwardentry2)
