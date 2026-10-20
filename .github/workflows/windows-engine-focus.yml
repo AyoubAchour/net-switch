@@ -2,7 +2,7 @@ name: Windows engine focus
 
 on:
   push:
-    branches: [engine/windows-platform-ci, engine/windows-platform-ci-x64, engine/windows-platform-native, engine/windows-platform-native-x64, engine/windows-platform-lifecycle, engine/windows-platform-udp, engine/windows-platform-capacity]
+    branches: [engine/windows-platform-ci, engine/windows-platform-ci-x64, engine/windows-platform-native, engine/windows-platform-native-x64, engine/windows-platform-native-ports, engine/windows-platform-lifecycle, engine/windows-platform-udp, engine/windows-platform-capacity]
   workflow_dispatch:
     inputs:
       arch:
@@ -73,7 +73,7 @@ jobs:
         if: ${{ !endsWith(github.ref, '-lifecycle') }}
         run: |
           if ('${{ github.ref }}'.Contains('windows-platform-native')) {
-            go test -count=1 -v ./internal/engine/windows ./internal/winclock ./internal/journal
+            go test -count=1 -v ./internal/engine/windows ./internal/engine/udp ./internal/winclock ./internal/journal
           } else {
             go test -count=1 -v ./internal/engine/... ./internal/journal ./internal/winclock ./tests/windows/testisp
           }
@@ -84,14 +84,14 @@ jobs:
           go test -race -count=1 -v ./internal/engine ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp ./internal/winclock ./internal/journal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Cold owner latency at 1950–2100 actual TCP rows
-        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && !endsWith(github.ref, '-ports') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
         env:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
           go test -count=1 -v -run '^TestOwnerSteadyColdTiming$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Attribute at least 995 of 1000 cold burst sockets
-        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && !endsWith(github.ref, '-ports') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
         env:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
@@ -129,12 +129,20 @@ jobs:
           node tests/windows/lifecycle-profile.mjs --profile v1 --engine-exe dist/windows-test/netswitch-engine.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Compare owner timing with the production processor default
-        if: ${{ !cancelled() && contains(github.ref, 'windows-platform-native') }}
+        if: ${{ !cancelled() && contains(github.ref, 'windows-platform-native') && !endsWith(github.ref, '-ports') }}
         env:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
           $env:GOMAXPROCS = ''
           go test -count=1 -v -run '^TestOwner(SteadyColdTiming|ColdBurstTiming)$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Isolate bound Winsock capacity and measure UDP timestamp collisions
+        if: ${{ !cancelled() && endsWith(github.ref, '-ports') }}
+        env:
+          NETSWITCH_PORT_GATE: '1'
+        run: |
+          Get-NetTCPSetting | Select-Object SettingName,DynamicPortRangeStartPort,DynamicPortRangeNumberOfPorts,AutoReusePortRangeStartPort,AutoReusePortRangeNumberOfPorts | ConvertTo-Json -Compress
+          go test -count=1 -v -run '^Test(NativeBoundPortCapacity|UDPGenerationCollisionWindow)$' -timeout=5m ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep every observed result
         if: ${{ always() && !contains(github.ref, 'windows-platform-native') }}
@@ -148,7 +156,7 @@ jobs:
             dist/windows-capacity/
           retention-days: 14
       - name: Repeat native half-close and cancellation after the owner measurements
-        if: ${{ !cancelled() && contains(github.ref, 'windows-platform-native') }}
+        if: ${{ !cancelled() && contains(github.ref, 'windows-platform-native') && !endsWith(github.ref, '-ports') }}
         run: |
           go test -count=32 -v -run '^TestReadinessHalfCloseAndCancellation$' -timeout=5m ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
