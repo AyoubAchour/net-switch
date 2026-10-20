@@ -15,6 +15,7 @@ import (
 // during Visit's callback; a positive socket hint copies the name it retains.
 type procDescriptors struct {
 	fd            int
+	open          bool
 	buffer        *[16 << 10]byte
 	position, end int
 }
@@ -24,24 +25,36 @@ func openProcDescriptors(path string) (procDescriptors, error) {
 	if err != nil {
 		return procDescriptors{}, err
 	}
-	return procDescriptors{fd: fd, buffer: processBuffers.Get()}, nil
+	return procDescriptors{fd: fd, open: true}, nil
 }
 
 func (d *procDescriptors) Close() error {
-	if d.buffer == nil {
+	if !d.open {
 		return nil
 	}
-	processBuffers.Put(d.buffer)
-	d.buffer = nil
+	d.open = false
+	if d.buffer != nil {
+		processBuffers.Put(d.buffer)
+		d.buffer = nil
+	}
 	return unix.Close(d.fd)
 }
 
 func (d *procDescriptors) Seek(offset int64, whence int) (int64, error) {
+	if !d.open {
+		return 0, unix.EBADF
+	}
 	d.position, d.end = 0, 0
 	return unix.Seek(d.fd, offset, whence)
 }
 
 func (d *procDescriptors) Visit(limit int, consume func([]byte) bool) (int, error) {
+	if !d.open {
+		return 0, unix.EBADF
+	}
+	if d.buffer == nil && limit > 0 {
+		d.buffer = processBuffers.Get()
+	}
 	count := 0
 	for count < limit {
 		if d.position == d.end {

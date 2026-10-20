@@ -8,6 +8,8 @@ import (
 	"os"
 	"strconv"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestProcDescriptorWindowsKeepEntriesAndReuseStorage(t *testing.T) {
@@ -66,5 +68,26 @@ func TestProcDescriptorWindowsKeepEntriesAndReuseStorage(t *testing.T) {
 	}
 	if allocs != 0 {
 		t.Fatalf("seek and targeted descriptor visit allocated %.1f objects", allocs)
+	}
+}
+
+func TestUnreadProcDescriptorDirectoryStillCloses(t *testing.T) {
+	dir, err := openProcDescriptors("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dir.Close()
+	var metadata unix.Stat_t
+	if err := unix.Fstat(dir.fd, &metadata); err != nil {
+		t.Fatal("fixture did not own an open directory:", err)
+	}
+	if dir.buffer != nil {
+		t.Fatal("opening a candidate eagerly borrowed scan storage")
+	}
+	if err := dir.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Fstat(dir.fd, &metadata); !errors.Is(err, unix.EBADF) {
+		t.Fatalf("unread candidate descriptor was not closed: %v", err)
 	}
 }
