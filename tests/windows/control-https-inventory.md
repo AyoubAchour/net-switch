@@ -24,6 +24,13 @@ for the new bb sockets. Engine metadata must identify the copied client, its
 source port, `tun/tun-in`, and the expected line. Refresh checks require the
 same client port, a reused socket and the same TLS responder connection ID.
 
+A client addressed directly to the runner's private IP would bypass the TUN's
+local-network exclusions. Also, sing-box 1.14.2's
+[`PUT /configs` handler](https://github.com/SagerNet/sing-box/blob/v1.14.2/experimental/clashapi/configs.go)
+does not reload routes. The rewrite therefore happens at Control's config-write
+boundary, before it starts the engine. The Go reader is excluded from ordinary
+builds; the Node hook lives only in the existing test launcher.
+
 No assertion deadline or request concurrency was increased, and no retry was
 added. There are 20 ordinary product-config lifecycle cycles after the traffic
 fixture. The original DNS-change observation remains an observation, not a
@@ -48,6 +55,7 @@ retried or counted as a pass.
 | TestISP proof: pause/drop, route withdrawal, direct-only firewall block, unaffected path and recovery | Same | **Can move the fault assertions local**, after keeping the public baseline on both paths. A replacement must still depend on the selected interface's default route; a local host route would invalidate withdrawal coverage. |
 | Product background health while Node Control/acceptance runs | `https://1.1.1.1/cdn-cgi/trace`, `https://8.8.8.8/`; native quick checks use their port 443 | **Keep for real internet health/failover coverage.** They are product behavior, not one-shot test requests. This PR does not change frozen Node code or suppress its probes. |
 | Product background health while Go Control runs | `1.1.1.1:443`, `8.8.8.8:443`, `9.9.9.9:443` (quick TCP and full HTTPS checks) | **Keep for operator/health coverage.** A local fixture could isolate unrelated traffic tests later, but would not prove external operator reachability. |
+| CI/release installer smoke: the installed app's background update timer | `https://api.github.com/repos/AyoubAchour/net-switch/releases/latest` | **Can isolate locally or disable in the test setup.** The smoke script starts the real installed app with default settings, so a long-lived instance can check releases; no installer assertion requires a real release response. The installer itself is unchanged here. |
 
 Every retained public dependency in that follow-up needs a distinct
 `public target unavailable` classification for HTTP 5xx and resets, with the
@@ -73,6 +81,8 @@ the same single public egress request.
 - Linux acceptance's `1.1.1.1`, `8.8.8.8`, and `9.9.9.9` are servers inside its
   isolated fake internet. They are not calls to Cloudflare, Google or Quad9.
 - Oracle vectors and unit-test addresses are recorded/mocked inputs.
+- The product's GitHub `releases/latest` update check is disabled in proxy mode;
+  the TUN and acceptance fixtures also seed `checkForUpdates: false`.
 - GitHub Actions, GitHub release/API/raw-content URLs, Node, Go, Wintun, npm,
   Ubuntu package mirrors and pinned Snap/Flatpak downloads are build inputs,
   not traffic assertions. Verified caches can reduce those dependencies;
@@ -84,8 +94,8 @@ the same single public egress request.
 job 118788636733, used sing-box 1.14.2 on ARM64 with Node 24.21.0.
 At the recorded head `f236281fdeb42ee725ef4d8dd082bb70edc6da96`,
 `e2e-tun.mjs:192` asserts the size of `oldIds` **before** calling
-`pointLaneAt('aa', 'bb')`. The preceding route check saw all 100 aa sockets;
-the next connection snapshot contained 99.
+`pointLaneAt('aa', 'bb')`. The preceding route check matched the 100 returned
+socket records to aa; the next snapshot produced only 99 distinct engine IDs.
 
 The engine remained on, its PID file existed, and its warn-level log contained
 no warning. The test did not record those 100 socket IDs/ports or FIN/reset
@@ -95,13 +105,25 @@ prove that Cloudflare closed it. It also cannot establish a selector-change
 bug: the selector PUT had not happened.
 
 Upstream [sing-box 1.14.2 selector code](https://github.com/SagerNet/sing-box/blob/v1.14.2/protocol/group/selector.go)
-separately controls interruption of external connections. Source inspection is
+separately controls interruption of external connections; both app config
+builders set `interrupt_exist_connections: false`. Source inspection is
 not a substitute for reproducing the loss. The local test keeps the original
 100/100 requirement and post-switch reuse assertions. New failure diagnostics
 record missing IDs/ports and client FIN/error/close events before cleanup.
 
 ## Verification
 
-The temporary dispatch runs ten fresh jobs per architecture, five Node and five
-Go, with at most four jobs running at once. Each executes the full proxy-routing
-and TUN test once. Results and final CI runs are recorded in the PR.
+Temporary dispatch 39477493246 schedules ten fresh jobs per architecture, five
+Node and five Go, with at most four jobs running at once. Each executes the full
+proxy-routing and TUN test once. Its definition is pinned to commit
+`99a902a286eb969932a9e46448d1620ae65a6a39`; the temporary workflow code is removed
+from the final branch. Results and final-head CI runs are recorded in the PR.
+
+Corrected repeat run 39477493246 already exposed a separate failure in x64/1
+(job 118817133820): the first three local TLS requests timed out at the unchanged
+ten-second deadline. The saved config has the correct rewrite and process pin;
+the responder saw zero requests. Control logged `speed readings stopped: the
+engine is not answering`. This points to engine/API non-response before any
+selector test, not a public-target closure. Its cause is not established, and
+the failed sample is retained. x64/2 passed the full 100-socket reuse assertion
+and all 20 ordinary lifecycle cycles.

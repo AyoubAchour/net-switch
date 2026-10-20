@@ -1,8 +1,8 @@
 // Checks that routing really sends new connections where the rules say, with
 // the real engine: the main line by default, an app's own line once it is
-// pinned there, and every line while combining. Runs the server in test mode
-// (a local proxy instead of the network adapter, so no administrator rights
-// and nothing else on the PC changes), with both lines on the same adapter:
+// pinned there, and every line while combining. Runs on a disposable hosted
+// Windows runner with a local TLS fixture. The server uses test mode
+// (a local proxy instead of the network adapter), with both lines on one adapter:
 // lines are told apart by the engine's outbound, not by the adapter.
 //
 //   node scripts/e2e-routing.mjs [--engine-dir path\to\engine]
@@ -25,7 +25,9 @@ import { killTree, runPowerShellJson } from '../lib/ps.mjs';
 import { launchServer, recordServerAndEngine, isNodeServer, launchSpec } from './server-under-test.mjs';
 import { verifyEngineProcess } from '../tests/windows/launch.mjs';
 import { localHttps } from './tun-test-https.mjs';
+import { hostedOnly } from '../tests/windows/testisp/harness.mjs';
 
+hostedOnly();
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Windows names a program by its real path; Node may run through a link (nvm).
 const SELF = realpathSync.native(process.execPath);
