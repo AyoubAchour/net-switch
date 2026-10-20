@@ -91,24 +91,28 @@ func recordLookupMaximum(counter *atomic.Uint64, value uint64) {
 // there is no per-operation log, sample list, or shared hot-path timing lock.
 func readScopeInto(path string, b []byte, timing *lookupTiming) ([]byte, error) {
 	started := time.Now()
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOFOLLOW, 0)
+	fd, direct, err := openKernelFile(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOFOLLOW)
 	timing.add(phaseScopeOpen, time.Since(started))
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		started := time.Now()
-		unix.Close(fd)
+		closeKernelFile(fd, direct)
 		timing.add(phaseScopeClose, time.Since(started))
 	}()
 	started = time.Now()
-	err = regularFile(fd, len(b))
+	err = regularKernelFile(fd, len(b), direct)
 	timing.add(phaseScopeStat, time.Since(started))
 	if err != nil {
 		return nil, err
 	}
 	started = time.Now()
-	data, err := readBounded(fd, b)
+	read := unix.Read
+	if direct && kernelScopePath(path) {
+		read = readKernelData
+	}
+	data, err := readBoundedWith(fd, b, read)
 	timing.add(phaseScopeRead, time.Since(started))
 	return data, err
 }

@@ -16,16 +16,17 @@ import (
 type procDescriptors struct {
 	fd            int
 	open          bool
+	direct        bool
 	buffer        *[16 << 10]byte
 	position, end int
 }
 
 func openProcDescriptors(path string) (procDescriptors, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	fd, direct, err := openKernelFile(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW)
 	if err != nil {
 		return procDescriptors{}, err
 	}
-	return procDescriptors{fd: fd, open: true}, nil
+	return procDescriptors{fd: fd, open: true, direct: direct}, nil
 }
 
 func (d *procDescriptors) Close() error {
@@ -37,7 +38,7 @@ func (d *procDescriptors) Close() error {
 		processBuffers.Put(d.buffer)
 		d.buffer = nil
 	}
-	return unix.Close(d.fd)
+	return closeKernelFile(d.fd, d.direct)
 }
 
 func (d *procDescriptors) Seek(offset int64, whence int) (int64, error) {
@@ -45,7 +46,7 @@ func (d *procDescriptors) Seek(offset int64, whence int) (int64, error) {
 		return 0, unix.EBADF
 	}
 	d.position, d.end = 0, 0
-	return unix.Seek(d.fd, offset, whence)
+	return seekKernelDirectory(d.fd, d.direct, offset, whence)
 }
 
 func (d *procDescriptors) Visit(limit int, consume func([]byte) bool) (int, error) {
@@ -62,7 +63,7 @@ func (d *procDescriptors) Visit(limit int, consume func([]byte) bool) (int, erro
 			// window must not make procfs instantiate hundreds of additional
 			// entries that the following seek would immediately discard.
 			size := min(len(d.buffer), (min(limit-count, 512)+2)*32)
-			n, err := unix.ReadDirent(d.fd, d.buffer[:size])
+			n, err := readKernelDirectory(d.fd, d.direct, d.buffer[:size])
 			if err == unix.EINTR {
 				continue
 			}
