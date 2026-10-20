@@ -139,6 +139,7 @@ jobs:
           node-version: '24.21.0'
           package-manager-cache: false
       - name: Build gateway and separately addressed probe process
+        id: native-build
         run: |
           go build -o dist/windows-test/netswitch-engine.exe ./cmd/netswitch-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -156,22 +157,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/udpreject.exe ./tests/windows/udpreject
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build today's native helper
-        # The helper has its own module and its own dependency policy.
-        env:
-          GOFLAGS: -mod=readonly -p=2
-        run: ./scripts/build-helper.ps1
       - name: Measure cold Windows owner lookups with 2000 existing TCP rows
         env:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
           go test -count=1 -v -run '^TestOwnerColdBurstTiming$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Fetch the verified engine and signed Wintun DLL
+      - name: Fetch the signed Wintun DLL beside the real engine
+        id: native-dll
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
         run: |
-          ./scripts/fetch-engine.ps1
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Run the 1.0 profile against the real Windows engine
+        # A timing failure stays red, but must not hide independent packet and
+        # lifecycle evidence. This is intentionally not continue-on-error.
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' && steps.native-dll.outcome == 'success' }}
         run: |
           node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
