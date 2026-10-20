@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -59,15 +60,27 @@ var lastRejectedMetadata atomic.Pointer[string]
 // directory may resolve a symlink, including a procfs magic link. Flatpak bind
 // mounts its regular metadata file here, so crossing a mount is legitimate.
 func readFlatpakInfo(root string, b []byte) ([]byte, error) {
+	return readFlatpakInfoTimed(root, b, nil)
+}
+
+func readFlatpakInfoTimed(root string, b []byte, timing *lookupTiming) ([]byte, error) {
+	started := time.Now()
 	dir, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	timing.add(phaseMetadataRootOpen, time.Since(started))
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(dir)
+	defer func() {
+		started := time.Now()
+		unix.Close(dir)
+		timing.add(phaseMetadataRootClose, time.Since(started))
+	}()
+	started = time.Now()
 	fd, err := unix.Openat2(dir, ".flatpak-info", &unix.OpenHow{
 		Flags:   unix.O_PATH | unix.O_CLOEXEC | unix.O_NOFOLLOW,
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
 	})
+	timing.add(phaseMetadataInfoOpen, time.Since(started))
 	if err != nil {
 		return nil, err
 	}

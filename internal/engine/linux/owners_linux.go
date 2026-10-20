@@ -386,13 +386,14 @@ func processOwnerAtTimed(pid uint32, start uint64, timing *lookupTiming) (platfo
 	// concurrent lookup just to receive ENOENT; the small scratch also covers
 	// normal Flatpak headers. Only a header beyond it needs the larger bound.
 	started = time.Now()
-	info, infoErr := readFlatpakInfo(root+"root", storage[:])
+	flatpakBefore := timing.metadataDuration()
+	info, infoErr := readFlatpakInfoTimed(root+"root", storage[:], timing)
 	var flatpak *[64 << 10]byte
 	if errors.Is(infoErr, errKernelFileLimit) {
 		flatpak = flatpakBuffers.Get()
-		info, infoErr = readFlatpakInfo(root+"root", flatpak[:])
+		info, infoErr = readFlatpakInfoTimed(root+"root", flatpak[:], timing)
 	}
-	timing.add(phaseMetadataFlatpak, time.Since(started))
+	timing.add(phaseMetadataFlatpak, max(0, time.Since(started)-(timing.metadataDuration()-flatpakBefore)))
 	if infoErr != nil && !errors.Is(infoErr, unix.ENOENT) && !errors.Is(infoErr, unix.ESRCH) {
 		rejectedMetadata.Add(1)
 		message := fmt.Sprintf("pid %d Flatpak metadata rejected: %v", pid, infoErr)

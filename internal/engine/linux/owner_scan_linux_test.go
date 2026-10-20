@@ -5,6 +5,7 @@ package linux
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -188,6 +189,117 @@ func TestMatchedHolderDoesNotWaitForBatchCompletion(t *testing.T) {
 	owner, err := o.holders(ctx, socketRow{inode: blockedInode, uid: rows[0].uid, protocol: unix.IPPROTO_UDP})
 	if err != nil || owner.PID != pid {
 		t.Fatalf("later published descriptor: %+v %v", owner, err)
+	}
+}
+
+func TestRequestedDescriptorPublishesBeforeUnrelatedChecks(t *testing.T) {
+	o := newTestOwners(t)
+	earlier := map[*ownerIndex]bool{}
+	before, err := openProcDescriptors("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = before.Visit(4096, func(name []byte) bool {
+		if inode, ok := socketInodeAt(before.fd, string(name)); ok {
+			earlier[o.indexFor(inode)] = true
+		}
+		return true
+	})
+	before.Close()
+	if err != nil && !errors.Is(err, io.EOF) {
+		t.Fatal(err)
+	}
+	var target uint32
+	var blocked *ownerIndex
+	for range 16 {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		raw, err := conn.SyscallConn()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var st unix.Stat_t
+		var statErr error
+		if err := raw.Control(func(fd uintptr) { statErr = unix.Fstat(int(fd), &st) }); err != nil || statErr != nil {
+			t.Fatalf("real socket metadata: %v %v", err, statErr)
+		}
+		inode := uint32(st.Ino)
+		if target == 0 {
+			target = inode
+		} else if o.indexFor(inode) != o.indexFor(target) && !earlier[o.indexFor(inode)] {
+			blocked = o.indexFor(inode)
+			break
+		}
+	}
+	if blocked == nil {
+		t.Fatal("fixture could not create a later socket in a separate index shard")
+	}
+	dir, err := openProcDescriptors("/proc/self/fd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	passedTarget, reachedBlock := false, false
+	_, err = dir.Visit(128, func(name []byte) bool {
+		inode, ok := socketInodeAt(dir.fd, string(name))
+		if !ok {
+			return true
+		}
+		passedTarget = passedTarget || inode == target
+		if o.indexFor(inode) == blocked {
+			reachedBlock = true
+			return false
+		}
+		return true
+	})
+	dir.Close()
+	if err != nil || !passedTarget || !reachedBlock {
+		t.Fatalf("fixture must encounter the requested socket before the blocked shard: %v", err)
+	}
+	pid := uint32(os.Getpid())
+	start, err := processStart(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var directory unix.Stat_t
+	if err := unix.Stat("/proc/self/fd", &directory); err != nil {
+		t.Fatal(err)
+	}
+	notice := o.subscribe(target)
+	defer o.unsubscribe(target, notice)
+	blocked.mu.Lock()
+	unlock := sync.OnceFunc(blocked.mu.Unlock)
+	defer unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	// A foreign-process scan retains only requested hints. Checking the next
+	// socket's subscribers is blocked; our earlier live match must be visible
+	// before that check, not after 32 matches or the whole directory finishes.
+	key := descriptorBatchKey{pid: pid, start: start, directory: directory.Ino, limit: 128}
+	job, err := o.descriptorBatch(ctx, key, time.Now(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-notice.ready:
+		if o.indexed(target).count() != 1 {
+			t.Fatal("notification did not carry the real descriptor hint")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("requested socket waited for an unrelated descriptor check")
+	}
+	select {
+	case <-job.done:
+		t.Fatal("fixture did not keep later descriptor work blocked")
+	default:
+	}
+	unlock()
+	select {
+	case <-job.done:
+	case <-time.After(time.Second):
+		t.Fatal("descriptor scan did not finish after releasing the unrelated shard")
 	}
 }
 
