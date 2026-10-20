@@ -4,6 +4,7 @@ const (
 	AddressMissesToFail        = 2
 	RouteMissesToFail          = 2
 	RouteStaleMS         int64 = 30000
+	RouteReadEveryMS     int64 = 5000
 	MinPollGapMS         int64 = 400
 	ProbeFailsToFail           = 3
 	ProbePassesToRecover       = 2

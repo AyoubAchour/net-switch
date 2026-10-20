@@ -19,6 +19,11 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
     ['/oracle/data/settings.json', JSON.stringify(initial)]]);
   const environment = { now: Date.UTC(2026, 9, 19, 12), adapters: [], interfaces: {}, rates: {}, counters: {}, connections: [], probes: {}, policy: 1 };
   Object.assign(environment, clone(suppliedEnvironment));
+	if (environment.undo) files.set('/oracle/data/windows-undo.json', JSON.stringify(environment.undo));
+	if (environment.userDir) {
+		files.set(`${environment.userDir}/settings.json`, files.get('/oracle/data/settings.json'));
+		files.delete('/oracle/data/settings.json');
+	}
   let sequence = 0;
   let httpHandler;
   const emit = (kind, value) => { outputs.push({ kind, ...clone(value) }); trace?.('output', kind, clone(value)); };
@@ -59,7 +64,10 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
       if (!files.has(name)) throw missing();
       return encoding ? files.get(name) : Buffer.from(files.get(name));
     },
-    writeFile: async (name, text) => fileWrite(name, text),
+    writeFile: async (name, text) => {
+      if (environment.undoWriteFailure && name.includes('/windows-undo.json.') && name.endsWith('.tmp')) throw Object.assign(new Error(environment.undoWriteFailure), { code: 'EIO' });
+      return fileWrite(name, text);
+    },
     appendFile: async (name, text) => fileWrite(name, (files.get(name) ?? '') + text),
     rename: async (from, to) => {
       if (!files.has(from)) throw missing();
@@ -71,7 +79,11 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
     },
     rm: async (name) => { files.delete(name); emit('remove', { file: name }); },
     mkdir: async () => {},
-    readdir: async (dir) => [...files.keys()].filter((name) => path.posix.dirname(name) === dir).map(path.posix.basename),
+    readdir: async (dir) => {
+      const names = [...files.keys()].filter((name) => path.posix.dirname(name) === dir).map(environment.realDirectoryList ? (name) => path.posix.basename(name) : path.posix.basename);
+      if (environment.realDirectoryList) complete('directory-list', { directory: dir, names });
+      return names;
+    },
     stat: async (name) => { if (!files.has(name)) throw missing(); return { size: Buffer.byteLength(files.get(name)), mtimeMs: 0 }; },
   };
   if (trace) {
@@ -95,21 +107,28 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
   }
   const context = vm.createContext({ Buffer, URL, AbortSignal, Date: ClockDate,
     oracleEvent: (event) => trace?.('output', 'event', clone(event)),
+    oracleSnapshot: () => { if (environment.realDirectoryList && trace) complete('state-snapshot', { now: environment.now }); },
     structuredClone: (value) => vm.runInContext(`JSON.parse(${JSON.stringify(JSON.stringify(value))})`, context),
     setTimeout: (run, ms) => { const timer = { run, at: environment.now + ms, unref() { return this; } }; timers.push(timer); return timer; },
     clearTimeout: (timer) => { const index = timers.indexOf(timer); if (index >= 0) timers.splice(index, 1); },
     setInterval: forbidden('setInterval'), clearInterval: () => {},
     console: { log: (text) => emit('console', { text }) },
-    process: { argv: ['node', importOnly ? '/oracle/test.mjs' : argvEntry, ...(mode === 'proxy' ? ['--dev-proxy'] : [])],
+    process: { argv: ['node', importOnly ? '/oracle/test.mjs' : argvEntry, ...(mode === 'proxy' ? ['--dev-proxy'] : []), ...(environment.userDir ? ['--user-data', environment.userDir] : [])],
       pid: 123, execPath: '/oracle/node', platform: 'win32', arch: 'x64', env: {},
       on: () => {}, exit: (code) => emit('exit', { code }) },
     fetch: async (url, options = {}) => {
+		if (new URL(url).hostname === 'api.github.com') {
+			const status = environment.updateStatus ?? 200;
+			const body = environment.release ?? {};
+			complete('update-reply', { status, body });
+			return { ok: status === 200, status, json: async () => clone(body) };
+		}
       const route = new URL(url).pathname;
       emit('engine', { route, method: options.method ?? 'GET', ...(options.body ? { body: JSON.parse(options.body) } : {}) });
       const probe = route.endsWith('/delay');
       const lineId = probe ? decodeURIComponent(route.split('/')[2]).slice(5) : null;
       const answer = environment.probes[lineId] ?? 18;
-      const status = probe && answer === false ? 503 : 200;
+      const status = probe && answer === false ? 503 : route === '/connections' ? environment.connectionsStatus ?? 200 : 200;
       const body = route === '/connections' ? { connections: environment.connections } : probe ? { delay: answer } : {};
       complete(probe ? 'probe-result' : 'engine-reply', { route, status, body });
       return { ok: status === 200, status, ...observeAsync({ json: async () => clone(body) }, `engine.${route}`) };
@@ -128,20 +147,23 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
     appPath: windowsAppPath, engineFileName: 'sing-box.exe', noAppPath: 'C:\\NetSwitch\\no-app-selected.exe',
     tunOptions: () => ({}), requiredEngineFiles: () => [],
     detectAdapters: async () => complete('adapter-snapshot', clone(environment.adapters)), isElevated: async () => true,
-    readDefaultRoutes: async () => Object.values(environment.interfaces).flat().filter((item) => item.family === 'IPv4').map((item) => ({ interfaceAddress: item.address })),
+    readDefaultRoutes: async () => environment.routes ?? Object.values(environment.interfaces).flat().filter((item) => item.family === 'IPv4').map((item) => ({ interfaceAddress: item.address })),
     readMinimizeConnectionsPolicy: async () => environment.policy,
     readMetrics: async () => [{ family: 'IPv4', automatic: true, metric: 25 }],
     allowSimultaneousConnections: async () => { environment.policy = 0; },
     applyCableAsMain: async () => {},
     closeTcpConnections: async (items) => { emit('outside-close', { items }); return { closed: items.length, failed: 0, gone: 0, codes: [] }; },
-    canAutostart: () => false, disableAutostart: forbidden('autostart'), enableAutostart: forbidden('autostart'),
-    installedHelper: () => null, readAutostart: async () => false, upgradeAutostart: async () => 'unchanged',
+    canAutostart: () => !!environment.userDir,
+    disableAutostart: async () => { environment.autostart = false; },
+    enableAutostart: async () => { environment.autostart = true; },
+    installedHelper: () => null, readAutostart: async () => environment.autostart ?? false, upgradeAutostart: async () => 'unchanged',
+    updateAssetName: (version, arch) => `NetSwitch-Setup-${version}-${arch}.exe`,
     protectMachineDir: async () => {}, portHolder: async () => null, stopOrphan: forbidden('stopOrphan'), killTree: forbidden('killTree'),
     createAppInfo: () => ({
       describe: (programPath) => ({ name: path.win32.basename(programPath, '.exe'), hasIcon: false, switchable: !!programPath, reconnectable: !!programPath && !/svchost\.exe$/i.test(programPath) }),
       lookupPending() {}, icon: () => null,
     }),
-    createInstalledApps: () => observeAsync({ list: async () => [{ path: 'C:\\Apps\\Firefox.exe', name: 'Firefox' }] }, 'installedApps'),
+    createInstalledApps: () => observeAsync({ list: async () => [{ path: 'C:\\Apps\\Firefox.exe', name: 'Firefox', ...(environment.realDirectoryList ? { hasIcon: false } : {}) }] }, 'installedApps'),
   };
   observeAsync(platform, 'platform');
   const mocks = new Map(Object.entries({
@@ -160,12 +182,18 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
       assert.equal(exe, '/oracle/engine/sing-box.exe');
       emit('spawn', { exe, args });
       const child = Object.assign(new EventEmitter(), { pid: 456, exitCode: null, signalCode: null, stdout: new EventEmitter(), stderr: new EventEmitter() });
-      child.kill = () => { child.exitCode = 0; complete('process-exit', { pid: child.pid, code: 0 }); child.emit('exit', 0); };
+      child.kill = () => { if (environment.quitFailure) throw new Error(environment.quitFailure); child.exitCode = 0; complete('process-exit', { pid: child.pid, code: 0 }); child.emit('exit', 0); };
       return child;
     } },
     '/oracle/lib/platform/windows.mjs': { windows: platform },
     '/oracle/lib/platform/index.mjs': { platformFor: () => platform },
-    '/oracle/lib/platform/windows-network.mjs': observeAsync({ restoreMetrics: async () => {}, restoreMinimizeConnectionsPolicy: async (value) => { environment.policy = value; } }, 'network'),
+    '/oracle/lib/platform/windows-network.mjs': observeAsync({
+      restoreMetrics: async (alias) => { if (environment.restoreFailures?.[alias]) throw new Error(environment.restoreFailures[alias]); },
+      restoreMinimizeConnectionsPolicy: async (value) => {
+        if (environment.policyFailure) throw new Error(environment.policyFailure);
+        environment.policy = value;
+      },
+    }, 'network'),
     '/oracle/lib/architecture.mjs': { nativeArchitecture: () => 'x64' },
     '/oracle/lib/ps.mjs': { spawnPowerShell: forbidden('PowerShell') },
     '/oracle/lib/logfile.mjs': { createLog: () => observeAsync({ append: async (text) => emit('log', { text }), rotate: async () => {} }, 'log') },
@@ -174,6 +202,7 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
     '/oracle/lib/updates.mjs': { UpdateChecker: class { offer = null; start() {} stop() {} async check() { complete('async-result', { operation: 'updates.check', args: [], ok: true, value: 'current', undefined: false }); return 'current'; } } },
   }));
   const modules = new Map();
+	if (environment.realUpdates) mocks.delete('/oracle/lib/updates.mjs');
   async function load(name) {
     if (modules.has(name)) return modules.get(name);
     let module;
@@ -187,6 +216,7 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
       let source = await readFile(new URL(name.slice('/oracle/'.length).replace('monitor-source.mjs', 'monitor.mjs'), root), 'utf8');
       // Observation hooks only; no existing statement is changed or skipped.
       if (name === '/oracle/lib/server-factory.mjs') {
+        if (environment.realDirectoryList) source = source.replace('function buildState() {', 'function buildState() { globalThis.oracleSnapshot();');
         const hooks = await readFile(new URL('tests/oracle/hooks.txt', root), 'utf8');
         if (source.includes('export async function createServer')) {
           source = source.replace('return { server, buildState, shutdown };', hooks.replace('export const oracleHooks =', 'globalThis.oracleHooks =') + '\nreturn { server, buildState, shutdown };');
@@ -213,6 +243,22 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
     };
   }
   const { Engine } = await evaluate('/oracle/lib/engine.mjs');
+  if (environment.realDirectoryList && trace) {
+    const { LaneSwitch } = await evaluate('/oracle/lib/lane-switch.mjs');
+    const probe = LaneSwitch.prototype.probeSometimes;
+    const observed = Symbol('observed-health');
+    LaneSwitch.prototype.probeSometimes = function (...args) {
+      if (!this.health[observed]) {
+        this.health[observed] = true;
+        const note = this.health.noteProbe.bind(this.health);
+        this.health.noteProbe = (result, at) => {
+          complete('probe-vote', { line: this.lineId, result, at });
+          return note(result, at);
+        };
+      }
+      return probe.apply(this, args);
+    };
+  }
   // Binary verification is covered by engine tests. No executable exists here.
   Engine.prototype.verifyEngineFiles = async () => {};
   const server = await evaluate(importOnly ? '/oracle/lib/server-factory.mjs' : '/oracle/server.mjs');
@@ -248,15 +294,18 @@ export async function oracle({ initial = {}, mode = 'tun', importOnly = false, a
     async request(method, route, body, headers = {}) {
       trace?.('input', 'http', { method, route, ...(body === undefined ? {} : { body: clone(body) }), headers });
       let response;
-      const session = JSON.parse(files.get('/oracle/data/server.json') ?? files.get('/oracle/data-test/server.json'));
+      const session = JSON.parse(files.get(`${environment.userDir ?? '/oracle/data'}/server.json`) ?? files.get('/oracle/data-test/server.json'));
       const request = { method, url: route, headers: { host: `127.0.0.1:${session.port}`, 'x-token': session.token, ...headers },
         async *[Symbol.asyncIterator]() { if (body !== undefined) yield Buffer.from(typeof body === 'string' ? body : JSON.stringify(body)); } };
       await httpHandler(request, {
         writeHead(status, headers) { response = { status, headers }; },
-        end(text) { response.body = JSON.parse(text); },
+        end(text) {
+          response.body = JSON.parse(text);
+          if (environment.realDirectoryList) trace?.('output', 'api', clone(response));
+        },
       });
       await settle();
-      trace?.('output', 'api', clone(response));
+      if (!environment.realDirectoryList) trace?.('output', 'api', clone(response));
       return clone(response);
     },
   };

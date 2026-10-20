@@ -87,6 +87,7 @@ to Net Switch's code only, not to the installer as a whole.
 The new engine's own code is MIT licensed. Its root Go module includes these
 dependencies; this does not replace the 0.3.x programs listed above.
 
+- The unshipped `netswitch-cleanup` tool includes the Go runtime and golang.org/x/sys under the same BSD-3-Clause licenses as the helper.
 - gvisor.dev/gvisor `v0.0.0-20261017122056-1b7906fdee8c`, Apache-2.0.
   Copyright The gVisor Authors. License and authors are preserved in
   `third_party/gvisor/LICENSE` and `AUTHORS`, and in the generated vendor tree.
@@ -96,7 +97,7 @@ dependencies; this does not replace the 0.3.x programs listed above.
 - github.com/google/btree v1.1.2, Apache-2.0; see
   `vendor/github.com/google/btree/LICENSE`.
 - golang.org/x/exp `v0.0.0-20250711185948-6ae5c78190dc`,
-  golang.org/x/sys v0.48.0 and golang.org/x/time v0.15.0, BSD-3-Clause;
+  golang.org/x/sys v0.49.0 and golang.org/x/time v0.15.0, BSD-3-Clause;
   see each module's LICENSE and PATENTS in `vendor/golang.org/x/`.
 - Go 1.27.2 runtime and standard library, BSD-3-Clause;
   see the Go toolchain's LICENSE and PATENTS.

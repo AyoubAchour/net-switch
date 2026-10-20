@@ -40,6 +40,9 @@ type Options struct {
 	ID            func() string
 	Sleep         func(time.Duration)
 	OnBackupError func(error)
+	// SyncFile is used by the control recovery journal. Other settings keep
+	// their legacy write behavior. It runs before the atomic rename.
+	SyncFile func(string) error
 }
 type Recovery struct {
 	Reason     string  `json:"reason"`
@@ -317,6 +320,12 @@ func AtomicWrite(file string, text []byte, o Options) error {
 	temp := file + "." + o.ID() + ".tmp"
 	if err := o.Files.WriteFile(temp, text, 0600); err != nil {
 		return err
+	}
+	if o.SyncFile != nil {
+		if err := o.SyncFile(temp); err != nil {
+			_ = o.Files.Remove(temp)
+			return fmt.Errorf("sync %s: %w", file, err)
+		}
 	}
 	for attempt := 0; ; attempt++ {
 		err := o.Files.Rename(temp, file)

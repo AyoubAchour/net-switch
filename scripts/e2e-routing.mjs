@@ -10,32 +10,41 @@
 // The engine must be in engine\ (scripts\fetch-engine.ps1 puts it there) or
 // in the folder --engine-dir names. This script's own connections go through
 // the proxy, so this script is the app being routed.
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { connect as tlsConnect } from 'node:tls';
 import { fileURLToPath } from 'node:url';
-import { killTree } from '../lib/ps.mjs';
-import { launchOptions, recordLaunch, serverCommand, verifyEngineProcess } from '../tests/windows/launch.mjs';
+import { promisify } from 'node:util';
+import { killTree, runPowerShellJson } from '../lib/ps.mjs';
+import { launchServer, recordServerAndEngine, isNodeServer, launchSpec } from './server-under-test.mjs';
+import { verifyEngineProcess } from '../tests/windows/launch.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Windows names a program by its real path; Node may run through a link (nvm).
 const SELF = realpathSync.native(process.execPath);
 const TARGET = { host: '1.1.1.1', port: 443, path: '/cdn-cgi/trace' };
-const options = launchOptions();
-await recordLaunch(options);
 
 const dataDir = await mkdtemp(path.join(tmpdir(), 'net-switch-e2e-'));
-const [serverExe, serverArgs] = serverCommand(options, dataDir, { proxy: true });
-const server = spawn(
-  serverExe,
-  serverArgs,
-  { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
-);
+await recordServerAndEngine();
+let staleSystemPID = null;
+if (process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted') {
+  // Get-Process reads the running token's owner directly. A CIM service scan
+  // can spend the whole deadline loading WMI on a cold ARM64 runner, and a
+  // configured service account is weaker evidence than the live identity.
+  staleSystemPID = await runPowerShellJson(`$ProgressPreference = 'SilentlyContinue'
+$system = (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18').Translate([Security.Principal.NTAccount]).Value
+$process = Get-Process -Name svchost -IncludeUserName -ErrorAction Stop | Where-Object { $_.UserName -eq $system } | Select-Object -First 1
+if (-not $process) { throw 'No running SYSTEM svchost available for stale PID proof' }
+[int]$process.Id | ConvertTo-Json -Compress`);
+  console.log(`SYSTEM svchost PID for stale-PID proof: ${staleSystemPID}`);
+  await writeFile(path.join(dataDir, 'engine.pid'), String(staleSystemPID));
+}
+const server = launchServer(dataDir);
 let serverOutput = '';
 server.stdout.on('data', (chunk) => (serverOutput += chunk));
 server.stderr.on('data', (chunk) => (serverOutput += chunk));
@@ -185,7 +194,22 @@ let failed = false;
 try {
   session = await until('the server starting', async () => JSON.parse(await readFile(path.join(dataDir, 'server.json'), 'utf8')), 60);
   let state = await routingOn();
-  await verifyEngineProcess(options, dataDir);
+  await verifyEngineProcess(launchSpec, dataDir);
+  if (staleSystemPID) check(Number(await readFile(path.join(dataDir, 'engine.pid'), 'utf8')) !== staleSystemPID, 'start replaced a stale SYSTEM svchost PID');
+  if (staleSystemPID && !isNodeServer) {
+    const { stdout, stderr } = await promisify(execFile)('go', ['test', '-v', '-count=1', '-timeout=90s', '-run=^TestReadWorkerCannotWriteControlHKLMOrTCP$', './internal/platform/worker'], {
+      cwd: ROOT, windowsHide: true, timeout: 120_000, maxBuffer: 2 * 1024 * 1024,
+      env: { ...process.env, NETSWITCH_CONTROL_PID: String(server.pid), GOMAXPROCS: '2' },
+    }).catch((error) => {
+      // execFile's message omits stdout, where Go prints failed assertions.
+      // Keep the live-Control proof visible even when the test exits nonzero.
+      if (error.stdout) console.error(error.stdout);
+      if (error.stderr) console.error(error.stderr);
+      throw error;
+    });
+    console.log(stdout); if (stderr) console.error(stderr);
+    check(true, 'read workers cannot modify the running Control process, HKLM or TCP rows');
+  }
   check(state.lines.length === 1, `the first line is the adapter Windows uses (${state.lines[0]?.alias})`);
   const main = state.lines[0];
 
@@ -229,9 +253,21 @@ try {
   check(counts[main.id] === 6, `an app pinned to the main line stays on it while combining (${JSON.stringify(counts)})`);
   await closeAll();
 
+  if (staleSystemPID) {
+    await api('routing', { on: false });
+    await writeFile(path.join(dataDir, 'engine.pid'), String(staleSystemPID));
+    await api('routing', { on: false });
+    check(await readFile(path.join(dataDir, 'engine.pid')).then(() => false, (error) => error.code === 'ENOENT'), 'Turn off removed a stale SYSTEM svchost PID');
+    await writeFile(path.join(dataDir, 'engine.pid'), String(staleSystemPID));
+  }
   await api('quit', {});
   await until('the server ending', async () => server.exitCode !== null, 30);
   check(server.exitCode === 0, 'quitting stops routing and ends the server');
+  if (staleSystemPID) {
+    check(await readFile(path.join(dataDir, 'engine.pid')).then(() => false, (error) => error.code === 'ENOENT'), 'Quit removed a stale SYSTEM svchost PID');
+    const name = await runPowerShellJson(`(Get-Process -Id ${staleSystemPID} -ErrorAction Stop).ProcessName | ConvertTo-Json -Compress`);
+    check(name === 'svchost', 'the SYSTEM process was never stopped');
+  }
   console.log('routing end-to-end test passed');
 } catch (error) {
   failed = true;

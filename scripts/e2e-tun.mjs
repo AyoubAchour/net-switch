@@ -7,10 +7,10 @@ import { once } from 'node:events';
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
-import { Engine } from '../lib/engine.mjs';
+import { ControlUnderTest } from './tun-control-adapter.mjs';
 import { lineOutbound } from '../lib/apps.mjs';
-import { launchOptions, recordLaunch } from '../tests/windows/launch.mjs';
+import { launchSpec } from './server-under-test.mjs';
+import { recordLaunch } from '../tests/windows/launch.mjs';
 import { startHarness } from '../tests/windows/testisp/harness.mjs';
 import { targets } from '../tests/windows/targets.mjs';
 
@@ -19,20 +19,16 @@ if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || pro
 }
 const dir = path.resolve('dist/tun-test');
 await mkdir(dir, { recursive: true });
-const options = launchOptions();
-await recordLaunch({ ...options, entry: fileURLToPath(import.meta.url) }, path.join(dir, 'executables.json'));
-console.log('Launcher: direct Engine adapter test; no control server is launched here.');
-// This historical test directly exercises today's Engine adapter. A different
-// control executable must use acceptance.mjs; it must never silently test Node.
-assert.equal(options.server.toLowerCase(), process.execPath.toLowerCase(),
-  'Use tests/windows/acceptance.mjs to test a different control executable');
+await recordLaunch(launchSpec, path.join(dir, 'executables.json'));
+console.log(`Launcher: the selected control service (${launchSpec.server}) owns the routing lifecycle.`);
 // A distinct executable path exercises process discovery and app pinning.
 const clientExe = path.join(dir, 'test-app.exe');
 await copyFile(process.execPath, clientExe);
-const engine = new Engine({ singBoxPath: options.engine, dataDir: dir, mode: 'tun' });
+const engine = new ControlUnderTest(dir);
 const report = [];
 function log(message) { console.log(message); report.push(message); }
-async function network(action, adapter) {
+async function network(action, adapter, timeoutMs = 45_000) {
+  const started = Date.now();
   const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
     path.resolve('scripts/tun-test-network.ps1'), '-Action', action], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
@@ -41,10 +37,13 @@ async function network(action, adapter) {
   let output = '', errors = '';
   child.stdout.on('data', (chunk) => { output += chunk; });
   child.stderr.on('data', (chunk) => { errors += chunk; });
-  const timer = setTimeout(() => child.kill(), 45_000);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
   try {
-    const [code] = await once(child, 'exit');
-    assert.equal(code, 0, `Network ${action}: ${errors}\n${output}`);
+    const [code, signal] = await once(child, 'exit');
+    const result = timedOut ? `timed out after ${timeoutMs / 1000} seconds; PowerShell was killed` : `exited ${code}${signal ? ` (${signal})` : ''}`;
+    assert.equal(code, 0, `Network ${action} ${result}: ${errors}\n${output}`);
+    if (timeoutMs > 45_000) log(`ARM64 cold preflight network read completed in ${Date.now() - started} ms`);
     return JSON.parse(output.replace(/^\uFEFF/, '').trim());
   } finally { clearTimeout(timer); }
 }
@@ -98,10 +97,10 @@ async function routed(items, line) {
     throw error;
   }
 }
-async function clean(label) {
+async function clean(label, firstReadTimeout = 45_000) {
   let state;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    state = await network('state');
+    state = await network('state', undefined, attempt === 0 ? firstReadTimeout : 45_000);
     if (Object.values(state).every((items) => items.length === 0)) { log(`ok - ${label}: no TUN adapter, routes or sing-tun firewall rules`); return; }
     await delay(500);
   }
@@ -113,7 +112,10 @@ let restoreDns = false;
 try {
   const pins = JSON.parse(await readFile('packaging/versions.json', 'utf8'));
   log(`Engine ${pins.singBox.version}, Windows ${process.arch}, Node ${process.version}`);
-  await clean('before start');
+  // The first ARM64 PowerShell/Windows-provider read can exceed 45 s before
+  // Control or TUN exists. Only this cold baseline read gets extra time;
+  // every subsequent read and every routing/cleanup assertion keeps its bound.
+  await clean('before start', process.arch === 'arm64' ? 90_000 : 45_000);
   adapter = await network('inspect');
   harness = await startHarness(path.join(dir, 'testisp'));
   responder = await targets(harness.uplink.address);
@@ -223,8 +225,12 @@ try {
   // does not prove the engine survived, and warn-level output can be empty.
   log(`Engine at failure: ${JSON.stringify({ status: engine.status, error: engine.error,
     childPid: engine.child?.pid ?? null, exitCode: engine.child?.exitCode ?? null })}`);
-  log(`PID file at failure: ${await readFile(engine.pidPath, 'utf8').catch((error) => error.code)}`);
-  log(`Engine log at failure:\n${await readFile(engine.logPath, 'utf8').then((text) => text.slice(-8000) || '(empty)').catch((error) => error.code)}`);
+  log(`PID file at failure: ${await readFile(engine.pidPath ?? path.join(dir, 'engine.pid'), 'utf8').catch((error) => error.code)}`);
+  for (const file of ['server.log', 'engine.log']) {
+    const text = await readFile(path.join(dir, file), 'utf8').catch(() => 'unavailable');
+    log(`${file}:\n${text.split('\n').slice(-50).join('\n')}`);
+  }
+  log(`Control output:\n${engine.output}`);
   process.exitCode = 1;
 } finally {
   if (restoreDns) {
@@ -234,6 +240,8 @@ try {
   if (worker.exitCode === null) worker.disconnect();
   try { await engine.stop(); await clean('final cleanup'); }
   catch (error) { log(`CLEANUP FAILED: ${error.stack}`); process.exitCode = 1; }
+  try { await engine.quit(); }
+  catch (error) { log(`CONTROL QUIT FAILED: ${error.stack}`); process.exitCode = 1; }
   if (harness) {
     try { log(`TestISP counters: ${JSON.stringify(await harness.control('stats'))}`); await harness.close(); }
     catch (error) { log(`TESTISP CLEANUP FAILED: ${error.stack}`); process.exitCode = 1; }

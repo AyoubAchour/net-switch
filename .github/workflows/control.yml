@@ -1,0 +1,79 @@
+name: Go control service
+
+on:
+  push:
+    branches: [port/control-service]
+  pull_request:
+    paths: ['internal/**', 'cmd/**', 'assets.go', 'go.mod', 'go.sum', 'scripts/*e2e*', 'scripts/*under-test*', 'scripts/tun-control-adapter.mjs', 'scripts/win32-parity.mjs', 'tests/oracle/**', '.github/workflows/control.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Control / Windows ${{ matrix.arch }} / ${{ matrix.control }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+        control: [node, go]
+        include:
+          - runner: windows-latest
+            arch: x64
+          - runner: windows-11-arm
+            arch: arm64
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          architecture: ${{ matrix.arch }}
+          package-manager-cache: false
+      - name: Build Go control with commit identity
+        run: go build -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o bin/netswitch.exe ./cmd/netswitch
+      - name: Native Win32 parity
+        id: parity
+        if: matrix.control == 'go'
+        continue-on-error: true
+        run: node scripts/win32-parity.mjs ./bin/netswitch.exe
+      - name: Fetch verified sing-box
+        run: ./scripts/fetch-engine.ps1
+      - name: Build the two-path TUN harness and fetch its signed driver
+        run: |
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
+      - name: Routing against the selected control executable
+        run: |
+          $server = if ('${{ matrix.control }}' -eq 'go') { (Resolve-Path bin/netswitch.exe).Path } else { (Get-Command node).Source }
+          node scripts/e2e-routing.mjs --server-executable $server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: TUN against the selected control executable
+        run: |
+          $server = if ('${{ matrix.control }}' -eq 'go') { (Resolve-Path bin/netswitch.exe).Path } else { (Get-Command node).Source }
+          node scripts/e2e-tun.mjs --server-executable $server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Require native parity to pass
+        if: always() && steps.parity.outcome == 'failure'
+        run: throw 'Native parity failed; its complete case results are above.'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: control-${{ matrix.arch }}-${{ matrix.control }}
+          path: dist/tun-test/
+          retention-days: 7

@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      control_security:
+        description: Run only the focused Windows control security regressions
+        type: boolean
+        default: false
       packet_capture:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
@@ -24,9 +28,32 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  control-security:
+    name: Control security / Windows x64
+    if: github.event_name == 'workflow_dispatch' && inputs.control_security
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Native migration, uninstall and token regressions with race checks
+        run: go test -race -v -count=1 ./internal/platform/windows ./internal/platform/worker
+
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.control_security
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -331,6 +358,10 @@ jobs:
       - run: go vet ./internal/... ./cmd/... ./tests/...
       - run: go test -v ./internal/... ./cmd/... ./tests/...
       - run: go build ./internal/... ./cmd/... ./tests/...
+      - name: Install pinned govulncheck
+        run: go install -mod=mod golang.org/x/vuln/cmd/govulncheck@v1.9.0
+      - name: Check reachable Go vulnerabilities on every PR
+        run: govulncheck ./internal/... ./cmd/... ./tests/...
       # The acceptance suites' QUIC fixture is its own module (QUIC stays out
       # of the product's dependencies), so "./tests/..." above skips it.
       - name: Vet and test the QUIC test fixture

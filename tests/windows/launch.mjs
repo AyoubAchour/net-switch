@@ -7,24 +7,29 @@ import { fileURLToPath } from 'node:url';
 import { identity, run, until } from './testisp/harness.mjs';
 
 function argument(name, fallback) {
-  const index = process.argv.indexOf(name);
-  if (index === -1) return fallback;
-  assert(process.argv[index + 1] && !process.argv[index + 1].startsWith('--'), `${name} needs a value`);
-  return process.argv[index + 1];
+  let value;
+  for (const flag of Array.isArray(name) ? name : [name]) {
+    const index = process.argv.indexOf(flag);
+    if (index === -1) continue;
+    assert(process.argv[index + 1] && !process.argv[index + 1].startsWith('--'), `${flag} needs a value`);
+    assert(value === undefined || value === process.argv[index + 1], `Conflicting values for ${name}`);
+    value = process.argv[index + 1];
+  }
+  return value ?? fallback;
 }
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 export function launchOptions() {
-  const server = path.resolve(argument('--server-exe', process.execPath));
-  const nodeServer = server.toLowerCase() === process.execPath.toLowerCase();
+  const server = path.resolve(argument(['--server-exe', '--server-executable'], process.execPath));
+  const nodeServer = server.toLowerCase() === process.execPath.toLowerCase() || /^(node|nodejs)(\.exe)?$/i.test(path.basename(server));
   const entry = argument('--server-entry', nodeServer ? path.join(repoRoot, 'server.mjs') : null);
   const engineDir = argument('--engine-dir', path.join(repoRoot, 'engine'));
   return {
     server, entry: entry ? path.resolve(entry) : null,
-    engine: path.resolve(argument('--engine-exe', path.join(engineDir, 'sing-box.exe'))),
+    engine: path.resolve(argument(['--engine-exe', '--engine-executable'], path.join(engineDir, 'sing-box.exe'))),
     profile: argument('--profile', 'baseline'),
-    serverVersionArgs: JSON.parse(argument('--server-version-args', nodeServer ? '["--version"]' : '["version"]')),
+    serverVersionArgs: JSON.parse(argument('--server-version-args', '["--version"]')),
     engineVersionArgs: JSON.parse(argument('--engine-version-args', '["version"]')),
   };
 }
@@ -42,9 +47,11 @@ export async function recordLaunch(options, file) {
 }
 
 export function serverCommand(options, dataDir, { proxy = false } = {}) {
+  const shim = options.entry === path.join(repoRoot, 'scripts', 'server-under-test-node.mjs');
   return [options.server, [
-    ...(options.entry ? [options.entry] : []), ...(proxy ? ['--dev-proxy'] : []),
-    '--user-data', dataDir, '--machine-data', dataDir, '--engine-dir', path.dirname(options.engine),
+    ...(options.entry ? [options.entry] : ['--root', repoRoot]), ...(proxy ? ['--dev-proxy'] : []),
+    '--user-data', dataDir, '--machine-data', dataDir,
+    ...(!options.entry || shim ? ['--engine-executable', options.engine] : ['--engine-dir', path.dirname(options.engine)]),
   ]];
 }
 

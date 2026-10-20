@@ -1,0 +1,2404 @@
+{
+  "version": 1,
+  "baseline": "0172a6bf345e739ce1854d732934bd5ee9c713db",
+  "name": "lineAdd",
+  "scenario": {
+    "initial": {
+      "lines": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1
+        }
+      ]
+    },
+    "steps": [
+      {
+        "kind": "http",
+        "method": "POST",
+        "route": "/api/lines/add",
+        "body": {
+          "alias": "Wi-Fi"
+        }
+      },
+      {
+        "kind": "http",
+        "method": "GET",
+        "route": "/api/state"
+      }
+    ],
+    "environment": {
+      "realDirectoryList": true
+    }
+  },
+  "entries": [
+    {
+      "seq": 0,
+      "direction": "input",
+      "kind": "initial-files",
+      "value": {
+        "settings": {
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "guid": null,
+              "label": "Ethernet",
+              "kind": "wired",
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "weight": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "seq": 1,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/package.json",
+        "ok": true
+      }
+    },
+    {
+      "seq": 2,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 1,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 3,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "mkdir",
+        "file": "/oracle/data",
+        "ok": true
+      }
+    },
+    {
+      "seq": 4,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 2,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 5,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "mkdir",
+        "file": "/oracle/data",
+        "ok": true
+      }
+    },
+    {
+      "seq": 6,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 3,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 7,
+      "direction": "input",
+      "kind": "socket-completion",
+      "value": {
+        "operation": "listen",
+        "port": 47820
+      }
+    },
+    {
+      "seq": 8,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 4,
+        "kind": "socket-completion"
+      }
+    },
+    {
+      "seq": 9,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/data/settings.json",
+        "ok": true
+      }
+    },
+    {
+      "seq": 10,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 5,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 11,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/data/windows-undo.json",
+        "ok": false,
+        "code": "ENOENT"
+      }
+    },
+    {
+      "seq": 12,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 6,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 13,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "line readings come from PowerShell: the native helper is not built (npm run build:helper)"
+      }
+    },
+    {
+      "seq": 14,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "network readings come from PowerShell and route.exe: the native helper is not built"
+      }
+    },
+    {
+      "seq": 15,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "line readings come from PowerShell: the native helper is not built (npm run build:helper)"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 16,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 7,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 17,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "network readings come from PowerShell and route.exe: the native helper is not built"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 18,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 8,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 19,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/data/usage.json",
+        "ok": false,
+        "code": "ENOENT"
+      }
+    },
+    {
+      "seq": 20,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 9,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 21,
+      "direction": "input",
+      "kind": "socket-completion",
+      "value": {
+        "operation": "listen",
+        "port": 47821
+      }
+    },
+    {
+      "seq": 22,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 10,
+        "kind": "socket-completion"
+      }
+    },
+    {
+      "seq": 23,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.isElevated",
+        "args": [],
+        "ok": true,
+        "value": true,
+        "undefined": false
+      }
+    },
+    {
+      "seq": 24,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 11,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 25,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 26,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 12,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 27,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.detectAdapters",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "id": "a1",
+            "alias": "Ethernet",
+            "guid": null,
+            "label": "Ethernet",
+            "kind": "wired",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "weight": 1,
+            "connected": true,
+            "ipv4s": [
+              "192.0.2.1"
+            ],
+            "metric": 10
+          },
+          {
+            "id": "b2",
+            "alias": "Wi-Fi",
+            "guid": null,
+            "label": "Wi-Fi",
+            "kind": "wifi",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "weight": 1,
+            "connected": true,
+            "ipv4s": [
+              "192.0.2.2"
+            ],
+            "metric": 10
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 28,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 13,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 29,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.readMinimizeConnectionsPolicy",
+        "args": [],
+        "ok": true,
+        "value": 1,
+        "undefined": false
+      }
+    },
+    {
+      "seq": 30,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 14,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 31,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/server.json.oracle-2.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 32,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 15,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 33,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/server.json",
+        "bytes": 135,
+        "sha256": "52089863a5f54837074069cc1721ef8803356bc7e5a67352e41b0d98809a2556",
+        "text": "{\"port\":47821,\"token\":\"010101010101010101010101010101010101010101010101\",\"pid\":123,\"mode\":\"tun\",\"startedAt\":\"2026-10-19T12:00:00.000Z\"}"
+      }
+    },
+    {
+      "seq": 34,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/server.json.oracle-2.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 35,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 16,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 36,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "started on port 47821 (mode tun, elevated true)"
+      }
+    },
+    {
+      "seq": 37,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "started on port 47821 (mode tun, elevated true)"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 38,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 17,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 39,
+      "direction": "output",
+      "kind": "console",
+      "value": {
+        "text": "Net Switch is running at http://127.0.0.1:47821/#token=010101010101010101010101010101010101010101010101"
+      }
+    },
+    {
+      "seq": 40,
+      "direction": "input",
+      "kind": "adapter-snapshot",
+      "value": [
+        {
+          "id": "a1",
+          "alias": "Ethernet",
+          "guid": null,
+          "label": "Ethernet",
+          "kind": "wired",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.1"
+          ],
+          "metric": 10
+        },
+        {
+          "id": "b2",
+          "alias": "Wi-Fi",
+          "guid": null,
+          "label": "Wi-Fi",
+          "kind": "wifi",
+          "metered": false,
+          "strict": false,
+          "cap": null,
+          "weight": 1,
+          "connected": true,
+          "ipv4s": [
+            "192.0.2.2"
+          ],
+          "metric": 10
+        }
+      ]
+    },
+    {
+      "seq": 41,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 18,
+        "kind": "adapter-snapshot"
+      }
+    },
+    {
+      "seq": 42,
+      "direction": "input",
+      "kind": "counter-sample",
+      "value": {
+        "alias": "Ethernet",
+        "value": null
+      }
+    },
+    {
+      "seq": 43,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 19,
+        "kind": "counter-sample"
+      }
+    },
+    {
+      "seq": 44,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.detectAdapters",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "id": "a1",
+            "alias": "Ethernet",
+            "guid": null,
+            "label": "Ethernet",
+            "kind": "wired",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "weight": 1,
+            "connected": true,
+            "ipv4s": [
+              "192.0.2.1"
+            ],
+            "metric": 10
+          },
+          {
+            "id": "b2",
+            "alias": "Wi-Fi",
+            "guid": null,
+            "label": "Wi-Fi",
+            "kind": "wifi",
+            "metered": false,
+            "strict": false,
+            "cap": null,
+            "weight": 1,
+            "connected": true,
+            "ipv4s": [
+              "192.0.2.2"
+            ],
+            "metric": 10
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 45,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 20,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 46,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.readDefaultRoutes",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "interfaceAddress": "192.0.2.1"
+          },
+          {
+            "interfaceAddress": "192.0.2.2"
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 47,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 21,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 48,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/usage.json.oracle-3.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 49,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 22,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 50,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "routing starting"
+      }
+    },
+    {
+      "seq": 51,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "routing starting"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 52,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 23,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 53,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/data/engine.pid",
+        "ok": false,
+        "code": "ENOENT"
+      }
+    },
+    {
+      "seq": 54,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 24,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 55,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/usage.json",
+        "bytes": 67,
+        "sha256": "61b5220ba1bdead7dd329773ab5b0babd33119779991b4bf3985d8df319c93f6",
+        "text": "{\"lines\":{\"a1\":{\"bytes\":0,\"periodStart\":1790812800000}},\"peaks\":{}}"
+      }
+    },
+    {
+      "seq": 56,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/usage.json.oracle-3.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 57,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 25,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 58,
+      "direction": "input",
+      "kind": "socket-completion",
+      "value": {
+        "operation": "listen",
+        "port": 49000
+      }
+    },
+    {
+      "seq": 59,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 26,
+        "kind": "socket-completion"
+      }
+    },
+    {
+      "seq": 60,
+      "direction": "input",
+      "kind": "socket-completion",
+      "value": {
+        "operation": "close",
+        "port": 49000
+      }
+    },
+    {
+      "seq": 61,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 27,
+        "kind": "socket-completion"
+      }
+    },
+    {
+      "seq": 62,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/apps-a1.json.oracle-5.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 63,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 28,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 64,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/apps-a1.json",
+        "bytes": 125,
+        "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+        "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+      }
+    },
+    {
+      "seq": 65,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/apps-a1.json.oracle-5.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 66,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 29,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 67,
+      "direction": "input",
+      "kind": "directory-list",
+      "value": {
+        "directory": "/oracle/data",
+        "names": [
+          "settings.json",
+          "server.json",
+          "usage.json",
+          "apps-a1.json"
+        ]
+      }
+    },
+    {
+      "seq": 68,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 30,
+        "kind": "directory-list"
+      }
+    },
+    {
+      "seq": 69,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readdir",
+        "file": "/oracle/data",
+        "ok": true
+      }
+    },
+    {
+      "seq": 70,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 31,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 71,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/engine-config.json",
+        "bytes": 1553,
+        "sha256": "0da4c3b86eae36a0d236a094f24341c49690c54304beac0502c62b96719f9d20",
+        "text": "{\n  \"log\": {\n    \"level\": \"warn\",\n    \"timestamp\": true\n  },\n  \"dns\": {\n    \"servers\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"local\"\n      }\n    ]\n  },\n  \"inbounds\": [\n    {\n      \"type\": \"tun\",\n      \"tag\": \"tun-in\",\n      \"interface_name\": \"NetSwitch\",\n      \"address\": [\n        \"198.18.0.1/30\",\n        \"fdfe:dcba:9876::1/126\"\n      ],\n      \"mtu\": 9000,\n      \"auto_route\": true,\n      \"strict_route\": false,\n      \"route_exclude_address\": [\n        \"10.0.0.0/8\",\n        \"172.16.0.0/12\",\n        \"192.168.0.0/16\",\n        \"169.254.0.0/16\",\n        \"224.0.0.0/4\",\n        \"255.255.255.255/32\",\n        \"fc00::/7\",\n        \"fe80::/10\",\n        \"ff00::/8\"\n      ],\n      \"dns_mode\": \"disabled\",\n      \"stack\": \"gvisor\"\n    }\n  ],\n  \"outbounds\": [\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-a1\",\n      \"bind_interface\": \"Ethernet\"\n    }\n  ],\n  \"route\": {\n    \"rules\": [\n      {\n        \"ip_version\": 6,\n        \"action\": \"reject\",\n        \"no_drop\": true\n      },\n      {\n        \"rule_set\": \"apps-a1\",\n        \"action\": \"route\",\n        \"outbound\": \"line-a1\"\n      }\n    ],\n    \"rule_set\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-a1.json\"\n      }\n    ],\n    \"final\": \"line-a1\",\n    \"auto_detect_interface\": true,\n    \"find_process\": true,\n    \"default_domain_resolver\": \"local\"\n  },\n  \"experimental\": {\n    \"clash_api\": {\n      \"external_controller\": \"127.0.0.1:49000\",\n      \"secret\": \"040404040404040404040404040404040404040404040404\"\n    }\n  }\n}"
+      }
+    },
+    {
+      "seq": 72,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/engine-config.json",
+        "ok": true
+      }
+    },
+    {
+      "seq": 73,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 32,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 74,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.rotate",
+        "args": [],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 75,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 33,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 76,
+      "direction": "output",
+      "kind": "spawn",
+      "value": {
+        "exe": "/oracle/engine/sing-box.exe",
+        "args": [
+          "run",
+          "-c",
+          "/oracle/data/engine-config.json",
+          "--disable-color"
+        ]
+      }
+    },
+    {
+      "seq": 77,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/engine.pid",
+        "bytes": 3,
+        "sha256": "b3a8e0e1f9ab1bfe3a36f231f676f78bb30a519d2b21e6c530c0eee8ebb4a5d0",
+        "text": "456"
+      }
+    },
+    {
+      "seq": 78,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/engine.pid",
+        "ok": true
+      }
+    },
+    {
+      "seq": 79,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 34,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 80,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/version",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 81,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/version",
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "seq": 82,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 35,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 83,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "routing on"
+      }
+    },
+    {
+      "seq": 84,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "routing on"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 85,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 36,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 86,
+      "direction": "input",
+      "kind": "http",
+      "value": {
+        "method": "POST",
+        "route": "/api/lines/add",
+        "body": {
+          "alias": "Wi-Fi"
+        },
+        "headers": {}
+      }
+    },
+    {
+      "seq": 87,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/apps-a1.json.oracle-7.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 88,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 37,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 89,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/apps-a1.json",
+        "bytes": 125,
+        "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+        "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+      }
+    },
+    {
+      "seq": 90,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/apps-a1.json.oracle-7.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 91,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 38,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 92,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/settings.json.oracle-8.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 93,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 39,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 94,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/settings.json",
+        "bytes": 635,
+        "sha256": "877401557e692d909f2eca0f902b76288a47199c7f838be18e0cc50453fa36f6",
+        "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    },\n    {\n      \"id\": \"060606\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Wi-Fi\",\n      \"kind\": \"wifi\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {},\n  \"combine\": false,\n  \"combineMode\": \"auto\",\n  \"probeTargets\": [\n    \"1.1.1.1:443\",\n    \"8.8.8.8:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": true,\n  \"skippedUpdate\": null\n}"
+      }
+    },
+    {
+      "seq": 95,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/settings.json.oracle-8.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 96,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 40,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 97,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/settings.json.bak.oracle-9.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 98,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 41,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 99,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/settings.json.bak",
+        "bytes": 635,
+        "sha256": "877401557e692d909f2eca0f902b76288a47199c7f838be18e0cc50453fa36f6",
+        "text": "{\n  \"lines\": [\n    {\n      \"id\": \"a1\",\n      \"alias\": \"Ethernet\",\n      \"guid\": null,\n      \"label\": \"Ethernet\",\n      \"kind\": \"wired\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    },\n    {\n      \"id\": \"060606\",\n      \"alias\": \"Wi-Fi\",\n      \"guid\": null,\n      \"label\": \"Wi-Fi\",\n      \"kind\": \"wifi\",\n      \"metered\": false,\n      \"strict\": false,\n      \"cap\": null,\n      \"weight\": 1\n    }\n  ],\n  \"appLines\": {},\n  \"combine\": false,\n  \"combineMode\": \"auto\",\n  \"probeTargets\": [\n    \"1.1.1.1:443\",\n    \"8.8.8.8:443\"\n  ],\n  \"ipv6\": \"auto\",\n  \"checkForUpdates\": true,\n  \"skippedUpdate\": null\n}"
+      }
+    },
+    {
+      "seq": 100,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/settings.json.bak.oracle-9.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 101,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 42,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 102,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "added Wi-Fi (Wi-Fi)"
+      }
+    },
+    {
+      "seq": 103,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "added Wi-Fi (Wi-Fi)"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 104,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 43,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 105,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "routing stopping"
+      }
+    },
+    {
+      "seq": 106,
+      "direction": "input",
+      "kind": "process-exit",
+      "value": {
+        "pid": 456,
+        "code": 0
+      }
+    },
+    {
+      "seq": 107,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 44,
+        "kind": "process-exit"
+      }
+    },
+    {
+      "seq": 108,
+      "direction": "output",
+      "kind": "remove",
+      "value": {
+        "file": "/oracle/data/engine.pid"
+      }
+    },
+    {
+      "seq": 109,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "routing stopping"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 110,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 45,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 111,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rm",
+        "file": "/oracle/data/engine.pid",
+        "ok": true
+      }
+    },
+    {
+      "seq": 112,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 46,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 113,
+      "direction": "output",
+      "kind": "remove",
+      "value": {
+        "file": "/oracle/data/engine.pid"
+      }
+    },
+    {
+      "seq": 114,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rm",
+        "file": "/oracle/data/engine.pid",
+        "ok": true
+      }
+    },
+    {
+      "seq": 115,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 47,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 116,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "routing off"
+      }
+    },
+    {
+      "seq": 117,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "routing off"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 118,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 48,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 119,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "routing starting"
+      }
+    },
+    {
+      "seq": 120,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "routing starting"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 121,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 49,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 122,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readFile",
+        "file": "/oracle/data/engine.pid",
+        "ok": false,
+        "code": "ENOENT"
+      }
+    },
+    {
+      "seq": 123,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 50,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 124,
+      "direction": "input",
+      "kind": "socket-completion",
+      "value": {
+        "operation": "listen",
+        "port": 49000
+      }
+    },
+    {
+      "seq": 125,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 51,
+        "kind": "socket-completion"
+      }
+    },
+    {
+      "seq": 126,
+      "direction": "input",
+      "kind": "socket-completion",
+      "value": {
+        "operation": "close",
+        "port": 49000
+      }
+    },
+    {
+      "seq": 127,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 52,
+        "kind": "socket-completion"
+      }
+    },
+    {
+      "seq": 128,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/apps-a1.json.oracle-11.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 129,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 53,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 130,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/apps-a1.json",
+        "bytes": 125,
+        "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+        "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+      }
+    },
+    {
+      "seq": 131,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/apps-a1.json.oracle-11.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 132,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 54,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 133,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/apps-060606.json.oracle-12.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 134,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 55,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 135,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/apps-060606.json",
+        "bytes": 125,
+        "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+        "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+      }
+    },
+    {
+      "seq": 136,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/apps-060606.json.oracle-12.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 137,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 56,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 138,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/share-060606.json.oracle-13.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 139,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 57,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 140,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/share-060606.json",
+        "bytes": 79,
+        "sha256": "b9d5b988acea19c4c9dd6f16e2d0cc72cbeee6575d7370b5e20b861e73b04476"
+      }
+    },
+    {
+      "seq": 141,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/share-060606.json.oracle-13.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 142,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 58,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 143,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/cut-060606.json.oracle-14.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 144,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 59,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 145,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/cut-060606.json",
+        "bytes": 125,
+        "sha256": "f21b335eea1a81d79fc0bc2e6f2178340c71354579985f49eb6892cccb805eee",
+        "text": "{\n  \"version\": 3,\n  \"rules\": [\n    {\n      \"process_path\": [\n        \"C:\\\\NetSwitch\\\\no-app-selected.exe\"\n      ]\n    }\n  ]\n}"
+      }
+    },
+    {
+      "seq": 146,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "rename",
+        "file": "/oracle/data/cut-060606.json.oracle-14.tmp",
+        "ok": true
+      }
+    },
+    {
+      "seq": 147,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 60,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 148,
+      "direction": "input",
+      "kind": "directory-list",
+      "value": {
+        "directory": "/oracle/data",
+        "names": [
+          "settings.json",
+          "server.json",
+          "usage.json",
+          "apps-a1.json",
+          "engine-config.json",
+          "settings.json.bak",
+          "apps-060606.json",
+          "share-060606.json",
+          "cut-060606.json"
+        ]
+      }
+    },
+    {
+      "seq": 149,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 61,
+        "kind": "directory-list"
+      }
+    },
+    {
+      "seq": 150,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "readdir",
+        "file": "/oracle/data",
+        "ok": true
+      }
+    },
+    {
+      "seq": 151,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 62,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 152,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/engine-config.json",
+        "bytes": 2817,
+        "sha256": "f81d8c865fd0c7a591c8ff2472d25949b057bb8dcef4addfbe903e6b639bcc1d",
+        "text": "{\n  \"log\": {\n    \"level\": \"warn\",\n    \"timestamp\": true\n  },\n  \"dns\": {\n    \"servers\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"local\"\n      }\n    ]\n  },\n  \"inbounds\": [\n    {\n      \"type\": \"tun\",\n      \"tag\": \"tun-in\",\n      \"interface_name\": \"NetSwitch\",\n      \"address\": [\n        \"198.18.0.1/30\",\n        \"fdfe:dcba:9876::1/126\"\n      ],\n      \"mtu\": 9000,\n      \"auto_route\": true,\n      \"strict_route\": false,\n      \"route_exclude_address\": [\n        \"10.0.0.0/8\",\n        \"172.16.0.0/12\",\n        \"192.168.0.0/16\",\n        \"169.254.0.0/16\",\n        \"224.0.0.0/4\",\n        \"255.255.255.255/32\",\n        \"fc00::/7\",\n        \"fe80::/10\",\n        \"ff00::/8\"\n      ],\n      \"dns_mode\": \"disabled\",\n      \"stack\": \"gvisor\"\n    }\n  ],\n  \"outbounds\": [\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-a1\",\n      \"bind_interface\": \"Ethernet\"\n    },\n    {\n      \"type\": \"direct\",\n      \"tag\": \"line-060606\",\n      \"bind_interface\": \"Wi-Fi\"\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-a1\",\n      \"outbounds\": [\n        \"line-a1\",\n        \"line-060606\"\n      ],\n      \"default\": \"line-a1\",\n      \"interrupt_exist_connections\": false\n    },\n    {\n      \"type\": \"selector\",\n      \"tag\": \"lane-060606\",\n      \"outbounds\": [\n        \"line-060606\",\n        \"line-a1\"\n      ],\n      \"default\": \"line-060606\",\n      \"interrupt_exist_connections\": false\n    }\n  ],\n  \"route\": {\n    \"rules\": [\n      {\n        \"ip_version\": 6,\n        \"action\": \"reject\",\n        \"no_drop\": true\n      },\n      {\n        \"rule_set\": \"cut-060606\",\n        \"action\": \"reject\"\n      },\n      {\n        \"rule_set\": \"apps-a1\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-a1\"\n      },\n      {\n        \"rule_set\": \"apps-060606\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-060606\"\n      },\n      {\n        \"rule_set\": \"share-060606\",\n        \"action\": \"route\",\n        \"outbound\": \"lane-060606\"\n      }\n    ],\n    \"rule_set\": [\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-a1\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-a1.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"apps-060606\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/apps-060606.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"share-060606\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/share-060606.json\"\n      },\n      {\n        \"type\": \"local\",\n        \"tag\": \"cut-060606\",\n        \"format\": \"source\",\n        \"path\": \"/oracle/data/cut-060606.json\"\n      }\n    ],\n    \"final\": \"lane-a1\",\n    \"auto_detect_interface\": true,\n    \"find_process\": true,\n    \"default_domain_resolver\": \"local\"\n  },\n  \"experimental\": {\n    \"clash_api\": {\n      \"external_controller\": \"127.0.0.1:49000\",\n      \"secret\": \"0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a\"\n    }\n  }\n}"
+      }
+    },
+    {
+      "seq": 153,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/engine-config.json",
+        "ok": true
+      }
+    },
+    {
+      "seq": 154,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 63,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 155,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.rotate",
+        "args": [],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 156,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 64,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 157,
+      "direction": "output",
+      "kind": "spawn",
+      "value": {
+        "exe": "/oracle/engine/sing-box.exe",
+        "args": [
+          "run",
+          "-c",
+          "/oracle/data/engine-config.json",
+          "--disable-color"
+        ]
+      }
+    },
+    {
+      "seq": 158,
+      "direction": "output",
+      "kind": "write",
+      "value": {
+        "file": "/oracle/data/engine.pid",
+        "bytes": 3,
+        "sha256": "b3a8e0e1f9ab1bfe3a36f231f676f78bb30a519d2b21e6c530c0eee8ebb4a5d0",
+        "text": "456"
+      }
+    },
+    {
+      "seq": 159,
+      "direction": "input",
+      "kind": "file-completion",
+      "value": {
+        "operation": "writeFile",
+        "file": "/oracle/data/engine.pid",
+        "ok": true
+      }
+    },
+    {
+      "seq": 160,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 65,
+        "kind": "file-completion"
+      }
+    },
+    {
+      "seq": 161,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/version",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 162,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/version",
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "seq": 163,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 66,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 164,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "routing on"
+      }
+    },
+    {
+      "seq": 165,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "routing on"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 166,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 67,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 167,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/lane-a1",
+        "method": "PUT",
+        "body": {
+          "name": "line-a1"
+        }
+      }
+    },
+    {
+      "seq": 168,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/proxies/lane-a1",
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "seq": 169,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 68,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 170,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.readDefaultRoutes",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "interfaceAddress": "192.0.2.1"
+          },
+          {
+            "interfaceAddress": "192.0.2.2"
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 171,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 69,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 172,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 173,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-a1/delay",
+        "status": 200,
+        "body": {
+          "delay": 18
+        }
+      }
+    },
+    {
+      "seq": 174,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 70,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 175,
+      "direction": "output",
+      "kind": "log",
+      "value": {
+        "text": "Ethernet's apps now use Ethernet"
+      }
+    },
+    {
+      "seq": 176,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "log.append",
+        "args": [
+          "Ethernet's apps now use Ethernet"
+        ],
+        "ok": true,
+        "value": null,
+        "undefined": true
+      }
+    },
+    {
+      "seq": 177,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 71,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 178,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "engine./proxies/line-a1/delay.json",
+        "args": [],
+        "ok": true,
+        "value": {
+          "delay": 18
+        },
+        "undefined": false
+      }
+    },
+    {
+      "seq": 179,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 72,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 180,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/lane-060606",
+        "method": "PUT",
+        "body": {
+          "name": "line-060606"
+        }
+      }
+    },
+    {
+      "seq": 181,
+      "direction": "input",
+      "kind": "engine-reply",
+      "value": {
+        "route": "/proxies/lane-060606",
+        "status": 200,
+        "body": {}
+      }
+    },
+    {
+      "seq": 182,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 73,
+        "kind": "engine-reply"
+      }
+    },
+    {
+      "seq": 183,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "platform.readDefaultRoutes",
+        "args": [],
+        "ok": true,
+        "value": [
+          {
+            "interfaceAddress": "192.0.2.1"
+          },
+          {
+            "interfaceAddress": "192.0.2.2"
+          }
+        ],
+        "undefined": false
+      }
+    },
+    {
+      "seq": 184,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 74,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 185,
+      "direction": "output",
+      "kind": "engine",
+      "value": {
+        "route": "/proxies/line-060606/delay",
+        "method": "GET"
+      }
+    },
+    {
+      "seq": 186,
+      "direction": "input",
+      "kind": "probe-result",
+      "value": {
+        "route": "/proxies/line-060606/delay",
+        "status": 200,
+        "body": {
+          "delay": 18
+        }
+      }
+    },
+    {
+      "seq": 187,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 75,
+        "kind": "probe-result"
+      }
+    },
+    {
+      "seq": 188,
+      "direction": "input",
+      "kind": "probe-vote",
+      "value": {
+        "line": "a1",
+        "result": true,
+        "at": 1792411200000
+      }
+    },
+    {
+      "seq": 189,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 76,
+        "kind": "probe-vote"
+      }
+    },
+    {
+      "seq": 190,
+      "direction": "input",
+      "kind": "async-result",
+      "value": {
+        "operation": "engine./proxies/line-060606/delay.json",
+        "args": [],
+        "ok": true,
+        "value": {
+          "delay": 18
+        },
+        "undefined": false
+      }
+    },
+    {
+      "seq": 191,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 77,
+        "kind": "async-result"
+      }
+    },
+    {
+      "seq": 192,
+      "direction": "input",
+      "kind": "probe-vote",
+      "value": {
+        "line": "060606",
+        "result": true,
+        "at": 1792411200000
+      }
+    },
+    {
+      "seq": 193,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 78,
+        "kind": "probe-vote"
+      }
+    },
+    {
+      "seq": 194,
+      "direction": "input",
+      "kind": "state-snapshot",
+      "value": {
+        "now": 1792411200000
+      }
+    },
+    {
+      "seq": 195,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 79,
+        "kind": "state-snapshot"
+      }
+    },
+    {
+      "seq": 196,
+      "direction": "output",
+      "kind": "api",
+      "value": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": true,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": false,
+            "active": false,
+            "mode": "auto"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            },
+            {
+              "id": "060606",
+              "alias": "Wi-Fi",
+              "label": "Wi-Fi",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "060606",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": null,
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            }
+          ],
+          "candidates": [],
+          "apps": [],
+          "events": [],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": true,
+            "probeTargets": [
+              "1.1.1.1:443",
+              "8.8.8.8:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 197,
+      "direction": "input",
+      "kind": "http",
+      "value": {
+        "method": "GET",
+        "route": "/api/state",
+        "headers": {}
+      }
+    },
+    {
+      "seq": 198,
+      "direction": "input",
+      "kind": "state-snapshot",
+      "value": {
+        "now": 1792411200000
+      }
+    },
+    {
+      "seq": 199,
+      "direction": "input",
+      "kind": "completion",
+      "value": {
+        "id": 80,
+        "kind": "state-snapshot"
+      }
+    },
+    {
+      "seq": 200,
+      "direction": "output",
+      "kind": "api",
+      "value": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store"
+        },
+        "body": {
+          "mode": "tun",
+          "elevated": true,
+          "version": "0.3.1",
+          "update": null,
+          "updateChecks": true,
+          "features": {
+            "reconnect": true,
+            "combine": true,
+            "lines": true,
+            "installedApps": true
+          },
+          "combine": {
+            "on": false,
+            "active": false,
+            "mode": "auto"
+          },
+          "routing": {
+            "status": "on",
+            "wanted": true,
+            "error": null,
+            "measuring": true,
+            "proxyPort": null,
+            "ipv6": false,
+            "retryAt": null
+          },
+          "lines": [
+            {
+              "id": "a1",
+              "alias": "Ethernet",
+              "label": "Ethernet",
+              "kind": "wired",
+              "main": true,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "a1",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": {
+                "bytes": 0,
+                "periodStart": 1790812800000
+              },
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            },
+            {
+              "id": "060606",
+              "alias": "Wi-Fi",
+              "label": "Wi-Fi",
+              "kind": "wifi",
+              "main": false,
+              "connected": true,
+              "problem": null,
+              "ping": 18,
+              "connections": 0,
+              "carrying": true,
+              "target": "060606",
+              "rate": null,
+              "ssid": null,
+              "metered": false,
+              "strict": false,
+              "cap": null,
+              "usage": null,
+              "exhausted": false,
+              "blocked": false,
+              "weight": 1,
+              "share": null
+            }
+          ],
+          "candidates": [],
+          "apps": [],
+          "events": [],
+          "settings": {
+            "autostart": null,
+            "checkForUpdates": true,
+            "probeTargets": [
+              "1.1.1.1:443",
+              "8.8.8.8:443"
+            ]
+          },
+          "setup": {
+            "cableNotDefault": true,
+            "wifiBlocked": false,
+            "keepBothConnected": true,
+            "changed": {
+              "cableDefault": false,
+              "keepBoth": false
+            }
+          }
+        }
+      }
+    }
+  ]
+}

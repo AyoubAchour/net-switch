@@ -1,0 +1,481 @@
+[
+  {
+    "name": "damaged-policy",
+    "undo": {
+      "policy": {
+        "value": "bad"
+      },
+      "metrics": {
+        "Zebra": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ]
+      }
+    },
+    "expected": {
+      "status": 400,
+      "error": "Net Switch couldn’t undo the Windows changes: the Windows undo record is damaged (the policy value is not a number), so nothing was undone; it is kept as it is.",
+      "remaining": {
+        "policy": {
+          "value": "bad"
+        },
+        "metrics": {
+          "Zebra": [
+            {
+              "family": "IPv4",
+              "automatic": true,
+              "metric": 25
+            }
+          ]
+        }
+      },
+      "policy": 1,
+      "operations": [],
+      "logs": [
+        "undo failed: the Windows undo record is damaged (the policy value is not a number), so nothing was undone; it is kept as it is"
+      ]
+    }
+  },
+  {
+    "name": "damaged-metrics",
+    "undo": {
+      "policy": {
+        "value": 3
+      },
+      "metrics": {
+        "Zebra": [
+          {
+            "family": "IP",
+            "automatic": true,
+            "metric": 25
+          }
+        ],
+        "Alpha": "bad"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "error": "Net Switch couldn’t undo the Windows changes: the Windows undo record is damaged (Zebra: an unreadable entry; Alpha: not a list), so nothing was undone; it is kept as it is.",
+      "remaining": {
+        "policy": {
+          "value": 3
+        },
+        "metrics": {
+          "Zebra": [
+            {
+              "family": "IP",
+              "automatic": true,
+              "metric": 25
+            }
+          ],
+          "Alpha": "bad"
+        }
+      },
+      "policy": 1,
+      "operations": [],
+      "logs": [
+        "undo failed: the Windows undo record is damaged (Zebra: an unreadable entry; Alpha: not a list), so nothing was undone; it is kept as it is"
+      ]
+    }
+  },
+  {
+    "name": "policy-failure",
+    "undo": {
+      "policy": {
+        "value": 3
+      },
+      "metrics": {
+        "Zebra": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ]
+      }
+    },
+    "faults": {
+      "policyFailure": "policy denied"
+    },
+    "expected": {
+      "status": 400,
+      "error": "Net Switch couldn’t undo the Windows changes: policy denied.",
+      "remaining": {
+        "policy": {
+          "value": 3
+        },
+        "metrics": {
+          "Zebra": [
+            {
+              "family": "IPv4",
+              "automatic": true,
+              "metric": 25
+            }
+          ]
+        }
+      },
+      "policy": 1,
+      "operations": [
+        {
+          "operation": "network.restoreMinimizeConnectionsPolicy",
+          "args": [
+            3
+          ],
+          "ok": false
+        }
+      ],
+      "logs": [
+        "undo failed: policy denied"
+      ]
+    }
+  },
+  {
+    "name": "save-failure",
+    "undo": {
+      "policy": {
+        "value": 3
+      },
+      "metrics": {
+        "Zebra": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ]
+      }
+    },
+    "faults": {
+      "undoWriteFailure": "disk full"
+    },
+    "expected": {
+      "status": 400,
+      "error": "Net Switch couldn’t undo the Windows changes: disk full.",
+      "remaining": {
+        "policy": {
+          "value": 3
+        },
+        "metrics": {
+          "Zebra": [
+            {
+              "family": "IPv4",
+              "automatic": true,
+              "metric": 25
+            }
+          ]
+        }
+      },
+      "policy": 3,
+      "operations": [
+        {
+          "operation": "network.restoreMinimizeConnectionsPolicy",
+          "args": [
+            3
+          ],
+          "ok": true
+        }
+      ],
+      "logs": [
+        "undo failed: disk full"
+      ]
+    }
+  },
+  {
+    "name": "partial-ordered",
+    "undo": {
+      "policy": {
+        "value": 3
+      },
+      "metrics": {
+        "Zebra": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ],
+        "Alpha": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ],
+        "Done": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ]
+      }
+    },
+    "faults": {
+      "restoreFailures": {
+        "Zebra": "adapter missing",
+        "Alpha": "access denied"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "error": "Connect Zebra and Alpha again to finish undoing, then press Undo again.",
+      "remaining": {
+        "metrics": {
+          "Zebra": [
+            {
+              "family": "IPv4",
+              "automatic": true,
+              "metric": 25
+            }
+          ],
+          "Alpha": [
+            {
+              "family": "IPv4",
+              "automatic": true,
+              "metric": 25
+            }
+          ]
+        },
+        "policy": {}
+      },
+      "policy": 3,
+      "operations": [
+        {
+          "operation": "network.restoreMinimizeConnectionsPolicy",
+          "args": [
+            3
+          ],
+          "ok": true
+        },
+        {
+          "operation": "network.restoreMetrics",
+          "args": [
+            "Zebra",
+            [
+              {
+                "family": "IPv4",
+                "automatic": true,
+                "metric": 25
+              }
+            ]
+          ],
+          "ok": false
+        },
+        {
+          "operation": "network.restoreMetrics",
+          "args": [
+            "Alpha",
+            [
+              {
+                "family": "IPv4",
+                "automatic": true,
+                "metric": 25
+              }
+            ]
+          ],
+          "ok": false
+        },
+        {
+          "operation": "network.restoreMetrics",
+          "args": [
+            "Done",
+            [
+              {
+                "family": "IPv4",
+                "automatic": true,
+                "metric": 25
+              }
+            ]
+          ],
+          "ok": true
+        },
+        {
+          "operation": "platform.readMinimizeConnectionsPolicy",
+          "args": [],
+          "ok": true
+        },
+        {
+          "operation": "platform.detectAdapters",
+          "args": [],
+          "ok": true
+        }
+      ],
+      "logs": []
+    }
+  },
+  {
+    "name": "empty-record",
+    "undo": {
+      "policy": {},
+      "metrics": {
+        "Empty": []
+      }
+    },
+    "expected": {
+      "status": 200,
+      "error": null,
+      "remaining": {
+        "metrics": {},
+        "policy": {}
+      },
+      "policy": 1,
+      "operations": [
+        {
+          "operation": "platform.readMinimizeConnectionsPolicy",
+          "args": [],
+          "ok": true
+        },
+        {
+          "operation": "platform.detectAdapters",
+          "args": [],
+          "ok": true
+        }
+      ],
+      "logs": []
+    }
+  },
+  {
+    "name": "legacy-ordered",
+    "legacyUndo": {
+      "policy": 3,
+      "metrics": {
+        "Zebra": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ],
+        "Alpha": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ]
+      }
+    },
+    "undo": {
+      "policy": {},
+      "metrics": {
+        "Zebra": [
+          {
+            "family": "IPv4",
+            "automatic": false,
+            "metric": 77
+          }
+        ],
+        "Current": [
+          {
+            "family": "IPv4",
+            "automatic": true,
+            "metric": 25
+          }
+        ]
+      }
+    },
+    "faults": {
+      "restoreFailures": {
+        "Zebra": "adapter missing",
+        "Alpha": "adapter missing",
+        "Current": "adapter missing"
+      }
+    },
+    "expected": {
+      "status": 400,
+      "error": "Connect Zebra and Alpha and Current again to finish undoing, then press Undo again.",
+      "remaining": {
+        "metrics": {
+          "Zebra": [
+            {
+              "family": "IPv4",
+              "automatic": false,
+              "metric": 77
+            }
+          ],
+          "Alpha": [
+            {
+              "family": "IPv4",
+              "automatic": true,
+              "metric": 25
+            }
+          ],
+          "Current": [
+            {
+              "family": "IPv4",
+              "automatic": true,
+              "metric": 25
+            }
+          ]
+        },
+        "policy": {}
+      },
+      "policy": 3,
+      "operations": [
+        {
+          "operation": "network.restoreMinimizeConnectionsPolicy",
+          "args": [
+            3
+          ],
+          "ok": true
+        },
+        {
+          "operation": "network.restoreMetrics",
+          "args": [
+            "Zebra",
+            [
+              {
+                "family": "IPv4",
+                "automatic": false,
+                "metric": 77
+              }
+            ]
+          ],
+          "ok": false
+        },
+        {
+          "operation": "network.restoreMetrics",
+          "args": [
+            "Alpha",
+            [
+              {
+                "family": "IPv4",
+                "automatic": true,
+                "metric": 25
+              }
+            ]
+          ],
+          "ok": false
+        },
+        {
+          "operation": "network.restoreMetrics",
+          "args": [
+            "Current",
+            [
+              {
+                "family": "IPv4",
+                "automatic": true,
+                "metric": 25
+              }
+            ]
+          ],
+          "ok": false
+        },
+        {
+          "operation": "platform.readMinimizeConnectionsPolicy",
+          "args": [],
+          "ok": true
+        },
+        {
+          "operation": "platform.detectAdapters",
+          "args": [],
+          "ok": true
+        }
+      ],
+      "logs": []
+    }
+  }
+]
