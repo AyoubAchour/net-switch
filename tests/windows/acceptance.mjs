@@ -683,6 +683,17 @@ try {
     assert(Object.values(state).every((list) => list.length === 0), JSON.stringify(state));
     throw new BaselineDefect('An owned non-present Wintun device remains before TestISP shuts down', { state, pnp: finalPnP });
   });
+  // Record the actual cleanup result first. Only then end a server this harness
+  // started if quit failed, so its open handles cannot hide the failure behind
+  // the job timeout or keep routing through TestISP while TestISP shuts down.
+  if (server?.child.exitCode === null && server.child.signalCode === null) {
+    console.error('Emergency cleanup of the test-owned server after failed quit; the failed result is preserved.');
+    process.exitCode = 1;
+    try {
+      server.child.kill('SIGKILL');
+      await until(() => server.child.exitCode !== null || server.child.signalCode !== null, 'test-owned server emergency cleanup', 30_000);
+    } catch (error) { console.error(error); }
+  }
   if (harness) try { await harness.close(); } catch (error) { console.error(error); process.exitCode = 1; }
   try { await targetFirewall('clean'); } catch (error) { console.error(error); process.exitCode = 1; }
   if (responder) { await writeFile(path.join(dir, 'target-observations.json'), JSON.stringify(responder.seen, null, 2)); await responder.close(); }
