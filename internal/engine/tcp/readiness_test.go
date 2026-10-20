@@ -223,13 +223,14 @@ func (e *readableEndpoint) Read(out io.Writer, _ tcpip.ReadOptions) (tcpip.ReadR
 
 func TestBlockedRelayOwnsBytesAcrossWorkerScratchReuse(t *testing.T) {
 	control := &testfake.Controller{}
+	workers := &relayWorkers{waiting: make(map[*readyRelay]struct{})}
 	makeRelay := func(data []byte, peer *readyPeer) *readyRelay {
 		ticket, err := control.Begin("tcp", platform.Tuple{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(ticket.Close)
-		return &readyRelay{remote: peer, c: &connection{ep: &readableEndpoint{data: data}, ticket: ticket}}
+		return &readyRelay{workers: workers, remote: peer, c: &connection{ep: &readableEndpoint{data: data}, ticket: ticket}}
 	}
 	firstBytes := bytes.Repeat([]byte("first connection\n"), 500)
 	firstPeer := newReadyPeer()
@@ -260,5 +261,61 @@ func TestBlockedRelayOwnsBytesAcrossWorkerScratchReuse(t *testing.T) {
 	}
 	if first.up.buffer != nil || second.up.buffer != nil {
 		t.Fatal("drained connections retained their pending buffer")
+	}
+}
+
+func TestStalledDirectionsStopReadingAtTheirSharedBufferBound(t *testing.T) {
+	w := &relayWorkers{waiting: make(map[*readyRelay]struct{}), wake: make(chan struct{}, 1)}
+	control := &testfake.Controller{}
+	scratch := new(relayScratch)
+	var relays []*readyRelay
+	for i := 0; i < RelayHeldBudget/RelayBuffer+20; i++ {
+		ticket, _ := control.Begin("tcp", platform.Tuple{})
+		peer := newReadyPeer()
+		peer.blocked = true
+		r := &readyRelay{workers: w, remote: peer, c: &connection{ticket: ticket, ep: &readableEndpoint{data: []byte("held")}}}
+		relays = append(relays, r)
+		if _, err := r.direction(&r.up, true, scratch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if w.loans*RelayBuffer != RelayHeldBudget || len(w.waiting) != 20 {
+		t.Fatalf("stalled storage is not bounded: %d loans/%d waiters", w.loans, len(w.waiting))
+	}
+	last := relays[len(relays)-1]
+	if len(last.c.ep.(*readableEndpoint).data) != 4 || last.up.buffer != nil {
+		t.Fatal("an unbudgeted read consumed bytes before it could retain them")
+	}
+	for _, r := range relays {
+		r.remote.(*readyPeer).blocked = false
+		if _, err := r.direction(&r.up, true, scratch); err != nil {
+			t.Fatal(err)
+		}
+		if string(r.remote.(*readyPeer).upload.Bytes()) != "held" {
+			t.Fatal("capacity recovery lost buffered or unread data")
+		}
+		r.c.ticket.Close()
+	}
+	if w.loans != 0 {
+		t.Fatal("stalled relay loans were not returned")
+	}
+}
+
+func TestOneDirectionCannotEraseTheOtherDirectionsBudgetWakeup(t *testing.T) {
+	w := &relayWorkers{waiting: make(map[*readyRelay]struct{}), wake: make(chan struct{}, 1), loans: RelayHeldBudget / RelayBuffer}
+	r := &readyRelay{workers: w}
+	if w.borrow(r) {
+		t.Fatal("fixture failed to block the first direction at capacity")
+	}
+	// A different direction's pending write drains and obtains the freed
+	// slot before the first direction is retried. Its successful borrow
+	// must preserve the first direction's queued interest.
+	w.loans--
+	if !w.borrow(r) {
+		t.Fatal("second direction could not consume the free slot")
+	}
+	w.giveBack()
+	if w.head != r {
+		t.Fatal("first direction was stranded with no readiness or budget wakeup")
 	}
 }
