@@ -81,4 +81,28 @@ func TestTableReadsCoverEveryWaiter(t *testing.T) {
 	if q.peakInFlight() > ownerParallelReads {
 		t.Fatalf("peak in flight %d exceeds %d", q.peakInFlight(), ownerParallelReads)
 	}
+
+	// Once a typical read time is known, a second read is not started back
+	// to back with the first: it waits for half that time even with a slot
+	// free, then starts on its own.
+	q.mu.Lock()
+	q.typical = 200 * time.Millisecond
+	q.mu.Unlock()
+	lead := q.join(instant(), run)
+	if r := next(); r != lead {
+		t.Fatal("the first read did not start at once")
+	}
+	staggered := q.join(instant(), run)
+	select {
+	case r := <-started:
+		t.Fatalf("a read started %s after the previous one; the stagger is %s", r.at-lead.at, q.typical/ownerParallelReads)
+	case <-time.After(20 * time.Millisecond):
+	}
+	// Go's timer and QPC tick differently; allow 2 ms of clock granularity.
+	if r := next(); r != staggered || r.at-lead.at < q.typical/ownerParallelReads-2*time.Millisecond {
+		t.Fatalf("staggered read started %s after the previous one; want at least %s", r.at-lead.at, q.typical/ownerParallelReads)
+	}
+	lead.result, staggered.result = 4, 5
+	q.finish(lead, run)
+	q.finish(staggered, run)
 }
