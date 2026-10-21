@@ -3,7 +3,6 @@ package stack
 
 import (
 	"fmt"
-	"runtime"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -28,10 +27,8 @@ type Options struct {
 func DefaultOptions() Options {
 	// Keep lost-final-ACK protection. The forwarder installs the local-app
 	// SYN reopen hook; see TestTimeWaitImmediateReuse.
-	o := Options{TimeWait: 60 * time.Second}
-	if runtime.GOOS == "windows" {
-		o.ClockResolution = 500 * time.Microsecond
-	}
+	clock, resolution := nativeClock()
+	o := Options{TimeWait: 60 * time.Second, Clock: clock, ClockResolution: resolution}
 	return o
 }
 

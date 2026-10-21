@@ -13,6 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
+	"github.com/AyoubAchour/net-switch/internal/winclock"
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -41,6 +44,9 @@ type Stats struct {
 	ReadWakes        uint64
 	Placeholders     uint64
 	OversizedPackets uint64
+	CloseNanos       uint64
+	CloseDetails     CloseDetails
+	Registrar        RegistrarStats
 }
 
 // Events are advisory and bounded. Stats remain authoritative if a caller
@@ -51,27 +57,45 @@ type Event struct {
 }
 
 type Session struct {
-	adapter            *Adapter
-	mu                 sync.RWMutex // keeps resources alive during native waits and packet copies
-	readMu, writeMu    sync.Mutex
-	rings              *rings
-	wake, cancelEvent  windows.Handle
-	changed            chan struct{}
-	err, closeErr      error
-	closed, recovering atomic.Bool
-	closeOnce          sync.Once
-	stop, stopped      chan struct{}
-	repair             chan error
-	events             chan Event
+	adapter                *Adapter
+	mu                     sync.RWMutex // keeps resources alive during native waits and packet copies
+	readMu, writeMu        sync.Mutex
+	rings                  *rings
+	wake, cancelEvent      windows.Handle
+	wakeOwner, cancelOwner winhandle.Owner
+	changed                chan struct{}
+	err, closeErr          error
+	closed, recovering     atomic.Bool
+	closeOnce              sync.Once
+	stop, stopped          chan struct{}
+	repair                 chan error
+	events                 chan Event
+	open                   func() (*rings, error)
+	registrars             atomic.Uint64
+	registrar              atomic.Pointer[RegistrarStats]
+	// waitHandles is the reader's native wait array, guarded by readMu. It
+	// lives in this heap object so no stack copy can move it under the kernel.
+	waitHandles [4]windows.Handle
 
 	read, written, dropped            atomic.Uint64
 	corruptions, recoveries, failures atomic.Uint64
 	wakeups                           atomic.Uint64
 	readWaits, readWakes              atomic.Uint64
 	placeholders, oversized           atomic.Uint64
+	closeStarted                      atomic.Int64
+	closeNanos                        atomic.Uint64
+	closeDetails                      atomic.Pointer[CloseDetails]
 }
 
+// StartSession registers rings through a registrar process. There is no
+// in-process registration path in production code, and no fallback to one.
 func (a *Adapter) StartSession() (*Session, error) {
+	return a.startSession(func() (*rings, error) { return openRings(a.devicePath, a.config.Capacity) })
+}
+
+// startSession takes the ring opener for both the first registration and
+// recovery. Only tests pass anything other than StartSession's opener.
+func (a *Adapter) startSession(open func() (*rings, error)) (*Session, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.handle == 0 {
@@ -84,7 +108,7 @@ func (a *Adapter) StartSession() (*Session, error) {
 			return nil, fmt.Errorf("adapter already has a session")
 		}
 	}
-	r, err := openRings(a.devicePath, a.config.Capacity)
+	r, err := open()
 	if err != nil {
 		return nil, err
 	}
@@ -92,11 +116,14 @@ func (a *Adapter) StartSession() (*Session, error) {
 	if err != nil {
 		return nil, errors.Join(err, r.close())
 	}
+	wakeOwner := winhandle.Open(wake, "Wintun session wake open")
 	cancelEvent, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
-		return nil, errors.Join(err, windows.CloseHandle(wake), r.close())
+		return nil, errors.Join(err, wakeOwner.HandleClose("Wintun session setup failure close"), r.close())
 	}
-	s := &Session{adapter: a, rings: r, wake: wake, cancelEvent: cancelEvent, changed: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}), repair: make(chan error, 1), events: make(chan Event, 8)}
+	s := &Session{adapter: a, rings: r, wake: wake, cancelEvent: cancelEvent, changed: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}), repair: make(chan error, 1), events: make(chan Event, 8), open: open}
+	s.wakeOwner, s.cancelOwner = wakeOwner, winhandle.Open(cancelEvent, "Wintun cancellation event open")
+	s.noteRings(r)
 	a.session = s
 	go s.maintain()
 	return s, nil
@@ -130,7 +157,21 @@ func (*Session) RXChecksumVerified(p []byte) bool {
 	return false
 }
 func (s *Session) Stats() Stats {
-	return Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), ReadWaits: s.readWaits.Load(), ReadWakes: s.readWakes.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load()}
+	result := Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), ReadWaits: s.readWaits.Load(), ReadWakes: s.readWakes.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load(), CloseNanos: s.closeNanos.Load()}
+	if details := s.closeDetails.Load(); details != nil {
+		result.CloseDetails = *details
+	}
+	if registrar := s.registrar.Load(); registrar != nil {
+		result.Registrar = *registrar
+	}
+	return result
+}
+
+func (s *Session) noteRings(r *rings) {
+	if g, ok := r.owner.(*registrar); ok {
+		stats := g.stats(s.registrars.Add(1))
+		s.registrar.Store(&stats)
+	}
 }
 
 // fail is called with mu held. Recovery runs elsewhere so neither a full ring
@@ -142,7 +183,7 @@ func (s *Session) fail(err error) {
 	if errors.Is(err, ErrCorrupt) {
 		s.corruptions.Add(1)
 	}
-	windows.SetEvent(s.wake)
+	windows.SetEvent(s.wakeOwner.Handle("Wintun recovery wake"))
 	s.repair <- err
 }
 
@@ -154,7 +195,10 @@ func (s *Session) event(kind string, err error) {
 }
 
 func (s *Session) maintain() {
-	defer close(s.stopped)
+	defer func() {
+		s.closeNanos.Store(uint64(winclock.Since(time.Duration(s.closeStarted.Load()))))
+		close(s.stopped)
+	}()
 	defer close(s.events)
 	var lastLog time.Time
 	var lastRecovery time.Time
@@ -164,13 +208,24 @@ func (s *Session) maintain() {
 		case <-s.stop:
 			// The read mutex also covers cancellation callback completion.
 			// Close has already signalled wake, so an active native wait exits.
+			started := winclock.Now()
+			queued := uint64(started - time.Duration(s.closeStarted.Load()))
 			s.readMu.Lock()
+			readLock := uint64(winclock.Since(started))
+			started = winclock.Now()
 			s.mu.Lock()
+			stateLock := uint64(winclock.Since(started))
+			var profile CloseDetails
 			if s.rings != nil {
-				s.closeErr = s.rings.close()
+				s.closeErr = errors.Join(s.closeErr, s.rings.close())
+				profile = s.rings.closeProfile
 				s.rings = nil
 			}
-			s.closeErr = errors.Join(s.closeErr, windows.CloseHandle(s.wake), windows.CloseHandle(s.cancelEvent))
+			started = winclock.Now()
+			s.closeErr = errors.Join(s.closeErr, s.wakeOwner.HandleClose("Wintun session wake close"), s.cancelOwner.HandleClose("Wintun cancellation event close"))
+			profile.EventsNanos += uint64(winclock.Since(started))
+			profile.QueueNanos, profile.ReadLockNanos, profile.StateLockNanos = queued, readLock, stateLock
+			s.closeDetails.Store(&profile)
 			close(s.changed)
 			s.mu.Unlock()
 			s.readMu.Unlock()
@@ -192,20 +247,47 @@ func (s *Session) maintain() {
 				s.mu.Unlock()
 				continue
 			}
+			// Sample the driver's markers before retiring the owner, because its
+			// stop makes the driver publish them as well. A marker already present
+			// is a loss the driver published before our stop, which read and write
+			// already treat as ErrDisconnected (removal, the owner's own exit that
+			// end() classifies, or a receive-thread rejection). So the session is
+			// lost even if ErrCorrupt queued this repair and the owner then exits
+			// cleanly on our stop request.
+			releasedFirst := s.rings.disconnected()
 			err := s.rings.close()
+			// The teardown/retirement error is a real cleanup failure, distinct
+			// from the expected removal/owner-exit cause. Session.Close must still
+			// surface it even though these rings are gone before the stop handler
+			// runs; the cause itself is never treated as a cleanup failure.
+			s.closeErr = errors.Join(s.closeErr, err)
+			// end() recorded, from the joined registrar, whether its process had
+			// already ended other than by our stop. A confirmed owner loss takes
+			// precedence over a queued corruption cause: the session is lost and
+			// must never be rebuilt in place, even if ErrCorrupt triggered this.
+			lostToExit := s.rings.ownerExitedFirst
 			s.rings = nil
-			removed := errors.Is(cause, ErrDisconnected)
+			removed := errors.Is(cause, ErrDisconnected) || releasedFirst || lostToExit
 			if !removed && err == nil {
 				s.event("recovering", cause)
-				s.rings, err = reopenRings(s.stop, func() (*rings, error) {
-					return openRings(s.adapter.devicePath, s.adapter.config.Capacity)
-				})
+				s.rings, err = reopenRings(s.stop, s.open)
 				removed = errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) || errors.Is(err, windows.ERROR_DEVICE_NOT_CONNECTED)
+				if err == nil {
+					s.noteRings(s.rings)
+				}
 			}
-			if removed {
-				s.err = errors.Join(ErrAdapterRemoved, err)
+			if removed && lostToExit {
+				// The registration owner exited on its own: a distinct reason from
+				// adapter removal, the same session loss, and never a rebuild. The
+				// teardown error (if any) is a cleanup failure kept in closeErr, not
+				// part of this terminal reason.
+				s.err = errors.Join(ErrAdapterRemoved, ErrRegistrarExited, cause)
 				s.event("removed", s.err)
-				slog.Info("Wintun adapter removed", "adapter", s.adapter.config.Name, "error", err)
+				slog.Warn("Wintun registration owner exited; session lost", "adapter", s.adapter.config.Name, "markersBeforeStop", releasedFirst, "error", errors.Join(s.err, err))
+			} else if removed {
+				s.err = errors.Join(ErrAdapterRemoved, cause)
+				s.event("removed", s.err)
+				slog.Info("Wintun adapter removed", "adapter", s.adapter.config.Name, "markersBeforeStop", releasedFirst, "error", errors.Join(s.err, err))
 			} else if err != nil {
 				s.failures.Add(1)
 				s.err = fmt.Errorf("Wintun session recovery after %v: %w", cause, err)
@@ -220,7 +302,7 @@ func (s *Session) maintain() {
 				}
 			}
 			s.recovering.Store(false)
-			windows.ResetEvent(s.wake)
+			windows.ResetEvent(s.wakeOwner.Handle("Wintun recovery reset"))
 			close(s.changed)
 			s.changed = make(chan struct{})
 			s.mu.Unlock()
@@ -229,14 +311,10 @@ func (s *Session) maintain() {
 }
 
 func waitRetry(stop <-chan struct{}, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-stop:
+	if !winclock.System.WaitDone(stop, delay) {
 		return net.ErrClosed
-	case <-timer.C:
-		return nil
 	}
+	return nil
 }
 
 // 0.14.1 returns STATUS_ALREADY_INITIALIZED while removal owns RegistrationLock.
@@ -291,9 +369,24 @@ func (s *Session) WriteBatch(packets [][]byte) (int, error) {
 		s.fail(err)
 	}
 	if errors.Is(err, ErrDisconnected) {
-		err = ErrAdapterRemoved
+		err = s.writeLoss()
 	}
 	return n, err
+}
+
+// writeLoss is the writer's own adapter-lost error, decided without waiting
+// and only on this loss path. The writer holds mu, so maintenance cannot be
+// retiring the owner: an exit handle already signalled means it ended on its
+// own. The driver publishes its markers from the owner's exit callback before
+// the process is signalled, so a writer can see them first and report removal
+// only; ReadBatch and later writes return maintenance's completed-exit reason.
+func (s *Session) writeLoss() error {
+	if h := s.rings.exited(); h != 0 {
+		if event, err := windows.WaitForSingleObject(h, 0); err == nil && event == windows.WAIT_OBJECT_0 {
+			return errors.Join(ErrAdapterRemoved, ErrRegistrarExited)
+		}
+	}
+	return ErrAdapterRemoved
 }
 
 // ReadBatch has one ordered reader. A blocking read is interrupted by Close,
@@ -375,25 +468,43 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		// Install the callback only when parking, and join it before readMu is
 		// released so Close can safely destroy the event.
 		if cancelEvent == 0 && ctx.Done() != nil {
-			event := s.cancelEvent
+			event := s.cancelOwner.Handle("Wintun read cancellation")
 			cancelEvent = event
 			finished := make(chan struct{})
-			stop := context.AfterFunc(ctx, func() { windows.SetEvent(event); close(finished) })
+			stop := context.AfterFunc(ctx, func() { windows.SetEvent(s.cancelOwner.Handle("Wintun cancellation callback")); close(finished) })
 			defer func() {
 				if !stop() {
 					<-finished
-					windows.ResetEvent(event)
+					windows.ResetEvent(s.cancelOwner.Handle("Wintun cancellation reset"))
 				}
 			}()
 		}
-		handles := []windows.Handle{s.wake, s.rings.readEvent}
+		handles := s.waitHandles[:0]
+		handles = append(handles, s.wakeOwner.Handle("Wintun read wake"), s.rings.readHandle())
+		// A registrar that ends for any reason (crash, job termination) loses the
+		// registration; wake a parked reader now instead of waiting for traffic.
+		// The reason (owner exit vs adapter removal) is settled during teardown.
+		exitIdx := -1
+		if h := s.rings.exited(); h != 0 {
+			exitIdx = len(handles)
+			handles = append(handles, h)
+		}
+		cancelIdx := -1
 		if cancelEvent != 0 {
-			handles = append(handles, cancelEvent)
+			cancelIdx = len(handles)
+			handles = append(handles, s.cancelOwner.Handle("Wintun cancellation wait"))
 		}
 		s.readWaits.Add(1)
-		_, err = windows.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		event, err := winapi.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		if err != nil {
+			err = fmt.Errorf("Wintun read wait (wake %#x, read event %#x, registrar exit %#x, cancel %#x): %w",
+				handles[0], handles[1], waitRole(handles, exitIdx), waitRole(handles, cancelIdx), err)
+		}
 		if err == nil {
 			s.readWakes.Add(1)
+		}
+		if err == nil && exitIdx >= 0 && event == windows.WAIT_OBJECT_0+uint32(exitIdx) {
+			s.fail(errOwnerLost)
 		}
 		s.mu.RUnlock()
 		if err != nil {
@@ -401,6 +512,15 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		}
 		spins = 0
 	}
+}
+
+// waitRole returns the handle at i for an error message, or zero when that
+// role was not part of this wait.
+func waitRole(handles []windows.Handle, i int) windows.Handle {
+	if i < 0 || i >= len(handles) {
+		return 0
+	}
+	return handles[i]
 }
 
 func (s *Session) ReadPacket(ctx context.Context, buffer []byte) (int, error) {
@@ -420,14 +540,21 @@ func (s *Session) WritePacket(ctx context.Context, packet []byte) error {
 	return err
 }
 
-func (s *Session) Close() error {
+// BeginClose interrupts packet I/O immediately and starts native teardown.
+// The owner must still call Close to join teardown and receive its result.
+func (s *Session) BeginClose() {
 	s.closeOnce.Do(func() {
+		s.closeStarted.Store(int64(winclock.Now()))
 		s.closed.Store(true)
 		// Close cannot wait for mu before signalling: a reader may be holding
 		// a read lock inside WaitForMultipleObjects.
-		windows.SetEvent(s.wake)
+		windows.SetEvent(s.wakeOwner.Handle("Wintun close wake"))
 		close(s.stop)
 	})
+}
+
+func (s *Session) Close() error {
+	s.BeginClose()
 	<-s.stopped
 	return s.closeErr
 }
