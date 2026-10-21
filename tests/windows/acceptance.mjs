@@ -34,6 +34,13 @@ const udpRejectExe = path.resolve('dist/windows-test/udpreject.exe');
 const rejections = new Set(['ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EACCES']);
 const publicDestination = '1.0.0.1:443';
 const publicTarget = { host: '1.0.0.1', port: 443, path: '/cdn-cgi/trace', tls: true, publicTrace: true, servername: 'one.one.one.one' };
+// The local TLS responder is reached through a test-only destination rewrite
+// in today's sing-box config. The 1.0 engine (v1) has no such rewrite and no
+// sing-box config, so v1 keeps its earlier public selection target for these
+// checks; the baseline profile uses the local responder.
+const localSelection = options.profile !== 'v1';
+const selectionTarget = () => localSelection ? tlsResponder.target : publicTarget;
+const selectionDestination = () => localSelection ? tlsResponder.destination : publicDestination;
 const appDeviceIDs = new Set();
 const destinationCount = (stats, destination) => stats.destinations?.[destination] ?? 0;
 const udpSizes = [64, 1200, 1800, 8192, 12000, ...(options.profile === 'v1' ? [65000] : [])];
@@ -167,7 +174,7 @@ async function engineConnections() {
     connections: (await response.json()).connections };
 }
 
-async function newTrafficOn(line, target = tlsResponder.target, count = 3) {
+async function newTrafficOn(line, target = selectionTarget(), count = 3) {
   await pin(line.id);
   const before = await harness.control('stats');
   const opened = await client('open', { count, target });
@@ -175,7 +182,7 @@ async function newTrafficOn(line, target = tlsResponder.target, count = 3) {
   assert.equal(byLine[line.id], count, JSON.stringify(byLine));
   assert.equal(Object.values(byLine).reduce((sum, n) => sum+n, 0), count, 'Old sockets still counted');
   const after = await harness.control('stats');
-  exactTraffic(before, after, line.id === second.id ? count : 0, target.publicTrace ? publicDestination : tlsResponder.destination);
+  exactTraffic(before, after, line.id === second.id ? count : 0, target.publicTrace ? publicDestination : selectionDestination());
   const engine = target.publicTrace ? undefined : await selectedSockets(opened, line.id);
   return { opened, byLine, before, after, engine };
 }
@@ -245,6 +252,7 @@ async function quicProbe(host, source, index) {
 }
 
 async function verifyTrafficConfig(phase, marker) {
+  if (!localSelection) return; // v1 writes no sing-box config to compare
   const rule = JSON.parse(marker ?? await readFile(path.join(dataDir, httpsMarker), 'utf8'));
   const product = JSON.parse(await readFile(path.join(dataDir, 'traffic-product-config.json'), 'utf8'));
   const actual = JSON.parse(await readFile(path.join(dataDir, 'engine-config.json'), 'utf8'));
@@ -415,7 +423,7 @@ try {
     });
   }
   await writeFile(path.join(dataDir, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
-  await writeFile(path.join(dataDir, httpsMarker), JSON.stringify(httpsRoute(tlsResponder)));
+  if (localSelection) await writeFile(path.join(dataDir, httpsMarker), JSON.stringify(httpsRoute(tlsResponder)));
   await targetFirewall('capture');
   await report.test('IPv6 probes cannot bypass the stopped engine', 'harness-baseline', async () => {
     await assert.rejects(client('udp', { target: ipv6Target }));
@@ -434,13 +442,13 @@ try {
   await verifyTrafficConfig('two lines');
   await report.test('pins select both interfaces; secondary traffic crosses TestISP', 'parity', async () => ({ direct: await newTrafficOn(main), virtual: await newTrafficOn(second) }));
   await report.test('new pin leaves old connections alive', 'parity', async () => {
-    const original = await client('open', { count: 3, target: tlsResponder.target });
+    const original = await client('open', { count: 3, target: selectionTarget() });
     await pinApp(clientExe, main.id);
-    const next = await client('open', { count: 3, target: tlsResponder.target });
+    const next = await client('open', { count: 3, target: selectionTarget() });
     await client('refresh', { ids: original.map((item) => item.id) });
     const byLine = await counts(9);
     assert(byLine[second.id] >= 6 && byLine[main.id] === 3, JSON.stringify(byLine));
-    await selectedSockets(original, second.id); await selectedSockets(next, main.id);
+    if (localSelection) { await selectedSockets(original, second.id); await selectedSockets(next, main.id); }
     return { original, next, byLine };
   });
   await pin(null);
@@ -448,15 +456,17 @@ try {
     await pin(null);
     await combine(true);
     const before = await harness.control('stats');
-    const opened = await client('open', { count: 40, target: tlsResponder.target });
+    const opened = await client('open', { count: 40, target: selectionTarget() });
     const byLine = await counts(40);
     assert(byLine[main.id] >= 10 && byLine[second.id] >= 10, JSON.stringify(byLine));
     const after = await harness.control('stats');
-    exactTraffic(before, after, byLine[second.id], tlsResponder.destination);
-    const snapshot = await engineConnections();
-    for (const line of [main, second]) {
-      const items = opened.filter(({ port }) => snapshot.connections.some((c) => Number(c.metadata.sourcePort) === port && c.chains.includes(`line-${line.id}`)));
-      assert.equal(items.length, byLine[line.id]); await selectedSockets(items, line.id);
+    exactTraffic(before, after, byLine[second.id], selectionDestination());
+    if (localSelection) {
+      const snapshot = await engineConnections();
+      for (const line of [main, second]) {
+        const items = opened.filter(({ port }) => snapshot.connections.some((c) => Number(c.metadata.sourcePort) === port && c.chains.includes(`line-${line.id}`)));
+        assert.equal(items.length, byLine[line.id]); await selectedSockets(items, line.id);
+      }
     }
     await client('close');
     await combine(false);
@@ -498,7 +508,7 @@ try {
   // reorders the lines. The controlled HTTP, reset, UDP, STUN, QUIC, IPv6 and
   // DF cases run on it before then. The rule is inert for them: it matches
   // only TCP to 203.0.113.44:443, and they address the controlled responder.
-  await unlink(path.join(dataDir, httpsMarker));
+  if (localSelection) await unlink(path.join(dataDir, httpsMarker));
   await pin(second.id);
   await report.test('controlled HTTP crosses the app TUN and TestISP', 'parity', async () => {
     const before = await harness.control('stats');
