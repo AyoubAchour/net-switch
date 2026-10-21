@@ -90,6 +90,35 @@ function client(command, args = {}, timeout = 120_000) {
   });
 }
 
+// Evidence for a flow that got no reply: engine stats (lookups, dialer, Wintun
+// counters, both ring headers and the registrar), the flow table and Control's
+// state, twice 2 s apart to show what still moves, then one more attempt.
+async function cycleFailureCapture() {
+  const take = async () => {
+    const [stats, state] = await Promise.all([
+      server.api('engine-command', { method: 'stats' }).then((reply) => reply.engine ?? reply).catch(String),
+      server.api('state').catch(String),
+    ]);
+    const flows = [];
+    try {
+      for (let cursor = '', pages = 0; pages < 20; pages++) {
+        const page = await server.api('engine-command', { method: 'flows', fields: { cursor } });
+        flows.push(...(page.flows ?? []));
+        if (!page.cursor) break;
+        cursor = page.cursor;
+      }
+    } catch (error) { flows.push({ error: String(error) }); }
+    return { at: new Date().toISOString(), stats, flows, state };
+  };
+  const first = await take();
+  await delay(2000);
+  const second = await take();
+  const retry = await client('open', { target: responder.virtual }).then((result) => ({ ok: true, result }), (error) => ({ ok: false, error: String(error) }));
+  await client('close').catch(() => {});
+  console.log(`WINDOWS CYCLE FAILURE CAPTURE ${JSON.stringify({ first: first.stats?.wintun, second: second.stats?.wintun, retry })}`);
+  return { capture: [first, second], retry };
+}
+
 async function network(action, adapter) {
   if (action === 'state' && inspection) return inspection.query('network');
   const result = await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.resolve('scripts/tun-test-network.ps1'), '-Action', action], {
@@ -777,7 +806,14 @@ try {
       await timedPhase(phases, 'routingOnMs', () => server.api('routing', { on: true }));
       await timedPhase(phases, 'routingReadyMs', () => server.on());
       rememberAppDevices(await timedPhase(phases, 'runningPnPCheckMs', pnpDevices));
-      await timedPhase(phases, 'firstFlowMs', () => client('open', { target: responder.virtual }));
+      await timedPhase(phases, 'firstFlowMs', async () => {
+        try { return await client('open', { target: responder.virtual }); } catch (error) {
+          // ARM64 job 119224625441, cycle 14: the first request got no reply
+          // for 8 s and nothing showed where it stopped. The check is unchanged.
+          error.evidence = { cycle: n, phases, native: serverOutput.events.slice(eventStart), ...await cycleFailureCapture() };
+          throw error;
+        }
+      });
       await timedPhase(phases, 'clientCloseMs', () => client('close'));
       const result = { cycle: n, totalMs: performance.now() - started, phases, stoppedChecks: snapshots.at(-1).phases,
         native: serverOutput.events.slice(eventStart) };

@@ -47,6 +47,21 @@ type Stats struct {
 	CloseNanos       uint64
 	CloseDetails     CloseDetails
 	Registrar        RegistrarStats
+	Rings            *RingState `json:",omitempty"` // absent without live rings, or while they are being replaced
+}
+
+// RingState is a live read of both ring headers, for failure capture. The
+// Send ring carries packets from Windows to the engine (the driver moves
+// Tail, the engine Head); the Receive ring the reverse. Equal Head and Tail
+// mean empty; a Head that does not move with a growing Tail means that side
+// stopped consuming.
+type RingState struct {
+	Capacity                                   uint32
+	SendHead, SendTail, SendAlertable          uint32
+	ReceiveHead, ReceiveTail, ReceiveAlertable uint32
+	// Registrar exit handle state: "running", "exited", or "none" for
+	// fixtures without a registration owner.
+	Registrar string
 }
 
 // Events are advisory and bounded. Stats remain authoritative if a caller
@@ -163,6 +178,23 @@ func (s *Session) Stats() Stats {
 	}
 	if registrar := s.registrar.Load(); registrar != nil {
 		result.Registrar = *registrar
+	}
+	// Never wait: close and recovery hold mu for driver teardown, and stats
+	// must answer during exactly those moments.
+	if s.mu.TryRLock() {
+		if r := s.rings; r != nil && !r.closed {
+			state := RingState{Capacity: r.send.capacity, Registrar: "none",
+				SendHead: r.send.load(0), SendTail: r.send.load(4), SendAlertable: r.send.load(8),
+				ReceiveHead: r.receive.load(0), ReceiveTail: r.receive.load(4), ReceiveAlertable: r.receive.load(8)}
+			if h := r.exited(); h != 0 {
+				state.Registrar = "running"
+				if event, err := windows.WaitForSingleObject(h, 0); err != nil || event != uint32(windows.WAIT_TIMEOUT) {
+					state.Registrar = "exited"
+				}
+			}
+			result.Rings = &state
+		}
+		s.mu.RUnlock()
 	}
 	return result
 }
