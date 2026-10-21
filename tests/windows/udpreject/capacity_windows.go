@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -51,6 +52,13 @@ func enableUDPRefusal(conn *net.UDPConn) error {
 }
 
 func datagramExchange(s heldDatagram, size int) (float64, string, error) {
+	elapsed, sum, err := timedExchange(s, size)
+	return float64(elapsed) / float64(time.Millisecond), sum, err
+}
+
+// timedExchange measures one echo with the performance counter. A failed
+// write reports zero elapsed time, as the old millisecond result did.
+func timedExchange(s heldDatagram, size int) (time.Duration, string, error) {
 	request := append([]byte("NSUDPCAP"), s.token...)
 	expected := request
 	if size != 0 {
@@ -70,7 +78,16 @@ func datagramExchange(s heldDatagram, size int) (float64, string, error) {
 	if err == nil && !bytes.Equal(expected, buffer[:n]) {
 		err = errors.New("UDP capacity payload mismatch")
 	}
-	return float64(winclock.Since(started)) / float64(time.Millisecond), fmt.Sprintf("%x", sha256.Sum256(buffer[:n])), err
+	return winclock.Since(started), fmt.Sprintf("%x", sha256.Sum256(buffer[:n])), err
+}
+
+// A verify reply carries at most this many failure details; the per-label
+// counts still cover every failed echo.
+const sweepFailureExamples = 16
+
+type sweepFailure struct {
+	Token, Local, Error, NativeError string
+	MS                               float64
 }
 
 func capacityError(err error) string {
@@ -181,22 +198,49 @@ func capacityProbe() error {
 			}
 			result["attempts"] = attempts
 		case "verify":
-			var maxMS float64
+			// One outcome slot per held session. Only exact echoes become
+			// latency samples; a failed echo is counted, never a zero sample.
+			elapsed := make([]time.Duration, len(held))
+			errs := make([]error, len(held))
+			started := winclock.Now()
 			for base := 0; base < len(held); base += 32 {
 				var workers sync.WaitGroup
-				var mu sync.Mutex
-				for _, s := range held[base:min(base+32, len(held))] {
-					workers.Go(func() {
-						ms, _, err := datagramExchange(s, command.Size)
-						mu.Lock()
-						maxMS = max(maxMS, ms)
-						failure = errors.Join(failure, err)
-						mu.Unlock()
-					})
+				for i := base; i < min(base+32, len(held)); i++ {
+					workers.Go(func() { elapsed[i], _, errs[i] = timedExchange(held[i], command.Size) })
 				}
 				workers.Wait()
 			}
+			sweep := winclock.Since(started)
+			var maxMS float64
+			samples := make([]int64, 0, len(held))
+			labels := map[string]int{}
+			examples := []sweepFailure{}
+			digest := sha256.New()
+			for i, s := range held {
+				digest.Write(s.token)
+				ms := float64(elapsed[i]) / float64(time.Millisecond)
+				maxMS = max(maxMS, ms) // The old field still includes failed echoes.
+				if errs[i] == nil {
+					// Whole microseconds, rounded up so no echo is understated.
+					samples = append(samples, int64((elapsed[i]+time.Microsecond-1)/time.Microsecond))
+					continue
+				}
+				labels[capacityError(errs[i])]++
+				if len(examples) < sweepFailureExamples {
+					examples = append(examples, sweepFailure{Token: hex.EncodeToString(s.token),
+						Local: s.conn.LocalAddr().String(), Error: capacityError(errs[i]), NativeError: errs[i].Error(), MS: ms})
+					failure = errors.Join(failure, errs[i])
+				}
+			}
+			if more := len(held) - len(samples) - len(examples); more > 0 {
+				failure = errors.Join(failure, fmt.Errorf("%d more held UDP echoes failed", more))
+			}
+			slices.Sort(samples)
 			result["checked"], result["maxMS"] = len(held), maxMS
+			result["echoed"], result["samplesUS"] = len(samples), samples
+			result["failures"], result["failureExamples"] = labels, examples
+			result["heldDigest"] = hex.EncodeToString(digest.Sum(nil))
+			result["sweepMS"] = float64(sweep) / float64(time.Millisecond)
 		case "release":
 			n := min(command.Count, len(held))
 			for _, s := range held[:n] {

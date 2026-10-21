@@ -58,12 +58,89 @@ async function udpPortSpaceAtFailure() {
   return { requestedAt: startedAt, ...JSON.parse(line.slice(line.indexOf(marker) + marker.length)) };
 }
 
+// Held-session responsiveness (SYSTEM-DESIGN 5.9, decided 2026-10-21): at the
+// UDP cap, one echo through every held session, 32 at a time, has p99 <= 250 ms
+// and the whole sweep across every app finishes within 30 s.
+export const heldUDPSweepGate = Object.freeze({ concurrency: 32, p99US: 250_000, sweepMS: 30_000 });
+const latencyBoundsUS = [1_000, 2_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000, 2_000_000];
+
+// The capacity client hashes the 8-byte tokens of its held sessions in held
+// order. The host keeps the same ledger, so a match names the swept population.
+export function ledgerDigest(tokens) {
+  const hash = createHash('sha256');
+  for (const token of tokens) hash.update(Buffer.from(token, 'hex'));
+  return hash.digest('hex');
+}
+
+// Nearest rank: the smallest value with at least perMille/1000 of the
+// population at or below it. Censored sessions (failed or missing echoes) rank
+// above every sample, so a rank that lands on one has no finite value.
+function nearestRank(sorted, population, perMille) {
+  if (!population) return null;
+  const rank = Math.ceil(perMille * population / 1000);
+  return rank <= sorted.length ? sorted[rank - 1] : null;
+}
+
+// apps: [{ app, expectedCount, expectedDigest, result?, error? }]. result is the
+// client's verify reply, present even when it reported failed echoes.
+export function heldSweepLatency({ held, sweepMS, apps }) {
+  const samples = [], perApp = [], failures = {};
+  let represented = 0, expected = 0, failed = 0, complete = true;
+  for (const item of apps) {
+    const result = item.result, values = Array.isArray(result?.samplesUS) ? result.samplesUS : [];
+    const counts = result?.failures ?? {};
+    const appFailed = Object.values(counts).reduce((n, count) => n + count, 0);
+    for (const [label, count] of Object.entries(counts)) failures[label] = (failures[label] ?? 0) + count;
+    const valid = values.every((value) => Number.isSafeInteger(value) && value > 0);
+    const digestMatches = result?.heldDigest === item.expectedDigest;
+    const whole = Boolean(result) && valid && digestMatches && result.checked === item.expectedCount &&
+      result.echoed === values.length && values.length + appFailed === result.checked;
+    if (valid) samples.push(...values);
+    expected += item.expectedCount;
+    failed += appFailed;
+    if (whole) represented += result.checked; else complete = false;
+    perApp.push({ app: item.app, expected: item.expectedCount, checked: result?.checked ?? null,
+      echoed: valid ? values.length : null, failed: appFailed, digestMatches, whole,
+      maxUS: valid && values.length ? Math.max(...values) : null, clientSweepMS: result?.sweepMS ?? null,
+      ...(item.error ? { error: item.error } : {}) });
+  }
+  samples.sort((a, b) => a - b);
+  // Every held session is one member. Anything without an exact echo is censored.
+  const population = Math.max(held, samples.length + failed);
+  const censored = population - samples.length;
+  const counts = latencyBoundsUS.map(() => 0);
+  let over = 0;
+  for (const value of samples) {
+    const bucket = latencyBoundsUS.findIndex((bound) => value <= bound);
+    if (bucket < 0) over++; else counts[bucket]++;
+  }
+  const quantilesUS = Object.fromEntries([['p50', 500], ['p90', 900], ['p99', 990], ['p999', 999]]
+    .map(([name, perMille]) => [name, nearestRank(samples, population, perMille)]));
+  const pass = {
+    represented: complete && expected === held && represented === held,
+    p99: quantilesUS.p99 !== null && quantilesUS.p99 <= heldUDPSweepGate.p99US,
+    sweep: sweepMS <= heldUDPSweepGate.sweepMS,
+  };
+  pass.p99 &&= pass.represented;
+  return {
+    gate: heldUDPSweepGate, rank: 'nearest-rank over every held session; failed or missing echoes rank above all samples',
+    held, population, echoed: samples.length, censored, failures,
+    quantilesUS, p99MS: quantilesUS.p99 === null ? null : quantilesUS.p99 / 1000,
+    minUS: samples[0] ?? null, maxUS: censored ? null : samples.at(-1) ?? null,
+    histogram: { boundsUS: latencyBoundsUS, counts, over, censored },
+    sweepMS, apps: perApp, pass, passed: pass.represented && pass.p99 && pass.sweep,
+  };
+}
+
 async function client(server, directory, line, app) {
   const exe = path.join(directory, `udp-capacity-app-${app}.exe`);
   await copyFile(path.resolve('dist/windows-test/udpreject.exe'), exe);
   await server.api('app-line', { path: exe, line });
   const child = spawn(exe, ['--capacity'], { windowsHide: true, stdio: ['pipe', 'pipe', 'inherit'] });
-  const pending = new Map();
+  const pending = new Map(), commands = new Map();
+  // Tokens the client holds, in its own held order, followed from every reply
+  // (including replies that arrive after their call's deadline).
+  const ledger = [];
   let serial = 0, buffer = '';
   const fail = (error) => {
     for (const item of pending.values()) { clearTimeout(item.timer); item.reject(error); }
@@ -78,14 +155,22 @@ async function client(server, directory, line, app) {
       const end = buffer.indexOf('\n');
       if (end < 0) break;
       const reply = JSON.parse(buffer.slice(0, end)); buffer = buffer.slice(end + 1);
+      const command = commands.get(reply.id);
+      commands.delete(reply.id);
+      if (command === 'open') ledger.push(...(reply.result?.attempts ?? []).filter((item) => !item.Error).map((item) => item.Token));
+      else if (command === 'release') ledger.splice(0, reply.result?.released ?? 0);
+      else if (command === 'close') ledger.length = 0;
       const item = pending.get(reply.id);
       if (!item) continue;
       pending.delete(reply.id); clearTimeout(item.timer);
-      if (reply.error) item.reject(new Error(reply.error)); else item.resolve(reply.result);
+      // A failed command still reports what it measured.
+      if (reply.error) item.reject(Object.assign(new Error(reply.error), { result: reply.result }));
+      else item.resolve(reply.result);
     }
   });
   const call = (command, fields = {}) => new Promise((resolve, reject) => {
     const id = ++serial;
+    commands.set(id, command);
     const started = performance.now();
     const startedAt = new Date().toISOString();
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`UDP ${app} ${command} deadline`)); }, 60_000);
@@ -97,7 +182,7 @@ async function client(server, directory, line, app) {
     }, reject, timer });
     child.stdin.write(JSON.stringify({ id, command, app, ...fields }) + '\n');
   });
-  return { child, call, exe, admissions: [] };
+  return { app, child, call, exe, ledger, admissions: [] };
 }
 
 export async function holdUDPCapacity({ server, harness, directory, line, native, evidence }) {
@@ -115,10 +200,13 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     await harness.control('udp-capacity-close', {});
     if (errors.length) throw new AggregateError(errors, 'UDP capacity cleanup failed');
   };
-  const observe = async () => {
-    const observed = await harness.control('udp-capacity');
+  const checkSource = (observed) => {
     assert.equal(observed.dropped, 0, 'The controlled UDP peer dropped a reply');
     assert.equal(observed.conflicts, 0, 'A held UDP mapping changed its physical source');
+  };
+  const observe = async () => {
+    const observed = await harness.control('udp-capacity');
+    checkSource(observed);
     return observed;
   };
   try {
@@ -219,29 +307,77 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
       assert(stats.tcpRelayBytes <= 16 * 1024 * 1024 && stats.tcpRelayPeakBytes <= 16 * 1024 * 1024,
         'The shared TCP relay exceeded its retained-buffer loan bound');
     };
-    const verify = async () => {
-      const results = [];
-      const phase = { startedAt: new Date().toISOString(), results };
+    // Every check the old sweep made still runs, in the same order, beside the
+    // held-session latency gate. All of them are evaluated and recorded before
+    // any is thrown, so a failure keeps the old verdict and the latency evidence.
+    const verify = async (label = `call-${(evidence.verificationPhases?.length ?? 0) + 1}`) => {
+      const results = [], apps = [], failures = [];
+      const check = (assertion) => {
+        try { assertion(); return true; } catch (error) { failures.push(error); return false; }
+      };
+      const phase = { label, startedAt: new Date().toISOString(), results };
       (evidence.verificationPhases ??= []).push(phase);
+      const sweepStarted = performance.now();
+      // Apps stay in serial order, each sweeping with its own 32 workers. The
+      // old sweep stopped at the first failed app; this one finishes every app.
       for (const app of clients) {
-        const result = await app.call('verify');
-        results.push(result);
+        const expected = { app: app.app, expectedCount: app.ledger.length, expectedDigest: ledgerDigest(app.ledger) };
+        try {
+          apps.push({ ...expected, result: await app.call('verify') });
+        } catch (error) {
+          const { result } = error;
+          delete error.result; // The phase keeps its summary; the thrown error stays small.
+          failures.push(error);
+          apps.push({ ...expected, result, error: error.message });
+        }
       }
+      phase.sweepMS = performance.now() - sweepStarted;
       phase.finishedAt = new Date().toISOString();
-      assert.equal(results.reduce((n, item) => n + item.checked, 0), held);
-      const stats = await engineStats();
-      checkStats(stats);
-      return { results, stats, observed: await observe() };
+      for (const { app, result } of apps) {
+        if (!result) continue;
+        const { samplesUS, ...summary } = result; // Per-echo samples are not retained.
+        results.push({ app, ...summary });
+      }
+      const latency = heldSweepLatency({ held, sweepMS: phase.sweepMS, apps });
+      apps.length = 0;
+      const checkedSum = results.reduce((n, item) => n + (item.checked ?? 0), 0);
+      const failedApps = latency.apps.filter((item) => item.error).map(({ app, error }) => ({ app, error }));
+      const oldVerdict = phase.oldVerdict = { failedApps, oldStoppedAtApp: failedApps[0]?.app ?? null,
+        checkedSum, held, maxMS: Math.max(0, ...results.map((item) => item.maxMS ?? 0)) };
+      check(() => assert.equal(checkedSum, held));
+      let stats, observed;
+      try {
+        stats = phase.stats = await engineStats();
+        oldVerdict.statsPass = check(() => checkStats(stats));
+      } catch (error) { failures.push(error); oldVerdict.statsPass = false; }
+      try {
+        observed = await harness.control('udp-capacity');
+        oldVerdict.source = { dropped: observed.dropped, conflicts: observed.conflicts, pass: check(() => checkSource(observed)) };
+      } catch (error) { failures.push(error); oldVerdict.source = { error: error.message, pass: false }; }
+      oldVerdict.wouldPass = failures.length === 0;
+      phase.latency = latency;
+      check(() => assert(latency.pass.represented,
+        `Held UDP latency population does not cover every held session: ${JSON.stringify(latency.apps)}`));
+      check(() => assert(latency.pass.p99,
+        `Held UDP echo p99 ${latency.p99MS ?? 'censored'} ms over ${latency.population} sessions ` +
+        `(${latency.censored} censored) misses the ${heldUDPSweepGate.p99US / 1000} ms gate or its full population`));
+      check(() => assert(latency.pass.sweep,
+        `Held UDP full sweep took ${Math.round(latency.sweepMS)} ms, over ${heldUDPSweepGate.sweepMS} ms`));
+      console.log(`WINDOWS UDP HELD SWEEP ${JSON.stringify({ label, startedAt: phase.startedAt, finishedAt: phase.finishedAt,
+        oldVerdict, latency, results })}`);
+      if (failures.length === 1) throw failures[0];
+      if (failures.length) throw new AggregateError(failures, failures.map((error) => error.message).join('; '));
+      return { results, stats, observed, oldVerdict, latency };
     };
     evidence.heldPlateau = [];
-    evidence.verifiedBefore = await verify();
+    evidence.verifiedBefore = await verify('before-gc');
     for (let i = 0; i < 3; i++) {
       const stats = await engineStats();
       checkStats(stats);
       evidence.heldPlateau.push(stats);
     }
     evidence.heldHeap = await captureHeap(server, 'udp-held', 0, held, evidence.baselineHeap);
-    evidence.verifiedAfterGC = await verify();
+    evidence.verifiedAfterGC = await verify('after-gc');
     const last = evidence.heldPlateau.at(-1), before = evidence.before;
     evidence.memoryPerSession = {
       ...evidence.heldHeap.perFlow, gcCPUppm: evidence.heldHeap.gcCPUppm,
@@ -267,7 +403,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         const failures = returned.attempts.filter((item) => item.Error);
         assert.equal(failures.length, 0, `UDP capacity did not recover on first attempts: ${JSON.stringify(failures)}`);
         held += 512;
-        evidence.recovery = { released, reconciled, returned, ms: performance.now() - started, verified: await verify() };
+        evidence.recovery = { released, reconciled, returned, ms: performance.now() - started, verified: await verify('after-recovery') };
       },
     };
   } catch (error) {
