@@ -47,8 +47,15 @@ async function client(server, directory, line, app) {
   });
   const call = (command, fields = {}) => new Promise((resolve, reject) => {
     const id = ++serial;
+    const started = performance.now();
+    const startedAt = new Date().toISOString();
     const timer = setTimeout(() => { pending.delete(id); reject(new Error(`UDP ${app} ${command} deadline`)); }, 60_000);
-    pending.set(id, { resolve, reject, timer });
+    pending.set(id, { resolve: (result) => {
+      const timing = { app, command, count: fields.count, startedAt, finishedAt: new Date().toISOString(),
+        elapsedMS: performance.now() - started, held: result.held };
+      console.log(`WINDOWS UDP COHORT PHASE ${JSON.stringify(timing)}`);
+      resolve({ ...result, timing });
+    }, reject, timer });
     child.stdin.write(JSON.stringify({ id, command, app, ...fields }) + '\n');
   });
   return { child, call, exe, admissions: [] };
@@ -161,7 +168,13 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     };
     const verify = async () => {
       const results = [];
-      for (const app of clients) results.push(await app.call('verify'));
+      const phase = { startedAt: new Date().toISOString(), results };
+      (evidence.verificationPhases ??= []).push(phase);
+      for (const app of clients) {
+        const result = await app.call('verify');
+        results.push(result);
+      }
+      phase.finishedAt = new Date().toISOString();
       assert.equal(results.reduce((n, item) => n + item.checked, 0), held);
       const stats = await engineStats();
       checkStats(stats);
@@ -206,7 +219,9 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     };
   } catch (error) {
     evidence.failedStats = await engineStats().catch(String);
-    evidence.failedObserved = await observe().catch(String);
+    // Preserve the peer's actual failure evidence. Re-running the asserting
+    // observer here would replace its source-change records with an error string.
+    evidence.failedObserved = await harness.control('udp-capacity').catch(String);
     await close().catch((failure) => { evidence.cleanupError = failure.stack; });
     throw error;
   }

@@ -138,7 +138,7 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 	if err != nil {
 		if portLimit(err) {
 			total := d.udpExhaustions.Add(1)
-			d.captureUDPAllocationFailure(line, source, err)
+			d.captureUDPAllocationFailure(line, source, a, err)
 			second := time.Now().Unix()
 			old := d.udpLastLog.Load()
 			if old != second && d.udpLastLog.CompareAndSwap(old, second) {
