@@ -78,7 +78,7 @@ func requireLeftoverSessions(t *testing.T) {
 	}
 }
 
-func requireOnlineManager(t *testing.T, owner uint32) {
+func requireLiveManager(t *testing.T, owner uint32) {
 	t.Helper()
 	if os.Getenv("NETSWITCH_EXPECT_LOGIND_MANAGER") != "1" {
 		return
@@ -107,12 +107,15 @@ func requireOnlineManager(t *testing.T, owner uint32) {
 		if err := bus.Object("org.freedesktop.login1", row.Path).CallWithContext(ctx, "org.freedesktop.DBus.Properties.GetAll", 0, "org.freedesktop.login1.Session").Store(&properties); err != nil {
 			t.Fatal(err)
 		}
-		if properties["Class"].Value() == "manager" && properties["State"].Value() == "online" {
-			t.Logf("LOGIND_MANAGER session=%s remains online after owner logout", row.ID)
+		state, _ := properties["State"].Value().(string)
+		// Seatless sessions are active in logind; online and opening also
+		// count under the old State-only rule this regression must defeat.
+		if properties["Class"].Value() == "manager" && (state == "active" || state == "online" || state == "opening") {
+			t.Logf("LOGIND_MANAGER session=%s state=%s remains present after owner logout", row.ID, state)
 			return
 		}
 	}
-	t.Fatal("new-systemd regression requires the owner's manager session to remain online")
+	t.Fatal("new-systemd regression requires the owner's live manager session to remain present")
 }
 
 func openLogindLogin(t *testing.T, a *linuxActor, label string) *logindLogin {
