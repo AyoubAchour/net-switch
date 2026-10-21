@@ -361,3 +361,5 @@ func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
 	}
 	return
 }
+
+// Validation-only change for PR #54 job gating (Windows-only Go case). Do not merge.
