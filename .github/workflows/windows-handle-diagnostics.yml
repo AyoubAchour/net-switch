@@ -61,7 +61,7 @@ jobs:
       - name: Exercise adapter-loss cleanup and terminal receipt under pressure
         if: ${{ !cancelled() && contains(github.ref, '-terminal') }}
         run: |
-          $cases = '^Test(Terminal|ServeTail|AdapterLoss|RuntimeStopAfterLoss|TunError|ExplicitStopWinsBeforeTerminal|StubbornProbeDoesNotDelayRoutingCleanupOrSpendItsContext|LeaseCleanupWinsWithoutCallingTerminalFinalizer|MainUsesOnlyDirectCompletedEngineExitOutcome|EngineProcessExitOutcomes)'
+          $cases = '^Test(Terminal|DisconnectWhileTerminalPending|ServeTail|AdapterLoss|RuntimeStopAfterLoss|TunError|ExplicitStopWinsBeforeTerminal|StubbornProbeDoesNotDelayRoutingCleanupOrSpendItsContext|LeaseCleanupWinsWithoutCallingTerminalFinalizer|MainUsesOnlyDirectCompletedEngineExitOutcome|EngineProcessExitOutcomes)'
           go test -count=1 -v -timeout=3m -run $cases ./internal/engine/protocol ./internal/engine/windows ./internal/engine ./cmd/netswitch-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ('${{ runner.arch }}' -eq 'X64') {
