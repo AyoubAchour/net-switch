@@ -45,7 +45,13 @@ function listed({ dir, goos, goarch, tags, tests, goflags, patterns }) {
     // or a generated tree golist.mjs doesn't follow.
     if (at.startsWith('..') || isAbsolute(at) || generated.test(`${at}/`)) continue;
     assert.equal(pkg.Error, undefined, `${goos}/${goarch} ${pkg.ImportPath}: ${pkg.Error?.Err}`);
-    for (const name of [pkg.GoFiles, pkg.TestGoFiles, pkg.XTestGoFiles, pkg.EmbedFiles, pkg.TestEmbedFiles, pkg.XTestEmbedFiles].flat().filter(Boolean)) {
+    // Every package lists its test files, but only the test variants -test
+    // adds for a named package p ("p [p.test]" and "p_test [p.test]") compile
+    // them. "q [p.test]" is q recompiled against p's tests: q's files only.
+    const [, path, tested] = /^(\S+)(?: \[(\S+)\.test\])?$/.exec(pkg.ImportPath);
+    const variant = tested !== undefined && (path === tested || path === `${tested}_test`);
+    const names = variant ?[pkg.GoFiles, pkg.TestGoFiles, pkg.XTestGoFiles, pkg.EmbedFiles, pkg.TestEmbedFiles, pkg.XTestEmbedFiles] : [pkg.GoFiles, pkg.EmbedFiles];
+    for (const name of names.flat().filter(Boolean)) {
       if (isAbsolute(name)) continue;
       files.add(at ? posix.join(at, name) : name);
     }
