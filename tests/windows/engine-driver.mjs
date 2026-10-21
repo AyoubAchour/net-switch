@@ -27,6 +27,7 @@ let heapProfile;
 const failures = [];
 const pending = new Map();
 let queue = Promise.resolve();
+let acknowledgedRevision = 0;
 function serially(fn) {
   const next = queue.then(fn);
   queue = next.catch(() => {});
@@ -166,6 +167,7 @@ async function apply(method = 'apply') {
   await persist();
   const applied = await command(method, { revision: { n: saved.revision, hash, config } });
   assert.equal(applied.n, saved.revision);
+  acknowledgedRevision = applied.n;
   // The test controller models Control's close-after-apply ordering. Only an
   // exhausted line which moved or is blocked closes its pre-revision flows.
   for (const line of saved.lines) {
@@ -273,37 +275,71 @@ async function api(route, body) {
 async function health() {
   if (!ready || healthBusy || stopping) return;
   healthBusy = true;
+  let diagnostic;
   try {
-    const { engine: stats } = await command('stats');
-    for (const line of saved.lines) {
-      if (!ready || stopping) return;
-      const binding = stats.bindings?.[line.id];
+    // Never visit a line added while this pass is awaiting a probe. Read each
+    // candidate's stats behind any API apply, paired with that exact revision.
+    // Per-line snapshots keep one health apply from invalidating the next line.
+    const candidates = await serially(() => [...saved.lines]);
+    for (const line of candidates) {
+      const snapshot = await serially(async () => {
+        if (!ready || stopping || !saved.lines.includes(line)) return;
+        diagnostic = { id: line.id, previousUp: line.up, snapshotRevision: saved.revision,
+          acknowledgedRevision, snapshotInstance: instance, snapshotEpoch: epoch, probes: [] };
+        if (acknowledgedRevision !== saved.revision) throw new Error('Policy revision is not acknowledged by the engine');
+        const { engine: stats } = await command('stats');
+        const binding = stats.bindings?.[line.id];
+        return { ...diagnostic, bindingPresent: Boolean(binding), binding: binding ?? null };
+      });
+      if (!snapshot) return;
+      diagnostic = snapshot;
+      const current = () => ready && !stopping && saved.revision === snapshot.snapshotRevision &&
+        instance === snapshot.snapshotInstance && epoch === snapshot.snapshotEpoch &&
+        saved.lines.includes(line) && line.up === snapshot.previousUp;
+      const log = (action, up) => console.log(`LINE HEALTH ${JSON.stringify({ ...snapshot,
+        action, up, revision: saved.revision, instance, epoch })}`);
+      if (!current()) { log('discard-stale'); continue; }
+      const { binding } = snapshot;
       let up = Boolean(binding?.up && binding?.default4);
+      // resolve retains present but unusable interfaces; absence can mean a
+      // physically removed interface. Both remain real failures when current.
+      snapshot.reason = !binding ? 'missing-binding' : !binding.up ? 'interface-down' :
+        !binding.default4 ? 'no-default4' : 'probe';
       if (up) {
         const probe = async (operator) => {
-          const result = await command('probe', { opId: randomUUID(), line: line.id, operator });
+          let result;
+          try { result = await command('probe', { opId: randomUUID(), line: line.id, operator }); }
+          catch (error) {
+            snapshot.probes.push({ operator, outcome: 'command-error', error: error.message });
+            throw error;
+          }
+          snapshot.probes.push({ operator, ...result });
           if (result.outcome === 'engineUnavailable') throw new Error(result.error);
           return result;
         };
         const quick = await probe('quick:cloudflare');
-        if (line.up && quick.ok) continue;
-        if (!line.up) up = (await probe('cloudflare')).ok;
+        if (snapshot.previousUp && quick.ok) continue;
+        if (!snapshot.previousUp) up = (await probe('cloudflare')).ok;
         else {
           const first = await probe('google');
           up = first.ok || (await probe('quad9')).ok;
         }
       }
-      if (line.up !== up) {
+      if (snapshot.previousUp !== up) {
         await serially(async () => {
+          // Probes intentionally run outside the API queue. Fence inside it:
+          // a pin, reorder, stop or reconnect can finish before this commit.
+          if (!current()) { log('discard-stale', up); return; }
           line.up = up;
-          console.log(`LINE HEALTH ${JSON.stringify({ id: line.id, up })}`);
+          log('apply', up);
           await apply();
         });
       }
     }
   } catch (error) {
     // An unavailable engine never becomes a line failure.
-    console.error(`HEALTH ENGINE UNAVAILABLE ${error.message}`);
+    console.error(`HEALTH ENGINE UNAVAILABLE ${JSON.stringify({ ...diagnostic,
+      revision: saved.revision, instance, epoch, error: error.message })}`);
   } finally { healthBusy = false; }
 }
 
