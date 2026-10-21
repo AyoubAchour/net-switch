@@ -36,9 +36,11 @@ func (s *udpSocket) Watch(wake func()) (platform.Readiness, error) {
 			return nil, err
 		}
 	}
+	// Each step names itself: hosted runs saw WSAENOBUFS here with thousands
+	// of ports free, and a bare error could not say which call refused.
 	file, err := s.conn.File()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("UDP readiness Go File duplicate: %w", err)
 	}
 	fileOwner, err := ownGoDescriptor(file, "UDP File duplicate")
 	if err != nil {
@@ -48,12 +50,12 @@ func (s *udpSocket) Watch(wake func()) (platform.Readiness, error) {
 	defer fileOwner.CloseGo("UDP File duplicate close", file.Close)
 	h, err := duplicateForReadiness(file, fileOwner)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("UDP readiness native duplicate: %w", err)
 	}
 	watch, err := s.pool.watch(h, wake)
 	if err != nil {
 		h.SocketClose("UDP failed readiness registration")
-		return nil, err
+		return nil, fmt.Errorf("UDP readiness event registration: %w", err)
 	}
 	s.handle, s.watch = h, watch
 	err = s.goOwner.CloseGo("UDP source Go connection close", s.conn.Close)
