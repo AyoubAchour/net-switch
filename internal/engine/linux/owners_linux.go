@@ -54,30 +54,32 @@ type fdWindow struct {
 	identity   *ownerValidation
 }
 type Owners struct {
-	queries         diagPool
-	batches         descriptorBatches
-	warmed          bool
-	budget          flows.Limits // the limits service_linux.go gives the engine
-	descriptors     *descriptorReservation
-	lookupErrors    [4]atomic.Uint64
-	cgroupStats     [3]atomic.Uint64
-	sharedScans     atomic.Uint64
-	metadataPasses  atomic.Uint64
-	sharedMetadata  atomic.Uint64
-	sharedScopes    atomic.Uint64
-	holderTimeouts  atomic.Uint64
-	timeoutPhases   [lookupPhases]lookupPhaseCounter
-	lastLookupError atomic.Pointer[string]
-	mu              sync.Mutex
-	cgroupMu        sync.RWMutex
-	recentMu        sync.RWMutex
-	cgroups         map[uint64]string
-	scopeReads      [64]atomic.Pointer[scopePIDSnapshot]
-	recent          map[uint32]*recentOwners
-	index           [ownerIndexShards]ownerIndex
-	indexSeed       maphash.Seed
-	windows         map[uint32]fdWindow
-	ambiguousPorts  map[uint16]time.Time
+	queries               diagPool
+	batches               descriptorBatches
+	warmed                bool
+	budget                flows.Limits // the limits service_linux.go gives the engine
+	descriptors           *descriptorReservation
+	udpGenerationSequence atomic.Uint64
+	udpGenerationFailures [8]atomic.Pointer[udpGenerationFailure]
+	lookupErrors          [4]atomic.Uint64
+	cgroupStats           [3]atomic.Uint64
+	sharedScans           atomic.Uint64
+	metadataPasses        atomic.Uint64
+	sharedMetadata        atomic.Uint64
+	sharedScopes          atomic.Uint64
+	holderTimeouts        atomic.Uint64
+	timeoutPhases         [lookupPhases]lookupPhaseCounter
+	lastLookupError       atomic.Pointer[string]
+	mu                    sync.Mutex
+	cgroupMu              sync.RWMutex
+	recentMu              sync.RWMutex
+	cgroups               map[uint64]string
+	scopeReads            [64]atomic.Pointer[scopePIDSnapshot]
+	recent                map[uint32]*recentOwners
+	index                 [ownerIndexShards]ownerIndex
+	indexSeed             maphash.Seed
+	windows               map[uint32]fdWindow
+	ambiguousPorts        map[uint16]time.Time
 	// Fault callbacks are assigned only by the acceptance build.
 	fault        func(context.Context) error
 	destroyFault func(context.Context, socketRow, func())
@@ -97,6 +99,7 @@ type lookupStats struct {
 	FDReserveTarget, FDReserveBefore, FDReserveAfter                                     int
 	FDReserveLimit                                                                       uint64
 	FDReserveError                                                                       string
+	UDPGenerationFailures                                                                []udpGenerationFailure
 	MetadataRejected                                                                     uint64
 	LastMetadataError                                                                    string
 	SharedScans                                                                          uint64
@@ -171,6 +174,11 @@ func (o *Owners) Stats() any {
 	for i := range o.batches.slow {
 		if f := o.batches.slow[i].Load(); f != nil {
 			s.SlowScans = append(s.SlowScans, f.snapshot())
+		}
+	}
+	for i := range o.udpGenerationFailures {
+		if failure := o.udpGenerationFailures[i].Load(); failure != nil {
+			s.UDPGenerationFailures = append(s.UDPGenerationFailures, *failure)
 		}
 	}
 	return s
@@ -306,7 +314,13 @@ func (o *Owners) UDPFor(ctx context.Context, tuple platform.Tuple) (platform.Own
 }
 func (o *Owners) udpOwner(ctx context.Context, tuple platform.Tuple) (owner platform.Owner, err error) {
 	source := tuple.Source
-	defer func() { o.recordError(err) }()
+	started, stage := time.Now(), "fault"
+	defer func() {
+		o.recordError(err)
+		if err != nil && owner.Generation == "" {
+			o.recordUDPGenerationFailure(ctx, tuple, stage, started, err)
+		}
+	}()
 	unknown := false
 	if o.fault != nil {
 		if err := o.fault(ctx); err != nil {
@@ -321,6 +335,7 @@ func (o *Owners) udpOwner(ctx context.Context, tuple platform.Tuple) (owner plat
 	// Exact lookup is useful for the common wildcard socket. A port-filtered
 	// dump also detects SO_REUSEPORT ambiguity instead of accepting the arbitrary
 	// socket that the kernel's inbound hash selected.
+	stage = "exact-query"
 	exact, err := o.query(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source, tuple.Destination)
 	if err != nil && !errors.Is(err, unix.ENOENT) {
 		return platform.Owner{}, fmt.Errorf("UDP exact query: %w", err)
@@ -336,17 +351,20 @@ func (o *Owners) udpOwner(ctx context.Context, tuple platform.Tuple) (owner plat
 			return o.resolveUDP(ctx, r, unknown)
 		}
 	}
+	stage = "family-dump"
 	rows, err := diagDump(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source)
 	if err != nil {
 		return platform.Owner{}, fmt.Errorf("UDP family dump: %w", err)
 	}
 	if source.Addr().Is4() {
+		stage = "dual-stack-dump"
 		v6, err := diagDump(ctx, unix.AF_INET6, unix.IPPROTO_UDP, source)
 		if err != nil {
 			return platform.Owner{}, fmt.Errorf("UDP dual-stack dump: %w", err)
 		}
 		rows = append(rows, v6...)
 	}
+	stage = "match"
 	r, err := matchUDP(rows, source)
 	if errors.Is(err, errSocketAmbiguous) {
 		o.mu.Lock()

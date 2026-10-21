@@ -80,14 +80,26 @@ func diag(ctx context.Context, family, protocol int, local, remote netip.AddrPor
 // Only completed exact queries are reusable. Interrupted dumps, cancellation,
 // malformed messages and errors discard the descriptor with all pending data.
 func diagQuery(ctx context.Context, family, protocol int, local, remote netip.AddrPort, dump bool, pool *diagPool) (rows []socketRow, err error) {
+	trace := diagQueryTrace{Stage: "context", StartedNS: time.Now().UnixNano()}
+	if deadline, ok := ctx.Deadline(); ok {
+		trace.DeadlineNS = deadline.UnixNano()
+	}
+	defer func() {
+		if err != nil {
+			trace.CompletedNS = time.Now().UnixNano()
+			err = &diagQueryError{Trace: trace, cause: err}
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	trace.Stage = "socket"
 	connection, err := pool.get()
 	if err != nil {
 		return nil, err
 	}
 	f, fd := connection.file, connection.fd
+	trace.SocketReadyNS = time.Now().UnixNano()
 	deadline, timed := ctx.Deadline()
 	var canceled chan struct{}
 	var stop func() bool
@@ -99,6 +111,9 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 		stop = context.AfterFunc(ctx, func() { f.SetReadDeadline(time.Now()); close(canceled) })
 	}
 	defer func() {
+		if !dump && trace.Stage == "receive" && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded)) {
+			trace.peek(f)
+		}
 		// A cancellation callback must finish before a later borrower can
 		// install its own deadline on this same descriptor.
 		if stop != nil && !stop() {
@@ -126,6 +141,7 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 	}
 	binary.NativeEndian.PutUint16(b[6:], flags)
 	sequence := diagSequence.Add(1)
+	trace.Sequence = sequence
 	binary.NativeEndian.PutUint32(b[8:], sequence)
 	b[16] = byte(family)
 	b[17] = byte(protocol)
@@ -153,9 +169,11 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 	for i := 64; i < 72; i++ {
 		b[i] = 255
 	}
+	trace.Stage = "send"
 	if err := unix.Sendto(fd, b, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
 		return nil, err
 	}
+	trace.SentNS = time.Now().UnixNano()
 	buf := connection.buffer[:]
 	if dump {
 		pooled := diagDumpBuffers.Get().(*[]byte)
@@ -163,6 +181,7 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 		buf = *pooled
 	}
 	for {
+		trace.Stage, trace.ReadStartedNS = "receive", time.Now().UnixNano()
 		n, err := readNetlink(f, buf)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -170,6 +189,7 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 			}
 			return nil, err
 		}
+		trace.Stage = "parse"
 		messages, err := syscall.ParseNetlinkMessage(buf[:n])
 		if err != nil {
 			return nil, err

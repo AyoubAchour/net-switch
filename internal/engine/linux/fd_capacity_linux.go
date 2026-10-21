@@ -29,8 +29,9 @@ import (
 //   - fixed descriptors (TUN, epoll, journal, the idle sock_diag pool, echo
 //     slots), control connections and transient closes, within 1,024.
 //
-// The 1,024 is operational headroom, not a ceiling: root-authenticated control
-// connections are not capped, so the table can still grow later. This only
+// The 1,024 is operational headroom, not a ceiling: registered control clients
+// are capped at four, but accepted connections awaiting registration can
+// transiently accumulate, so the table can still grow later. This only
 // takes the growth the budgets predict off the lookup path.
 //
 // With the Linux defaults that is 65,536 + 4*(8,192+16,384) + 1,024 = 164,864,
