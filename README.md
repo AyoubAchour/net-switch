@@ -1,4 +1,5 @@
 # Net Switch: per-app internet for Windows
+<!-- gating probe: stacked docs-only change, do not merge -->
 
 Choose which internet connection each Windows app uses.
 
