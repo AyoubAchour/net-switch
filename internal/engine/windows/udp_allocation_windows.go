@@ -81,7 +81,8 @@ func (d *Dialer) captureUDPAllocationFailure(line string, source netip.Addr, ada
 		snapshot.Call = call.Syscall
 	}
 	// Only the first failing allocation takes these read-only snapshots.
-	// Other refusals do not wait for it; there is no bind retry or new socket.
+	// Other refusals do not wait for it; the refused flow is never retried.
+	// The separate fixed-port diagnostic below sends no traffic.
 	space := captureUDPPortSpace()
 	snapshot.NativeUDP, snapshot.Reservation = space.Native, space.Probe
 	snapshot.System = systemResources()

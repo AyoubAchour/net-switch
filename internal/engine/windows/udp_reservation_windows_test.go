@@ -162,6 +162,7 @@ func TestUDPReservationProbeCompletesInBackground(t *testing.T) {
 		t.Fatalf("state %v before commands finished", state)
 	}
 	close(release)
+	jobs.wait.Wait() // Observe normal completion before testing Close's cancellation.
 	jobs.close()
 	decoded := probeJSON(t, probe)
 	families, _ := decoded["families"].([]any)
