@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
@@ -147,6 +148,64 @@ func goOptions(t *testing.T, conn syscall.Conn, options []socketOption) map[stri
 	return values
 }
 
+// socketProvider names the catalog entry behind a socket.
+func socketProvider(h windows.Handle) string {
+	var info windows.WSAProtocolInfo
+	size := int32(unsafe.Sizeof(info))
+	if err := windows.Getsockopt(h, windows.SOL_SOCKET, soProtocolInfoW, (*byte)(unsafe.Pointer(&info)), &size); err != nil {
+		return "error " + err.Error()
+	}
+	return fmt.Sprintf("%s (catalog %d, family %d, type %d, protocol %d, chain %d, flags1 %#x)", windows.UTF16ToString(info.ProtocolName[:]),
+		info.CatalogEntryId, info.AddressFamily, info.SocketType, info.Protocol, info.ProtocolChain.ChainLen, info.ServiceFlags1)
+}
+
+// logExplicitProtocolProvider records which catalog entry an explicit
+// protocol number would select, beside the default one the engine uses.
+func logExplicitProtocolProvider(t *testing.T, v6 bool, kind, protocol int32) {
+	t.Helper()
+	family := int32(windows.AF_INET)
+	if v6 {
+		family = windows.AF_INET6
+	}
+	h, err := windows.WSASocket(family, kind, protocol, nil, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
+	if err != nil {
+		t.Logf("explicit protocol %d socket: %v", protocol, err)
+		return
+	}
+	owner := winhandle.Open(h, "explicit protocol provider probe open")
+	t.Logf("explicit protocol %d selects %s", protocol, socketProvider(owner.Handle("explicit protocol provider probe")))
+	owner.SocketClose("explicit protocol provider probe close")
+}
+
+func logProtocolCatalog(t *testing.T) {
+	t.Helper()
+	entries := make([]windows.WSAProtocolInfo, 64)
+	size := uint32(len(entries)) * uint32(unsafe.Sizeof(entries[0]))
+	n, err := windows.WSAEnumProtocols(nil, &entries[0], &size)
+	if err != nil {
+		t.Logf("WSAEnumProtocols: %v", err)
+		return
+	}
+	for _, entry := range entries[:n] {
+		t.Logf("catalog %d: %s family=%d type=%d protocol=%d chain=%d flags1=%#x providerFlags=%#x",
+			entry.CatalogEntryId, windows.UTF16ToString(entry.ProtocolName[:]), entry.AddressFamily, entry.SocketType,
+			entry.Protocol, entry.ProtocolChain.ChainLen, entry.ServiceFlags1, entry.ProviderFlags)
+	}
+}
+
+func goProvider(t *testing.T, conn syscall.Conn) string {
+	t.Helper()
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var provider string
+	if err := raw.Control(func(fd uintptr) { provider = socketProvider(windows.Handle(fd)) }); err != nil {
+		t.Fatal(err)
+	}
+	return provider
+}
+
 func lineOptions(v6 bool) []socketOption {
 	options := []socketOption{{"SO_TYPE", windows.SOL_SOCKET, 0x1008}, {"SO_REUSEADDR", windows.SOL_SOCKET, windows.SO_REUSEADDR},
 		{"SO_EXCLUSIVEADDRUSE", windows.SOL_SOCKET, ^windows.SO_REUSEADDR}}
@@ -161,6 +220,7 @@ func lineOptions(v6 bool) []socketOption {
 // options, bind and connected options, read back from the kernel.
 func TestNativeTCPMatchesGoDialOptions(t *testing.T) {
 	hosted(t)
+	logProtocolCatalog(t)
 	pool := completionTestPool(t, queryTCPCompletionPolicy(windows.WSAEnumProtocols))
 	for _, network := range []string{"tcp4", "tcp6"} {
 		t.Run(network, func(t *testing.T) {
@@ -192,6 +252,10 @@ func TestNativeTCPMatchesGoDialOptions(t *testing.T) {
 				socketOption{"TCP_KEEPCNT", windows.IPPROTO_TCP, windows.TCP_KEEPCNT})
 			got := readOptions(native.handle.Handle("TCP option parity"), options)
 			want := goOptions(t, conn.(*net.TCPConn), options)
+			got["provider"] = socketProvider(native.handle.Handle("TCP provider parity"))
+			want["provider"] = goProvider(t, conn.(*net.TCPConn))
+			options = append(options, socketOption{name: "provider"})
+			logExplicitProtocolProvider(t, v6, windows.SOCK_STREAM, windows.IPPROTO_TCP)
 			index := line.Index4
 			if v6 {
 				index = line.Index6
@@ -232,6 +296,10 @@ func TestNativeUDPMatchesGoListenOptions(t *testing.T) {
 			options := append(lineOptions(v6), socketOption{"SO_BROADCAST", windows.SOL_SOCKET, windows.SO_BROADCAST})
 			got := readOptions(native.handle.Handle("UDP option parity"), options)
 			want := goOptions(t, conn, options)
+			got["provider"] = socketProvider(native.handle.Handle("UDP provider parity"))
+			want["provider"] = goProvider(t, conn)
+			options = append(options, socketOption{name: "provider"})
+			logExplicitProtocolProvider(t, v6, windows.SOCK_DGRAM, windows.IPPROTO_UDP)
 			t.Logf("native=%v go=%v", got, want)
 			for _, option := range options {
 				if got[option.name] != want[option.name] {
