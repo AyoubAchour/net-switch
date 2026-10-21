@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       control_security:
-        description: Run only the focused Windows control security regressions
+        description: Also run the focused Windows control security regressions
         type: boolean
         default: false
       packet_capture:
@@ -149,7 +149,7 @@ jobs:
 
   windows-acceptance:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.legacy_windows != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.legacy_windows != 'false') }}
     name: Windows acceptance / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
@@ -226,7 +226,7 @@ jobs:
 
   testisp:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.testisp != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.testisp != 'false') }}
     name: TestISP proof / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -282,7 +282,7 @@ jobs:
 
   engine:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.legacy_windows != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.legacy_windows != 'false') }}
     name: Windows ${{ matrix.arch }} / engine configs and TUN
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -364,7 +364,7 @@ jobs:
   # run the same steps.
   go1-windows:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go_windows != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.go_windows != 'false') }}
     name: Go 1.0 / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -481,7 +481,7 @@ jobs:
 
   go1-linux:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go_linux != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.go_linux != 'false') }}
     name: Go 1.0 / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -498,7 +498,7 @@ jobs:
 
   wintun:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.wintun != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.wintun != 'false') }}
     name: Wintun session / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -575,7 +575,7 @@ jobs:
 
   linux:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
     name: Linux / Node ${{ matrix.node }} (shared code)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -595,7 +595,7 @@ jobs:
 
   linux-helper:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.helper != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.helper != 'false') }}
     name: Linux / helper build and shared tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -626,7 +626,7 @@ jobs:
   # in it, and a fixed name on a matrix job gets the matrix values appended.
   test-node-22:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
     name: Windows / Node 22
     runs-on: windows-latest
     timeout-minutes: 20
@@ -679,7 +679,7 @@ jobs:
 
   test-node-24:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
     name: Windows / Node 24
     runs-on: windows-latest
     timeout-minutes: 20
@@ -702,7 +702,7 @@ jobs:
 
   installer:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.installer != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.installer != 'false') }}
     name: Installer smoke test
     runs-on: windows-latest
     timeout-minutes: 30
@@ -728,7 +728,7 @@ jobs:
 
   arm64:
     needs: changes
-    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
     name: Windows ARM64 / tests and installer
     runs-on: windows-11-arm
     timeout-minutes: 30

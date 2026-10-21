@@ -24,8 +24,8 @@ export function areaFor(path) {
   if (/^(?:\.github|scripts|vendor|third_party)\//.test(path)
       || /(?:^|\/)(?:go\.(?:mod|sum)|package(?:-lock)?\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock)$/.test(path)
       || /(?:^|\/)(?:fixtures?|testdata)(?:\/|$)/.test(path)) return null;
-  // These Markdown files ship inside the installer payload.
-  if (path === 'THIRD_PARTY_NOTICES.md' || path === 'docs/user-guide.md') return null;
+  // The installer copies these entire trees, not just today's user guide.
+  if (path === 'THIRD_PARTY_NOTICES.md' || (/^(?:lib|ui|tools|licenses|docs)\//.test(path) && path.endsWith('.md'))) return null;
   if (path.endsWith('.md') && !path.startsWith('test/')) return 'docs';
   // Node's trace coverage test reads this source, and its fixture tests read
   // internal/**/node-*.json. Those cross-language inputs take the full path.

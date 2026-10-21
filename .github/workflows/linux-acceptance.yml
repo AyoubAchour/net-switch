@@ -22,8 +22,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: linux-acceptance-${{ github.ref }}
-  cancel-in-progress: true
+  # Label events on a merged PR must not share main's concurrency group.
+  group: ${{ github.event_name == 'pull_request' && format('linux-acceptance-pr-{0}', github.event.pull_request.number) || format('linux-acceptance-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Picks the jobs a pull request needs from its changed files
@@ -64,7 +65,7 @@ jobs:
 
   linux:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.acceptance != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.acceptance != 'false') }}
     name: Linux acceptance / ${{ matrix.runner }}
     # Pinned labels: ubuntu-latest moves between releases.
     runs-on: ${{ matrix.runner }}
