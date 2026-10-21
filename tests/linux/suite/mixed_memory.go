@@ -15,7 +15,7 @@ import (
 
 func init() {
 	register(56, func(r *registry) {
-		r.add("capacity.mixed-caps", "49,152 TCP flows, 16,384 UDP sessions and 4,096 TIME_WAIT endpoints held together stay within 512 MiB", harness.Requires10, "5.9", 8*time.Minute, mixedCaps)
+		r.add("capacity.mixed-caps", "49,152 TCP flows, 16,384 UDP sessions and 4,096 TIME_WAIT endpoints held together keep post-GC live heap within 460.8 MiB", harness.Requires10, "5.9", 8*time.Minute, mixedCaps)
 	})
 }
 
