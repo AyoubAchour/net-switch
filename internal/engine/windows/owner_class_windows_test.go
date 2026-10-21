@@ -197,17 +197,22 @@ func TestOwnerReadTimeAtPortLimit(t *testing.T) {
 			mu.Unlock()
 		}
 	}()
-	rows, _ := nativeTCPRowCounts(t)
-	for pairs := 0; rows < 13900; pairs++ {
-		conn, err := net.Dial("tcp4", listener.Addr().String())
-		if err != nil {
-			t.Fatalf("after %d pairs (%d rows): %v", pairs, rows, err)
-		}
-		mu.Lock()
-		conns = append(conns, conn)
-		mu.Unlock()
-		if pairs%250 == 0 || rows > 13500 {
-			rows, _ = nativeTCPRowCounts(t)
+	// Earlier tests' TIME_WAIT rows expire during a phase (x64 job
+	// 119321529600 fell from 13,622 to 13,469 rows), so top up to the middle
+	// of the range before each phase, not once.
+	fill := func() {
+		rows, _ := nativeTCPRowCounts(t)
+		for pairs := 0; rows < 14250; pairs++ {
+			conn, err := net.Dial("tcp4", listener.Addr().String())
+			if err != nil {
+				t.Fatalf("after %d pairs (%d rows): %v", pairs, rows, err)
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+			if pairs%250 == 0 || rows > 13850 {
+				rows, _ = nativeTCPRowCounts(t)
+			}
 		}
 	}
 	type sample struct{ read, index time.Duration }
@@ -253,6 +258,7 @@ func TestOwnerReadTimeAtPortLimit(t *testing.T) {
 			at(indexes, 50), at(indexes, 95), at(totals, 95), (sum / time.Duration(len(samples))).Microseconds()}
 	}
 	phase := func(name string) {
+		fill()
 		var oldScratch, newScratch []uint64
 		var oldSamples, newSamples []sample
 		oldRows, newRows := [2]int{1 << 30, 0}, [2]int{1 << 30, 0}
