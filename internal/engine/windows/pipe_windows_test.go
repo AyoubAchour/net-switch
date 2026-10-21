@@ -43,6 +43,14 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	if os.Getenv(pipeOSFileDuplexEnv) == "1" {
+		if err := osFileDuplexChild(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("os.File duplex control exchanged 1 MiB each way")
+		os.Exit(0)
+	}
 	if os.Getenv("NETSWITCH_PIPE_DENIED_CHILD") == "1" {
 		if err := deniedPipeClient(); err != nil {
 			fmt.Fprintln(os.Stderr, err)

@@ -24,6 +24,8 @@ const echo = functionRange('internal/engine/windows/dial_windows.go', 'func (d *
 const mtu = functionRange('internal/engine/windows/dial_windows.go', 'func (s *udpSocket) pathMTU(');
 const registrar = functionRange('internal/wintun/registrar_windows.go', 'func startRegistrar(');
 const modes = functionRange('internal/engine/windows/readiness_modes_windows.go', 'func querySocketCompletionModes(');
+const pipeConnNew = functionRange('internal/engine/windows/pipe_windows.go', 'func newPipeConn(');
+const pipeTransfer = functionRange('internal/engine/windows/pipe_windows.go', 'func (c *pipeConn) transfer(');
 const session = functionRange('internal/wintun/session_windows.go', 'func (a *Adapter) startSession(');
 const udpReady = functionRange('internal/engine/windows/udp_readiness_windows.go', 'func newUDPReadiness(');
 const heapOpen = functionRange('internal/engine/windows/heap_profile_windows.go', 'func openHeapProfile(');
@@ -32,6 +34,10 @@ const terminalWrite = functionRange('internal/engine/windows/terminal_pipe_windo
 const terminalTest = functionRange('internal/engine/windows/terminal_pipe_windows_test.go', 'func TestTerminalLossCancelsRealEnginePipeBlockedWrite(');
 const sites = [
   ['pipe accept OVERLAPPED', /pipe_windows\.go:\d+:\d+: moved to heap: op$/, accept],
+  // Connected pipe I/O: both OVERLAPPEDs live in the connection, and each
+  // payload is pinned (so heap-allocated) until its operation has finished.
+  ['pipe connection OVERLAPPED owner', /pipe_windows\.go:\d+:\d+: &pipeConn\{.*escapes to heap$/, pipeConnNew],
+  ['pipe connection payload', /pipe_windows\.go:\d+:\d+: leaking param: b$/, pipeTransfer],
   ['TCP receive OVERLAPPED and flags owner', /readiness_windows\.go:\d+:\d+: &socketWatch\{.*escapes to heap$/, watch],
   ['ICMP caller request', /dial_windows\.go:\d+:\d+: leaking param: request$/, echo],
   ['ICMP aligned reply', /dial_windows\.go:\d+:\d+: make\(\[\]uint64,.*escapes to heap$/, echo],
@@ -93,7 +99,7 @@ for (const tags of ['', 'netswitch_handlecheck']) {
   console.log(`WINDOWS POINTER ESCAPE ${JSON.stringify({ version: version.stdout.trim(), tags: tags || 'release', proof })}`);
 }
 
-// This observer is test-only, but exercises a real overlapped File.Write. Its
+// This observer is test-only, but exercises a real overlapped pipe write. Its
 // explicit retention/pin must have compiler evidence too, not just a comment
 // citing the standard library's separate operation allocation.
 const fixture = spawnSync('go', ['test', '-c', '-o', 'dist/windows-pointer-audit.test.exe',

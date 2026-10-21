@@ -26,7 +26,7 @@ type terminalPipeObserver struct {
 	started, completed atomic.Int32
 	// Only the protocol writer accesses these; the observer itself is owned
 	// by Serve's goroutine. Retain and explicitly pin the payload until the
-	// production File.Write has completed or drained cancellation.
+	// production pipe write has completed or drained cancellation.
 	pending    []byte
 	payloadPin runtime.Pinner
 }
@@ -37,10 +37,9 @@ func (p *terminalPipeObserver) Write(b []byte) (int, error) {
 		p.payloadPin.Pin(unsafe.SliceData(p.pending))
 	}
 	p.started.Add(1)
-	// No test-owned stack OVERLAPPED: Go 1.27.3 internal/poll.FD.execIO
-	// obtains operation from its heap pool and pins that operation plus the
-	// payload before submission. waitIO/waitCanceled drain completion before
-	// execIO unpins and File.Write returns. Exercise that production path.
+	// No test-owned stack OVERLAPPED: the production pipeConn keeps its
+	// OVERLAPPED in the heap connection and pins the payload until the write
+	// completes or Close has drained its cancellation. Exercise that path.
 	n, err := p.ReadWriteCloser.Write(p.pending)
 	p.payloadPin.Unpin()
 	p.pending = nil

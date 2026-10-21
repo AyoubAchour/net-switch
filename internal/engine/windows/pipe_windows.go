@@ -141,7 +141,166 @@ func (p *Pipe) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
 		return nil, err
 	}
 	p.pending = next
-	return winhandle.NewFile(h, p.name), nil
+	return newPipeConn(h, p.name)
+}
+
+// pipeConn is one connected engine pipe instance. The protocol server reads
+// and writes it at the same time, one operation per direction.
+//
+// It does its own event-based overlapped I/O instead of using os.File. Go
+// 1.27.3's internal/poll updates a per-file offset after every pipe Read and
+// Write without synchronization, so a full-duplex pipe is a data race (seen
+// by the race detector in TestTerminalLossCancelsRealEnginePipeBlockedWrite,
+// run 39559440093). Go fixed it upstream in f4ac29c3c7 ("don't track offsets
+// for Windows pipes", 2026-09-11), after our pinned release.
+//
+// The handle is never associated with Go's completion port; each direction
+// waits on its own event. Close cancels both directions and waits for them to
+// finish before the handle is closed, so no OVERLAPPED or buffer is released
+// while the kernel may still use it.
+type pipeConn struct {
+	h           winhandle.Owner
+	name        string
+	read, write pipeOp
+	readMu      sync.Mutex // one read at a time
+	writeMu     sync.Mutex // one write at a time
+	mu          sync.Mutex // closed, and issuing I/O against Close's cancel
+	closed      bool
+	active      sync.WaitGroup
+	closeOnce   sync.Once
+	closeErr    error
+	readEvent   winhandle.Owner
+	writeEvent  winhandle.Owner
+}
+
+// pipeOp is one direction's OVERLAPPED. It lives inside the heap pipeConn
+// and is reused only after the previous operation in that direction finished.
+type pipeOp struct {
+	o windows.Overlapped
+}
+
+func newPipeConn(h winhandle.Owner, name string) (io.ReadWriteCloser, error) {
+	c := &pipeConn{h: h, name: name}
+	for _, event := range []*winhandle.Owner{&c.readEvent, &c.writeEvent} {
+		e, err := windows.CreateEvent(nil, 1, 0, nil)
+		if err != nil {
+			c.closeEvents()
+			windows.DisconnectNamedPipe(h.Handle("engine pipe event failure"))
+			return nil, errors.Join(fmt.Errorf("engine pipe event: %w", err), h.HandleClose("engine pipe event failure close"))
+		}
+		*event = winhandle.Open(e, "engine pipe connection event open")
+	}
+	return c, nil
+}
+
+func (c *pipeConn) closeEvents() {
+	for _, event := range []*winhandle.Owner{&c.readEvent, &c.writeEvent} {
+		if !event.IsZero() {
+			event.HandleClose("engine pipe connection event close")
+			*event = winhandle.Owner{}
+		}
+	}
+}
+
+func (c *pipeConn) Read(b []byte) (int, error) {
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	n, err := c.transfer(&c.read, c.readEvent, b, false)
+	switch {
+	case errors.Is(err, windows.ERROR_BROKEN_PIPE), errors.Is(err, windows.ERROR_HANDLE_EOF):
+		// The client closed its end; os.File reports the same as EOF.
+		err = io.EOF
+	case err != nil:
+		err = &os.PathError{Op: "read", Path: c.name, Err: err}
+	}
+	return n, err
+}
+
+func (c *pipeConn) Write(b []byte) (int, error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	written := 0
+	for written < len(b) {
+		n, err := c.transfer(&c.write, c.writeEvent, b[written:], true)
+		written += n
+		if err != nil {
+			return written, &os.PathError{Op: "write", Path: c.name, Err: err}
+		}
+		if n == 0 {
+			return written, &os.PathError{Op: "write", Path: c.name, Err: io.ErrShortWrite}
+		}
+	}
+	return written, nil
+}
+
+// transfer submits one overlapped read or write and waits for it. b must
+// stay put until the kernel is done with it, so it is pinned (and therefore
+// heap-allocated) for the whole operation, including a cancelled one.
+func (c *pipeConn) transfer(op *pipeOp, event winhandle.Owner, b []byte, write bool) (int, error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+	if len(b) > 1<<30 {
+		b = b[:1<<30]
+	}
+	var pinned runtime.Pinner
+	pinned.Pin(&b[0])
+	defer pinned.Unpin()
+	// Submit under mu so Close's CancelIoEx either sees this operation or
+	// this operation sees closed. It never blocks: the handle is overlapped.
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return 0, os.ErrClosed
+	}
+	c.active.Add(1)
+	defer c.active.Done()
+	ev := event.Handle("engine pipe operation event")
+	windows.ResetEvent(ev)
+	op.o = windows.Overlapped{HEvent: ev}
+	h := c.h.Handle("engine pipe operation")
+	var err error
+	if write {
+		err = windows.WriteFile(h, b, nil, &op.o)
+	} else {
+		err = windows.ReadFile(h, b, nil, &op.o)
+	}
+	c.mu.Unlock()
+	if err != nil && !errors.Is(err, windows.ERROR_IO_PENDING) {
+		return 0, err
+	}
+	// Inline success and pending completion both report through the same
+	// OVERLAPPED. Wait for the final count; after cancellation this returns
+	// ERROR_OPERATION_ABORTED once the kernel has released b and op.
+	var done uint32
+	err = windows.GetOverlappedResult(h, &op.o, &done, true)
+	if err != nil && errors.Is(err, windows.ERROR_OPERATION_ABORTED) {
+		c.mu.Lock()
+		closed := c.closed
+		c.mu.Unlock()
+		if closed {
+			err = os.ErrClosed
+		}
+	}
+	return int(done), err
+}
+
+// Close cancels any read or write in progress, waits until the kernel has
+// finished with both, and then closes the pipe instance.
+func (c *pipeConn) Close() error {
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		c.closed = true
+		cancelErr := windows.CancelIoEx(c.h.Handle("engine pipe connection cancel"), nil)
+		c.mu.Unlock()
+		if errors.Is(cancelErr, windows.ERROR_NOT_FOUND) {
+			cancelErr = nil // nothing was in flight
+		}
+		c.active.Wait()
+		c.closeEvents()
+		c.closeErr = errors.Join(cancelErr, c.h.HandleClose("engine pipe connection close"))
+	})
+	return c.closeErr
 }
 
 func authenticatePipe(h windows.Handle, standalone bool) error {
