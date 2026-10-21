@@ -66,7 +66,19 @@ const worker = spawn(clientExe, [path.resolve('scripts/tun-test-client.mjs')], {
 });
 let serial = 0;
 const pending = new Map();
-worker.on('message', ({ id, result, error }) => {
+worker.on('message', async ({ id, result, error, publicSocket }) => {
+  if (publicSocket) {
+    // The client has completed TLS but has not sent HTTP yet. Capture the
+    // strict engine row before the public server can close after its reply.
+    try {
+      const all = await routed([publicSocket], 'aa');
+      const record = all.find((c) => Number(c.metadata.sourcePort) === publicSocket.port &&
+        c.metadata.processPath?.toLowerCase() === clientExe.toLowerCase() &&
+        c.metadata.type === 'tun/tun-in' && c.chains.includes(lineOutbound('aa')));
+      worker.send({ command: 'public-recorded', id, record });
+    } catch (cause) { worker.send({ command: 'public-recorded', id, error: cause.message }); }
+    return;
+  }
   const entry = pending.get(id);
   if (!entry) return;
   pending.delete(id); clearTimeout(entry.timer);
@@ -177,8 +189,8 @@ try {
     // Exactly one public request, with verified TLS and no retry. It uses the
     // copied app through the TUN, on aa before that lane is pointed at bb.
     const publicTrace = await client('public');
-    const publicConnections = await routed([publicTrace], 'aa');
-    const record = publicConnections.find((c) => Number(c.metadata.sourcePort) === publicTrace.port);
+    const record = publicTrace.engine;
+    assert.equal(Number(record.metadata.sourcePort), publicTrace.port);
     log(`ok - one public HTTPS trace through TUN on physical line aa: ${JSON.stringify({ ...publicTrace, engine: record })}`);
   }
   await client('refresh', { ids: first.map(({ id }) => id) });
@@ -268,6 +280,7 @@ try {
   log(`TLS sockets at failure: ${JSON.stringify(sockets)}`);
   await writeFile(path.join(dir, 'https-client-failure.json'), JSON.stringify(sockets, null, 2));
   if (engineAdapter) {
+    log(`PID file at failure: ${await readFile(engine.pidPath, 'utf8').catch(() => 'unavailable')}`);
     log(`Engine adapter at failure: ${JSON.stringify({ status: engine.status, error: engine.error,
       childPid: engine.child?.pid ?? null, exitCode: engine.child?.exitCode ?? null })}`);
   }
