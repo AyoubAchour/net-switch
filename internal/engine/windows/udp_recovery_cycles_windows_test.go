@@ -28,6 +28,7 @@ type udpRecoveryRefusal struct {
 	Half       string `json:"half"`  // app connect or engine bind
 	Code       string `json:"code"`
 	Errno      uint32 `json:"errno,omitempty"`
+	Error      string `json:"error"`
 	Free       int    `json:"freeAtRefusal"`
 	RetryOK    bool   `json:"retryAfter200msOK"`
 	RetryCode  string `json:"retryCode,omitempty"`
@@ -207,7 +208,7 @@ func nativeUDPRecoveryCyclesWith(t *testing.T, cycles int, ready bool, tcpLoad i
 				keep()
 				continue
 			}
-			refusal := udpRecoveryRefusal{Phase: phase, Half: half, Free: freeDynamicUDP4(t, space)}
+			refusal := udpRecoveryRefusal{Phase: phase, Half: half, Error: err.Error(), Free: freeDynamicUDP4(t, space)}
 			refusal.Code, refusal.Errno = udpFailureCode(err)
 			time.Sleep(200 * time.Millisecond)
 			if keep, err := attempt(half); err == nil {

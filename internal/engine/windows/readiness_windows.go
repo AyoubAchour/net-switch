@@ -500,13 +500,13 @@ func duplicateBorrowedSocket(raw syscall.RawConn, source winhandle.Owner) (winha
 		sourceName, sourceErr := windows.Getsockname(windows.Handle(descriptor))
 		for attempt := 0; attempt < staleDuplicateAttempts; attempt++ {
 			var protocol windows.WSAProtocolInfo
-			nativeError = windows.WSADuplicateSocket(windows.Handle(descriptor), uint32(os.Getpid()), &protocol)
-			if nativeError != nil {
+			if err := windows.WSADuplicateSocket(windows.Handle(descriptor), uint32(os.Getpid()), &protocol); err != nil {
+				nativeError = fmt.Errorf("WSADuplicateSocket: %w", err)
 				return
 			}
-			var h windows.Handle
-			h, nativeError = windows.WSASocket(-1, -1, -1, &protocol, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
-			if nativeError != nil {
+			h, err := windows.WSASocket(-1, -1, -1, &protocol, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
+			if err != nil {
+				nativeError = fmt.Errorf("WSASocket import: %w", err)
 				return
 			}
 			candidate := winhandle.Open(h, "WSASocket native duplicate")
