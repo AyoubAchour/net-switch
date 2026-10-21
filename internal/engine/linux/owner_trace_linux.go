@@ -67,7 +67,13 @@ type descriptorTrace struct {
 	omitted int
 }
 
+// Round-6 experiment only: per-read stamps compiled out.
+const descriptorTraceDisabled = true
+
 func (t *descriptorTrace) begin(fd int64) int {
+	if descriptorTraceDisabled {
+		return -1
+	}
 	now := time.Now().UnixNano()
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -79,7 +85,7 @@ func (t *descriptorTrace) begin(fd int64) int {
 	return len(t.reads) - 1
 }
 func (t *descriptorTrace) end(index int) {
-	if index < 0 {
+	if descriptorTraceDisabled || index < 0 {
 		return
 	}
 	now := time.Now().UnixNano()
