@@ -74,6 +74,8 @@ type stackMoveReport struct {
 	Trials     int            `json:"trials"`
 	Moved      int            `json:"moved"`
 	Failed     int            `json:"failed"`
+	FailedMove int            `json:"failedAfterMove"` // failures in trials whose stack moved
+	FailedStay int            `json:"failedInPlace"`   // failures without a move: not this hazard
 	OnStack    int            `json:"arrayOnStack"`
 	FirstDepth int            `json:"firstFailureDepth"`
 	Errors     map[string]int `json:"errors"`
@@ -139,15 +141,39 @@ func TestWaitArrayStackMove(t *testing.T) {
 	// when KernelBase reads the decommitted array. If it never fails, the
 	// sweep has no power and the helper's pass above proves nothing.
 	legacy, code, out, elapsed := run("xsys")
-	violation := strings.Contains(out, "0xc0000005")
-	reproduced := legacy.Failed != 0 || (code != 0 && violation)
-	t.Logf("x/sys child exit=%d elapsed=%s access_violation=%t report=%+v old_would_pass=%t", code, elapsed.Round(time.Millisecond), violation, legacy, !reproduced)
+	// Attribute the failure to this hazard, not to any crash. A returned
+	// failure must come from a trial whose stack moved, with none in place.
+	// A crash must be an access violation at exactly the array address that
+	// x/sys handed to the kernel, read from the crashing goroutine's trace.
+	faultAddress, passedAddress := crashAddresses(out)
+	violation := code != 0 && faultAddress != "" && faultAddress == passedAddress
+	reproduced := (legacy.FailedMove != 0 && legacy.FailedStay == 0) || violation
+	t.Logf("x/sys child exit=%d elapsed=%s fault_address=%s passed_array=%s attributed_violation=%t report=%+v old_would_pass=%t",
+		code, elapsed.Round(time.Millisecond), faultAddress, passedAddress, violation, legacy, !reproduced)
 	if !reproduced {
 		t.Fatalf("x/sys wrapper did not reproduce the stack-move hazard (exit=%d); output:\n%s", code, tail(out))
 	}
 	if code != 0 {
 		t.Logf("x/sys child crash excerpt:\n%s", tail(out))
 	}
+}
+
+// crashAddresses returns the faulting address of a Go "Exception 0xc0000005"
+// report and the handle-array argument of x/sys's waitForMultipleObjects frame
+// in the same output, both as printed (hex). Either is empty when absent.
+func crashAddresses(out string) (fault, passed string) {
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if fields := strings.Fields(line); fault == "" && len(fields) >= 4 && fields[0] == "Exception" && fields[1] == "0xc0000005" {
+			fault = fields[3]
+		}
+		if rest, ok := strings.CutPrefix(line, "golang.org/x/sys/windows.waitForMultipleObjects("); ok && passed == "" {
+			if args := strings.Split(rest, ","); len(args) >= 2 {
+				passed = strings.TrimSuffix(strings.TrimSpace(args[1]), "?")
+			}
+		}
+	}
+	return fault, passed
 }
 
 func tail(s string) string {
@@ -200,6 +226,11 @@ func runStackMoveChild(mode string) int {
 		}
 		if c.err != nil || c.result != windows.WAIT_OBJECT_0 {
 			report.Failed++
+			if c.moved {
+				report.FailedMove++
+			} else {
+				report.FailedStay++
+			}
 			if report.FirstDepth < 0 {
 				report.FirstDepth = depth
 			}
