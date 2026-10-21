@@ -154,3 +154,12 @@ jobs:
         run: |
           go test -count=1 -v -timeout=4m -run '^TestReadyUDPArmedIdleLatency$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify datagram semantics and shard close fences
+        if: ${{ !cancelled() }}
+        run: |
+          go test -count=1 -v -timeout=2m -run '^Test(UDPShard.*|ReadyUDP(DoesNotConsumeDatagrams|SharedEventAndIdleCost))$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ('${{ inputs.arch }}' -eq 'x64') {
+            go test -race -count=1 -v -timeout=2m -run '^Test(UDPShard.*|ReadyUDP(DoesNotConsumeDatagrams|SharedEventAndIdleCost))$' ./internal/engine/windows
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

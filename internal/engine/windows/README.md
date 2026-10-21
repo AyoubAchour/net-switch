@@ -37,8 +37,15 @@ Concurrent first-packet lookups share one in-flight UDP dump per address family.
 Each lookup requires a dump started after that lookup began; an earlier cached
 positive cannot extend the observed same-port generation collision window.
 The once-per-second reconciliation still reads a separate complete native table.
-The optional datagram readiness adapter uses one shared `WSAEventSelect` event
-to wake a non-consuming, zero-timeout `WSAPoll` query. It performs no receive
+The optional datagram readiness adapter uses 64 bounded `WSAEventSelect`
+groups, each with at most 256 sockets. Two waiters each watch 32 group events
+and one stop event, rotating their wait order to prevent a hot group starving
+another. An Arm wakes only its group; the group mutex fences polling and
+detach before a socket can close. No packet operation takes the registration
+allocator's mutex. Each non-consuming `WSAPoll` query is bounded to one group.
+`ProcessSocketNotifications` requires build 20348, above the Windows 10 19045
+floor, so this backend uses the documented event/wait APIs on every version.
+The adapter performs no receive
 until the shared worker supplies its buffer. Microsoft documents `MSG_PEEK`
 only for non-overlapped receives, so the new Watch path does not depend on
 overlapped peeking or on `WSAEMSGSIZE` proving non-consumption. Native tests

@@ -33,14 +33,46 @@ type udpReadinessMetrics struct {
 }
 
 func (p *udpReadiness) stats() map[string]any {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	armed := 0
-	for watch := range p.watches {
-		if watch.events != 0 {
-			armed++
+	armed, registered, largest := 0, 0, 0
+	var total udpReadinessMetrics
+	for i := range p.shards {
+		s := &p.shards[i]
+		s.mu.Lock()
+		registered += len(s.watches)
+		largest = max(largest, len(s.watches))
+		for watch := range s.watches {
+			if watch.events != 0 {
+				armed++
+			}
 		}
+		total.merge(s.metrics)
+		s.mu.Unlock()
 	}
-	return map[string]any{"measured": p.capture, "registered": len(p.watches), "armed": armed,
-		"timingUpperUS": udpTimingUS, "metrics": p.metrics}
+	return map[string]any{"measured": p.capture, "registered": registered, "armed": armed,
+		"timingUpperUS": udpTimingUS, "metrics": total, "shards": udpShardCount,
+		"shardCapacity": udpShardCapacity, "largestShard": largest, "waiters": udpWaiters}
+}
+
+func (m *udpTiming) merge(other udpTiming) {
+	m.Count += other.Count
+	m.Nanos += other.Nanos
+	m.MaxNanos = max(m.MaxNanos, other.MaxNanos)
+	for i := range m.Buckets {
+		m.Buckets[i] += other.Buckets[i]
+	}
+}
+
+func (m *udpReadinessMetrics) merge(other udpReadinessMetrics) {
+	m.Arm.merge(other.Arm)
+	m.ArmLockWait.merge(other.ArmLockWait)
+	m.BuildRows.merge(other.BuildRows)
+	m.Poll.merge(other.Poll)
+	m.Disarm.merge(other.Disarm)
+	m.Callbacks.merge(other.Callbacks)
+	m.WaitReturns += other.WaitReturns
+	m.PollRows += other.PollRows
+	m.ReadyRows += other.ReadyRows
+	m.ZeroReadyPolls += other.ZeroReadyPolls
+	m.SetEvents += other.SetEvents
+	m.MaxPollRows = max(m.MaxPollRows, other.MaxPollRows)
 }

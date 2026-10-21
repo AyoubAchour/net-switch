@@ -4,8 +4,10 @@ package winengine
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -14,25 +16,42 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// UDP uses documented event readiness, not an overlapped MSG_PEEK receive.
-// One manual-reset event wakes a batched, non-consuming WSAPoll query. No
-// socket owns a receive buffer, waiter goroutine or individual event handle.
-// https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsaeventselect
-// https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsapoll
+// WSAEventSelect and WSAPoll are documented on our Windows 10 19045 floor.
+// Each event covers at most 256 sockets. Two waiters each watch 32 shard
+// events and one stop event; no socket owns a waiter, receive buffer or event.
+// ProcessSocketNotifications needs build 20348, so it cannot be our baseline.
+const udpShardCount, udpShardCapacity, udpWaiters = 64, 256, 2
+
+var udpEventSelectProc = winsock.NewProc("WSAEventSelect")
+var udpPollProc = winsock.NewProc("WSAPoll")
+
+type udpReadinessFailure struct{ err error }
+
 type udpReadiness struct {
-	mu      sync.Mutex
+	mu       sync.Mutex // registration allocation only; never acquired by Arm or polling
+	closeMu  sync.Mutex
+	shards   [udpShardCount]udpShard
+	stops    [udpWaiters]winhandle.Owner
+	next     int
+	closed   atomic.Bool
+	failure  atomic.Pointer[udpReadinessFailure]
+	wg       sync.WaitGroup
+	closeErr error
+	onError  func(error)
+	capture  bool
+	poll     func([]pollFD) (int32, error)
+}
+
+type udpShard struct {
+	mu      sync.Mutex // fences native queries and unregister-before-close
 	event   winhandle.Owner
 	watches map[*udpWatch]struct{}
-	closed  bool
-	err     error
-	onError func(error)
-	done    chan struct{}
-	capture bool
 	metrics udpReadinessMetrics
 }
 
 type udpWatch struct {
 	pool     *udpReadiness
+	shard    *udpShard
 	socket   winhandle.Owner
 	wake     func()
 	events   int16
@@ -41,54 +60,105 @@ type udpWatch struct {
 }
 
 func newUDPReadiness(onError func(error)) (*udpReadiness, error) {
-	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	p := &udpReadiness{onError: onError, capture: hostedTraceEnabled(), poll: pollUDP}
+	var opened []winhandle.Owner
+	open := func(site string) (winhandle.Owner, error) {
+		h, err := windows.CreateEvent(nil, 1, 0, nil)
+		if err != nil {
+			return winhandle.Owner{}, err
+		}
+		owner := winhandle.Open(h, site)
+		opened = append(opened, owner)
+		return owner, nil
+	}
+	var err error
+	for i := range p.stops {
+		p.stops[i], err = open("UDP readiness waiter stop open")
+		if err != nil {
+			break
+		}
+	}
+	if err == nil {
+		for i := range p.shards {
+			s := &p.shards[i]
+			s.event, err = open(fmt.Sprintf("UDP readiness shard %d event open", i))
+			if err != nil {
+				break
+			}
+			s.watches = make(map[*udpWatch]struct{})
+		}
+	}
 	if err != nil {
+		for _, owner := range opened {
+			err = errors.Join(err, owner.HandleClose("UDP readiness setup failure close"))
+		}
 		return nil, err
 	}
-	p := &udpReadiness{event: winhandle.Open(event, "UDP readiness event open"), watches: map[*udpWatch]struct{}{}, done: make(chan struct{}), onError: onError, capture: hostedTraceEnabled()}
-	go p.run()
+	p.wg.Add(udpWaiters)
+	for i := range udpWaiters {
+		go p.run(i)
+	}
 	return p, nil
 }
 
 func selectUDPEvents(socket winhandle.Owner, event windows.Handle, mask int32) error {
-	code, _, err := winsock.NewProc("WSAEventSelect").Call(uintptr(socket.Handle("UDP event selection")), uintptr(event), uintptr(mask))
+	code, _, err := udpEventSelectProc.Call(uintptr(socket.Handle("UDP event selection")), uintptr(event), uintptr(mask))
 	if int32(code) == -1 {
 		return err
 	}
 	return nil
 }
 
+func pollUDP(rows []pollFD) (int32, error) {
+	n, _, err := udpPollProc.Call(uintptr(unsafe.Pointer(&rows[0])), uintptr(len(rows)), 0)
+	if int32(n) == -1 {
+		return -1, err
+	}
+	return int32(n), nil
+}
+
 func (p *udpReadiness) watch(socket winhandle.Owner, wake func()) (*udpWatch, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.closed {
+	if p.closed.Load() {
 		return nil, net.ErrClosed
 	}
-	if p.err != nil {
-		return nil, p.err
+	if failure := p.failure.Load(); failure != nil {
+		return nil, failure.err
 	}
-	w := &udpWatch{pool: p, socket: socket, wake: wake}
-	p.watches[w] = struct{}{}
-	return w, nil
+	for offset := range udpShardCount {
+		index := (p.next + offset) % udpShardCount
+		s := &p.shards[index]
+		s.mu.Lock()
+		if len(s.watches) < udpShardCapacity {
+			w := &udpWatch{pool: p, shard: s, socket: socket, wake: wake}
+			s.watches[w] = struct{}{}
+			s.mu.Unlock()
+			p.next = (index + 1) % udpShardCount
+			return w, nil
+		}
+		s.mu.Unlock()
+	}
+	return nil, errors.New("Windows UDP readiness reached its 16384 socket ceiling")
 }
 
 func (w *udpWatch) Arm(read, write bool) error {
-	p := w.pool
-	var started time.Duration
+	p, s := w.pool, w.shard
+	var began time.Duration
 	if p.capture {
-		started = winclock.Now()
+		began = winclock.Now()
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if p.capture {
-		p.metrics.ArmLockWait.add(winclock.Since(started))
-		defer func() { p.metrics.Arm.add(winclock.Since(started)) }()
+		s.metrics.ArmLockWait.add(winclock.Since(began))
+		defer func() { s.metrics.Arm.add(winclock.Since(began)) }()
 	}
-	if w.detached || p.closed {
+	if w.detached || p.closed.Load() {
 		return net.ErrClosed
 	}
-	if p.err != nil {
-		return p.err
+	if failure := p.failure.Load(); failure != nil {
+		return failure.err
 	}
 	if w.err != nil {
 		return w.err
@@ -96,94 +166,119 @@ func (w *udpWatch) Arm(read, write bool) error {
 	var mask int32
 	var events int16
 	if read {
-		mask |= 1        // FD_READ.
-		events |= 0x0100 // POLLRDNORM.
+		mask |= 1
+		events |= 0x100
 	}
 	if write {
-		mask |= 2        // FD_WRITE.
-		events |= 0x0010 // POLLWRNORM.
+		mask |= 2
+		events |= 0x10
 	}
-	// Replacing the event mask clears that socket's old event record. Windows
-	// also records already-readable/writable state, closing the rearm race.
-	if err := selectUDPEvents(w.socket, p.event.Handle("UDP event arm"), mask); err != nil {
+	// Replacing the mask clears this socket's record. Always query its shard
+	// after rearm, including FD_WRITE: rearm is level-triggered, not an edge wait.
+	if err := selectUDPEvents(w.socket, s.event.Handle("UDP shard event arm"), mask); err != nil {
 		return err
 	}
 	w.events = events
 	if events != 0 {
-		// FD_WRITE is edge-triggered, and an unconnected UDP socket need not
-		// have had a connect event. Query current state once on every arm;
-		// later network changes wake the same event without a receive.
 		if p.capture {
-			p.metrics.SetEvents++
+			s.metrics.SetEvents++
 		}
-		return windows.SetEvent(p.event.Handle("UDP arm wake"))
+		return windows.SetEvent(s.event.Handle("UDP shard arm wake"))
 	}
 	return nil
 }
 
 func (w *udpWatch) Detach() {
-	p := w.pool
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	s := w.shard
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if w.detached {
 		return
 	}
-	w.detached = true
-	w.events = 0
-	// The same lock covers the nonblocking poll query, so no query can still
-	// refer to this descriptor after Detach returns and Close recycles it.
+	w.detached, w.events = true, 0
 	w.err = selectUDPEvents(w.socket, 0, 0)
-	delete(p.watches, w)
+	delete(s.watches, w)
 }
 
-func (p *udpReadiness) run() {
-	defer close(p.done)
-	var rows []pollFD
-	var watches []*udpWatch
-	var callbacks []func()
+func (p *udpReadiness) fail(err error) {
+	if !p.failure.CompareAndSwap(nil, &udpReadinessFailure{err}) {
+		return
+	}
+	for _, stop := range p.stops {
+		windows.SetEvent(stop.Handle("UDP failure wake"))
+	}
+	if p.onError != nil {
+		p.onError(err)
+	}
+}
+
+func (p *udpReadiness) run(worker int) {
+	defer p.wg.Done()
+	const perWaiter = udpShardCount / udpWaiters
+	var handles [perWaiter + 1]windows.Handle
+	rows := make([]pollFD, 0, udpShardCapacity)
+	watches := make([]*udpWatch, 0, udpShardCapacity)
+	callbacks := make([]func(), 0, udpShardCapacity)
+	cursor := 0
 	for {
-		_, waitErr := windows.WaitForSingleObject(p.event.Handle("UDP event wait"), windows.INFINITE)
-		p.mu.Lock()
-		if p.closed {
-			p.mu.Unlock()
+		handles[0] = p.stops[worker].Handle("UDP waiter stop")
+		for i := range perWaiter {
+			index := ((cursor+i)%perWaiter)*udpWaiters + worker
+			handles[i+1] = p.shards[index].event.Handle("UDP waiter shard event")
+		}
+		result, err := windows.WaitForMultipleObjects(handles[:], false, windows.INFINITE)
+		if err != nil {
+			p.fail(err)
 			return
 		}
-		// Reset before querying readiness. Arrivals after this point leave the
-		// event signalled for the next pass; those before it are in the query.
-		resetErr := windows.ResetEvent(p.event.Handle("UDP event reset"))
+		if result == windows.WAIT_OBJECT_0 {
+			return
+		}
+		if result < windows.WAIT_OBJECT_0+1 || result > windows.WAIT_OBJECT_0+perWaiter {
+			p.fail(fmt.Errorf("unexpected UDP wait result %d", result))
+			return
+		}
+		slot := int(result-windows.WAIT_OBJECT_0) - 1
+		index := ((cursor+slot)%perWaiter)*udpWaiters + worker
+		// WaitForMultipleObjects favors the lowest signalled index. Rotation
+		// plus one bounded poll per turn prevents a hot shard starving another.
+		cursor = (cursor + slot + 1) % perWaiter
+		s := &p.shards[index]
+		s.mu.Lock()
+		if p.closed.Load() {
+			s.mu.Unlock()
+			return
+		}
+		err = windows.ResetEvent(s.event.Handle("UDP shard event reset"))
 		var began time.Duration
 		if p.capture {
-			p.metrics.WaitReturns++
+			s.metrics.WaitReturns++
 			began = winclock.Now()
 		}
 		rows, watches, callbacks = rows[:0], watches[:0], callbacks[:0]
-		for w := range p.watches {
+		for w := range s.watches {
 			if w.events != 0 {
-				rows = append(rows, pollFD{Socket: w.socket.Handle("UDP readiness poll"), Events: w.events})
+				rows = append(rows, pollFD{Socket: w.socket.Handle("UDP shard readiness poll"), Events: w.events})
 				watches = append(watches, w)
 			}
 		}
-		err := errors.Join(waitErr, resetErr)
 		if p.capture {
-			p.metrics.BuildRows.add(winclock.Since(began))
+			s.metrics.BuildRows.add(winclock.Since(began))
 			began = winclock.Now()
 		}
-		if len(rows) > 0 && err == nil {
-			n, _, callErr := winsock.NewProc("WSAPoll").Call(uintptr(unsafe.Pointer(&rows[0])), uintptr(len(rows)), 0)
+		if len(rows) != 0 && err == nil {
+			n, callErr := p.poll(rows)
 			if p.capture {
-				p.metrics.Poll.add(winclock.Since(began))
-				p.metrics.PollRows += uint64(len(rows))
-				p.metrics.MaxPollRows = max(p.metrics.MaxPollRows, uint64(len(rows)))
+				s.metrics.Poll.add(winclock.Since(began))
+				s.metrics.PollRows += uint64(len(rows))
+				s.metrics.MaxPollRows = max(s.metrics.MaxPollRows, uint64(len(rows)))
 				if n == 0 {
-					p.metrics.ZeroReadyPolls++
+					s.metrics.ZeroReadyPolls++
 				}
 			}
-			if int32(n) == -1 {
+			if n == -1 {
 				err = callErr
 			}
-		}
-		if err != nil {
-			p.err = err
 		}
 		if p.capture {
 			began = winclock.Now()
@@ -198,12 +293,10 @@ func (p *udpReadiness) run() {
 			callbacks = append(callbacks, w.wake)
 		}
 		if p.capture {
-			p.metrics.ReadyRows += uint64(len(callbacks))
-			p.metrics.Disarm.add(winclock.Since(began))
+			s.metrics.ReadyRows += uint64(len(callbacks))
+			s.metrics.Disarm.add(winclock.Since(began))
 		}
-		p.mu.Unlock()
-		// Detach may race these already-selected callbacks. The shared worker
-		// ignores late scheduling after it finishes; callbacks do no socket I/O.
+		s.mu.Unlock()
 		if p.capture {
 			began = winclock.Now()
 		}
@@ -214,28 +307,48 @@ func (p *udpReadiness) run() {
 		clear(watches)
 		if p.capture {
 			elapsed := winclock.Since(began)
-			p.mu.Lock()
-			p.metrics.Callbacks.add(elapsed)
-			p.mu.Unlock()
+			s.mu.Lock()
+			s.metrics.Callbacks.add(elapsed)
+			s.mu.Unlock()
 		}
 		if err != nil {
-			if p.onError != nil {
-				p.onError(err)
-			}
+			p.fail(err)
 			return
 		}
 	}
 }
 
 func (p *udpReadiness) close() error {
-	p.mu.Lock()
-	if len(p.watches) != 0 {
-		p.mu.Unlock()
-		return errors.New("cannot close UDP readiness with live sockets")
+	p.closeMu.Lock()
+	defer p.closeMu.Unlock()
+	if p.closed.Load() {
+		return p.closeErr
 	}
-	p.closed = true
-	windows.SetEvent(p.event.Handle("UDP readiness stop"))
+	p.mu.Lock()
+	for i := range p.shards {
+		s := &p.shards[i]
+		s.mu.Lock()
+		live := len(s.watches)
+		s.mu.Unlock()
+		if live != 0 {
+			p.mu.Unlock()
+			return errors.New("cannot close UDP readiness with live sockets")
+		}
+	}
+	p.closed.Store(true)
+	for _, stop := range p.stops {
+		p.closeErr = errors.Join(p.closeErr, windows.SetEvent(stop.Handle("UDP waiter stop signal")))
+	}
 	p.mu.Unlock()
-	<-p.done
-	return errors.Join(p.err, p.event.HandleClose("UDP readiness event close"))
+	p.wg.Wait()
+	if failure := p.failure.Load(); failure != nil {
+		p.closeErr = errors.Join(p.closeErr, failure.err)
+	}
+	for i := range p.shards {
+		p.closeErr = errors.Join(p.closeErr, p.shards[i].event.HandleClose("UDP shard event close"))
+	}
+	for _, stop := range p.stops {
+		p.closeErr = errors.Join(p.closeErr, stop.HandleClose("UDP waiter stop close"))
+	}
+	return p.closeErr
 }
