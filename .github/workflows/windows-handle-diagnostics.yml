@@ -198,6 +198,7 @@ jobs:
             go test -race -count=1 -v -timeout=2m -run '^Test(UDPShard.*|ReadyUDP(DoesNotConsumeDatagrams|SharedEventAndIdleCost))$' ./internal/engine/windows
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+
   registrar:
     if: ${{ github.ref == 'refs/heads/engine/windows-platform-registrar' }}
     name: Wintun registrar / ${{ inputs.arch || 'x64' }}
@@ -224,6 +225,14 @@ jobs:
         with:
           go-version: ${{ steps.pins.outputs.go_version }}
           cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Verify registrar and engine pointer allocation
+        run: |
+          node scripts/check-windows-pointer-escapes.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build and hash the uninstrumented release engine
         id: engine
         env:
@@ -240,8 +249,14 @@ jobs:
           "NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Build the tagged registrar test fixtures
         run: |
-          go test -c -o bin/wintun-registrar.test.exe ./internal/wintun
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $PSNativeCommandUseErrorActionPreference = $false
+          $diagnostics = @(go test -c '-gcflags=github.com/AyoubAchour/net-switch/internal/wintun=-m' -o bin/wintun-registrar.test.exe ./internal/wintun 2>&1)
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { $diagnostics; exit $code }
+          $proof = @($diagnostics | Where-Object { "$_" -match 'registrar_production_windows_test\.go:\d+:\d+: moved to heap: limits$' })
+          if (!$proof.Count) { 'Missing heap proof for the measurement job-information query'; exit 1 }
+          $match = [regex]::Match("$($proof[0])", '(?<file>.*\.go):(?<line>\d+):(?<column>\d+): (?<message>.*)')
+          'REGISTRAR TEST POINTER PROOF ' + (@{ file = $match.Groups['file'].Value; line = $match.Groups['line'].Value; column = $match.Groups['column'].Value; message = $match.Groups['message'].Value } | ConvertTo-Json -Compress)
       - uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: wintun

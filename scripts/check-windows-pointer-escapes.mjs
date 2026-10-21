@@ -22,6 +22,8 @@ const accept = functionRange('internal/engine/windows/pipe_windows.go', 'func (p
 const watch = functionRange('internal/engine/windows/readiness_windows.go', 'func (p *readiness) watch(');
 const echo = functionRange('internal/engine/windows/dial_windows.go', 'func (d *Dialer) Echo(');
 const mtu = functionRange('internal/engine/windows/dial_windows.go', 'func (s *udpSocket) pathMTU(');
+const registrar = functionRange('internal/wintun/registrar_windows.go', 'func startRegistrar(');
+const modes = functionRange('internal/engine/windows/readiness_modes_windows.go', 'func querySocketCompletionModes(');
 const sites = [
   ['pipe accept OVERLAPPED', /pipe_windows\.go:\d+:\d+: moved to heap: op$/, accept],
   ['TCP receive OVERLAPPED and flags owner', /readiness_windows\.go:\d+:\d+: &socketWatch\{.*escapes to heap$/, watch],
@@ -31,6 +33,12 @@ const sites = [
   ['ICMP IPv6 source', /dial_windows\.go:\d+:\d+: moved to heap: src$/, echo],
   ['ICMP IPv6 destination', /dial_windows\.go:\d+:\d+: moved to heap: dst$/, echo],
   ['IP Helper pointer through Go wrapper', /dial_windows\.go:\d+:\d+: moved to heap: row$/, mtu],
+  ['registrar job limits', /registrar_windows\.go:\d+:\d+: moved to heap: limits$/, registrar],
+  ['registrar job UI limits', /registrar_windows\.go:\d+:\d+: moved to heap: ui$/, registrar],
+  ['registrar inherited handle array', /registrar_windows\.go:\d+:\d+: make\(\[\]windows.Handle,.*escapes to heap$/, registrar],
+  ['registrar atomic job-list array', /registrar_windows\.go:\d+:\d+: \[\]windows.Handle\{.*escapes to heap$/, registrar],
+  ['completion-mode output flags', /readiness_modes_windows\.go:\d+:\d+: moved to heap: modes$/, modes],
+  ['completion-mode status block', /readiness_modes_windows\.go:\d+:\d+: moved to heap: status$/, modes],
   ['Go file/socket OVERLAPPED operation', /fd_windows\.go:\d+:\d+: new\(operation\) escapes to heap$/],
   ['Go file/socket pinned buffers', /fd_windows\.go:\d+:\d+: leaking param content: pinPtrs$/],
 ];
