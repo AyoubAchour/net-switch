@@ -134,6 +134,9 @@ func widestTCPFlows(t *testing.T) []tcp.Diagnostic {
 func statsReply(t *testing.T, server *protocol.Server) []byte {
 	t.Helper()
 	controller, transport := net.Pipe()
+	if err := controller.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(t.Context())
 	served := make(chan error, 1)
 	go func() { served <- server.Serve(ctx, transport) }()
