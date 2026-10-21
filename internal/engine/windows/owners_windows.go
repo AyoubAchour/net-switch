@@ -132,6 +132,10 @@ type LookupHistogram struct {
 	UDPRefreshes       uint64          `json:"udpRefreshes"`
 	UDPReadNanos       uint64          `json:"udpReadNanos"`
 	UDPIndexNanos      uint64          `json:"udpIndexNanos"`
+	UDPReadBuckets     []uint64        `json:"udpReadBuckets"`  // native reads alone, not lookups
+	UDPReadMaxUS       uint64          `json:"udpReadMaxUS"`    // slowest native read
+	UDPPeakRows        uint64          `json:"udpPeakRows"`     // largest table read
+	UDPParallelPeak    int             `json:"udpParallelPeak"` // most reads in flight for one family
 	Failures           []lookupFailure `json:"failures,omitempty"`
 }
 
@@ -144,9 +148,11 @@ type Owners struct {
 	paths                                                         map[processKey]platform.Owner
 	tcpBuffers                                                    [2][]uint64
 	udpSnapshots                                                  [2]atomic.Pointer[udpOwnerSnapshot]
-	udpRefreshes                                                  [2]atomic.Pointer[udpOwnerRefresh]
-	udpBuffers                                                    [2][]uint64
+	udpReads                                                      [2]udpOwnerReads
+	udpBuffers                                                    [2][udpOwnerParallelReads][]uint64
 	udpDumps, udpReadNanos, udpIndexNanos                         atomic.Uint64
+	udpReadHist                                                   [len(lookupBounds)]atomic.Uint64
+	udpReadMaxUS, udpPeakRows                                     atomic.Uint64
 	hist                                                          [len(lookupBounds)]atomic.Uint64
 	snapshotHist, processHist                                     [len(lookupBounds)]atomic.Uint64
 	refreshHist                                                   [len(lookupBounds)]atomic.Uint64
@@ -199,6 +205,11 @@ func (o *Owners) Stats() LookupHistogram {
 	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
 	h.TCPPeakRows = o.tcpPeakRows.Load()
 	h.UDPRefreshes, h.UDPReadNanos, h.UDPIndexNanos = o.udpDumps.Load(), o.udpReadNanos.Load(), o.udpIndexNanos.Load()
+	h.UDPReadBuckets = make([]uint64, len(lookupBounds))
+	for i := range h.UDPReadBuckets {
+		h.UDPReadBuckets[i] = o.udpReadHist[i].Load()
+	}
+	h.UDPReadMaxUS, h.UDPPeakRows, h.UDPParallelPeak = o.udpReadMaxUS.Load(), o.udpPeakRows.Load(), o.udpParallelPeak()
 	h.Failures = o.failureSnapshot()
 	for family := range o.snapshot {
 		if snapshot := o.snapshot[family].Load(); snapshot != nil {
