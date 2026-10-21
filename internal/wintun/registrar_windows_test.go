@@ -203,6 +203,9 @@ var guardWindowsResources struct {
 	owners map[windows.Handle]guardFileID
 	ids    map[guardFileID]string
 	err    error
+	// The system directory in Win32 and native form. A message resource found
+	// later must sit directly in one locale folder below it.
+	systemDir, systemNative string
 }
 
 func loadGuardWindowsResources(t *testing.T) {
@@ -219,6 +222,13 @@ func loadGuardWindowsResources(t *testing.T) {
 			guardWindowsResources.err = err
 			return
 		}
+		native, err := guardSystemDirectoryNativeName(t, system)
+		if err != nil {
+			guardWindowsResources.err = err
+			return
+		}
+		guardWindowsResources.systemDir, guardWindowsResources.systemNative = system, native
+		t.Logf("device-file system directory path=%q nativeName=%q", system, native)
 		// Only these exact system resources were observed in the full native
 		// suite. Neither a .mui suffix nor a basename on another path qualifies.
 		for _, leaf := range []string{"KernelBase.dll.mui", "mswsock.dll.mui"} {
@@ -286,6 +296,88 @@ func readGuardFileID(t *testing.T, h windows.Handle) (guardFileID, error) {
 	return id, err
 }
 
+// guardOpenAttributes opens path for attributes only, never following a
+// final reparse point, the same way as the fixed resource references.
+func guardOpenAttributes(path string, flags uint32) (windows.Handle, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return 0, err
+	}
+	return windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|flags, 0)
+}
+
+func guardSystemDirectoryNativeName(t *testing.T, system string) (string, error) {
+	var h windows.Handle
+	err := deviceGuardQuery(t, 0, "open system directory "+system, func() error {
+		var openErr error
+		h, openErr = guardOpenAttributes(system, windows.FILE_FLAG_BACKUP_SEMANTICS)
+		return openErr
+	})
+	if err != nil {
+		return "", fmt.Errorf("open system directory %q: %w", system, err)
+	}
+	defer windows.CloseHandle(h)
+	var native string
+	err = deviceGuardQuery(t, h, "system directory ObjectNameInformation", func() error {
+		var queryErr error
+		native, queryErr = diagnosticDeviceFileName(h)
+		return queryErr
+	})
+	if err == nil && !strings.HasPrefix(native, `\Device\`) {
+		err = fmt.Errorf("system directory has an unexpected native name %q", native)
+	}
+	return native, err
+}
+
+// guardSystemMessageResourcePath maps a native name of the exact form
+// <native system dir>\<locale>\<name>.mui to its Win32 path. Anything deeper,
+// shallower, elsewhere, or not a .mui file does not qualify.
+func guardSystemMessageResourcePath(native string) (string, bool) {
+	prefix := guardWindowsResources.systemNative + `\`
+	if guardWindowsResources.systemNative == "" || len(native) <= len(prefix) || !strings.EqualFold(native[:len(prefix)], prefix) {
+		return "", false
+	}
+	locale, leaf, ok := strings.Cut(native[len(prefix):], `\`)
+	if !ok || locale == "" || len(leaf) <= len(".mui") || strings.ContainsAny(leaf, `\/:`) ||
+		!strings.EqualFold(leaf[len(leaf)-len(".mui"):], ".mui") {
+		return "", false
+	}
+	for i, r := range locale {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r == '-' && i > 0 || r >= '0' && r <= '9' && i > 1) {
+			return "", false
+		}
+	}
+	return filepath.Join(guardWindowsResources.systemDir, locale, leaf), true
+}
+
+// guardSameFile reports whether a fresh open of path is the same disk file
+// (volume and 128-bit file ID) as want. The fresh handle is closed again.
+func guardSameFile(t *testing.T, path string, want guardFileID) (bool, error) {
+	var h windows.Handle
+	err := deviceGuardQuery(t, 0, "open message resource "+path, func() error {
+		var openErr error
+		h, openErr = guardOpenAttributes(path, 0)
+		return openErr
+	})
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(h)
+	var info windows.ByHandleFileInformation
+	err = deviceGuardQuery(t, h, "message resource attributes", func() error {
+		return windows.GetFileInformationByHandle(h, &info)
+	})
+	if err == nil && info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+		err = errors.New("message resource is a directory or reparse point")
+	}
+	if err != nil {
+		return false, err
+	}
+	got, err := readGuardFileID(t, h)
+	return err == nil && got == want, err
+}
+
 // Reading a delta must not load the DLL itself and change the measured state.
 func cachedGuardDLLID(t *testing.T) *guardFileID {
 	dllCache.Lock()
@@ -342,32 +434,40 @@ func classifyGuardFile(t *testing.T, h windows.Handle, dllID *guardFileID) (kind
 		if info.Directory != 0 {
 			return "Directory", oldKind, nil
 		}
-		if dllID != nil || len(guardWindowsResources.ids) != 0 {
-			id, idErr := readGuardFileID(t, h)
-			if idErr != nil {
-				return kind, oldKind, idErr
-			}
-			if dllID != nil {
-				t.Logf("device-file disk handle=%#x volume=%#x fileID=%x pinned_volume=%#x pinned_fileID=%x same_file=%t old_pass=false", h, id.Volume, id.ID, dllID.Volume, dllID.ID, id == *dllID)
-				if id == *dllID {
-					return "PinnedDLL", oldKind, nil
-				}
-			}
-			if resource, ok := guardWindowsResources.ids[id]; ok {
-				t.Logf("device-file disk handle=%#x matches independently owned resource %q old_pass=false", h, resource)
-				return "WindowsResource", oldKind, nil
-			}
-		} else {
-			t.Logf("device-file disk handle=%#x standard=%+v has no independently owned file identity", h, info)
+		id, idErr := readGuardFileID(t, h)
+		if idErr != nil {
+			return kind, oldKind, idErr
 		}
-		// Diagnostic only: neither a name nor a name-query failure can excuse
-		// this unmatched disk file or change its already-failing verdict.
+		if dllID != nil {
+			t.Logf("device-file disk handle=%#x volume=%#x fileID=%x pinned_volume=%#x pinned_fileID=%x same_file=%t old_pass=false", h, id.Volume, id.ID, dllID.Volume, dllID.ID, id == *dllID)
+			if id == *dllID {
+				return "PinnedDLL", oldKind, nil
+			}
+		}
+		if resource, ok := guardWindowsResources.ids[id]; ok {
+			t.Logf("device-file disk handle=%#x matches independently owned resource %q old_pass=false", h, resource)
+			return "WindowsResource", oldKind, nil
+		}
 		var name string
 		nameErr := deviceGuardQuery(t, h, "unrecognized disk ObjectNameInformation", func() error {
 			var queryErr error
 			name, queryErr = diagnosticDeviceFileName(h)
 			return queryErr
 		})
+		// Windows' loader opens a system message-resource file (.mui) the first
+		// time an error from that module is formatted, and keeps it. Accept one
+		// only when its native name is <system>\<locale>\<name>.mui and a fresh
+		// open of that exact path has this handle's file ID. A name alone, a
+		// name-query failure, or any other disk file stays an offender.
+		if nameErr == nil {
+			if path, ok := guardSystemMessageResourcePath(name); ok {
+				match, matchErr := guardSameFile(t, path, id)
+				t.Logf("device-file disk handle=%#x nativeName=%q system_resource=%q same_file=%t error=%v old_pass=false", h, name, path, match, matchErr)
+				if matchErr == nil && match {
+					return "WindowsResource", oldKind, nil
+				}
+			}
+		}
 		t.Logf("device-file unmatched disk handle=%#x nativeName=%q nameError=%v old_pass=false new_pass=false", h, name, nameErr)
 		return kind, oldKind, nil
 	}
@@ -1023,6 +1123,22 @@ func TestWintunRegistrarDeviceFileGuardNegativeControl(t *testing.T) {
 	closeErr := windows.CloseHandle(unrelated)
 	unrelated = 0 // consume our owner once, even if Close reports an error
 	must(t, closeErr)
+	guard.assertNone(t)
+	// A .mui file outside the system directory's locale folders must still
+	// fail: the message-resource rule is about location and identity, not name.
+	lookalikePath := filepath.Join(t.TempDir(), "en-US", "lookalike.dll.mui")
+	must(t, os.MkdirAll(filepath.Dir(lookalikePath), 0o700))
+	must(t, os.WriteFile(lookalikePath, []byte("not a resource"), 0o600))
+	lookalike, err := guardOpenAttributes(lookalikePath, 0)
+	must(t, err)
+	lookalikeKind, _, lookalikeErr := classifyGuardFile(t, lookalike, guard.dllID)
+	offenders, unreadable = guard.offenders(t)
+	closeErr = windows.CloseHandle(lookalike)
+	if lookalikeErr != nil || lookalikeKind != "File" || unreadable != 0 || len(offenders) != 1 || offenders[0] != lookalike {
+		t.Fatalf("guard accepted a .mui file outside the system directory: kind=%q err=%v offenders=%v unreadable=%d", lookalikeKind, lookalikeErr, offenders, unreadable)
+	}
+	must(t, closeErr)
+	report(t, map[string]any{"test": "device_file_guard_lookalike_resource", "arch": runtime.GOARCH, "actual_disk_detected": true})
 	guard.assertNone(t)
 	s, err := a.startInProcessSession()
 	must(t, err)

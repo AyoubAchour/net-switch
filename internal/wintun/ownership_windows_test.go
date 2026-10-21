@@ -22,6 +22,34 @@ const handleFlagProtectFromClose = 0x00000002
 
 var compareObjectHandles = windows.NewLazySystemDLL("kernelbase.dll").NewProc("CompareObjectHandles")
 
+var (
+	getCurrentProcessorNumber = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetCurrentProcessorNumber")
+	setThreadAffinityMask     = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetThreadAffinityMask")
+)
+
+// pinToCurrentProcessor keeps this locked OS thread on the processor it is
+// running on, and returns a function that restores its previous affinity.
+// A freed handle value goes back to a free list that Windows keeps per
+// processor, so a thread that migrates between the close and the next
+// allocation may never be offered that value again. ARM64 run 39559181981
+// showed exactly that: 4,096 allocations without the freed value.
+func pinToCurrentProcessor(t *testing.T) (processor uint32, restore func()) {
+	t.Helper()
+	n, _, _ := getCurrentProcessorNumber.Call()
+	if n >= 64 {
+		t.Fatalf("processor %d is outside this thread's affinity group mask", n)
+	}
+	previous, _, err := setThreadAffinityMask.Call(uintptr(windows.CurrentThread()), uintptr(1)<<n)
+	if previous == 0 {
+		t.Fatalf("pin the test thread to processor %d: %v", n, err)
+	}
+	return uint32(n), func() {
+		if ok, _, err := setThreadAffinityMask.Call(uintptr(windows.CurrentThread()), previous); ok == 0 {
+			t.Errorf("restore the test thread's affinity: %v", err)
+		}
+	}
+}
+
 // sameObject reports whether value still names the kernel object behind
 // witness. A closed value, or one reused for another object, reports false.
 func sameObject(value, witness windows.Handle) bool {
@@ -172,6 +200,8 @@ func TestRingRemovalBetweenMarkerCheckAndClose(t *testing.T) {
 func legacyCloseWindow(t *testing.T, tracked bool) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	processor, restore := pinToCurrentProcessor(t)
+	defer restore()
 	r, err := allocateRings(MinCapacity)
 	must(t, err)
 	view := r.view
@@ -220,7 +250,7 @@ func legacyCloseWindow(t *testing.T, tracked bool) {
 	survived := replacement != 0 && sameObject(replacement, replacementWitness)
 	tripwire := violation != nil && strings.Contains(fmt.Sprint(violation), "WINDOWS HANDLE OWNERSHIP VIOLATION")
 	report(t, map[string]any{"test": "removal_between_marker_check_and_close", "arch": runtime.GOARCH,
-		"owner": "legacy_in_process", "tracked": tracked, "handlecheck": winhandle.Enabled,
+		"owner": "legacy_in_process", "tracked": tracked, "handlecheck": winhandle.Enabled, "pinned_processor": processor,
 		"driver_close_error": errText(driverErr), "reuse_attempts": attempts, "replacement": replacement != 0,
 		"replacement_survived": survived, "tripwire": tripwire, "violation": fmt.Sprint(violation), "close_error": errText(err)})
 	if survived {
