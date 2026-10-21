@@ -164,6 +164,9 @@ func (p *readiness) pollWrites() {
 		if !winclock.System.WaitDone(p.stop, 2*time.Millisecond) {
 			return
 		}
+		// The backing array outlives this snapshot. Release detached watches
+		// and their relay callbacks before shortening it, including idle passes.
+		clear(watches)
 		rows, watches = rows[:0], watches[:0]
 		p.mu.Lock()
 		for _, w := range p.writers {
