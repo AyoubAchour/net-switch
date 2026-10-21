@@ -129,7 +129,11 @@ func TestMatchedHolderDoesNotWaitForBatchCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	upToTarget := map[*ownerIndex]bool{}
+	// UDP cookie hints share the inode index's 64 shard mutexes, and a UDP
+	// lookup reads its cookie's shard before it scans. Every row here has
+	// cookie zero; exclude that shard too, or about one run in 64 (the seed
+	// is random) blocks the lookup before scanning, not the later publication.
+	upToTarget := map[*ownerIndex]bool{o.cookieIndex(rows[0].cookie): true}
 	oldFirst := map[*ownerIndex]bool{}
 	var blocked, oldBlocked *ownerIndex
 	var blockedInode uint32
@@ -189,7 +193,9 @@ func TestMatchedHolderDoesNotWaitForBatchCompletion(t *testing.T) {
 			t.Fatalf("first live descriptor: %+v %v", got.owner, got.err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("matched owner waited for unrelated descriptor publication")
+		stacks := make([]byte, 64<<10)
+		n := runtime.Stack(stacks, true)
+		t.Fatalf("matched owner waited for unrelated descriptor publication; goroutines:\n%s", stacks[:n])
 	}
 	o.batches.liveMu.Lock()
 	var batch *descriptorBatch
