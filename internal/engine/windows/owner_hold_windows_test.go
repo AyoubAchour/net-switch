@@ -133,6 +133,29 @@ func TestOwnerOverloadHold(t *testing.T) {
 			t.Fatalf("the lookup whose own read was slow should have been held: %v", err)
 		}
 	})
+	t.Run("a found owner whose identity step crosses 50 ms is kept", func(t *testing.T) {
+		o := NewOwners()
+		slowTables(o, func() time.Duration { return 40 * time.Millisecond }, func() []byte { return tcp4Table(pid, holdTuple) })
+		o.identify = func(pid uint32) (platform.Owner, error) {
+			winclock.System.Wait(context.Background(), 30*time.Millisecond)
+			return o.process(pid)
+		}
+		owner, err, took := timedLookup(o, context.Background(), holdTuple)
+		if err != nil || owner.PID != pid || took < ownerLookupBound || o.Stats().TCPLateIdentities != 1 {
+			t.Fatalf("late identity: %+v %v after %v late=%d", owner, err, took, o.Stats().TCPLateIdentities)
+		}
+	})
+	t.Run("an identity step past the hold still ends unknown", func(t *testing.T) {
+		o := NewOwners()
+		slowTables(o, func() time.Duration { return 40 * time.Millisecond }, func() []byte { return tcp4Table(pid, holdTuple) })
+		o.identify = func(pid uint32) (platform.Owner, error) {
+			winclock.System.Wait(context.Background(), ownerOverloadHold)
+			return o.process(pid)
+		}
+		if _, err, _ := timedLookup(o, context.Background(), holdTuple); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("identity past the hold: %v", err)
+		}
+	})
 	t.Run("the caller's context still cancels a hold", func(t *testing.T) {
 		o := NewOwners()
 		slowTables(o, func() time.Duration { return 200 * time.Millisecond }, func() []byte { return tcp4Table(pid, holdTuple) })

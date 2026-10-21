@@ -284,7 +284,8 @@ export async function capacity({ server, harness, directory, line }) {
     progress.wrongLine = { unknownTCPAdmissions: unknownTCP(refusedStats) - unknownTCP(admissionsBefore),
       lookups: lookup(refusedStats).count - (lookup(admissionsBefore).count ?? 0),
       misses: lookup(refusedStats).misses - (lookup(admissionsBefore).misses ?? 0),
-      holds: lookup(refusedStats).tcpHolds, heldFound: lookup(refusedStats).tcpHeldFound, maxUS: lookup(refusedStats).maxUS,
+      holds: lookup(refusedStats).tcpHolds, heldFound: lookup(refusedStats).tcpHeldFound,
+      lateIdentities: lookup(refusedStats).tcpLateIdentities, maxUS: lookup(refusedStats).maxUS,
       tcpReadMaxUS: lookup(refusedStats).tcpReadMaxUS, tcpReadBuckets: lookup(refusedStats).tcpReadBuckets,
       upperUS: lookup(refusedStats).upperUS, peakRows: lookup(refusedStats).tcpPeakRows, failures: lookup(refusedStats).failures };
     console.log(`WINDOWS CAPACITY WRONG-LINE ${JSON.stringify(progress.wrongLine)}`);
