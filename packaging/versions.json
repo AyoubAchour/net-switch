@@ -26,9 +26,9 @@
     }
   },
   "go": {
-    "version": "1.27.2",
-    "url": "https://go.dev/dl/go1.27.2.windows-amd64.zip",
-    "sha256": "1314008898bd40df77af4b014f777f08873dbdfbcd3d92308728ee03304fe04f",
+    "version": "1.27.3",
+    "url": "https://go.dev/dl/go1.27.3.windows-amd64.zip",
+    "sha256": "f26081f438319757f8a1b46d7d0b2c5ec7583d4038e485e0aa725cfde7885fff",
     "checksumsUrl": "https://go.dev/dl/?mode=json&include=all",
     "archiveRoot": "go"
   },

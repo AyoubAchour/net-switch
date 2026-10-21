@@ -74,7 +74,7 @@ to Net Switch's code only, not to the installer as a whole.
 - What it does here: `helper\netswitch-helper.exe` is Net Switch's own small
   program (its source is in the repository's `helper` folder) that reads the
   line meters and the connections that go around routing. It is written in Go, so the Go runtime
-  and standard library (Go 1.27.2) and
+  and standard library (Go 1.27.3) and
   [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys) v0.49.0 are compiled
   into it, unmodified.
 - Copyright 2009 The Go Authors. Both are under the same BSD-style
@@ -105,5 +105,5 @@ dependencies; this does not replace the 0.3.x programs listed above.
 - golang.org/x/exp `v0.0.0-20250711185948-6ae5c78190dc`,
   golang.org/x/sys v0.49.0 and golang.org/x/time v0.15.0, BSD-3-Clause;
   see each module's LICENSE and PATENTS in `vendor/golang.org/x/`.
-- Go 1.27.2 runtime and standard library, BSD-3-Clause;
+- Go 1.27.3 runtime and standard library, BSD-3-Clause;
   see the Go toolchain's LICENSE and PATENTS.

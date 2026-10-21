@@ -1,6 +1,6 @@
 module github.com/AyoubAchour/net-switch
 
-go 1.27.2
+go 1.27.3
 
 require gvisor.dev/gvisor v0.0.0-20261017122056-1b7906fdee8c
 

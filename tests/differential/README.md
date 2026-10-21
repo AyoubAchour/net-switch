@@ -1,6 +1,6 @@
 # Pure-module parity
 
-Build `./tests/differential/runner` with Go 1.27.2, then pass its executable to
+Build `./tests/differential/runner` with Go 1.27.3, then pass its executable to
 `node tests/differential/run.mjs <executable>`. `ORACLE_SEED` changes the reproducible
 random sequence. The Linux Go CI jobs build and run it; race checks run on Linux
 and Windows x64. The runner is test-only and is never packaged.
