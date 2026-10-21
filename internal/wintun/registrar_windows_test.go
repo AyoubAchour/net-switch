@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -197,13 +198,24 @@ func newDeviceFileGuard(t *testing.T) *deviceFileGuard {
 // This also works for the OS-owned current-directory handle. It reads no name
 // and retains no handle value: a reused number must be classified again.
 func nativeDirectory(h windows.Handle) bool {
-	var info struct {
-		AllocationSize, EndOfFile int64
-		Links                     uint32
-		DeletePending, Directory  uint8
-		_                         [2]byte
-	}
-	return windows.GetFileInformationByHandleEx(h, windows.FileStandardInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))) == nil && info.Directory != 0
+	info, err := nativeFileStandardInfo(h)
+	return err == nil && info.Directory != 0
+}
+
+// FILE_STANDARD_INFO uses one-byte BOOLEANs, not four-byte BOOLs. Both Windows
+// targets have size 24, with DeletePending/Directory at offsets 20/21.
+// https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_standard_info
+type nativeFileStandard struct {
+	AllocationSize, EndOfFile int64
+	Links                     uint32
+	DeletePending, Directory  uint8
+	_                         [2]byte
+}
+
+func nativeFileStandardInfo(h windows.Handle) (nativeFileStandard, error) {
+	var info nativeFileStandard
+	err := windows.GetFileInformationByHandleEx(h, windows.FileStandardInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)))
+	return info, err
 }
 
 // offenders returns every unowned/changed File except positively classified
@@ -232,8 +244,12 @@ func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, u
 		if err == nil && fileType == windows.FILE_TYPE_PIPE {
 			continue
 		}
-		if err == nil && fileType == windows.FILE_TYPE_DISK && nativeDirectory(h) {
-			continue
+		if err == nil && fileType == windows.FILE_TYPE_DISK {
+			info, infoErr := nativeFileStandardInfo(h)
+			if infoErr == nil && info.Directory != 0 {
+				continue
+			}
+			t.Logf("device-file guard disk %#x: standard=%+v standardError=%v", h, info, infoErr)
 		}
 		offenders = append(offenders, h)
 	}
@@ -254,6 +270,128 @@ func (g *deviceFileGuard) assertNone(t *testing.T) {
 		}
 		t.Fatalf("device-file guard is not clean: %d unowned/changed non-pipe or unclassified file handle(s) %v, %d unreadable handles", len(offenders), offenders, unreadable)
 	}
+}
+
+// This is an evidence-gathering probe, not a replacement for the guard's hard
+// negative control. Name queries can block inside a driver even after a pipe
+// check (the borrowed number can be reused). Confine all such queries to one
+// disposable child, bounded and reaped by the parent. Never copy the parent's
+// snapshot handles into that child or duplicate/close any borrowed value.
+func TestWintunRegistrarDeviceFileGuardDiagnostics(t *testing.T) {
+	requireRunner(t)
+	const childEnv = "NETSWITCH_WINTUN_DEVICE_GUARD_DIAGNOSTICS_CHILD"
+	if os.Getenv(childEnv) != "1" {
+		exe, err := os.Executable()
+		must(t, err)
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, exe, "-test.run=^TestWintunRegistrarDeviceFileGuardDiagnostics$", "-test.v", "-test.timeout=40s")
+		cmd.Env = append(os.Environ(), childEnv+"=1")
+		cmd.WaitDelay = 2 * time.Second
+		var output bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &output, &output
+		err = cmd.Run() // waits for exit and drains output, including after a timeout
+		t.Logf("device-file diagnostic child (not a guard verdict):\n%s", output.String())
+		if err != nil {
+			t.Fatalf("device-file diagnostics incomplete: %v (deadline: %v)", err, ctx.Err())
+		}
+		return
+	}
+
+	_, err := loadLibrary()
+	must(t, err)
+	if unsafe.Sizeof(nativeFileStandard{}) != 24 || unsafe.Offsetof(nativeFileStandard{}.Directory) != 21 {
+		t.Fatal("unexpected FILE_STANDARD_INFO layout")
+	}
+	dump := func(stage string, device windows.Handle) {
+		t.Helper()
+		var handles []windows.Handle
+		for h := range handleSnapshot(t) {
+			handles = append(handles, h)
+		}
+		slices.Sort(handles)
+		files := 0
+		foundDevice := device == 0
+		for _, h := range handles {
+			kind, err := objectType(h)
+			if err != nil {
+				t.Fatalf("diagnostic %s handle %#x object type: %v", stage, h, err)
+			}
+			if kind != "File" {
+				continue
+			}
+			fileType, fileErr := windows.GetFileType(h)
+			if fileErr == nil && fileType == windows.FILE_TYPE_PIPE {
+				continue // never query pipe/socket names
+			}
+			files++
+			foundDevice = foundDevice || h == device
+			if files > 64 {
+				t.Fatal("device-file diagnostics exceeded 64 non-pipe files")
+			}
+			// PUBLIC_OBJECT_BASIC_INFORMATION: attributes, granted access,
+			// handle/pointer counts, then ten reserved ULONGs. No file I/O.
+			var basic [14]uint32
+			status, _, _ := ntQueryObject.Call(uintptr(h), 0, uintptr(unsafe.Pointer(&basic[0])), unsafe.Sizeof(basic), 0)
+			t.Logf("diagnostic %s handle=%#x actualDevice=%t fileType=%#x fileError=%v basicStatus=%#x attributes=%#x access=%#x handles=%d references=%d", stage, h, h == device, fileType, fileErr, status, basic[0], basic[1], basic[2], basic[3])
+			if fileErr == nil && fileType == windows.FILE_TYPE_DISK {
+				info, infoErr := nativeFileStandardInfo(h)
+				t.Logf("diagnostic %s handle=%#x standard=%+v standardError=%v", stage, h, info, infoErr)
+			}
+			// The preceding line survives a hung query and identifies its handle.
+			name, nameErr := diagnosticDeviceFileName(h)
+			t.Logf("diagnostic %s handle=%#x nativeName=%q nameError=%v", stage, h, name, nameErr)
+		}
+		if !foundDevice {
+			t.Fatalf("diagnostic %s missed the registered device %#x", stage, device)
+		}
+		t.Logf("diagnostic %s complete: %d non-pipe files", stage, files)
+	}
+	dump("loaded-library", 0)
+	guid, err := windows.GenerateGUID()
+	must(t, err)
+	a, err := Create(Config{Name: "NsGuardCI", GUID: guid.String(), Capacity: MinCapacity})
+	must(t, err)
+	t.Cleanup(func() { must(t, a.Close()) })
+	t.Logf("diagnostic adapter device path=%q", a.devicePath)
+	dump("adapter-created", 0)
+	s, err := a.startInProcessSession()
+	must(t, err)
+	defer s.Close()
+	func() {
+		s.mu.RLock()
+		defer s.mu.RUnlock()
+		o, ok := s.rings.owner.(*inProcessOwner)
+		if !ok || !o.registered {
+			t.Fatal("diagnostic never registered the real in-process device")
+		}
+		dump("in-process-registered", o.deviceOwner.Handle("diagnostic registered device"))
+	}()
+	must(t, s.Close())
+	dump("in-process-closed", 0)
+}
+
+// Only the disposable diagnostic child above may query a borrowed file's name.
+// The aligned buffer escapes through LazyProc.Call's //go:uintptrescapes with
+// the conversion inline; it lives until the synchronous query returns or the
+// entire child exits. No async I/O or goroutine can retain a retired buffer.
+func diagnosticDeviceFileName(h windows.Handle) (string, error) {
+	var buffer [1024]uint64 // one bounded 8 KiB OBJECT_NAME_INFORMATION query
+	status, _, _ := ntQueryObject.Call(uintptr(h), 1, uintptr(unsafe.Pointer(&buffer[0])), unsafe.Sizeof(buffer), 0)
+	if status != 0 {
+		return "", windows.NTStatus(status)
+	}
+	info := (*windows.NTUnicodeString)(unsafe.Pointer(&buffer[0]))
+	if info.Length == 0 {
+		return "", nil
+	}
+	base, address := uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(info.Buffer))
+	if info.Length%2 != 0 || info.Length > info.MaximumLength || address%2 != 0 || address < base+16 || address-base > unsafe.Sizeof(buffer) || uintptr(info.Length) > unsafe.Sizeof(buffer)-(address-base) {
+		return "", errors.New("malformed diagnostic object name")
+	}
+	name := windows.UTF16ToString(unsafe.Slice(info.Buffer, int(info.Length/2)))
+	runtime.KeepAlive(&buffer)
+	return name, nil
 }
 
 func sessionRegistrar(t *testing.T, s *Session) (*registrar, windows.Handle) {
