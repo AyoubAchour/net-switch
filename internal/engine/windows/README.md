@@ -7,7 +7,7 @@ hosted acceptance controller. Neither mode accepts a remote or ordinary-user
 client. Services, enrolment and desktop IPC belong to milestone 2.
 
 The engine holds an exclusive byte-range lock in a verified SYSTEM/Administrators
-folder for its entire lifetime. The shared `winlock` helper also serves the
+folder through forwarding and ownership cleanup. The shared `winlock` helper also serves the
 separate lifecycle store lock. A standard user holding the old predictable
 Global mutex cannot block it. Recovery runs under the file lock, before any
 Wintun DLL load. It calls
@@ -83,6 +83,67 @@ open, and a fresh process rebuilds the adapter.
 
 The temporary shared protocol and echo hooks match PR #36. The Windows readiness
 backend targets that PR's shared TCP relay; there is no second relay design.
+
+## Adapter-lost terminal contract
+
+`wintun.ErrAdapterRemoved` (including helper death normalized by the session)
+hands shutdown to the Windows runtime. Both packet pumps use the same instance
+latch. The engine does not rebuild or enter `OnFatal` for this condition.
+Ordinary TUN failures keep their existing fatal cleanup path.
+
+`Server.StopWithReason` takes the existing command/attach fence, runs normal
+`Runtime.Stop`, then sends one reserved terminal record to the connection that
+attached the current epoch. Socket/TUN teardown and journal cleanup finish first;
+Windows also closes its remaining runtime resources before reporting success.
+In-flight control probes are cancelled and joined before that teardown while
+their transport remains available for the terminal receipt.
+An explicit stop or lease cleanup that acquires the fence first wins instead.
+
+The `hello` capability is `terminal-stop`. Example terminal record:
+
+```json
+{"type":"stopped","engineInstanceId":"instance","epoch":4,"opId":"server-random-token","reason":"adapter lost"}
+```
+
+If cleanup failed, the record also has a nonempty `cleanupError`. Control sends
+the following receipt on the **same connection**, retaining the supplied fields:
+
+```json
+{"id":"receipt","method":"terminalAck","engineInstanceId":"instance","epoch":4,"opId":"server-random-token"}
+```
+
+Control must keep reading while sending this final receipt; its reply is not
+required before EOF. The engine waits at most two seconds **after cleanup** for
+the full write and receipt together, including any previously blocked write.
+The record bypasses the bounded droppable event queue. Timeout cancels the
+transport, and the runtime joins its reader/writer before returning. No blocking
+native pipe flush or detached flush goroutine is used. Another connection or an
+old epoch/instance cannot acknowledge. A full ordinary reply budget still admits
+the terminal receipt without queuing another reply. Lease checks and stop requests cannot
+finish a pending terminal delivery early.
+
+Clean loss returns `AdapterLostError` and process exit status **2**, even with no
+controller or an unread/unacknowledged terminal record. Delivery failures are
+logged separately. Cleanup errors and simultaneous generic failures retain exit
+status **1**; they never qualify as a clean adapter loss. A joined late-close
+error cannot inherit the special status. Control's restart budget/latch and
+production service integration are outside this contract.
+
+The added tests use in-memory controllers and the real engine pumps/stop plus
+an ownership journal with fake OS objects. A Windows test gives its fake TUN a
+real anonymous event: an independent duplicate verifies the native object's
+handle count falls from two to one before the controller receives the terminal.
+This proves closure without relying on GC or the ownership counter. It does not
+replace the helper's production adapter-removal/handle-reuse acceptance tests.
+Protocol tests cover full event/reply queues, missing receipts, blocked writes,
+disconnects, fencing, explicit-stop precedence and cleanup errors. The generic
+engine tests cover read, scalar-write and batch-write failures with nil, declined
+and accepted handoffs.
+
+Reference: Microsoft's [pipe flush contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+requires waiting for the client to read, which is why this protocol uses a
+bounded application receipt. Native handle evidence uses the documented
+[`NtQueryObject` basic information](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntqueryobject).
 
 ## Short-interval clock audit
 

@@ -10,10 +10,15 @@ import (
 )
 
 type connection struct {
-	events   chan Event
-	replies  chan Reply
-	slots    chan struct{}
-	finished func()
+	events          chan Event
+	replies         chan Reply
+	slots           chan struct{}
+	finished        func()
+	terminal        chan *terminalDelivery
+	done            chan struct{}
+	cancel          context.CancelFunc
+	stopWork        context.CancelFunc
+	terminalStarted chan struct{}
 }
 
 // Serve owns the transport until EOF or cancellation. Its reader and writer
@@ -21,10 +26,15 @@ type connection struct {
 func (s *Server) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	work, stopWork := context.WithCancel(ctx)
+	defer stopWork()
 	defer rw.Close()
 	stop := context.AfterFunc(ctx, func() { rw.Close() })
 	defer stop()
-	c := &connection{events: make(chan Event, 64), replies: make(chan Reply, Outstanding), slots: make(chan struct{}, Outstanding), finished: s.finished}
+	c := &connection{events: make(chan Event, 64), replies: make(chan Reply, Outstanding), slots: make(chan struct{}, Outstanding), finished: s.finished,
+		terminal: make(chan *terminalDelivery, 1), done: make(chan struct{}), cancel: cancel, stopWork: stopWork,
+		terminalStarted: make(chan struct{})}
+	defer close(c.done)
 	s.mu.Lock()
 	if len(s.clients) >= 4 {
 		s.mu.Unlock()
@@ -39,21 +49,38 @@ func (s *Server) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 	var workers sync.WaitGroup
 	var readErr error
 	for {
+		reserved := true
 		select {
 		case c.slots <- struct{}{}:
-		case <-ctx.Done():
-			readErr = ctx.Err()
+		default:
+			select {
+			case c.slots <- struct{}{}:
+			case <-c.terminalStarted:
+				// No ordinary reply slot is available. Keep reading solely
+				// for the final receipt; it requires no reply slot of its own.
+				reserved = false
+			case <-ctx.Done():
+				readErr = ctx.Err()
+			}
 		}
 		if readErr != nil {
 			break
 		}
 		line, err := readLine(reader)
 		if err != nil {
-			<-c.slots
+			if reserved {
+				<-c.slots
+			}
 			readErr = err
 			break
 		}
 		r, err := Decode(line)
+		if !reserved {
+			if err == nil && r.Method == "terminalAck" {
+				s.handle(work, r, c)
+			}
+			continue
+		}
 		if err != nil {
 			select {
 			case c.replies <- Reply{ID: r.ID, Error: err.Error()}:
@@ -63,7 +90,7 @@ func (s *Server) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 			continue
 		}
 		workers.Go(func() {
-			reply := s.Handle(ctx, r)
+			reply := s.handle(work, r, c)
 			select {
 			case c.replies <- reply:
 			case <-ctx.Done():
@@ -102,12 +129,21 @@ func (c *connection) write(ctx context.Context, w io.Writer) error {
 	for {
 		var value any
 		reply := false
-		// Always recheck replies before writing a selected log/event.
+		var terminal *terminalDelivery
+		// A terminal record has a reserved slot, independent of droppable logs.
 		select {
-		case r := <-c.replies:
-			value = r
-			reply = true
+		case terminal = <-c.terminal:
+			value = terminal.message
 		default:
+		}
+		// Always recheck replies before writing a selected log/event.
+		if value == nil {
+			select {
+			case r := <-c.replies:
+				value = r
+				reply = true
+			default:
+			}
 		}
 		if value == nil && pending != nil {
 			value = *pending
@@ -115,6 +151,8 @@ func (c *connection) write(ctx context.Context, w io.Writer) error {
 		}
 		if value == nil {
 			select {
+			case terminal = <-c.terminal:
+				value = terminal.message
 			case r := <-c.replies:
 				value = r
 				reply = true
@@ -146,6 +184,9 @@ func (c *connection) write(ctx context.Context, w io.Writer) error {
 				return io.ErrShortWrite
 			}
 			b = b[n:]
+		}
+		if terminal != nil {
+			close(terminal.written)
 		}
 		if reply {
 			<-c.slots

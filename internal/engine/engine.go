@@ -31,6 +31,12 @@ type Dependencies struct {
 	Identities platform.UDPIdentity
 }
 type Engine struct {
+	// OnTunError may hand a platform-specific terminal condition to the service.
+	// It runs under mu and must not block or call Engine methods. Returning true
+	// transfers responsibility for Stop to the service; other errors retain the
+	// ordinary cleanup and OnFatal path. Install before starting the engine.
+	OnTunError func(error) bool
+
 	OnFatal   func(error)
 	mu        sync.Mutex
 	root      context.Context
@@ -193,6 +199,9 @@ func (e *Engine) fail(link *ns.Link, err error) {
 		e.mu.Lock()
 		defer e.mu.Unlock()
 		if e.link != link {
+			return
+		}
+		if e.OnTunError != nil && e.OnTunError(err) {
 			return
 		}
 		e.lastError = err

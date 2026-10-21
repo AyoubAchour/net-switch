@@ -46,6 +46,8 @@ type Server struct {
 	operations                  map[string]*operation
 	order                       []string
 	clients                     map[*connection]struct{}
+	controller                  *connection
+	terminal                    *terminalDelivery
 	EventsDropped               atomic.Uint64
 	done                        chan struct{}
 	doneOnce                    sync.Once
@@ -72,7 +74,10 @@ func (s *Server) fence(r Request) error {
 }
 
 func (s *Server) Handle(ctx context.Context, r Request) Reply {
-	result, err := s.execute(ctx, r)
+	return s.handle(ctx, r, nil)
+}
+func (s *Server) handle(ctx context.Context, r Request, c *connection) Reply {
+	result, err := s.execute(ctx, r, c)
 	reply := Reply{ID: r.ID, Result: result, terminal: r.Method == "stop" && err == nil}
 	if err != nil {
 		reply.Result = nil
@@ -80,10 +85,14 @@ func (s *Server) Handle(ctx context.Context, r Request) Reply {
 	}
 	return reply
 }
-func (s *Server) execute(ctx context.Context, r Request) (any, error) {
+func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, error) {
 	s.mu.Lock()
+	if r.Method == "terminalAck" {
+		defer s.mu.Unlock()
+		return s.ackTerminal(r, c)
+	}
 	if r.Method == "hello" {
-		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks"}}
+		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks", "terminal-stop"}}
 		s.mu.Unlock()
 		return v, nil
 	}
@@ -95,10 +104,15 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		s.epoch++
 		s.expires = s.now().Add(Lease)
 		s.attached = true
+		s.controller = c
 		s.table.SetEpoch(s.epoch)
 		epoch := s.epoch
 		s.mu.Unlock()
 		return map[string]any{"epoch": epoch, "leaseSeconds": 30}, nil
+	}
+	if s.terminal != nil {
+		s.mu.Unlock()
+		return nil, errors.New("engine terminal shutdown")
 	}
 	if r.Method == "stop" && s.stopped && r.Instance == s.Instance && r.Epoch == s.epoch {
 		s.mu.Unlock()
@@ -257,7 +271,7 @@ func (s *Server) effect(ctx context.Context, r Request, run func() (any, error))
 func (s *Server) CheckLease(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {
+	if s.terminal != nil || !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {
 		return nil
 	}
 	s.stopping = true
