@@ -2,7 +2,7 @@ name: Windows handle diagnostics
 
 on:
   push:
-    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section, engine/windows-platform-udp-latency-arm64, engine/windows-platform-pointers-arm64]
+    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section, engine/windows-platform-udp-latency-arm64, engine/windows-platform-pointers-arm64, engine/windows-platform-terminal-arm64]
   workflow_dispatch:
     inputs:
       arch:
@@ -38,17 +38,27 @@ jobs:
           go-version-file: go.mod
           cache: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: ${{ contains(github.ref, '-socket-trace') || contains(github.ref, '-pointers') }}
+        if: ${{ contains(github.ref, '-socket-trace') || contains(github.ref, '-pointers') || contains(github.ref, '-terminal') }}
         with:
           node-version: '24.21.0'
           package-manager-cache: false
       - name: Prove heap placement for retained Windows pointers
-        if: ${{ contains(github.ref, '-pointers') }}
+        if: ${{ contains(github.ref, '-pointers') || contains(github.ref, '-terminal') }}
         run: |
           node scripts/check-windows-pointer-escapes.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -count=1 -v -timeout=2m -run '^Test(NativeEchoReplyPayload|PipeCloseWakesAccept|PipeDisconnectedBeforeAcceptIsRetryable)$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise adapter-loss cleanup and terminal receipt under pressure
+        if: ${{ !cancelled() && contains(github.ref, '-terminal') }}
+        run: |
+          $cases = '^Test(Terminal|ServeTail|AdapterLoss|RuntimeStopAfterLoss|TunError|ExplicitStopWinsBeforeTerminal|StubbornProbeDoesNotDelayRoutingCleanupOrSpendItsContext|LeaseCleanupWinsWithoutCallingTerminalFinalizer|MainUsesOnlyDirectCompletedEngineExitOutcome|EngineProcessExitOutcomes)'
+          go test -count=1 -v -timeout=3m -run $cases ./internal/engine/protocol ./internal/engine/windows ./internal/engine ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ('${{ runner.arch }}' -eq 'X64') {
+            go test -race -count=1 -v -timeout=3m -run $cases ./internal/engine/protocol ./internal/engine/windows ./internal/engine ./cmd/netswitch-engine
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Prove native poll lifetime, callback collection and heap publication
         if: ${{ !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') }}
         run: |
