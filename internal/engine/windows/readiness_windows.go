@@ -460,6 +460,30 @@ func duplicateForReadiness(file *os.File, source winhandle.Owner) (winhandle.Own
 	return duplicateBorrowedSocket(raw, source)
 }
 
+// staleDuplicates counts native duplicates discarded because Winsock reported
+// them unbound or bound elsewhere while their source was bound.
+var staleDuplicates atomic.Uint64
+
+// staleDuplicateAttempts bounds how many duplicates one transfer may try.
+const staleDuplicateAttempts = 3
+
+// duplicateName reads a fresh duplicate's name; tests replace it to make
+// Winsock's stale answer deterministic.
+var duplicateName = windows.Getsockname
+
+// sameSocketName reports whether two getsockname results are one address.
+func sameSocketName(a, b windows.Sockaddr) bool {
+	switch a := a.(type) {
+	case *windows.SockaddrInet4:
+		b, ok := b.(*windows.SockaddrInet4)
+		return ok && a.Port == b.Port && a.Addr == b.Addr
+	case *windows.SockaddrInet6:
+		b, ok := b.(*windows.SockaddrInet6)
+		return ok && a.Port == b.Port && a.Addr == b.Addr && a.ZoneId == b.ZoneId
+	}
+	return false
+}
+
 func duplicateBorrowedSocket(raw syscall.RawConn, source winhandle.Owner) (winhandle.Owner, error) {
 	var duplicate winhandle.Owner
 	var nativeError error
@@ -467,17 +491,43 @@ func duplicateBorrowedSocket(raw syscall.RawConn, source winhandle.Owner) (winha
 		if windows.Handle(descriptor) != source.GoBorrow("WSADuplicateSocket source borrow") {
 			panic("Go descriptor changed inside its ownership borrow")
 		}
-		var protocol windows.WSAProtocolInfo
-		nativeError = windows.WSADuplicateSocket(windows.Handle(descriptor), uint32(os.Getpid()), &protocol)
-		if nativeError != nil {
+		// Hosted x64 runs (descriptor test, rounds 12, 44 and 97 of 128): a
+		// duplicate of Go's File duplicate was the same kernel socket
+		// (CompareObjectHandles) yet Winsock reported it unbound and not
+		// connected, and refused SO_UPDATE_CONNECT_CONTEXT. Sends on it would
+		// fail. Check the duplicate's name against its source and discard a
+		// stale one; the source itself is never touched.
+		sourceName, sourceErr := windows.Getsockname(windows.Handle(descriptor))
+		for attempt := 0; attempt < staleDuplicateAttempts; attempt++ {
+			var protocol windows.WSAProtocolInfo
+			nativeError = windows.WSADuplicateSocket(windows.Handle(descriptor), uint32(os.Getpid()), &protocol)
+			if nativeError != nil {
+				return
+			}
+			var h windows.Handle
+			h, nativeError = windows.WSASocket(-1, -1, -1, &protocol, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
+			if nativeError != nil {
+				return
+			}
+			candidate := winhandle.Open(h, "WSASocket native duplicate")
+			if sourceErr != nil {
+				duplicate = candidate // an unbound source has no name to compare
+				break
+			}
+			name, nameErr := duplicateName(candidate.Handle("native duplicate name check"))
+			if nameErr == nil && sameSocketName(name, sourceName) {
+				duplicate = candidate
+				break
+			}
+			staleDuplicates.Add(1)
+			candidate.SocketClose("stale native duplicate close")
+			nativeError = fmt.Errorf("Winsock duplicate of socket %#x reported name %#v (%v), source %#v, after %d attempts",
+				descriptor, name, nameErr, sourceName, attempt+1)
+		}
+		if duplicate.IsZero() {
 			return
 		}
-		var h windows.Handle
-		h, nativeError = windows.WSASocket(-1, -1, -1, &protocol, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
-		if nativeError != nil {
-			return
-		}
-		duplicate = winhandle.Open(h, "WSASocket native duplicate")
+		nativeError = nil
 		var nonblocking uint32 = 1
 		code, _, failure := winsock.NewProc("ioctlsocket").Call(uintptr(duplicate.Handle("native duplicate nonblocking")), 0x8004667e, uintptr(unsafe.Pointer(&nonblocking)))
 		if int32(code) != 0 {

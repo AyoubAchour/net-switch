@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { copyFile } from 'node:fs/promises';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { hostedOnly, run, until } from './testisp/harness.mjs';
 import { captureHeap } from './heap-profile.mjs';
 
@@ -475,6 +476,11 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
           if (verdict.newVerdict === 'reported') {
             console.log(`WINDOWS UDP RECOVERY CONTENTION REPORTED ${JSON.stringify({ failures: failures.length, ...verdict })}`);
           } else {
+            // Evidence only (x64 run 39621326637: ENOBUFS with about 519 ports
+            // free and no other process grown): is the refusal transient?
+            await delay(200);
+            const retry = await clients[0].call('open', { ...target, count: failures.length }).catch((error) => ({ error: String(error) }));
+            console.log(`WINDOWS UDP RECOVERY RETRY AFTER 200 MS ${JSON.stringify({ opened: retry.opened, errors: retry.attempts?.map((item) => item.Error), error: retry.error })}`);
             assert.equal(failures.length, 0, `UDP capacity did not recover on first attempts: ${JSON.stringify(failures)}`);
           }
         }

@@ -84,6 +84,7 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 						t.Fatal(err)
 					}
 					source := fileOwner.Handle("transfer regression source identity")
+					staleBefore := staleDuplicates.Load()
 					h, err := duplicateForReadiness(file, fileOwner)
 					if err != nil {
 						t.Fatal(err)
@@ -132,6 +133,11 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 						}
 					}
 					check("duplicated")
+					if discarded := staleDuplicates.Load() - staleBefore; discarded != 0 {
+						// The duplicate step discarded a stale Winsock duplicate;
+						// the kept one must still pass every later stage.
+						t.Logf("STALE DUPLICATE round=%d network=%s discarded=%d", round, network, discarded)
+					}
 					if err := conn.Close(); err != nil {
 						t.Fatal(err)
 					}
