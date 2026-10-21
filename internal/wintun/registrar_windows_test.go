@@ -734,6 +734,10 @@ func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, u
 	t.Helper()
 	oldOffenders, oldUnreadable := 0, 0
 	classified := map[string]int{}
+	// Windows' loader keeps one handle per loaded message-resource file. Any
+	// second handle to the same file, other than our own reference open, is
+	// an offender: the exception is bounded, not open-ended.
+	resources := map[guardFileID][]windows.Handle{}
 	for h := range handleSnapshot(t) {
 		if g.witnesses[h] {
 			continue // retained by this guard until t.Cleanup, never a session file
@@ -769,10 +773,25 @@ func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, u
 			}
 			t.Logf("device-file guard cannot identify File %#x: %v", h, err)
 		}
+		if kind == "WindowsResource" && !reference {
+			id, idErr := readGuardFileID(t, h)
+			if idErr != nil {
+				t.Logf("device-file resource handle %#x lost its identity: %v", h, idErr)
+				offenders = append(offenders, h)
+				continue
+			}
+			resources[id] = append(resources[id], h)
+		}
 		if kind != "File" {
 			continue
 		}
 		offenders = append(offenders, h)
+	}
+	for id, handles := range resources {
+		if len(handles) > 1 {
+			t.Logf("device-file resource %q (fileID=%x) has %d non-reference handles; one is the loader's", guardWindowsResources.ids[id], id.ID, len(handles))
+			offenders = append(offenders, handles...)
+		}
 	}
 	t.Logf("device-file guard comparison old_pass=%t old_offenders=%d old_unreadable=%d classified=%v new_offenders=%d new_unreadable=%d", oldOffenders == 0 && oldUnreadable == 0, oldOffenders, oldUnreadable, classified, len(offenders), unreadable)
 	return offenders, unreadable
@@ -1087,12 +1106,34 @@ func TestWintunRegistrarDeviceFileGuardNegativeControl(t *testing.T) {
 		must(t, err)
 		separateResource, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 		must(t, err)
-		defer windows.CloseHandle(separateResource)
 		resourceKind, _, resourceErr := classifyGuardFile(t, separateResource, guard.dllID)
-		if resourceErr != nil || resourceKind != "WindowsResource" || sameObject(separateResource, reference) {
+		same := sameObject(separateResource, reference)
+		must(t, windows.CloseHandle(separateResource))
+		if resourceErr != nil || resourceKind != "WindowsResource" || same {
 			t.Fatalf("separate resource open did not prove file-ID classification: path=%q kind=%q err=%v", path, resourceKind, resourceErr)
 		}
 		t.Logf("device-file resource control path=%q separate_handle=%#x reference=%#x same_file_id=true same_kernel_object=false", path, separateResource, reference)
+	}
+	guard.assertNone(t)
+	// The message-resource exception is bounded: two extra handles to one
+	// resource file are more than the loader's one, so both must be flagged.
+	for _, path := range guardWindowsResources.ids {
+		name, err := windows.UTF16PtrFromString(path)
+		must(t, err)
+		var extra [2]windows.Handle
+		for i := range extra {
+			extra[i], err = windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+			must(t, err)
+		}
+		offenders, unreadable := guard.offenders(t)
+		for _, h := range extra {
+			must(t, windows.CloseHandle(h))
+		}
+		if unreadable != 0 || !slices.Contains(offenders, extra[0]) || !slices.Contains(offenders, extra[1]) {
+			t.Fatalf("guard accepted two extra handles to %q: offenders=%v extra=%v unreadable=%d", path, offenders, extra, unreadable)
+		}
+		report(t, map[string]any{"test": "device_file_guard_resource_bound", "arch": runtime.GOARCH, "path": path, "extra_handles_flagged": 2})
+		break
 	}
 	guard.assertNone(t)
 	// A real ordinary disk file must still fail; admitting the two system

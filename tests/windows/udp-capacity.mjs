@@ -490,14 +490,16 @@ export async function largeUDPReplies({ server, harness, directory, line }) {
       await until(async () => {
         const [value, records] = await Promise.all([stats(), udpFlows()]);
         last = { value, records };
-        return records.every((flow) => !targets.has(flow.destination)) &&
+        // The engine's UDP counter must also equal the sessions it lists, so
+        // a leaked count is still caught when another app's session is open.
+        return records.every((flow) => !targets.has(flow.destination)) && value.flows.UDP === records.length &&
           value.flows.UDPReadBytes === 0 && value.flows.UDPReplyBytes === 0;
       }, 'large reply sessions and output leases released', 3000);
     } finally {
       const own = last?.records.filter((flow) => targets.has(flow.destination)) ?? null;
       console.log(`WINDOWS LARGE UDP RELEASE ${JSON.stringify({ ms: performance.now() - started,
         ownRemaining: own?.length ?? null, otherSessions: last?.records.filter((flow) => !targets.has(flow.destination)) ?? null,
-        totalUDP: last?.value.flows.UDP ?? null, totalBefore: before.flows.UDP,
+        totalUDP: last?.value.flows.UDP ?? null, listedUDP: last?.records.length ?? null, totalBefore: before.flows.UDP,
         oldTotalCountWouldPass: last ? last.value.flows.UDP <= before.flows.UDP : null })}`);
     }
     if (closeError) throw closeError;
