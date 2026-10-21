@@ -7,7 +7,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hostedOnly, run, until } from './testisp/harness.mjs';
-import { holdUDPCapacity, largeUDPReplies, nativeUDPCapacity } from './udp-capacity.mjs';
+import { holdUDPCapacity, largeUDPReplies, nativeUDPCapacity, udpRecoveryCycles } from './udp-capacity.mjs';
 import { captureHeap } from './heap-profile.mjs';
 
 async function nativeRefusalBaseline(host) {
@@ -203,6 +203,10 @@ export async function capacity({ server, harness, directory, line }) {
     progress.largeUDP = await largeUDPReplies({ server, harness, directory, line });
     progress.udp = {};
     udpHold = await holdUDPCapacity({ server, harness, directory, line, native: nativeUDP, evidence: progress.udp });
+    // Evidence only: the UDP recovery cycles matched to the native control
+    // (UDP at the limit, no TCP load yet), so only the engine differs.
+    progress.udp.matchedCycles = await udpHold.evidenceCycles(udpRecoveryCycles);
+    udpHold.checkStats(await engineStats());
     for (let i = 0; i < 8; i++) {
       const exe = path.join(directory, `capacity-app-${i}.exe`);
       await copyFile(process.execPath, exe);
