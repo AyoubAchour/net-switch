@@ -99,8 +99,13 @@ On the first failure, before socket/peer cleanup, logs include:
 Microsoft CDB handles and prints the first-chance invalid-handle notification,
 using `!htrace` before resuming. Without a debugger the deliberate BADREF control
 terminated the test process with status 0xc0000008 in run 39520309695, before
-any socket scenario ran. The original NTSTATUS, trace-record and socket
-assertions still run; the controller also rejects any extra invalid-handle
+any socket scenario ran. ARM64 run 39529688403 returned zero from the deliberate
+invalid reference after CDB handled its exception, so the old traced-NTSTATUS
+control failed before any socket scenario. The sentinel's STATUS_INVALID_HANDLE
+is now checked before tracing is enabled. After tracing, the actual BADREF
+record (same handle, PID/TID and nonzero stack) and debugger exception remain
+mandatory; the continuation's return value and old verdict are reported.
+Socket assertions are unchanged; the controller also rejects any extra invalid-handle
 notification and requires the Go suite's final PASS. Debug heap is disabled,
 no symbol downloads are configured, and this is diagnostic timing only.
 
