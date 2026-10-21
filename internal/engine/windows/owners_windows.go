@@ -150,6 +150,7 @@ type LookupHistogram struct {
 	TCPParallelPeak    int             `json:"tcpParallelPeak"`   // most reads in flight for one family
 	TCPHolds           uint64          `json:"tcpHolds"`          // lookups held past 50 ms for a fresh read
 	TCPHeldFound       uint64          `json:"tcpHeldFound"`      // held lookups that found the owner
+	TCPLateIdentities  uint64          `json:"tcpLateIdentities"` // found rows whose identity step ended past 50 ms
 	TCPReadMaxUS       uint64          `json:"tcpReadMaxUS"`      // slowest native TCP read
 	TCPReadBuckets     []uint64        `json:"tcpReadBuckets"`    // native TCP reads alone, not lookups
 	Failures           []lookupFailure `json:"failures,omitempty"`
@@ -176,12 +177,14 @@ type Owners struct {
 	tcpRefreshes, tcpReadNanos, tcpIndexNanos, cacheMissRefreshes atomic.Uint64
 	tcpRetries                                                    atomic.Uint64
 	tcpPeakRows                                                   atomic.Uint64
-	tcpHolds, tcpHeldFound, tcpReadMaxUS                          atomic.Uint64
+	tcpHolds, tcpHeldFound, tcpReadMaxUS, tcpLateIdentities       atomic.Uint64
 	tcpReadHist                                                   [len(lookupBounds)]atomic.Uint64
 	failures                                                      [16]lookupFailure
 	failureCount                                                  uint64
-	// readTCP replaces the native TCP table read in tests; nil in production.
-	readTCP func(ctx context.Context, family uint32, scratch *[]uint64) ([]byte, error)
+	// readTCP and identify replace the native TCP table read and the process
+	// identity step in tests; nil in production.
+	readTCP  func(ctx context.Context, family uint32, scratch *[]uint64) ([]byte, error)
+	identify func(pid uint32) (platform.Owner, error)
 }
 
 func NewOwners() *Owners { return &Owners{paths: make(map[processKey]platform.Owner)} }
@@ -225,6 +228,7 @@ func (o *Owners) Stats() LookupHistogram {
 	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
 	h.TCPPeakRows = o.tcpPeakRows.Load()
 	h.TCPHolds, h.TCPHeldFound, h.TCPReadMaxUS = o.tcpHolds.Load(), o.tcpHeldFound.Load(), o.tcpReadMaxUS.Load()
+	h.TCPLateIdentities = o.tcpLateIdentities.Load()
 	h.TCPReadBuckets = make([]uint64, len(lookupBounds))
 	for i := range h.TCPReadBuckets {
 		h.TCPReadBuckets[i] = o.tcpReadHist[i].Load()
@@ -627,10 +631,22 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 			if candidates.count == 1 {
 				at.stage, at.pid = "process", candidates.pid
 				processStart := winclock.Now()
-				owner, err = o.process(candidates.pid)
+				identify := o.process
+				if o.identify != nil {
+					identify = o.identify
+				}
+				owner, err = identify(candidates.pid)
 				measureStage(&o.processHist, processStart)
-				if elapsed := winclock.Since(start); elapsed >= ownerOverloadHold || elapsed >= ownerLookupBound && !held {
+				// The row was found, so the owner is known. Under overload the
+				// identity step can finish past 50 ms (Windows acceptance x64,
+				// run 39621333715: 16 SYNs found pid 724 by 49 ms, finished the
+				// process step at 50-53 ms, and were sent to the default line).
+				// Discarding a found owner is the wrong-line outcome the overload
+				// rule exists to prevent, so it finishes within the hold.
+				if elapsed := winclock.Since(start); elapsed >= ownerOverloadHold {
 					return platform.Owner{}, context.DeadlineExceeded
+				} else if elapsed >= ownerLookupBound && !held {
+					o.tcpLateIdentities.Add(1)
 				}
 				if ctx.Err() != nil {
 					return platform.Owner{}, ctx.Err()
