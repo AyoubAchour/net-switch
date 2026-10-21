@@ -88,14 +88,14 @@ func (s *udpSocket) TryWriteTo(b []byte, dst netip.AddrPort, df bool) (int, erro
 		if sendErr != nil {
 			return
 		}
-		sendErr = sendDatagram(func() error {
+		sendErr = s.sendAttributed(dst, len(b), func() error {
 			for {
 				err := unix.Sendto(int(fd), b, unix.MSG_DONTWAIT, to)
 				if err != unix.EINTR {
 					return err
 				}
 			}
-		}, s.drainErrors)
+		})
 	})
 	if err != nil {
 		return 0, err
@@ -105,8 +105,6 @@ func (s *udpSocket) TryWriteTo(b []byte, dst netip.AddrPort, df bool) (int, erro
 		return len(b), nil
 	case unix.EAGAIN:
 		return 0, platform.ErrWouldBlock
-	case unix.EMSGSIZE:
-		return 0, s.tooBig(dst)
 	default:
 		return 0, sendErr
 	}
