@@ -9,7 +9,7 @@ import (
 )
 
 func TestRealWindowsOwnerSession(t *testing.T) {
-	if os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+	if os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" || os.Getenv("NETSWITCH_REAL_WTS_PROBE") != "1" {
 		t.Skip("hosted SYSTEM WTS probe only")
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

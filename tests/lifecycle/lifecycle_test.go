@@ -361,7 +361,9 @@ func TestRealServices(t *testing.T) {
 		}
 		t.Log("synthetic Windows actors use injected WTS presence; their IPC authentication still uses real OS tokens")
 		t.Run("real-WTS-session-probe", func(t *testing.T) {
-			b, err := exec.Command(filepath.Join(dir, "session.test.exe"), "-test.v", "-test.run=^TestRealWindowsOwnerSession$").CombinedOutput()
+			probe := exec.Command(filepath.Join(dir, "session.test.exe"), "-test.v", "-test.run=^TestRealWindowsOwnerSession$")
+			probe.Env = append(os.Environ(), "NETSWITCH_REAL_WTS_PROBE=1")
+			b, err := probe.CombinedOutput()
 			if err != nil {
 				t.Fatal(err, string(b))
 			}
