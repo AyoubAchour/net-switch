@@ -82,7 +82,9 @@ func TestUDPReservationMissingInputsAreNotZero(t *testing.T) {
 	}
 	truncated := udpFamilyReservation{DynamicCommand: reservationCommandResult{Output: dynamicUDPOutput, Truncated: true}}
 	truncated.account([]uint16{1}, true)
-	if truncated.DynamicRange != nil || len(truncated.ParseErrors) != 1 {
+	if truncated.DynamicRange != nil || !reflect.DeepEqual(truncated.ParseErrors, []string{
+		"dynamic: output truncated", "excluded: excluded port table header was not found",
+	}) {
 		t.Fatalf("truncated output parsed: %+v", truncated)
 	}
 }
