@@ -1,0 +1,320 @@
+name: Windows handle diagnostics
+
+on:
+  push:
+    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section, engine/windows-platform-udp-latency-arm64, engine/windows-platform-pointers-arm64, engine/windows-platform-terminal-arm64, engine/windows-platform-completions-arm64, engine/windows-platform-registrar]
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Native Windows architecture
+        type: choice
+        options: [x64, ARM64]
+        default: x64
+
+permissions:
+  contents: read
+
+jobs:
+  handles:
+    if: ${{ !endsWith(github.ref, '-section') && !contains(github.ref, '-udp-latency') && !contains(github.ref, 'windows-platform-registrar') }}
+    name: Native handle diagnostics / ${{ (inputs.arch != 'x64' && (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64'))) && 'ARM64' || 'x64' }}
+    runs-on: ${{ (inputs.arch != 'x64' && (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64'))) && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2 -tags=netswitch_handlecheck
+      NETSWITCH_EXPECT_HANDLECHECK: '1'
+      NETSWITCH_ENGINE_TEST_TRACE: '1'
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ contains(github.ref, '-socket-trace') || contains(github.ref, '-pointers') || contains(github.ref, '-terminal') || contains(github.ref, '-completions') }}
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Prove heap placement for retained Windows pointers
+        if: ${{ contains(github.ref, '-pointers') || contains(github.ref, '-terminal') || contains(github.ref, '-completions') }}
+        run: |
+          node scripts/check-windows-pointer-escapes.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -count=1 -v -timeout=2m -run '^Test(NativeEchoReplyPayload|PipeCloseWakesAccept|PipeDisconnectedBeforeAcceptIsRetryable)$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify ordinary and inherited TCP completion ownership
+        if: ${{ !cancelled() && contains(github.ref, '-completions') }}
+        run: |
+          go test -count=1 -v -timeout=3m -run '^TestTCP(Readiness|Completion)' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ('${{ runner.arch }}' -eq 'X64') {
+            go test -race -count=1 -v -timeout=3m -run '^TestTCP(Readiness|Completion)' ./internal/engine/windows
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Exercise adapter-loss cleanup and terminal receipt under pressure
+        if: ${{ !cancelled() && contains(github.ref, '-terminal') }}
+        run: |
+          $cases = '^Test(Terminal|DisconnectWhileTerminalPending|ServeTail|AdapterLoss|RuntimeStopAfterLoss|TunError|ExplicitStopWinsBeforeTerminal|StubbornProbeDoesNotDelayRoutingCleanupOrSpendItsContext|LeaseCleanupWinsWithoutCallingTerminalFinalizer|MainUsesOnlyDirectCompletedEngineExitOutcome|EngineProcessExitOutcomes)'
+          go test -count=1 -v -timeout=3m -run $cases ./internal/engine/protocol ./internal/engine/windows ./internal/engine ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ('${{ runner.arch }}' -eq 'X64') {
+            go test -race -count=1 -v -timeout=3m -run $cases ./internal/engine/protocol ./internal/engine/windows ./internal/engine ./cmd/netswitch-engine
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Prove native poll lifetime, callback collection and heap publication
+        if: ${{ !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') }}
+        run: |
+          go test -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check the same ownership boundaries under race
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && runner.arch == 'X64' }}
+        run: |
+          go test -race -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check shared UDP destroy and setup-refusal accounting
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') }}
+        run: |
+          go test -count=1 -v -run '^Test(DestroyFinishesAcrossFailedSetupCachePublication|FailedUDPSetupRetiresBeforeRefusalAndBoundsNegativeCache)$' ./internal/engine/udp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ('${{ runner.arch }}' -eq 'X64') {
+            go test -race -count=1 -v -run '^Test(DestroyFinishesAcrossFailedSetupCachePublication|FailedUDPSetupRetiresBeforeRefusalAndBoundsNegativeCache)$' ./internal/engine/udp
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Measure protected handle close behavior before relying on it
+        if: ${{ endsWith(github.ref, '-wintun-probe') }}
+        run: |
+          go test -count=1 -v -timeout=2m -run '^TestRingHandleProtectionProbe$' ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Reproduce removal between the old marker check and native close
+        if: ${{ !cancelled() && endsWith(github.ref, '-wintun-probe') }}
+        run: |
+          go test -count=1 -v -timeout=2m -run '^TestRingRemovalBetweenMarkerCheckAndClose$' ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the opt-in OS socket trace fixture
+        id: socket-build
+        if: ${{ contains(github.ref, '-socket-trace') }}
+        run: |
+          go test -c -o dist/windows-test/socket-diagnostics.exe ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prove OS trace controls and observe bounded socket churn
+        if: ${{ !cancelled() && steps.socket-build.outcome == 'success' }}
+        env:
+          NETSWITCH_SOCKET_DIAGNOSTICS: '1'
+        run: |
+          node tests/windows/socket-trace.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Keep the exact executable for resolving raw trace addresses
+        if: ${{ always() && steps.socket-build.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: socket-trace-${{ (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64')) && 'ARM64' || 'x64' }}
+          path: dist/windows-test/socket-diagnostics.exe
+          if-no-files-found: error
+          retention-days: 14
+
+  section:
+    if: ${{ endsWith(github.ref, '-section') }}
+    name: Shared Wintun section / ${{ inputs.arch || 'x64' }}
+    runs-on: ${{ inputs.arch == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2 -tags=netswitch_handlecheck
+      NETSWITCH_WINTUN_CI: '1'
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build the native shared-section probe
+        run: |
+          go test -c -o bin/wintun-section.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - name: Prepare the unchanged signed driver DLL
+        run: ./scripts/prepare-wintun-tests.ps1
+      - name: Register shared pages, exchange packets and retire the helper
+        run: |
+          ./bin/wintun-section.test.exe '-test.v' '-test.timeout=4m' '-test.run=^TestWintunSharedSectionOwner$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  udp-latency:
+    if: ${{ contains(github.ref, '-udp-latency') }}
+    name: UDP armed-reader latency / ${{ inputs.arch || 'ARM64' }}
+    runs-on: ${{ inputs.arch == 'x64' && 'windows-latest' || 'windows-11-arm' }}
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=vendor -p=2 -tags=netswitch_handlecheck
+      NETSWITCH_EXPECT_HANDLECHECK: '1'
+      NETSWITCH_ENGINE_TEST_TRACE: '1'
+      NETSWITCH_UDP_READINESS_GATE: '1'
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Measure fixed sockets with progressively armed idle readers
+        run: |
+          go test -count=1 -v -timeout=4m -run '^TestReadyUDPArmedIdleLatency$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Check the held-session latency population and thresholds
+        if: ${{ !cancelled() }}
+        run: |
+          node --test test/windows-udp-sweep.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify datagram semantics and shard close fences
+        if: ${{ !cancelled() }}
+        run: |
+          go test -count=1 -v -timeout=2m -run '^Test(UDPShard.*|ReadyUDP(DoesNotConsumeDatagrams|SharedEventAndIdleCost))$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ('${{ inputs.arch }}' -eq 'x64') {
+            go test -race -count=1 -v -timeout=2m -run '^Test(UDPShard.*|ReadyUDP(DoesNotConsumeDatagrams|SharedEventAndIdleCost))$' ./internal/engine/windows
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+  registrar:
+    if: ${{ startsWith(github.ref, 'refs/heads/engine/windows-platform-registrar') }}
+    name: Wintun registrar / ${{ inputs.arch || 'x64' }}
+    runs-on: ${{ inputs.arch == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 25
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2 -tags=netswitch_handlecheck
+      NETSWITCH_WINTUN_CI: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the pinned Go version
+        id: pins
+        run: |
+          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+          "go_version=$($pins.go.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.pins.outputs.go_version }}
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Verify registrar and engine pointer allocation
+        run: |
+          node scripts/check-windows-pointer-escapes.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Reproduce the x/sys wait-array stack move and prove the helper
+        run: |
+          go test -count=1 -v -timeout=5m ./internal/platform/winapi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and hash the uninstrumented release engine
+        id: engine
+        env:
+          GOFLAGS: -mod=vendor -p=2
+        run: |
+          go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o dist/registrar-release/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go version -m dist/registrar-release/netswitch-engine.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $engine = (Resolve-Path dist/registrar-release/netswitch-engine.exe).Path
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant()
+          "Release engine $engine from commit $env:GITHUB_SHA, SHA-256 $hash"
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE=$engine" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build the tagged registrar test fixtures
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $diagnostics = @(go test -c '-gcflags=github.com/AyoubAchour/net-switch/internal/wintun=-m' -o bin/wintun-registrar.test.exe ./internal/wintun 2>&1)
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { $diagnostics; exit $code }
+          $proof = @($diagnostics | Where-Object { "$_" -match 'registrar_production_windows_test\.go:\d+:\d+: moved to heap: limits$' })
+          if (!$proof.Count) { 'Missing heap proof for the measurement job-information query'; exit 1 }
+          $match = [regex]::Match("$($proof[0])", '(?<file>.*\.go):(?<line>\d+):(?<column>\d+): (?<message>.*)')
+          'REGISTRAR TEST POINTER PROOF ' + (@{ file = $match.Groups['file'].Value; line = $match.Groups['line'].Value; column = $match.Groups['column'].Value; message = $match.Groups['message'].Value } | ConvertTo-Json -Compress)
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - name: Fetch the unchanged signed Wintun DLL beside the test executable
+        run: ./scripts/prepare-wintun-tests.ps1
+      - name: Identify native file objects without changing the guard verdict
+        if: ${{ endsWith(github.ref, '-diagnostics') }}
+        run: |
+          ./bin/wintun-registrar.test.exe '-test.v' '-test.timeout=90s' '-test.run=^TestWintunRegistrarDeviceFileGuardDiagnostics$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'Diagnostic collection only. This does not qualify the unchanged device-file guard or the registrar.'
+      - name: Registrar ownership, retirement and production-engine proofs
+        if: ${{ !endsWith(github.ref, '-diagnostics') }}
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $false
+          $selected = @('RegistrarRefusesWithoutInheritedCapabilities', 'RegistrarReplyPreservesReadError',
+            'RingRemovalBetweenMarkerCheckAndClose', 'SessionCloseReportsRetirementError',
+            'SessionCorruptionYieldsToConfirmedOwnerLoss', 'SessionCorruptionYieldsToConfirmedOwnerLossCleanRetire',
+            'SessionCorruptionYieldsToPreStopDriverRelease', 'SessionLossSentinels',
+            'WintunRegistrarSession', 'WintunRegistrarLoss',
+            'WintunRegistrarDeviceFileGuardNegativeControl', 'WintunRegistrarPostRegisterFailureCleanup',
+            'WintunRegistrarNoDeviceFileThroughRecovery', 'WintunRegistrarJobReapsBeforeResume',
+            'WintunRegistrarStartupFaults', 'WintunRegistrarStartupCloseErrors',
+            'WintunRegistrarEngineCrash', 'WintunRegistrarProductionEngine',
+            'WintunRegistrarSurpriseRemovalReleasesCrossProcessRegistration',
+            'WintunRegistrarEngineCrashReleasesRealRegistration') |
+            ForEach-Object { "Test$_" }
+          $pattern = '^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|RingRemovalBetweenMarkerCheckAndClose|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine|SurpriseRemovalReleasesCrossProcessRegistration|EngineCrashReleasesRealRegistration))$'
+          ./bin/wintun-registrar.test.exe '-test.v' '-test.timeout=12m' "-test.run=$pattern" | Tee-Object -Variable log
+          $code = $LASTEXITCODE
+          # Top-level results only; subtests are indented.
+          $results = @($log | Select-String -Pattern '^--- (PASS|FAIL|SKIP): (Test\S+) \(([0-9.]+)s\)$' | ForEach-Object {
+            [pscustomobject]@{ Result = $_.Matches[0].Groups[1].Value; Name = $_.Matches[0].Groups[2].Value; Seconds = $_.Matches[0].Groups[3].Value }
+          })
+          'Executed top-level tests:'
+          $results | ForEach-Object { "  $($_.Result) $($_.Name) $($_.Seconds)s" }
+          $unexpected = @($results | Where-Object { $selected -notcontains $_.Name })
+          $missing = @($selected | Where-Object { $name = $_; -not ($results | Where-Object { $_.Name -eq $name -and $_.Result -eq 'PASS' }) })
+          if ($code -ne 0) { "Test executable exited $code"; exit $code }
+          if ($unexpected.Count) { "Unselected tests ran: $($unexpected.Name -join ', ')"; exit 1 }
+          if ($missing.Count) { "Selected tests that did not run and pass: $($missing -join ', ')"; exit 1 }
+          "All $($selected.Count) selected tests ran and passed."
+      - name: No registrar or test helper outlives the run
+        if: ${{ always() && steps.engine.outcome == 'success' }}
+        run: |
+          $left = @([Diagnostics.Process]::GetProcessesByName('netswitch-engine')) + @([Diagnostics.Process]::GetProcessesByName('wintun-registrar.test'))
+          $left | ForEach-Object { "Leftover process $($_.Id) $($_.ProcessName) $($_.Path)" }
+          if ($left.Count) { exit 1 }
+          'No netswitch-engine or test-binary process remains.'
+      - name: Keep the exact measured release engine
+        if: ${{ always() && steps.engine.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: registrar-release-engine-${{ inputs.arch || 'x64' }}
+          path: dist/registrar-release/netswitch-engine.exe
+          if-no-files-found: error
+          retention-days: 14

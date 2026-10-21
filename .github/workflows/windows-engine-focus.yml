@@ -1,0 +1,196 @@
+name: Windows engine focus
+
+on:
+  push:
+    branches: [engine/windows-platform-ci, engine/windows-platform-ci-x64, engine/windows-platform-native, engine/windows-platform-native-x64, engine/windows-platform-native-ports, engine/windows-platform-lifecycle, engine/windows-platform-udp, engine/windows-platform-capacity, engine/windows-platform-health]
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: Native Windows architecture
+        type: choice
+        options: [ARM64, x64]
+        default: ARM64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-engine-focus-${{ github.ref }}-${{ inputs.arch || 'ARM64' }}
+  cancel-in-progress: true
+
+jobs:
+  harness-health:
+    if: ${{ endsWith(github.ref, '-health') }}
+    name: Acceptance controller health ordering
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Exercise the actual driver functions with controlled I/O ordering
+        run: node --test test/windows-driver-health.test.mjs
+  engine:
+    if: ${{ !endsWith(github.ref, '-health') }}
+    name: Windows engine / ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'x64' || 'ARM64' }}
+    runs-on: ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'windows-latest' || 'windows-11-arm' }}
+    timeout-minutes: 40
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2 -tags=netswitch_handlecheck
+      NETSWITCH_EXPECT_HANDLECHECK: '1'
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Verify the generated dependency trees
+        run: |
+          node scripts/generate-gvisor.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go mod vendor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --exit-code -- third_party/gvisor vendor
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build engine and native fixtures
+        id: build
+        if: ${{ !contains(github.ref, 'windows-platform-native') }}
+        run: |
+          go build -o dist/windows-test/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/recovery/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o dist/windows-test/windows-platform.test.exe ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/quicprobe.exe ./tests/windows/quicprobe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/mtuprobe.exe ./tests/windows/mtuprobe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/udpreject.exe ./tests/windows/udpreject
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
+      - name: Native and shared engine regressions
+        if: ${{ !endsWith(github.ref, '-lifecycle') }}
+        run: |
+          if ('${{ github.ref }}'.Contains('windows-platform-native')) {
+            go test -count=1 -v ./internal/engine/windows ./internal/engine/udp ./internal/engine/flows ./internal/winclock ./internal/winlock ./internal/winhandle ./internal/journal
+          } else {
+            go test -count=1 -v ./internal/engine/... ./internal/journal ./internal/winclock ./internal/winlock ./internal/winhandle ./tests/windows/testisp
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows race checks
+        if: ${{ !cancelled() && (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
+        run: |
+          go test -race -count=1 -v ./internal/engine ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp ./internal/engine/flows ./internal/winclock ./internal/winlock ./internal/winhandle ./internal/journal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Cold owner latency at 1950–2100 actual TCP rows
+        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && !endsWith(github.ref, '-ports') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
+        env:
+          NETSWITCH_LOOKUP_GATE: '1'
+        run: |
+          go test -count=1 -v -run '^TestOwnerSteadyColdTiming$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Attribute at least 995 of 1000 cold burst sockets
+        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && !endsWith(github.ref, '-ports') && (steps.build.outcome == 'success' || contains(github.ref, 'windows-platform-native')) }}
+        env:
+          NETSWITCH_LOOKUP_GATE: '1'
+        run: |
+          go test -count=1 -v -run '^TestOwnerColdBurstTiming$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Real TUN 1.0 acceptance and flow-cap measurement
+        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
+        env:
+          NETSWITCH_ENGINE_TEST_TRACE: '1'
+          NETSWITCH_ENGINE_HEAP_CAPTURE: '1'
+        run: |
+          node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Observe the unchanged blocked-UDP case at the Wintun boundary
+        if: ${{ !cancelled() && endsWith(github.ref, '-udp') && steps.build.outcome == 'success' }}
+        env:
+          NETSWITCH_ENGINE_TEST_TRACE: '1'
+        run: |
+          node tests/windows/udp-quote-profile.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Measure real held flows without waiting for unrelated cases
+        if: ${{ !cancelled() && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
+        env:
+          NETSWITCH_ENGINE_TEST_TRACE: '1'
+          NETSWITCH_ENGINE_HEAP_CAPTURE: '1'
+        run: |
+          node tests/windows/capacity-profile.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prepare the unchanged 0.3.x comparison
+        if: ${{ !cancelled() && endsWith(github.ref, '-lifecycle') && steps.build.outcome == 'success' }}
+        run: |
+          go -C helper build -mod=readonly -o bin/netswitch-helper.exe .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./scripts/fetch-engine.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compare current and adapter-first cleanup with the same-run baseline
+        if: ${{ success() && endsWith(github.ref, '-lifecycle') }}
+        env:
+          NETSWITCH_ENGINE_TEST_TRACE: '1'
+        run: |
+          node tests/windows/lifecycle-profile.mjs --profile v1 --engine-exe dist/windows-test/netswitch-engine.exe --adapter-first-comparison
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Compare owner timing with the production processor default
+        if: ${{ !cancelled() && contains(github.ref, 'windows-platform-native') && !endsWith(github.ref, '-ports') }}
+        env:
+          NETSWITCH_LOOKUP_GATE: '1'
+        run: |
+          $env:GOMAXPROCS = ''
+          go test -count=1 -v -run '^TestOwner(SteadyColdTiming|ColdBurstTiming)$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Isolate UDP allocation with two active halves and measure timestamp collisions
+        if: ${{ !cancelled() && endsWith(github.ref, '-ports') }}
+        env:
+          NETSWITCH_PORT_GATE: '1'
+        run: |
+          Get-NetTCPSetting | Select-Object SettingName,DynamicPortRangeStartPort,DynamicPortRangeNumberOfPorts,AutoReusePortRangeStartPort,AutoReusePortRangeNumberOfPorts | ConvertTo-Json -Compress
+          go test -count=1 -v -run '^Test(NativeUDPSocketCapacity|NativeUDPPairedCapacity|UDPGenerationCollisionWindow)$' -timeout=5m ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Keep every observed result
+        if: ${{ always() && !contains(github.ref, 'windows-platform-native') }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-engine-focus-${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'x64' || 'ARM64' }}
+          path: |
+            dist/windows-acceptance/
+            dist/windows-lifecycle/
+            dist/windows-udp-quote/
+            dist/windows-capacity/
+          retention-days: 14
+      - name: Repeat native half-close and cancellation after the owner measurements
+        if: ${{ !cancelled() && contains(github.ref, 'windows-platform-native') && !endsWith(github.ref, '-ports') }}
+        run: |
+          go test -count=64 -v -run '^TestReadinessHalfCloseAndCancellation$' -timeout=5m ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Repeat documented UDP readiness with exact datagrams
+        if: ${{ !cancelled() && contains(github.ref, 'windows-platform-native') && !endsWith(github.ref, '-ports') }}
+        run: |
+          go test -count=32 -v -run '^TestReadyUDP(DoesNotConsumeDatagrams|SharedEventAndIdleCost)$' -timeout=5m ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ('${{ github.ref }}'.EndsWith('-x64')) {
+            go test -race -count=32 -v -run '^TestReadyUDP(DoesNotConsumeDatagrams|SharedEventAndIdleCost)$' -timeout=5m ./internal/engine/windows
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

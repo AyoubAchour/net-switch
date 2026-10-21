@@ -49,6 +49,7 @@ type observedRemote struct {
 	readEOF      atomic.Bool
 	closeEntered chan struct{}
 	enterOnce    sync.Once
+	afterWrite   func()
 }
 
 func (c *observedRemote) Read(b []byte) (int, error) {
@@ -69,6 +70,14 @@ func (c *observedRemote) CloseRead() error {
 		<-*gate
 	}
 	return err
+}
+
+func (c *observedRemote) Write(b []byte) (int, error) {
+	n, err := c.Conn.Write(b)
+	if c.afterWrite != nil {
+		c.afterWrite()
+	}
+	return n, err
 }
 
 func (c *observedRemote) Close() error {
@@ -104,6 +113,7 @@ type peer struct {
 	fixedSendBuffer    int
 	setupGate          <-chan struct{}
 	setupEntered       chan struct{}
+	afterWrite         func()
 }
 
 type peerControl struct {
@@ -181,7 +191,7 @@ func newPeerLink(t testing.TB, timestamps bool, limits flows.Limits, options ns.
 		eof := make(chan struct{})
 		entered := make(chan struct{})
 		p.accepted <- accepted{conn: b, relayClosed: closed, sentEOF: eof, closeEntered: entered}
-		return &observedRemote{Conn: a, closed: closed, closeGate: &p.relayCloseGate, sentEOF: eof, closeEntered: entered}, nil
+		return &observedRemote{Conn: a, closed: closed, closeGate: &p.relayCloseGate, sentEOF: eof, closeEntered: entered, afterWrite: p.afterWrite}, nil
 	}}
 	p.owners = &testfake.Owners{Value: platform.Owner{AppID: "peer"}}
 	f := ntcp.New(context.Background(), s, limits.Handshakes, peerControl{Table: table, peer: p}, p.owners, d, l)

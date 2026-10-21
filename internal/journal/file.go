@@ -16,8 +16,9 @@ import (
 const RecordLimit = 1 << 20
 
 type envelope struct {
-	Record json.RawMessage `json:"record"`
-	Hash   string          `json:"sha256"`
+	Record  json.RawMessage `json:"record,omitempty"`
+	Records json.RawMessage `json:"records,omitempty"`
+	Hash    string          `json:"sha256"`
 }
 
 // FileStore is an fsynced append journal. The platform supplies directory
@@ -76,7 +77,7 @@ func (f *FileStore) Records() ([]Record, error) {
 		if err != nil {
 			return nil, err
 		}
-		record, decodeErr := decodeRecord(line)
+		batch, decodeErr := decodeRecords(line)
 		if oversize {
 			decodeErr = errors.New("journal record exceeds limit")
 		}
@@ -95,55 +96,99 @@ func (f *FileStore) Records() ([]Record, error) {
 			f.dirty = false
 			return records, nil
 		}
-		records = append(records, record)
+		records = append(records, batch...)
 		offset += int64(len(line))
 	}
 }
 
-func decodeRecord(line []byte) (Record, error) {
+func decodeRecords(line []byte) ([]Record, error) {
 	var e envelope
 	d := json.NewDecoder(bytes.NewReader(line))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&e); err != nil {
-		return Record{}, err
+		return nil, err
 	}
 	if err := d.Decode(new(any)); err != io.EOF {
-		return Record{}, errors.New("trailing journal data")
+		return nil, errors.New("trailing journal data")
 	}
-	sum := sha256.Sum256(e.Record)
+	if (e.Record == nil) == (e.Records == nil) {
+		return nil, errors.New("journal frame needs one record or one record batch")
+	}
+	raw := e.Record
+	if e.Records != nil {
+		raw = e.Records
+	}
+	sum := sha256.Sum256(raw)
 	if e.Hash != hex.EncodeToString(sum[:]) {
-		return Record{}, errors.New("journal checksum mismatch")
+		return nil, errors.New("journal checksum mismatch")
 	}
-	var record Record
-	d = json.NewDecoder(bytes.NewReader(e.Record))
+	d = json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
-	if err := d.Decode(&record); err != nil {
-		return Record{}, err
+	var records []Record
+	if e.Record != nil {
+		var record Record
+		if err := d.Decode(&record); err != nil {
+			return nil, err
+		}
+		records = []Record{record}
+	} else if err := d.Decode(&records); err != nil {
+		return nil, err
 	}
-	return record, nil
+	if len(records) == 0 {
+		return nil, errors.New("empty journal record batch")
+	}
+	return records, nil
 }
 
 func (f *FileStore) Append(record Record) error {
+	return f.AppendBatch([]Record{record})
+}
+
+// One checksummed line frames the whole batch. Merely concatenating record
+// lines before one sync would allow a torn batch to look like interior
+// corruption. A partial final frame can instead be discarded as a unit.
+func encodeRecords(records []Record) ([]byte, error) {
+	var value any = records
+	if len(records) == 1 {
+		value = records[0] // Keep the original single-record on-disk format.
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(raw)
+	e := envelope{Hash: hex.EncodeToString(sum[:])}
+	if len(records) == 1 {
+		e.Record = raw
+	} else {
+		e.Records = raw
+	}
+	line, err := json.Marshal(e)
+	if err != nil {
+		return nil, err
+	}
+	line = append(line, '\n')
+	if len(line) > RecordLimit {
+		return nil, errors.New("journal frame exceeds limit")
+	}
+	return line, nil
+}
+
+func (f *FileStore) AppendBatch(records []Record) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if len(records) == 0 {
+		return nil
+	}
 	if f.dirty {
 		return errors.New("journal needs tail recovery")
 	}
 	if f.SyncParent == nil {
 		return errors.New("journal directory durability hook required")
 	}
-	raw, err := json.Marshal(record)
+	line, err := encodeRecords(records)
 	if err != nil {
 		return err
-	}
-	sum := sha256.Sum256(raw)
-	line, err := json.Marshal(envelope{Record: raw, Hash: hex.EncodeToString(sum[:])})
-	if err != nil {
-		return err
-	}
-	line = append(line, '\n')
-	if len(line) > RecordLimit {
-		return errors.New("journal record exceeds limit")
 	}
 	file, err := os.OpenFile(f.Path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {

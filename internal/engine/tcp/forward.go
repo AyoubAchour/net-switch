@@ -12,6 +12,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -26,7 +27,7 @@ const MinimumBuffer = 64 << 10
 type Forwarder struct {
 	ctx                           context.Context
 	cancel                        context.CancelFunc
-	mu                            sync.Mutex
+	mu                            sync.RWMutex
 	pending                       map[stack.TransportEndpointID]*pendingOpen
 	wg                            sync.WaitGroup
 	forwarder                     *gtcp.Forwarder
@@ -34,11 +35,61 @@ type Forwarder struct {
 	inFlight                      int
 	connections                   map[stack.TransportEndpointID]*connection
 	retired                       map[*connection]struct{}
+	relays                        *relayWorkers
 	control                       flowapi.Controller
 	owners                        platform.OwnerLookup
 	dialer                        platform.LineDialer
 	out                           flowapi.Output
 	Rejected, Invalid, DialFailed atomic.Uint64
+	// Diagnostics only: SYNs that get neither a dial nor a reset. Handle's
+	// own early returns are counted by reason; Forwarded minus Opened counts
+	// SYNs gVisor accepted but never handed to open (its in-flight dedup).
+	silent    silentSYNs
+	Forwarded atomic.Uint64
+	Opened    atomic.Uint64
+}
+
+// silentSYNs records SYNs returned as handled without a dial or a reset.
+type silentSYNs struct {
+	mu     sync.Mutex
+	counts map[string]uint64
+	recent []SilentSYN
+}
+
+// SilentSYN is one silently handled SYN, for matching with a packet trace.
+type SilentSYN struct {
+	AtUnixMilli int64  `json:"at"`
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+	Reason      string `json:"reason"`
+}
+
+func (s *silentSYNs) note(reason string, t platform.Tuple) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.counts == nil {
+		s.counts = map[string]uint64{}
+	}
+	s.counts[reason]++
+	if len(s.recent) == 32 {
+		s.recent = append(s.recent[:0], s.recent[1:]...)
+	}
+	s.recent = append(s.recent, SilentSYN{time.Now().UnixMilli(), t.Source.String(), t.Destination.String(), reason})
+}
+
+// SilentStats reports silently handled SYNs and how many are still pending.
+func (f *Forwarder) SilentStats() map[string]any {
+	f.silent.mu.Lock()
+	counts := make(map[string]uint64, len(f.silent.counts))
+	for reason, n := range f.silent.counts {
+		counts[reason] = n
+	}
+	recent := append([]SilentSYN(nil), f.silent.recent...)
+	f.silent.mu.Unlock()
+	f.mu.RLock()
+	pending := len(f.pending)
+	f.mu.RUnlock()
+	return map[string]any{"counts": counts, "recent": recent, "forwarded": f.Forwarded.Load(), "opened": f.Opened.Load(), "pending": pending}
 }
 
 type orderedOutput interface {
@@ -50,6 +101,7 @@ func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Cont
 	ctx, cancel := context.WithCancel(ctx)
 	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]*pendingOpen), connections: make(map[stack.TransportEndpointID]*connection), retired: make(map[*connection]struct{}), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 2*inFlight, f.open)
+	f.relays = newRelayWorkers()
 	s.SetTransportProtocolHandler(gtcp.ProtocolNumber, f.Handle)
 	gtcp.SetTimeWaitHandler(s, f.Handle)
 	drain := gtcp.SetLocalCloseFence(s, localCloseFenceEnabled)
@@ -95,11 +147,10 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		registered := f.stack.FindTransportEndpoint(p.NetworkProtocolNumber, gtcp.ProtocolNumber, id, p.NICID)
 		if state == gtcp.StateClose || state == gtcp.StateError || any(registered) != any(c.ep) {
 			c.ticket.Retire()
-			select {
-			case <-c.done:
+			if c.completed.Load() {
 				// Final accounting is ready; no need to retain this old graph.
 				c.ticket.Close()
-			default:
+			} else {
 				f.retired[c] = struct{}{}
 			}
 			delete(f.connections, id)
@@ -107,13 +158,16 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 			// A delayed reopen callback can follow a duplicate SYN that has
 			// already established the replacement. It must not reset or dial
 			// that live incarnation a second time.
+			f.silent.note("live-connection", tuple(id))
 			return true
 		}
 	}
 	if _, ok := f.pending[id]; ok {
+		f.silent.note("pending", tuple(id))
 		return true
 	}
 	if f.ctx.Err() != nil {
+		f.silent.note("stopping", tuple(id))
 		return true
 	}
 	t := tuple(id)
@@ -141,17 +195,23 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		ticket.Close()
 		f.wg.Done()
 		reject()
+		return true
 	}
+	f.Forwarded.Add(1)
 	return true
 }
 
 func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	defer f.wg.Done()
+	f.Opened.Add(1)
 	id := r.ID()
-	f.mu.Lock()
+	// Setup only reads the admission record. Serializing every new callback
+	// on an exclusive lock creates a mutex-handoff convoy during SYN bursts,
+	// starving the owner lookups that those callbacks are about to start.
+	f.mu.RLock()
 	pending := f.pending[id]
-	pending.request = r
-	f.mu.Unlock()
+	f.mu.RUnlock()
+	pending.request.Store(r)
 	ticket := pending.ticket
 	owned := true
 	defer func() {
@@ -180,7 +240,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 	}()
 	ctx, cancel := context.WithCancel(f.ctx)
-	defer cancel()
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cancel()
+		}
+	}()
 	ticket.SetCancel(cancel)
 	t := tuple(id)
 	lookup, cancelLookup := context.WithTimeout(ctx, 50*time.Millisecond)
@@ -211,20 +276,29 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 		return
 	}
-	defer remote.Close()
+	defer func() {
+		if !handedOff {
+			remote.Close()
+		}
+	}()
 	stopRemote := context.AfterFunc(ctx, func() { remote.SetLinger(0); remote.Close() })
-	defer stopRemote()
+	defer func() {
+		if !handedOff {
+			stopRemote()
+		}
+	}()
 	if ctx.Err() != nil {
 		return
 	}
-	var wq waiter.Queue
+	relay := new(readyRelay)
+	wq := &relay.queue
 	// A closing queue can hand off a SYN before its drain returns. A tuple
 	// lookup can then find a newer pending request. Only this request's own
 	// endpoint notification authorizes retiring it from the ingress fence.
 	closed := waiter.NewFunctionEntry(waiter.EventHUp, func(waiter.EventMask) { pending.hungUp.Store(true) })
 	wq.EventRegister(&closed)
 	defer wq.EventUnregister(&closed)
-	ep, errTCP := r.CreateEndpoint(&wq)
+	ep, errTCP := r.CreateEndpoint(wq)
 	if errTCP != nil {
 		// TCP already handled the failed handshake. In particular an app RST
 		// must not receive another reset from admission during deferred cleanup.
@@ -239,10 +313,20 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 		ep.Abort()
 	}
-	closeEndpoint := sync.OnceFunc(ep.Close)
-	defer closeEndpoint()
+	// Setup owns Close until the relay takes over. Only the blocking fallback
+	// needs a retained OnceFunc; readiness has one serialized close owner.
+	closeEndpoint := ep.Close
+	defer func() {
+		if !handedOff {
+			closeEndpoint()
+		}
+	}()
 	stopApp := context.AfterFunc(ctx, abort)
-	defer stopApp()
+	defer func() {
+		if !handedOff {
+			stopApp()
+		}
+	}()
 	if ctx.Err() != nil {
 		// The handshake succeeded; Abort owns the reset, not admission.
 		discardHandshake()
@@ -262,7 +346,9 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 		ticket.EndTimeWait()
 	})
-	c := &connection{id: id, ep: ep, ticket: ticket, clock: f.stack.Clock(), last: f.stack.Clock().Now(), done: make(chan struct{})}
+	c := &relay.connection
+	c.id, c.ep, c.ticket, c.clock, c.last = id, ep, ticket, f.stack.Clock(), f.stack.Clock().Now()
+	relay.c = c
 	f.mu.Lock()
 	if f.ctx.Err() != nil || closedState(ep) {
 		f.mu.Unlock()
@@ -276,28 +362,53 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	// Keep the pending entry through endpoint setup. A delayed reopen hook
 	// must see either pending or connections, never a gap between them.
 	complete(false)
-	defer close(c.done)
-	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(&wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission}
 	if a, ok := remote.LocalAddr().(*net.TCPAddr); ok {
 		ticket.Established(a.AddrPort().Addr())
 	} else {
 		ticket.Established(netip.Addr{})
 	}
-	count := func(u, d uint64) { c.up.Add(u); c.down.Add(d); ticket.Add(u, d) }
+	if ready, ok := remote.(platform.ReadyTCP); ok {
+		stopRemote()
+		stopApp()
+		if err := f.startReadyRelay(ctx, relay, ready, owner.AppID); err != nil {
+			abort()
+			f.completeConnection(c)
+			return
+		}
+		cancel() // readiness now owns closure; release the setup context tree
+		handedOff = true
+		return
+	}
+	closeEndpoint = sync.OnceFunc(ep.Close)
+	app := &onceCloseConn{TCPConn: gonet.NewTCPConn(wq, ep), close: closeEndpoint, afterCloseWrite: c.releaseAdmission, ep: ep, wq: wq}
+	// Lookup, dialing and handshake work can grow this goroutine's stack.
+	// Hand off to a small relay goroutine so every idle connection does not
+	// retain the setup frame, request and its deferred cleanup closures.
+	f.wg.Go(func() { f.relay(ctx, c, app, remote, cancel, stopRemote, stopApp, abort) })
+	handedOff = true
+	// TIME_WAIT releases admission at the state transition. The monitor keeps
+	// this ticket until removal and relay completion for final byte accounting.
+}
+
+func (f *Forwarder) relay(ctx context.Context, c *connection, app *onceCloseConn, remote platform.TCPConn, cancel context.CancelFunc, stopRemote, stopApp func() bool, abort func()) {
+	// Publish completion only after both sockets and cancellation hooks have
+	// finished cleanup. Wait includes this goroutine as well as setup.
+	defer f.completeConnection(c)
+	defer cancel()
+	defer remote.Close()
+	defer func() { app.Close(); c.releaseAdmission() }()
+	defer stopRemote()
+	defer stopApp()
+	count := func(u, d uint64) { c.up.Add(u); c.down.Add(d); c.ticket.Add(u, d) }
 	if err := Splice(ctx, app, remote, count, abort); err != nil {
 		abort()
 	}
-	app.Close()
-	c.releaseAdmission()
-	// TCP releases admission once both directions end and payload drains, or
-	// on reset/removal. Keep the ticket until removal and relay completion
-	// for final byte accounting.
 }
 
 // Stop cancels dials and relays. The owner must close the stack before Wait,
 // which also unblocks handshakes whose app never sent its final ACK.
 func (f *Forwarder) Stop() { f.mu.Lock(); f.cancel(); f.mu.Unlock() }
-func (f *Forwarder) Wait() { f.wg.Wait() }
+func (f *Forwarder) Wait() { f.wg.Wait(); f.relays.close() }
 
 // gonet.Close delegates directly to Endpoint.Close, which requires one call.
 // Cancellation, splice errors and normal cleanup share this single owner.
@@ -305,6 +416,8 @@ type onceCloseConn struct {
 	*gonet.TCPConn
 	close           func()
 	afterCloseWrite func()
+	ep              tcpip.Endpoint
+	wq              *waiter.Queue
 }
 
 func (c *onceCloseConn) Close() error { c.close(); return nil }
@@ -315,4 +428,18 @@ func (c *onceCloseConn) CloseWrite() error {
 		c.afterCloseWrite()
 	}
 	return err
+}
+
+func (c *onceCloseConn) WaitReadable(ctx context.Context) error {
+	entry, wake := waiter.NewChannelEntry(waiter.ReadableEvents)
+	c.wq.EventRegister(&entry)
+	defer c.wq.EventUnregister(&entry)
+	for c.ep.Readiness(waiter.ReadableEvents) == 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-wake:
+		}
+	}
+	return nil
 }

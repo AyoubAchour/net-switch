@@ -4,7 +4,10 @@ package udp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -14,6 +17,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	gu "gvisor.dev/gvisor/pkg/tcpip/transport/udp"
@@ -24,6 +28,7 @@ const PendingBytes = 256 << 10
 const IdleTimeout = 5 * time.Minute
 const IdentityMaxAge = 2 * time.Second
 const RejectLifetime = time.Second
+const RejectCacheEntries = 4096
 const shards = 32
 
 type datagram struct {
@@ -41,6 +46,8 @@ type session struct {
 	queue           []datagram
 	bytes           int
 	owner           platform.Owner
+	pendingDestroys []string
+	destroyOverflow bool
 	validated, last time.Time
 	active, closed  bool
 	rejected        bool
@@ -50,10 +57,16 @@ type session struct {
 	wake            chan struct{}
 	done            chan struct{}
 	cancel          context.CancelFunc
+	ready           atomic.Pointer[readySession]
 }
 type shard struct {
 	sync.Mutex
-	m map[netip.AddrPort]*session
+	m        map[netip.AddrPort]*session
+	negative map[netip.AddrPort]refusedSession
+}
+type refusedSession struct {
+	owner platform.Owner
+	at    time.Time
 }
 type NAT struct {
 	ctx                                                              context.Context
@@ -62,7 +75,8 @@ type NAT struct {
 	owners                                                           platform.OwnerLookup
 	identities                                                       platform.UDPIdentity
 	dialer                                                           platform.LineDialer
-	out                                                              flowapi.Output
+	out                                                              flowapi.DatagramOutput
+	fragmentID                                                       atomic.Uint32
 	now                                                              func() time.Time
 	mtu                                                              int
 	table                                                            [shards]shard
@@ -70,12 +84,20 @@ type NAT struct {
 	wg                                                               sync.WaitGroup
 	reconcileMu                                                      sync.Mutex
 	refresh                                                          chan struct{}
+	io                                                               *udpWorkers
 	Invalid, Dropped, Rejected, IdentityErrors, Oversize, ReadErrors atomic.Uint64
+	PeakQueuePackets, PeakQueueBytes                                 atomic.Uint64
+	OpenFailed                                                       atomic.Uint64
+	GenerationMissing                                                atomic.Uint64
 }
 
-func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.Output, mtu int) *NAT {
+func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.DatagramOutput, mtu int) *NAT {
 	ctx, cancel := context.WithCancel(ctx)
 	n := &NAT{ctx: ctx, cancel: cancel, control: c, owners: o, identities: i, dialer: d, out: out, now: time.Now, mtu: mtu, refresh: make(chan struct{}, 1)}
+	n.io = newUDPWorkers()
+	var seed [4]byte
+	rand.Read(seed[:])
+	n.fragmentID.Store(binary.NativeEndian.Uint32(seed[:]))
 	for j := range n.table {
 		n.table[j].m = make(map[netip.AddrPort]*session)
 	}
@@ -108,20 +130,66 @@ func (n *NAT) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) bool {
 		n.Invalid.Add(1)
 		return true
 	}
-	n.receive(source, destination, dataSize, func() ([]byte, []byte, bool) {
+	network := p.NetworkHeader().Slice()
+	headerBytes := len(network) + len(h)
+	originalSize := headerBytes + p.Data().Size()
+	n.receive(source, destination, dataSize+originalSize, func() ([]byte, []byte, bool) {
 		payload := p.Data().AsRange().Capped(dataSize).ToSlice()
-		original := packet.UDP(source, destination, payload)
+		// ICMP must quote the triggering headers, including the IPv4 ID,
+		// options/flags and the original UDP checksum (which may be zero on
+		// IPv4). Retain IP padding too, so the original length stays valid.
+		original := make([]byte, originalSize)
+		copy(original, network)
+		copy(original[len(network):], h)
+		writer := tcpip.SliceWriter(original[headerBytes:])
+		_, _ = p.Data().ReadTo(&writer, true) // destination has exactly Data().Size() bytes
 		df := false
 		if src.Is4() {
-			ip := header.IPv4(p.NetworkHeader().Slice())
+			ip := header.IPv4(network)
 			df = ip.Flags()&header.IPv4FlagDontFragment != 0
+			// Reassembly updates total length and fragment flags in gVisor's
+			// header. Repair its checksum; an ordinary packet stays identical.
+			original[10], original[11] = 0, 0
+			binary.BigEndian.PutUint16(original[10:], ^packet.Sum(original[:len(network)], 0))
+		} else {
+			// IPv6 has no DF bit. An unfragmented packet must learn a smaller
+			// path through PTB; once the host sends fragments, preserve that
+			// decision on our real socket after gVisor reassembles them.
+			df = !ipv6Fragmented(p.NetworkHeader().Slice())
 		}
 		return payload, original, df
 	})
 	return true
 }
 
-func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket func() ([]byte, []byte, bool)) {
+func ipv6Fragmented(ip []byte) bool {
+	if len(ip) < 40 {
+		return false
+	}
+	next, offset := ip[6], 40
+	for offset+2 <= len(ip) {
+		if next == 44 {
+			return true
+		}
+		var size int
+		switch next {
+		case 0, 43, 60:
+			size = (int(ip[offset+1]) + 1) * 8
+		case 51:
+			size = (int(ip[offset+1]) + 2) * 4
+		default:
+			return false
+		}
+		if size < 8 || offset+size > len(ip) {
+			return false
+		}
+		next = ip[offset]
+		offset += size
+	}
+	return false
+}
+
+func (n *NAT) receive(source, destination netip.AddrPort, ownedBytes int, copyPacket func() ([]byte, []byte, bool)) {
 	b := n.bucket(source)
 	b.Lock()
 	if n.closed.Load() {
@@ -131,6 +199,19 @@ func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket f
 	s := b.m[source]
 	created := false
 	if s == nil {
+		if denied, ok := b.negative[source]; ok {
+			if n.now().Sub(denied.at) < RejectLifetime {
+				b.Unlock()
+				if n.control.AllowReject(denied.owner.AppID) {
+					_, raw, _ := copyPacket()
+					n.out.Send(packet.Unreachable(raw, 0))
+				} else {
+					n.Dropped.Add(1)
+				}
+				return
+			}
+			delete(b.negative, source)
+		}
 		t, err := n.control.Begin("udp", platform.Tuple{Source: source, Destination: destination})
 		if err != nil {
 			b.Unlock()
@@ -138,6 +219,8 @@ func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket f
 			if n.control.AllowReject("") {
 				_, raw, _ := copyPacket()
 				n.out.Send(packet.Unreachable(raw, 0))
+			} else {
+				n.Dropped.Add(1)
 			}
 			return
 		}
@@ -159,8 +242,9 @@ func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket f
 		}
 		return
 	}
-	// Reserve all owned copies, including the quoted packet used for errors.
-	bytes := 2*size + 48
+	// Reserve both exact owned copies. IPv4 options and IPv6 extensions make
+	// the quotation's header larger than the old fixed 48-byte allowance.
+	bytes := ownedBytes
 	if s.closed || len(s.queue) >= PendingPackets || s.bytes+bytes > PendingBytes || !n.control.ReservePending(bytes) {
 		s.mu.Unlock()
 		n.Dropped.Add(1)
@@ -174,9 +258,17 @@ func (n *NAT) receive(source, destination netip.AddrPort, size int, copyPacket f
 	payload, raw, df := copyPacket()
 	s.queue = append(s.queue, datagram{destination: destination, payload: payload, original: raw, df: df, bytes: bytes})
 	s.bytes += bytes
+	for old := n.PeakQueuePackets.Load(); uint64(len(s.queue)) > old && !n.PeakQueuePackets.CompareAndSwap(old, uint64(len(s.queue))); old = n.PeakQueuePackets.Load() {
+	}
+	for old := n.PeakQueueBytes.Load(); uint64(s.bytes) > old && !n.PeakQueueBytes.CompareAndSwap(old, uint64(s.bytes)); old = n.PeakQueueBytes.Load() {
+	}
 	s.mu.Unlock()
 	if created {
 		go s.run()
+	}
+	if r := s.ready.Load(); r != nil {
+		r.notify()
+		return
 	}
 	select {
 	case s.wake <- struct{}{}:
@@ -199,7 +291,7 @@ func (s *session) close() {
 	}
 	s.closed = true
 	close(s.done)
-	socket, cancel := s.socket, s.cancel
+	socket, cancel, ready := s.socket, s.cancel, s.ready.Load()
 	bytes := s.bytes
 	s.bytes = 0
 	s.queue = nil
@@ -207,7 +299,9 @@ func (s *session) close() {
 	if cancel != nil {
 		cancel()
 	}
-	if socket != nil {
+	if ready != nil {
+		ready.notify()
+	} else if socket != nil {
 		socket.Close()
 	}
 	n.control.ReleasePending(bytes)
@@ -215,9 +309,16 @@ func (s *session) close() {
 
 func (s *session) run() {
 	n := s.n
-	defer n.wg.Done()
+	handedOff := false
 	// Socket completion counters must finish before the final totals fold.
-	defer func() { s.close(); s.workers.Wait(); s.ticket.Close() }()
+	defer func() {
+		if !handedOff {
+			s.close()
+			s.workers.Wait()
+			s.ticket.Close()
+			n.wg.Done()
+		}
+	}()
 	ctx, cancel := context.WithCancel(n.ctx)
 	defer cancel()
 	s.mu.Lock()
@@ -230,7 +331,23 @@ func (s *session) run() {
 	s.ticket.SetCancel(cancel)
 	lookup, cl := context.WithTimeout(ctx, 50*time.Millisecond)
 	lookupStart := time.Now()
-	owner, err := n.owners.UDP(lookup, s.source)
+	var owner platform.Owner
+	var err error
+	if owners, ok := n.owners.(platform.DatagramOwnerLookup); ok {
+		s.mu.Lock()
+		var destination netip.AddrPort
+		if len(s.queue) > 0 {
+			destination = s.queue[0].destination
+		}
+		s.mu.Unlock()
+		if !destination.IsValid() {
+			cl()
+			return
+		}
+		owner, err = owners.UDPFor(lookup, platform.Tuple{Source: s.source, Destination: destination})
+	} else {
+		owner, err = n.owners.UDP(lookup, s.source)
+	}
 	if observer, ok := n.control.(interface {
 		Lookup(time.Duration, error, platform.Owner)
 	}); ok {
@@ -238,32 +355,72 @@ func (s *session) run() {
 	}
 	cl()
 	if err != nil {
-		owner = platform.Owner{}
+		// Attribution may be unknown while the kernel socket cookie is known.
+		// Keep that cookie so unknown-owner sessions can still be validated.
+		owner = platform.Owner{Generation: owner.Generation}
 	}
 	s.mu.Lock()
 	s.owner = owner
+	destroyed := false
+	for _, generation := range s.pendingDestroys {
+		if generation == owner.Generation {
+			destroyed = true
+		}
+	}
+	verify := s.destroyOverflow
+	s.pendingDestroys = nil
 	s.mu.Unlock()
+	if destroyed {
+		return
+	}
+	if verify {
+		if n.identities == nil {
+			n.IdentityErrors.Add(1)
+			return
+		}
+		live, err := n.identities.Snapshot(ctx, []netip.AddrPort{s.source})
+		if err != nil || !same(live[s.source], owner) {
+			n.IdentityErrors.Add(1)
+			return
+		}
+	}
 	// No generation means we cannot prove this socket is still the same one.
 	if owner.Generation == "" {
 		n.IdentityErrors.Add(1)
-		s.rejectPending(owner.AppID)
-		s.waitRejected(ctx)
+		n.GenerationMissing.Add(1)
+		if reporter, ok := n.control.(interface{ Emit(flowapi.Event) }); ok {
+			reporter.Emit(flowapi.Event{Type: "log", Message: fmt.Sprintf("UDP setup has no socket generation: source=%s lookup=%v", s.source, err)})
+		}
+		s.refuseSetup(owner.AppID)
 		return
 	}
 	decision, err := s.ticket.Resolve(owner)
 	if err != nil {
 		n.Rejected.Add(1)
 		s.rejectPending(owner.AppID)
-		s.waitRejected(ctx)
 		return
 	}
-	socket, err := n.dialer.OpenUDP(ctx, decision.Line, s.source.Addr().Is6())
+	var socket platform.UDPConn
+	if dialer, ok := n.dialer.(platform.DestinationDialer); ok {
+		s.mu.Lock()
+		var destination netip.AddrPort
+		if len(s.queue) > 0 {
+			destination = s.queue[0].destination
+		}
+		s.mu.Unlock()
+		if !destination.IsValid() {
+			return
+		}
+		socket, err = dialer.OpenUDPTo(ctx, decision.Line, destination)
+	} else {
+		socket, err = n.dialer.OpenUDP(ctx, decision.Line, s.source.Addr().Is6())
+	}
 	if err != nil {
+		n.OpenFailed.Add(1)
 		if observer, ok := n.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil {
 			observer.LineError(decision.Line, err)
 		}
-		s.rejectPending(owner.AppID)
-		s.waitRejected(ctx)
+		s.refuseSetup(owner.AppID)
 		return
 	}
 	s.mu.Lock()
@@ -278,9 +435,18 @@ func (s *session) run() {
 	s.active = true
 	s.mu.Unlock()
 	s.ticket.Established(socket.LocalAddr().Addr())
+	if q, ok := socket.(platform.UDPErrorHandler); ok {
+		q.SetErrorHandler(s.errorReply)
+	}
+	if socket, ok := socket.(platform.ReadyUDP); ok {
+		handedOff = s.startReady(socket)
+		return
+	}
 	s.workers.Go(func() { s.read(ctx) })
 	if q, ok := socket.(platform.UDPErrorQueue); ok {
-		s.workers.Go(func() { s.readErrors(ctx, q) })
+		if _, inline := socket.(platform.UDPErrorHandler); !inline {
+			s.workers.Go(func() { s.readErrors(ctx, q) })
+		}
 	}
 	for {
 		select {
@@ -309,6 +475,8 @@ func (s *session) run() {
 					s.mu.Lock()
 					s.last = n.now()
 					s.mu.Unlock()
+				} else if errors.Is(err, platform.ErrDatagramDropped) {
+					n.Dropped.Add(1)
 				} else if n.control.AllowReject(owner.AppID) {
 					var big *platform.TooBig
 					if errors.As(err, &big) {
@@ -326,7 +494,29 @@ func (s *session) run() {
 }
 
 func (s *session) rejectPending(app string) {
+	// Failed setups must disappear from counts and pagination before any
+	// refusal is observable. Suppression has its own bounded, timer-free cache.
+	s.ticket.Retire()
+	b := s.n.bucket(s.source)
+	b.Lock()
 	s.mu.Lock()
+	if !s.closed && b.m[s.source] == s {
+		if b.negative == nil {
+			b.negative = make(map[netip.AddrPort]refusedSession)
+		}
+		if len(b.negative) >= RejectCacheEntries/shards {
+			var oldest netip.AddrPort
+			var at time.Time
+			for key, entry := range b.negative {
+				if !oldest.IsValid() || entry.at.Before(at) {
+					oldest, at = key, entry.at
+				}
+			}
+			delete(b.negative, oldest)
+		}
+		b.negative[s.source] = refusedSession{owner: s.owner, at: s.n.now()}
+	}
+	b.Unlock()
 	defer s.mu.Unlock()
 	// A packet arriving after this flush must also receive a rejection, even
 	// if close has not yet removed the session from its shard.
@@ -345,43 +535,33 @@ func (s *session) rejectPending(app string) {
 	s.queue = nil
 }
 
-func (s *session) waitRejected(ctx context.Context) {
-	timer := time.NewTimer(RejectLifetime)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-	case <-s.done:
-	case <-timer.C:
+func (s *session) refuseSetup(app string) {
+	s.n.Rejected.Add(1)
+	if ticket, ok := s.ticket.(interface{ RefuseSetup() }); ok {
+		ticket.RefuseSetup()
 	}
+	s.rejectPending(app)
 }
 
 func (s *session) read(ctx context.Context) {
 	n := s.n
 	defer s.close()
-	// Begin reserved this fixed read buffer as part of the session budget.
-	buf := make([]byte, flowapi.UDPReadBuffer)
-	headerSize := 48
-	if s.source.Addr().Is4() {
-		headerSize = 28
-	}
 	for {
-		size, remote, err := s.socket.ReadFrom(buf)
+		reply, err := s.readPacket(ctx)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
 			}
-			if platform.IsTooBig(err) {
+			if errors.Is(err, errReplyBudget) {
+				n.Dropped.Add(1)
+			} else if platform.IsTooBig(err) {
 				n.Oversize.Add(1)
 			} else {
 				n.ReadErrors.Add(1)
 			}
 			// A permanently failing adapter must not turn this into a busy loop.
-			timer := time.NewTimer(time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			if !waitReadRetry(ctx) {
 				return
-			case <-timer.C:
 			}
 			continue
 		}
@@ -389,23 +569,17 @@ func (s *session) read(ctx context.Context) {
 		fresh := !s.closed && n.now().Sub(s.validated) < IdentityMaxAge
 		s.mu.Unlock()
 		if !fresh {
+			reply.release()
 			n.Dropped.Add(1)
 			continue
 		}
-		if size < 0 || size > len(buf) || size+headerSize > n.mtu {
-			n.Oversize.Add(1)
-			continue
-		}
-		p := packet.UDP(remote, s.source, buf[:size])
-		if len(p) > n.mtu || len(p) == 0 {
-			n.Oversize.Add(1)
-			continue
-		}
-		if n.out.Send(p) {
-			s.ticket.Add(0, uint64(size))
+		if n.out.SendBatch(reply.packets, reply.release) {
+			s.ticket.Add(0, uint64(reply.size))
 			s.mu.Lock()
 			s.last = n.now()
 			s.mu.Unlock()
+		} else {
+			n.Dropped.Add(1)
 		}
 		if ctx.Err() != nil {
 			return
@@ -419,11 +593,16 @@ func (s *session) readErrors(ctx context.Context, q platform.UDPErrorQueue) {
 		if err != nil {
 			return
 		}
-		s.mu.Lock()
-		fresh := !s.closed && s.n.now().Sub(s.validated) < IdentityMaxAge
-		s.mu.Unlock()
-		if fresh && s.n.control.AllowReject(s.owner.AppID) {
-			s.n.out.Send(packet.Unreachable(packet.UDP(s.source, e.Destination, e.Payload), e.MTU))
-		}
+		s.errorReply(e)
+	}
+}
+
+func (s *session) errorReply(e platform.DatagramError) {
+	s.mu.Lock()
+	fresh := !s.closed && s.n.now().Sub(s.validated) < IdentityMaxAge
+	app := s.owner.AppID
+	s.mu.Unlock()
+	if fresh && s.n.control.AllowReject(app) {
+		s.n.out.Send(packet.Unreachable(packet.UDP(s.source, e.Destination, e.Payload), e.MTU))
 	}
 }

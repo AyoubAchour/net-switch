@@ -52,10 +52,16 @@ export async function targets(address) {
     await once(socket, 'listening');
     socket.on('error', (error) => { console.error('target UDP error', error); });
     socket.on('message', (packet, peer) => {
-      seen.push({ protocol: 'udp', target: i, source: peer.address, port: peer.port, bytes: packet.length });
+      const identity = packet.subarray(0, 6).toString() === 'NS-ID:' ? packet.subarray(6, 38).toString() : undefined;
+      seen.push({ protocol: 'udp', target: i, source: peer.address, port: peer.port, bytes: packet.length, token: identity, at: Date.now() });
       // The legacy TUN test's padded example.com query gets a deterministic A
       // answer, retaining EDNS padding so large replies exercise reassembly too.
-      if (packet.length >= 44 && packet.readUInt16BE(0) === 0x1234 && packet.readUInt16BE(2) === 0x0100 && packet.readUInt16BE(4) === 1) {
+      if (packet.length === 42 && packet.subarray(0, 8).toString() === 'NS-REPLY') {
+        const size = packet.readUInt16BE(8);
+        if (size === 0 || size > 65507) return;
+        const reply = createCipheriv('aes-256-ctr', packet.subarray(10), Buffer.alloc(16)).update(Buffer.alloc(size));
+        socket.send(reply, peer.port, peer.address);
+      } else if (packet.length >= 44 && packet.readUInt16BE(0) === 0x1234 && packet.readUInt16BE(2) === 0x0100 && packet.readUInt16BE(4) === 1) {
         const header = Buffer.from(packet.subarray(0, 12)); header.writeUInt16BE(0x8180, 2); header.writeUInt16BE(1, 6);
         const answer = Buffer.from('c00c000100010000003c0004cb007107', 'hex');
         socket.send(Buffer.concat([header, packet.subarray(12, 29), answer, packet.subarray(29)]), peer.port, peer.address);

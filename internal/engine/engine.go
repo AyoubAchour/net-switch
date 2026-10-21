@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"runtime/debug"
+	"runtime/metrics"
 	"sync"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
@@ -29,6 +31,13 @@ type Dependencies struct {
 	Identities platform.UDPIdentity
 }
 type Engine struct {
+	// OnTunError may hand a platform-specific terminal condition to the service.
+	// It runs under mu and must not block or call Engine methods. Returning true
+	// transfers responsibility for Stop to the service; other errors retain the
+	// ordinary cleanup and OnFatal path. Install before starting the engine.
+	OnTunError func(error) bool
+
+	OnFatal   func(error)
 	mu        sync.Mutex
 	root      context.Context
 	deps      Dependencies
@@ -93,9 +102,16 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	// service context and protocol lease do; reattach keeps these flows alive.
 	run, cancel := context.WithCancel(e.root)
 	e.cancel = cancel
+	if device, ok := tun.(platform.TunIOContext); ok {
+		device.BindIOContext(run)
+	}
 	e.tcp = ntcp.New(run, s, e.limits.Handshakes, e.Table, e.deps.Owners, e.deps.Dialer, link)
 	e.udp = udp.New(run, s, e.Table, e.deps.Owners, e.deps.Identities, e.deps.Dialer, link, tun.MTU())
+	echo := newEcho(run, e.deps.Dialer, e.Table, link)
 	nat := e.udp
+	if events, ok := e.deps.Identities.(platform.UDPNotifications); ok {
+		e.pumps.Go(func() { events.WatchUDP(run, nat.Destroy, nat.RefreshNow) })
+	}
 	link.SetObserver(func(p *gv.PacketBuffer) {
 		first, ok := p.Data().PullUp(20)
 		if !ok {
@@ -108,6 +124,7 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 		nat.ObserveICMP(b)
 	})
 	e.pumps.Go(func() {
+		defer echo.wait()
 		b := make([]byte, ns.MTU)
 		for {
 			n, err := tun.ReadPacket(run, b)
@@ -120,13 +137,18 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			if n <= 0 || n > len(b) {
 				continue
 			}
+			if echo.handle(b[:n]) {
+				continue
+			}
 			proto := header.IPv4ProtocolNumber
 			if b[0]>>4 == 6 {
 				proto = header.IPv6ProtocolNumber
 			} else if b[0]>>4 != 4 {
 				continue
 			}
-			p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(append([]byte(nil), b[:n]...))})
+			// MakeWithData copies into a gVisor-owned chunk before returning.
+			// An extra clone here doubles ingress payload allocations.
+			p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b[:n])})
 			if verified, ok := tun.(platform.ChecksumVerifier); ok {
 				p.RXChecksumValidated = verified.RXChecksumVerified(b[:n])
 			}
@@ -136,10 +158,14 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	})
 	e.pumps.Go(func() {
 		packets := make([][]byte, 64)
+		owned := make([]ns.OutputPacket, len(packets))
 		for {
-			n := link.ReadBatch(run, packets)
+			n := link.ReadOwnedBatch(run, owned)
 			if n == 0 {
 				return
+			}
+			for i := range n {
+				packets[i] = owned[i].Bytes
 			}
 			var err error
 			if batch, ok := tun.(platform.BatchWriter); ok {
@@ -150,6 +176,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 						break
 					}
 				}
+			}
+			for i := range n {
+				owned[i].Release()
 			}
 			clear(packets[:n])
 			if err != nil {
@@ -172,10 +201,16 @@ func (e *Engine) fail(link *ns.Link, err error) {
 		if e.link != link {
 			return
 		}
+		if e.OnTunError != nil && e.OnTunError(err) {
+			return
+		}
 		e.lastError = err
 		cleanup := e.stopLocked(context.Background())
 		e.lastError = errors.Join(err, cleanup)
 		e.Table.Emit(flowapi.Event{Type: "fatal", Message: e.lastError.Error()})
+		if e.OnFatal != nil {
+			e.OnFatal(e.lastError)
+		}
 	}()
 }
 func (e *Engine) Apply(ctx context.Context, r policy.Revision) (policy.Applied, error) {
@@ -218,33 +253,73 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return e.stopLocked(ctx)
 }
 func (e *Engine) stopLocked(ctx context.Context) error {
+	phase := func(string) func() { return func() {} }
+	if timing, ok := e.deps.Routes.(interface{ StopPhase(string) func() }); ok {
+		phase = timing.StopPhase
+	}
+	finish := phase("quiesce")
+	if routes, ok := e.deps.Routes.(platform.RouteQuiescer); ok {
+		routes.Quiesce()
+	}
+	finish()
+	finish = phase("flow-close")
 	if e.cancel != nil {
 		e.cancel()
 	}
 	e.Table.Unload()
 	e.Table.CloseAll()
+	finish()
+	finish = phase("tcp-stop")
 	if e.tcp != nil {
 		e.tcp.Stop()
 	}
+	finish()
+	finish = phase("stack-close")
 	if e.stack != nil {
 		e.stack.Close()
 	}
+	finish()
+	finish = phase("udp-close")
 	if e.udp != nil {
 		e.udp.Close()
 	}
+	finish()
+	finish = phase("tun-signal")
+	beginTun := func() {}
+	joinTun := func() error { return nil }
 	if e.tun != nil {
-		e.tun.Close()
+		if starter, ok := e.tun.(platform.TunCloseStarter); ok {
+			// The cancelled I/O context wakes the pumps. Complete socket
+			// cancellation before native device teardown; device close still
+			// overlaps the journal's fingerprint checks and route cleanup.
+			beginTun = starter.BeginClose
+			joinTun = e.tun.Close
+		} else {
+			e.tun.Close()
+		}
 	}
+	finish()
+	finish = phase("pumps-join")
 	e.pumps.Wait()
+	finish()
+	finish = phase("stack-join")
 	if e.stack != nil {
 		e.stack.Wait()
 	}
+	finish()
+	finish = phase("tcp-join")
 	if e.tcp != nil {
 		e.tcp.Wait()
 	}
+	finish()
+	finish = phase("tun-begin")
+	beginTun()
+	finish()
+	finish = phase("link-close")
 	if e.link != nil {
 		e.link.Close()
 	}
+	finish()
 	e.stack = nil
 	e.tcp = nil
 	e.udp = nil
@@ -252,10 +327,11 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	e.tun = nil
 	e.cancel = nil
 	e.lines = nil
+	var cleanup error
 	if e.deps.Routes != nil {
-		return e.deps.Routes.Cleanup(ctx)
+		cleanup = e.deps.Routes.Cleanup(ctx)
 	}
-	return nil
+	return errors.Join(cleanup, joinTun())
 }
 
 func cloneLines(lines []platform.Line) []platform.Line {
@@ -269,16 +345,55 @@ func (e *Engine) Stats() any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	s := map[string]any{"flows": e.Table.Stats()}
+	if tun, ok := e.tun.(interface{ Stats() any }); ok {
+		s["tunKernel"] = tun.Stats()
+	}
+	if owners, ok := e.deps.Owners.(interface{ Stats() any }); ok {
+		s["ownerLookup"] = owners.Stats()
+	}
+	if dialer, ok := e.deps.Dialer.(interface{ Stats() any }); ok {
+		s["dialer"] = dialer.Stats()
+	}
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	s["heapBytes"] = memory.HeapAlloc
+	s["stackBytes"] = memory.StackInuse
+	s["heapGoalBytes"] = memory.NextGC
+	s["gcCycles"] = uint64(memory.NumGC)
+	s["gcCPUppm"] = uint64(memory.GCCPUFraction * 1_000_000)
+	s["runtimeBytes"] = memory.Sys - memory.HeapReleased
+	s["goroutines"] = uint64(runtime.NumGoroutine())
+	s["gomaxprocs"] = uint64(runtime.GOMAXPROCS(0))
+	samples := []metrics.Sample{{Name: "/gc/stack/starting-size:bytes"}, {Name: "/gc/heap/live:bytes"}, {Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/total:cpu-seconds"}}
+	metrics.Read(samples)
+	s["stackStartBytes"] = samples[0].Value.Uint64()
+	s["heapLiveBytes"] = samples[1].Value.Uint64()
+	s["gcCPUNanos"] = uint64(samples[2].Value.Float64() * 1e9)
+	s["totalCPUNanos"] = uint64(samples[3].Value.Float64() * 1e9)
 	if e.lastError != nil {
 		s["fatal"] = e.lastError.Error()
 	}
 	if e.link != nil {
 		s["tunDropped"] = e.link.Dropped.Load()
+		s["tunQueued"] = e.link.Queued()
+		s["tunPeakQueued"] = e.link.PeakQueued()
 	}
 	if e.tcp != nil {
+		s["tcpRelayBytes"], s["tcpRelayPeakBytes"] = e.tcp.RelayBufferBytes()
 		s["tcpRejected"] = e.tcp.Rejected.Load()
 		s["tcpInvalid"] = e.tcp.Invalid.Load()
 		s["tcpDialFailed"] = e.tcp.DialFailed.Load()
+		s["tcpSilentSYN"] = e.tcp.SilentStats()
+		s["tcpFlows"], s["tcpFlowsOmitted"] = e.tcp.Diagnostics(128)
+	}
+	if e.stack != nil {
+		stats := e.stack.Stats()
+		s["tcpSegmentsSent"] = stats.TCP.SegmentsSent.Value()
+		s["tcpRetransmits"] = stats.TCP.Retransmits.Value()
+		s["tcpRTOs"] = stats.TCP.Timeouts.Value()
+		s["tcpSACKRecoveries"] = stats.TCP.SACKRecovery.Value()
+		s["tcpSpuriousRTOs"] = stats.TCP.SpuriousRTORecovery.Value()
+		s["transportDropped"] = stats.DroppedPackets.Value()
 	}
 	if e.udp != nil {
 		s["udpRejected"] = e.udp.Rejected.Load()
@@ -287,6 +402,11 @@ func (e *Engine) Stats() any {
 		s["udpIdentityErrors"] = e.udp.IdentityErrors.Load()
 		s["udpOversize"] = e.udp.Oversize.Load()
 		s["udpReadErrors"] = e.udp.ReadErrors.Load()
+		s["udpOpenFailed"] = e.udp.OpenFailed.Load()
+		s["udpGenerationMissing"] = e.udp.GenerationMissing.Load()
+		s["udpNegativeEntries"] = uint64(e.udp.NegativeCacheSize())
+		s["udpPeakQueuePackets"] = e.udp.PeakQueuePackets.Load()
+		s["udpPeakQueueBytes"] = e.udp.PeakQueueBytes.Load()
 	}
 	return s
 }
