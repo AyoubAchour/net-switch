@@ -88,7 +88,7 @@ func osFileDuplexChild() error {
 // TestEnginePipeFullDuplex sends 1 MiB each way at once through a real
 // accepted engine pipe, and closes a connection with a read pending. Under
 // -race this is the regression for Go 1.27.3's unsynchronized pipe offset;
-// the os.File negative control must still be reported by the race detector.
+// the os.File path runs alongside as a logged control.
 func TestEnginePipeFullDuplex(t *testing.T) {
 	hosted(t) // fixed production pipe: disposable hosted runner only
 	listener, err := ListenPipe(EnginePipe, true)
@@ -205,9 +205,13 @@ func TestEnginePipeFullDuplex(t *testing.T) {
 	cmd.Env = append(os.Environ(), pipeOSFileDuplexEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	reported := strings.Contains(string(out), "WARNING: DATA RACE") && strings.Contains(string(out), "addOffset")
+	// The race detector reports only races it happens to observe, so this
+	// control is logged evidence, not a gate: requiring a report made it flaky
+	// (run 39574267343). The race itself was reported in production code by
+	// run 39559440093 and is fixed upstream in Go f4ac29c3c7.
 	t.Logf("os.File duplex control: race_build=%t exit_error=%v race_reported=%t old_would_pass=%t", raceEnabled, err, reported, !reported)
-	if raceEnabled && !reported {
-		t.Fatalf("the os.File negative control did not reproduce Go's pipe offset race; output:\n%s", out)
+	if raceEnabled && !reported && err != nil {
+		t.Fatalf("the os.File control failed without a race report: %v\n%s", err, out)
 	}
 	if !raceEnabled && err != nil {
 		t.Fatalf("os.File duplex control failed without the race detector: %v\n%s", err, out)
