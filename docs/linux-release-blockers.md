@@ -14,48 +14,62 @@ The real numerator, denominator and threshold result remain in the JSON, console
 log and summary. Every declaration carries `release-blocker` status, including
 when a sample meets its threshold. No retry or excluded natural miss changes it.
 
-The measurements below are from PR head `a2a85f4` (Go 1.27.3), Acceptance run
-[39540308747](https://github.com/AyoubAchour/net-switch/actions/runs/39540308747),
-on all four runners. Each cell is natural misses / lookups in the case's own
-non-injected window (pagination: identified rows of 300, 299 required). A
-threshold that a sample meets is still declared; a lucky run clears nothing.
+The measurements below are from PR head `fb74394` (Go 1.27.3), Acceptance run
+[39565641409](https://github.com/AyoubAchour/net-switch/actions/runs/39565641409),
+on all four runners. Later commits changed only a scanner test fixture, the
+report's CPU-model line and this document. Each cell is natural misses /
+lookups in the case's own non-injected window (pagination: identified rows of
+300, 299 required). A threshold that a sample meets is still declared; a lucky
+run clears nothing.
 
 | Case | Ubuntu 24 x64 | Ubuntu 26 x64 | Ubuntu 24 ARM64 | Ubuntu 26 ARM64 |
 | --- | ---: | ---: | ---: | ---: |
-| overload.udp-sessions-per-app | 10 / 10,004 | 27 / 10,004 | 0 / 10,004 | 2 / 10,004 |
-| overload.udp-sessions-total | 112 / 16,388 | 434 / 16,388 | 49 / 16,388 | 74 / 16,388 |
-| overload.tcp-connection-storm | 1,247 / 12,604 | 1,888 / 12,304 | 241 / 12,604 | 533 / 12,879 |
-| overload.tcp-handshakes-in-flight | 381 / 10,063 | 777 / 11,922 | 206 / 12,735 | 238 / 13,191 |
-| overload.tcp-flows-total | 16,559 / 80,047 | 22,886 / 80,101 | 4,579 / 68,067 | 5,870 / 69,358 |
-| overload.tcp-buffer-budget | 21 / 64 | 52 / 64 | 5 / 64 | 2 / 64 |
+| overload.udp-sessions-per-app | 26 / 10,004 | 8 / 10,004 | 0 / 10,004 | 0 / 10,004 |
+| overload.udp-sessions-total | 361 / 16,388 | 158 / 16,388 | 31 / 16,388 | 66 / 16,388 |
+| overload.tcp-connection-storm | 2,007 / 12,304 | 1,275 / 12,604 | 289 / 12,904 | 559 / 12,853 |
+| overload.tcp-handshakes-in-flight | 958 / 12,333 | 586 / 12,803 | 351 / 13,036 | 189 / 11,723 |
+| overload.tcp-flows-total | 23,767 / 80,101 | 16,694 / 80,101 | 4,164 / 67,652 | 5,904 / 69,392 |
+| overload.tcp-buffer-budget | 42 / 64 | 17 / 64 | 0 / 64 | 2 / 64 |
 | overload.rejection-notices-per-app | 0 / 12,000 | 0 / 12,000 | 0 / 12,000 | 0 / 12,000 |
-| overload.rejection-notices-total | 264 / 25,600 | 689 / 25,600 | 160 / 25,600 | 96 / 25,600 |
+| overload.rejection-notices-total | 793 / 25,600 | 276 / 25,600 | 90 / 25,600 | 170 / 25,600 |
 | overload.timewait-cap | 0 / 5,060 | 0 / 5,060 | 0 / 5,060 | 0 / 5,060 |
 | overload.udp-pending-bytes | 0 / 4 | 0 / 4 | 0 / 4 | 0 / 4 |
 | overload.unknown-owner-limits | 0 / 3 | 0 / 3 | 0 / 3 | 0 / 3 |
 | overload.tun-write-queue | 0 / 4 | 0 / 4 | 0 / 4 | 0 / 4 |
-| overload.memory-at-limit | 40 / 86 | 59 / 86 | 22 / 86 | 28 / 86 |
-| protocol.flows-pagination | 299 | 297 | 299 | 300 |
-| capacity.mixed-caps, held of 65,536 | 65,536 | 62,782 | 65,536 | 65,536 |
+| overload.memory-at-limit | 56 / 86 | 38 / 86 | 24 / 86 | 26 / 86 |
+| protocol.flows-pagination | 286 | 293 | 300 | 299 |
+| capacity.mixed-caps, held of 65,536 | 65,535 | 65,536 | 65,536 | 65,536 |
 
-Held exact caps on the same run: TCP total held 65,536 on three runners and
-59,263 on Ubuntu 26 x64. Its 6,273 shortfall, and the 2,754 mixed shortfall,
-were each wholly classified as unknown-overflow refusals. That is the only kind
-of shortfall the catalogue allows; any other would have failed the job. UDP
-total, mixed UDP, UDP per app and the TCP storm's identified 8,192 were exact
-on every runner. Each runner ran 85 cases: 70 passed and 15 declared release
-blockers, with no hard failures. The manual gate
-([39545430881](https://github.com/AyoubAchour/net-switch/actions/runs/39545430881))
-refused exactly these 15 entries.
+Held exact caps on the same run: TCP total held 65,536 on both ARM64 runners,
+58,382 on Ubuntu 24 x64 and 65,455 on Ubuntu 26 x64. Those shortfalls (7,154
+and 81), and the 1 missing in mixed on Ubuntu 24 x64, were each wholly
+classified as unknown-overflow refusals. That is the only kind of shortfall
+the catalogue allows; any other would have failed the job. UDP total, mixed
+UDP, UDP per app and the TCP storm's identified 8,192 were exact on every
+runner. Each runner ran 85 cases: 70 passed and 15 declared release blockers,
+with no hard failures.
+
+The x64 TCP total misses are a known open problem. Round 6 removed a measured
+regression (per-read scan stamps were 27% of the engine's allocation in that
+case), but on one hosted x64 CPU model (AMD EPYC 7763) the fixed head still
+falls short where the round-3 code held 65,536. The CPU profiles show no new
+hot path; the gap is not explained yet. Each acceptance report now records the
+runner's CPU model so it can be tied to hardware.
 
 These checks stayed hard on every runner and passed:
 - **TIME_WAIT probes:** all 50 alpha and 10 bravo post-burst probes were
   identified, with no misses in 5,060 lookups.
-- **Live heap:** the largest forced-GC live heap was 411,046,496 B, against
+- **Live heap:** the largest forced-GC live heap was 412,428,664 B, against
   the 483,183,820 B limit.
 - **Held sessions (§5.9):** an echo through every held UDP session in the
-  per-app, total and mixed cases had a p99 of 2.2–7.1 ms (the limit is
-  250 ms). Each full sweep took 0.29–0.82 s (the limit is 30 s).
+  per-app, total and mixed cases had a p99 of 1.9–10.1 ms (the limit is
+  250 ms). Each full sweep took 0.27–0.98 s (the limit is 30 s). Every
+  swept session kept its recorded engine flow ID, and no sweep admitted or
+  refused anything.
+The sweep also proves continuity: each swept session must still be the engine
+flow recorded with the held pool (same flow ID for the same app source, so a
+session recreated with the same outbound address and port fails), and the
+sweep must make no new admission or UDP refusal.
 The held-session check isn't an attribution check and isn't in the catalogue.
 
 Deliberately injected misses remain separately reported: 132/132 in pending
@@ -122,7 +136,12 @@ No limits, timeouts, demand or scanner behavior change with this classification.
 
 The hard checks require all offered attempts to be held or explicitly refused;
 all admitted flows to remain held; engine flow counts to equal independent
-client/server counts; no failed outbound TCP dial or native UDP open; every forwarding
+client/server counts absolutely, not just as a delta: at the first sample the
+engine's TCP and UDP counts must equal what clients and servers already held
+(the survival stream, the settled burst, the held UDP pool), and at the second
+sample that baseline plus the newly held clients, in every scope (total,
+per-app, mixed, tail, TCP and UDP), so a phantom flow carried through both
+samples fails; no failed outbound TCP dial or native UDP open; every forwarding
 refusal to have the expected cap or unknown-pool reason; and every lookup miss
 to be an unknown admission or counted unknown-pool overflow. Handshake, policy,
 unexplained or unrelated app-cap refusals cannot waive an occupancy shortfall.
