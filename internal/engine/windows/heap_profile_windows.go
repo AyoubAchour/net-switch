@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -166,6 +167,25 @@ func publishHeapJSON(path string, value any) error {
 	return windows.MoveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
 }
 
+func readPublishedHeapJSON(path string) ([]byte, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	// Rename publishes the new name before MoveFileEx releases its DELETE
+	// handle. Share that access so a complete, immutable capture is readable
+	// during this window. os.ReadFile omits FILE_SHARE_DELETE on Windows.
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open heap capture", Path: path, Err: err}
+	}
+	file := winhandle.NewFile(winhandle.Open(handle, "heap published file open"), path)
+	data, err := io.ReadAll(file)
+	return data, errors.Join(err, file.Close())
+}
+
 func (p *heapProfile) run() {
 	defer close(p.done)
 	var sequence uint64
@@ -185,7 +205,7 @@ func (p *heapProfile) run() {
 		}
 		next := sequence + 1
 		var request heapProfileRequest
-		b, err := os.ReadFile(filepath.Join(p.dir.Name(), fmt.Sprintf("request-%06d.json", next)))
+		b, err := readPublishedHeapJSON(filepath.Join(p.dir.Name(), fmt.Sprintf("request-%06d.json", next)))
 		if err != nil || len(b) > 4096 || json.Unmarshal(b, &request) != nil ||
 			request.Sequence != next || request.Nonce != p.info.Nonce || !validProfileNonce(request.RequestNonce) {
 			log.Printf("heap capture request %d rejected: invalid/missing request (%v)", next, err)
@@ -241,7 +261,7 @@ func requestHeapCapture(dir, nonce, instance, requestNonce, label string, pid in
 		return result, errors.New("heap capture requires an elevated hosted harness and fresh request identity")
 	}
 	var info heapProfileInfo
-	b, err := os.ReadFile(filepath.Join(dir, "ready.json"))
+	b, err := readPublishedHeapJSON(filepath.Join(dir, "ready.json"))
 	if err != nil {
 		return result, err
 	}
@@ -270,7 +290,7 @@ func requestHeapCapture(dir, nonce, instance, requestNonce, label string, pid in
 	defer cancel()
 	output := filepath.Join(dir, fmt.Sprintf("memory-%06d.json", sequence))
 	for {
-		b, err := os.ReadFile(output)
+		b, err := readPublishedHeapJSON(output)
 		if err == nil {
 			if err := json.Unmarshal(b, &result); err != nil {
 				return result, err

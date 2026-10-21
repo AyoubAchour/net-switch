@@ -3,6 +3,7 @@
 package winengine
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -14,6 +15,41 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
+
+func TestHeapCaptureReadDuringRenameHandleLifetime(t *testing.T) {
+	hosted(t)
+	path := filepath.Join(t.TempDir(), "memory-000001.json")
+	want := heapProfileRequest{Sequence: 1, Nonce: "engine", RequestNonce: "fresh", Label: "held"}
+	if err := publishHeapJSON(path, want); err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hold exactly the access that remains after the name is published but
+	// before MoveFileEx closes its rename handle. No sleep or racing scanner.
+	handle, err := windows.CreateFile(name, windows.DELETE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := winhandle.Open(handle, "heap rename window witness")
+	defer owner.HandleClose("heap rename window witness close")
+	if _, err := os.ReadFile(path); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("old reader did not reproduce the publication failure: %v", err)
+	}
+	data, err := readPublishedHeapJSON(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got heapProfileRequest
+	if err := json.Unmarshal(data, &got); err != nil || got != want {
+		t.Fatalf("capture changed during publication: got=%+v error=%v", got, err)
+	}
+	t.Log("old reader fails with ERROR_SHARING_VIOLATION; new reader reads the exact capture while the rename handle remains open")
+}
 
 func TestHeapCaptureIsFreshAndEventRejectsMediumToken(t *testing.T) {
 	hosted(t)
