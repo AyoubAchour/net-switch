@@ -27,6 +27,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
 	"golang.org/x/sys/windows"
 )
 
@@ -173,7 +174,13 @@ func startIO(t *testing.T, a *Adapter, mode string) batchIO {
 	if mode == "dll" {
 		return startDLL(t, a)
 	}
-	s, err := a.StartSession()
+	start := a.StartSession // "ours": the production registrar path
+	if mode == "inprocess" {
+		start = a.startInProcessSession // test-only former baseline
+	} else if mode != "ours" {
+		t.Fatalf("unknown session mode %q", mode)
+	}
+	s, err := start()
 	must(t, err)
 	return s
 }
@@ -373,7 +380,7 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 			handles = append(handles, cancelEvent)
 		}
 		s.readWaits.Add(1)
-		_, err := windows.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		_, err := winapi.WaitForMultipleObjects(handles, false, windows.INFINITE)
 		if err == nil {
 			s.readWakes.Add(1)
 		}
@@ -640,6 +647,7 @@ func TestWintunParallelUDP(t *testing.T) {
 
 func TestWintunRecoveryAndCancellation(t *testing.T) {
 	requireRunner(t)
+	useProductionRegistrar(t, "recovery_registrar_provenance")
 	f := newFixture(t, "ours", MinCapacity)
 	s := f.io.(*Session)
 	f.stopEcho()
@@ -683,6 +691,9 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 			// Windows may emit DNS/IPv6 discovery after a media reconnect.
 		}
 		cancel()
+		// Recovery must finish inside that 500 ms window. Under -race a
+		// race-built test registrar missed it (run 39559172829); the release
+		// engine registrar above is production's, so the window is unchanged.
 		if s.Stats().Recoveries != before+1 {
 			t.Fatalf("%s did not recover: %+v", kind, s.Stats())
 		}
@@ -800,6 +811,9 @@ func warmRuntimeThreads() {
 
 func TestWintunLifetime(t *testing.T) {
 	requireRunner(t)
+	// Under -race a test-binary registrar spent about 1 s starting each of
+	// the 1,000 cycles (run 39564185852); production's is the release engine.
+	useProductionRegistrar(t, "lifetime_registrar_provenance")
 	a := newAdapter(t, MinCapacity)
 	warmRuntimeThreads()
 	for i := 0; i < 100; i++ {
@@ -811,18 +825,40 @@ func TestWintunLifetime(t *testing.T) {
 	beforeHandles, beforeBytes := processUsage(t)
 	beforeTypes := handleTypes(t)
 	start := time.Now()
+	// Each cycle starts and retires a registrar process. A stuck cycle fails
+	// at the registrar's own start, stop and kill bounds, naming the cycle,
+	// instead of at the binary's overall timeout (run 39559172829 hit 5 m
+	// under the race detector with no way to tell slow from stuck).
+	cycleBound := registrarStartTimeout + registrarStopTimeout + registrarKillTimeout
+	var slowest time.Duration
 	for i := 0; i < 1000; i++ {
-		s, err := a.StartSession()
-		must(t, err)
-		must(t, s.Close())
+		began := time.Now()
+		cycle := make(chan error, 1)
+		go func() {
+			s, err := a.StartSession()
+			if err == nil {
+				err = s.Close()
+			}
+			cycle <- err
+		}()
+		select {
+		case err := <-cycle:
+			must(t, err)
+		case <-time.After(cycleBound):
+			t.Fatalf("session cycle %d did not finish within %s", i, cycleBound)
+		}
+		slowest = max(slowest, time.Since(began))
 		if i%50 == 0 {
 			runtime.GC()
+		}
+		if (i+1)%100 == 0 {
+			t.Logf("lifetime progress: %d sessions in %s, slowest cycle %s", i+1, time.Since(start).Round(time.Millisecond), slowest.Round(time.Millisecond))
 		}
 	}
 	debug.FreeOSMemory()
 	afterHandles, afterBytes := processUsage(t)
 	afterTypes := handleTypes(t)
-	report(t, map[string]any{"test": "lifetime", "arch": runtime.GOARCH, "sessions": 1000, "seconds": time.Since(start).Seconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "types_before": beforeTypes, "types_after": afterTypes, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes})
+	report(t, map[string]any{"test": "lifetime", "arch": runtime.GOARCH, "sessions": 1000, "seconds": time.Since(start).Seconds(), "slowest_cycle_ms": slowest.Milliseconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "types_before": beforeTypes, "types_after": afterTypes, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes})
 	if afterHandles > beforeHandles+2 {
 		t.Fatal("session handle leak")
 	}
@@ -907,7 +943,9 @@ func TestWintunAdapterRemoval(t *testing.T) {
 	if s.Stats().RecoveryFailures != 0 || s.Stats().Recoveries != 0 {
 		t.Fatalf("removal counted as recovery: %+v", s.Stats())
 	}
-	if strings.Count(logs.String(), "Wintun adapter removed") != 1 || strings.Contains(logs.String(), "level=ERROR") {
+	// Count log records, not substrings: the one removal record's joined error
+	// text also contains "Wintun adapter removed" (ErrAdapterRemoved).
+	if strings.Count(logs.String(), `msg="Wintun adapter removed"`) != 1 || strings.Contains(logs.String(), "level=ERROR") {
 		t.Fatalf("wrong removal logging: %s", logs.String())
 	}
 	assertPnPAbsent(t, owner.InstanceID())

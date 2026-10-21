@@ -188,7 +188,9 @@ test("the reviewer's PowerShell case: Get-ChildItem from the script's parent fol
 
 test("the reviewer's workflow case: a step runs a computed executable", () => {
   const ci = '.github/workflows/ci.yml';
-  const step = '      - name: Run acceptance against today\'s Node server and sing-box\n';
+  const step = '      - name: Run the 1.0 profile against the real Windows engine\n';
+  // A renamed step would make every replace below a silent no-op.
+  assert.ok(repoView().read(ci).includes(step), `ci.yml has no step ${JSON.stringify(step)}`);
   fails({ overrides: edit(ci, text => text.replace(step, `      - run: '& $env:REVIEW_SCRIPT'\n${step}`)) }, /ci\.yml windows-acceptance: step \d+: computed executable &\(\$env:REVIEW_SCRIPT\)/);
   fails({ overrides: edit(ci, text => text.replace(step, `      - run: '& $script'\n${step}`)) }, /ci\.yml windows-acceptance: step \d+: computed executable &\(\$script\)/);
   // A POSIX shell: the first word of a command.

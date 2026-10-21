@@ -41,6 +41,55 @@ type Forwarder struct {
 	dialer                        platform.LineDialer
 	out                           flowapi.Output
 	Rejected, Invalid, DialFailed atomic.Uint64
+	// Diagnostics only: SYNs that get neither a dial nor a reset. Handle's
+	// own early returns are counted by reason; Forwarded minus Opened counts
+	// SYNs gVisor accepted but never handed to open (its in-flight dedup).
+	silent    silentSYNs
+	Forwarded atomic.Uint64
+	Opened    atomic.Uint64
+}
+
+// silentSYNs records SYNs returned as handled without a dial or a reset.
+type silentSYNs struct {
+	mu     sync.Mutex
+	counts map[string]uint64
+	recent []SilentSYN
+}
+
+// SilentSYN is one silently handled SYN, for matching with a packet trace.
+type SilentSYN struct {
+	AtUnixMilli int64  `json:"at"`
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+	Reason      string `json:"reason"`
+}
+
+func (s *silentSYNs) note(reason string, t platform.Tuple) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.counts == nil {
+		s.counts = map[string]uint64{}
+	}
+	s.counts[reason]++
+	if len(s.recent) == 32 {
+		s.recent = append(s.recent[:0], s.recent[1:]...)
+	}
+	s.recent = append(s.recent, SilentSYN{time.Now().UnixMilli(), t.Source.String(), t.Destination.String(), reason})
+}
+
+// SilentStats reports silently handled SYNs and how many are still pending.
+func (f *Forwarder) SilentStats() map[string]any {
+	f.silent.mu.Lock()
+	counts := make(map[string]uint64, len(f.silent.counts))
+	for reason, n := range f.silent.counts {
+		counts[reason] = n
+	}
+	recent := append([]SilentSYN(nil), f.silent.recent...)
+	f.silent.mu.Unlock()
+	f.mu.RLock()
+	pending := len(f.pending)
+	f.mu.RUnlock()
+	return map[string]any{"counts": counts, "recent": recent, "forwarded": f.Forwarded.Load(), "opened": f.Opened.Load(), "pending": pending}
 }
 
 type orderedOutput interface {
@@ -109,13 +158,16 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 			// A delayed reopen callback can follow a duplicate SYN that has
 			// already established the replacement. It must not reset or dial
 			// that live incarnation a second time.
+			f.silent.note("live-connection", tuple(id))
 			return true
 		}
 	}
 	if _, ok := f.pending[id]; ok {
+		f.silent.note("pending", tuple(id))
 		return true
 	}
 	if f.ctx.Err() != nil {
+		f.silent.note("stopping", tuple(id))
 		return true
 	}
 	t := tuple(id)
@@ -143,12 +195,15 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		ticket.Close()
 		f.wg.Done()
 		reject()
+		return true
 	}
+	f.Forwarded.Add(1)
 	return true
 }
 
 func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	defer f.wg.Done()
+	f.Opened.Add(1)
 	id := r.ID()
 	// Setup only reads the admission record. Serializing every new callback
 	// on an exclusive lock creates a mutex-handoff convoy during SYN bursts,

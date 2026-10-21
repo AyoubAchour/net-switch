@@ -133,17 +133,28 @@ async function open({ count = 1, target }) {
   return results;
 }
 
-async function udp({ target, size = 64, stun = false, localAddress }) {
+async function udp({ target, size = 64, replySize = 0, stun = false, localAddress }) {
   const v6 = target.host.includes(':');
   const socket = createSocket(v6 ? 'udp6' : 'udp4');
   const transaction = randomBytes(12);
-  const packet = stun ? Buffer.alloc(20) : randomBytes(size);
+  let packet = stun ? Buffer.alloc(20) : randomBytes(size);
+  let expected = packet;
+  if (replySize) {
+    assert(!stun && replySize > 0 && replySize <= 65507);
+    const key = randomBytes(32);
+    expected = createCipheriv('aes-256-ctr', key, Buffer.alloc(16)).update(Buffer.alloc(replySize));
+    packet = Buffer.alloc(42);
+    packet.write('NS-REPLY', 0, 'ascii');
+    packet.writeUInt16BE(replySize, 8);
+    key.copy(packet, 10);
+  }
   if (stun) { packet.writeUInt16BE(1, 0); packet.writeUInt32BE(0x2112a442, 4); transaction.copy(packet, 8); }
   try {
     return await new Promise((resolve, reject) => {
       const replies = [], mappings = [];
       let unsolicited = false;
-      const result = () => ({ port: socket.address().port, sent: packet.length, replies, mappings, unsolicited });
+      const result = () => ({ port: socket.address().port, sent: packet.length, receivedBytes: expected.length,
+        sha256: createHash('sha256').update(expected).digest('hex'), replies, mappings, unsolicited });
       const timer = setTimeout(() => {
         if (stun && new Set(replies).size >= 2) finish(resolve, result());
         else finish(reject, new Error(`UDP baseline/echo failed: ${replies.length} replies, size=${size}`));
@@ -161,7 +172,7 @@ async function udp({ target, size = 64, stun = false, localAddress }) {
             const mappedPort = reply.readUInt16BE(26) ^ 0x2112;
             mappings.push({ server: peer.port, port: mappedPort });
             replies.push(peer.port);
-          } else { assert(reply.equals(packet), 'UDP payload corrupted'); replies.push(peer.port); }
+          } else { assert(reply.equals(expected), 'UDP payload corrupted'); replies.push(peer.port); }
           if ((!stun && replies.length) || (stun && new Set(replies).size >= 2 && unsolicited)) {
             finish(resolve, result());
           }

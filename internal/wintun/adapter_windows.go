@@ -15,13 +15,19 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
 const DefaultGUID = "{D9B44E84-B5C7-4DC4-97A4-4E7CA6722686}"
+
+// crashRemovalWait bounds crash cleanup's wait for Windows to finish removing
+// a dead creator's software device before it treats the adapter as present.
+const crashRemovalWait = 5 * time.Second
 
 // Config is also usable by TestISP. A test must use its own name and GUID.
 // Address, MTU and route configuration belong to the engine's platform layer.
@@ -59,7 +65,7 @@ var pinnedDLL = map[string]string{
 
 type library struct {
 	module                                  windows.Handle
-	file                                    *os.File // Denies replacement/writes for the lifetime of the loaded DLL.
+	file                                    *winhandle.File // Denies replacement/writes for the lifetime of the loaded DLL.
 	create, open, close, luid, deleteDriver uintptr
 }
 
@@ -110,7 +116,7 @@ func loadVerifiedLibrary() (*library, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := os.NewFile(uintptr(h), path)
+	f := winhandle.NewFile(winhandle.Open(h, "Wintun DLL guard open"), path)
 	ok := false
 	defer func() {
 		if !ok {
@@ -329,19 +335,69 @@ func recoverAfterCrash(config Config) (int, error) {
 		}
 		var status, problem uint32
 		err = windows.CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0)
+		// The owner has exited, but Windows removes a dead creator's software
+		// device asynchronously: right after the crash it can still be present
+		// (ARM64 run 39574636242). Wait a bounded time for that removal; an
+		// adapter still present afterwards is refused as before.
+		for deadline := time.Now().Add(crashRemovalWait); err == nil && time.Now().Before(deadline); {
+			time.Sleep(50 * time.Millisecond)
+			err = windows.CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0)
+		}
 		if err == nil {
 			return 0, fmt.Errorf("refusing crash cleanup of present adapter %s", config.GUID)
 		}
 		if !errors.Is(err, windows.CR_NO_SUCH_DEVNODE) {
 			return 0, fmt.Errorf("check crashed Wintun device: %w", err)
 		}
+		instance, err := set.DeviceInstanceID(dev)
+		if err != nil {
+			return 0, fmt.Errorf("identify crashed Wintun device: %w", err)
+		}
 		params := windows.RemoveDeviceParams{ClassInstallHeader: *windows.MakeClassInstallHeader(windows.DIF_REMOVE), Scope: windows.DI_REMOVEDEVICE_GLOBAL}
 		if err := set.SetClassInstallParams(dev, &params.ClassInstallHeader, uint32(unsafe.Sizeof(params))); err != nil {
 			return 0, err
 		}
 		if err := set.CallClassInstaller(windows.DIF_REMOVE, dev); err != nil {
-			return 0, fmt.Errorf("remove crashed Wintun device: %w", err)
+			// When the creator died, Windows may remove its software device
+			// between our enumeration and this call (seen on ARM64, run
+			// 39562669574). That is the state we want, but only if a fresh
+			// enumeration shows no device with this exact instance ID.
+			if errors.Is(err, windows.ERROR_NO_SUCH_DEVINST) {
+				present, checkErr := wintunInstanceExists(instance)
+				if checkErr == nil && !present {
+					return 0, nil
+				}
+				err = errors.Join(err, checkErr)
+			}
+			return 0, fmt.Errorf("remove crashed Wintun device %s: %w", instance, err)
 		}
 		return 1, nil
+	}
+}
+
+// wintunInstanceExists reports whether a Wintun network device with this
+// instance ID, present or not, is still enumerated. Any enumeration or
+// identity error is returned, never read as absence.
+func wintunInstanceExists(instance string) (bool, error) {
+	set, err := windows.SetupDiGetClassDevsEx(&netClass, "SWD\\Wintun", 0, 0, 0, "")
+	if err != nil {
+		return false, err
+	}
+	defer set.Close()
+	for i := 0; ; i++ {
+		dev, err := set.EnumDeviceInfo(i)
+		if errors.Is(err, windows.ERROR_NO_MORE_ITEMS) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		id, err := set.DeviceInstanceID(dev)
+		if err != nil {
+			return false, fmt.Errorf("read Wintun device instance ID: %w", err)
+		}
+		if strings.EqualFold(id, instance) {
+			return true, nil
+		}
 	}
 }

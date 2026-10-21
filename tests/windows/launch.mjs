@@ -21,14 +21,15 @@ function argument(name, fallback) {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 export function launchOptions() {
+  const profile = argument('--profile', 'baseline');
   const server = path.resolve(argument(['--server-exe', '--server-executable'], process.execPath));
   const nodeServer = server.toLowerCase() === process.execPath.toLowerCase() || /^(node|nodejs)(\.exe)?$/i.test(path.basename(server));
-  const entry = argument('--server-entry', nodeServer ? path.join(repoRoot, 'server.mjs') : null);
+  const entry = argument('--server-entry', nodeServer ? path.join(repoRoot, profile === 'v1' ? 'tests/windows/engine-driver.mjs' : 'server.mjs') : null);
   const engineDir = argument('--engine-dir', path.join(repoRoot, 'engine'));
   return {
     server, entry: entry ? path.resolve(entry) : null,
-    engine: path.resolve(argument(['--engine-exe', '--engine-executable'], path.join(engineDir, 'sing-box.exe'))),
-    profile: argument('--profile', 'baseline'),
+    engine: path.resolve(argument(['--engine-exe', '--engine-executable'], profile === 'v1' ? path.join(repoRoot, 'dist/windows-test/netswitch-engine.exe') : path.join(engineDir, 'sing-box.exe'))),
+    profile,
     serverVersionArgs: JSON.parse(argument('--server-version-args', '["--version"]')),
     engineVersionArgs: JSON.parse(argument('--engine-version-args', '["version"]')),
   };
@@ -56,6 +57,10 @@ export function serverCommand(options, dataDir, { proxy = false } = {}) {
 }
 
 export async function startServer(options, dataDir, output) {
+  if (options.profile === 'v1') {
+    const { startEngineDriver } = await import('./launch-engine.mjs');
+    return startEngineDriver(options, dataDir, output);
+  }
   const [exe, args] = serverCommand(options, dataDir);
   const child = spawn(exe, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   child.stdout.on('data', output); child.stderr.on('data', output);

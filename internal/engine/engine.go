@@ -31,6 +31,12 @@ type Dependencies struct {
 	Identities platform.UDPIdentity
 }
 type Engine struct {
+	// OnTunError may hand a platform-specific terminal condition to the service.
+	// It runs under mu and must not block or call Engine methods. Returning true
+	// transfers responsibility for Stop to the service; other errors retain the
+	// ordinary cleanup and OnFatal path. Install before starting the engine.
+	OnTunError func(error) bool
+
 	OnFatal   func(error)
 	mu        sync.Mutex
 	root      context.Context
@@ -195,6 +201,9 @@ func (e *Engine) fail(link *ns.Link, err error) {
 		if e.link != link {
 			return
 		}
+		if e.OnTunError != nil && e.OnTunError(err) {
+			return
+		}
 		e.lastError = err
 		cleanup := e.stopLocked(context.Background())
 		e.lastError = errors.Join(err, cleanup)
@@ -244,36 +253,73 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return e.stopLocked(ctx)
 }
 func (e *Engine) stopLocked(ctx context.Context) error {
+	phase := func(string) func() { return func() {} }
+	if timing, ok := e.deps.Routes.(interface{ StopPhase(string) func() }); ok {
+		phase = timing.StopPhase
+	}
+	finish := phase("quiesce")
 	if routes, ok := e.deps.Routes.(platform.RouteQuiescer); ok {
 		routes.Quiesce()
 	}
+	finish()
+	finish = phase("flow-close")
 	if e.cancel != nil {
 		e.cancel()
 	}
 	e.Table.Unload()
 	e.Table.CloseAll()
+	finish()
+	finish = phase("tcp-stop")
 	if e.tcp != nil {
 		e.tcp.Stop()
 	}
+	finish()
+	finish = phase("stack-close")
 	if e.stack != nil {
 		e.stack.Close()
 	}
+	finish()
+	finish = phase("udp-close")
 	if e.udp != nil {
 		e.udp.Close()
 	}
+	finish()
+	finish = phase("tun-signal")
+	beginTun := func() {}
+	joinTun := func() error { return nil }
 	if e.tun != nil {
-		e.tun.Close()
+		if starter, ok := e.tun.(platform.TunCloseStarter); ok {
+			// The cancelled I/O context wakes the pumps. Complete socket
+			// cancellation before native device teardown; device close still
+			// overlaps the journal's fingerprint checks and route cleanup.
+			beginTun = starter.BeginClose
+			joinTun = e.tun.Close
+		} else {
+			e.tun.Close()
+		}
 	}
+	finish()
+	finish = phase("pumps-join")
 	e.pumps.Wait()
+	finish()
+	finish = phase("stack-join")
 	if e.stack != nil {
 		e.stack.Wait()
 	}
+	finish()
+	finish = phase("tcp-join")
 	if e.tcp != nil {
 		e.tcp.Wait()
 	}
+	finish()
+	finish = phase("tun-begin")
+	beginTun()
+	finish()
+	finish = phase("link-close")
 	if e.link != nil {
 		e.link.Close()
 	}
+	finish()
 	e.stack = nil
 	e.tcp = nil
 	e.udp = nil
@@ -281,10 +327,11 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	e.tun = nil
 	e.cancel = nil
 	e.lines = nil
+	var cleanup error
 	if e.deps.Routes != nil {
-		return e.deps.Routes.Cleanup(ctx)
+		cleanup = e.deps.Routes.Cleanup(ctx)
 	}
-	return nil
+	return errors.Join(cleanup, joinTun())
 }
 
 func cloneLines(lines []platform.Line) []platform.Line {
@@ -339,6 +386,7 @@ func (e *Engine) Stats() any {
 		s["tcpRejected"] = e.tcp.Rejected.Load()
 		s["tcpInvalid"] = e.tcp.Invalid.Load()
 		s["tcpDialFailed"] = e.tcp.DialFailed.Load()
+		s["tcpSilentSYN"] = e.tcp.SilentStats()
 		s["tcpFlows"], s["tcpFlowsOmitted"] = e.tcp.Diagnostics(128)
 	}
 	if e.stack != nil {

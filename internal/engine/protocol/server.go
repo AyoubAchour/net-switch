@@ -52,6 +52,8 @@ type Server struct {
 	operations                  map[string]*operation
 	order                       []string
 	clients                     map[*connection]struct{}
+	controller                  *connection
+	terminal                    *terminalDelivery
 	EventsDropped               atomic.Uint64
 	done                        chan struct{}
 	doneOnce                    sync.Once
@@ -111,7 +113,10 @@ func (s *Server) fence(r Request) error {
 }
 
 func (s *Server) Handle(ctx context.Context, r Request) Reply {
-	result, err := s.execute(ctx, r)
+	return s.handle(ctx, r, nil)
+}
+func (s *Server) handle(ctx context.Context, r Request, c *connection) Reply {
+	result, err := s.execute(ctx, r, c)
 	reply := Reply{ID: r.ID, Result: result}
 	reply.stop = r.Method == "stop" && err == nil
 	if err != nil {
@@ -120,7 +125,7 @@ func (s *Server) Handle(ctx context.Context, r Request) Reply {
 	}
 	return reply
 }
-func (s *Server) execute(ctx context.Context, r Request) (any, error) {
+func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, error) {
 	switch r.Method {
 	case "attach", "start", "apply", "stop", "closeFlows", "adapterForgetLane":
 		// A new controller cannot overtake an accepted mutation. Renewals
@@ -129,8 +134,12 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		defer s.mutation.Unlock()
 	}
 	s.mu.Lock()
+	if r.Method == "terminalAck" {
+		defer s.mu.Unlock()
+		return s.ackTerminal(r, c)
+	}
 	if r.Method == "hello" {
-		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks"}}
+		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks", "terminal-stop"}}
 		s.mu.Unlock()
 		if adapter, ok := s.runtime.(AdapterRuntime); ok {
 			v["capabilities"] = []string{"singbox-adapter-v1", "revisions", "lease"}
@@ -160,10 +169,15 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		s.epoch = next
 		s.expires = s.now().Add(Lease)
 		s.attached = true
+		s.controller = c
 		s.table.SetEpoch(s.epoch)
 		epoch := s.epoch
 		s.mu.Unlock()
 		return map[string]any{"epoch": epoch, "leaseSeconds": 30}, nil
+	}
+	if s.terminal != nil {
+		s.mu.Unlock()
+		return nil, errors.New("engine terminal shutdown")
 	}
 	if r.Method == "stop" && s.stopped && r.Instance == s.Instance && r.Epoch == s.epoch {
 		s.mu.Unlock()
@@ -350,7 +364,8 @@ func (s *Server) effect(ctx context.Context, r Request, run func() (any, error))
 func (s *Server) Expired() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.attached || s.stopped || s.now().Before(s.expires) {
+	// A pending adapter-lost terminal record owns shutdown.
+	if s.terminal != nil || !s.attached || s.stopped || s.now().Before(s.expires) {
 		return false
 	}
 	s.stopping = true
@@ -362,7 +377,8 @@ func (s *Server) Expired() bool {
 // cleanup begins, no new controller can resurrect this engine instance.
 func (s *Server) CheckLease(ctx context.Context) error {
 	s.mu.Lock()
-	if !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {
+	// A pending adapter-lost terminal record owns shutdown.
+	if s.terminal != nil || !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {
 		s.mu.Unlock()
 		return nil
 	}
