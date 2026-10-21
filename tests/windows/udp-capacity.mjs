@@ -25,13 +25,18 @@ export async function nativeUDPCapacity(binding) {
       NETSWITCH_UDP_BASELINE_INDEX: String(binding.index), NETSWITCH_UDP_RECOVERY_CYCLES: String(udpRecoveryCycles) },
     timeout: 360_000 });
   const cyclesMarker = 'WINDOWS NATIVE UDP RECOVERY CYCLES ';
+  // Two native controls: plain sockets, and engine halves through the
+  // engine's readiness path (native duplicate and event registration).
   const nativeRecovery = paired.stdout.split(/\r?\n/).filter((value) => value.includes(cyclesMarker))
-    .map((value) => JSON.parse(value.slice(value.indexOf(cyclesMarker) + cyclesMarker.length)))[0];
-  assert(udpRecoveryCycles === 0 || nativeRecovery?.cycles?.length === udpRecoveryCycles, `Native UDP recovery control did not run: ${paired.stdout.slice(-2000)}`);
-  if (nativeRecovery) console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path: 'native', cycles: nativeRecovery.cycles.length,
-    attempts: nativeRecovery.reopenAttempts, refused: nativeRecovery.reopenRefused,
-    restoreRefused: nativeRecovery.cycles.reduce((n, cycle) => n + cycle.restoreRefused, 0),
-    refusals: nativeRecovery.cycles.flatMap((cycle) => cycle.refusals ?? []) })}`);
+    .map((value) => JSON.parse(value.slice(value.indexOf(cyclesMarker) + cyclesMarker.length)));
+  assert(udpRecoveryCycles === 0 || (nativeRecovery.length === 2 && nativeRecovery.every((item) => item.cycles?.length === udpRecoveryCycles)),
+    `Native UDP recovery controls did not run: ${paired.stdout.slice(-2000)}`);
+  for (const item of nativeRecovery) {
+    console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path: item.readyUDP ? 'native, readiness path' : 'native', cycles: item.cycles.length,
+      attempts: item.reopenAttempts, refused: item.reopenRefused,
+      restoreRefused: item.cycles.reduce((n, cycle) => n + cycle.restoreRefused, 0),
+      refusals: item.cycles.flatMap((cycle) => cycle.refusals ?? []) })}`);
+  }
   const pairMarker = 'WINDOWS NATIVE UDP PAIRED CAPACITY ';
   const pairs = paired.stdout.split(/\r?\n/).filter((value) => value.includes(pairMarker))
     .map((value) => JSON.parse(value.slice(value.indexOf(pairMarker) + pairMarker.length)));
