@@ -2,7 +2,7 @@
 // Net Switch's dependencies: the product's go.mod and vendor/ never see it.
 module github.com/AyoubAchour/net-switch/tests/quicfixture
 
-go 1.27.2
+go 1.27.3
 
 require github.com/quic-go/quic-go v0.64.0
 
