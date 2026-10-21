@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
@@ -15,6 +16,9 @@ import (
 )
 
 type diagQueryTrace struct {
+	ReplyType                                                                uint16
+	ReplyErrno                                                               int32
+	ReplyCookie                                                              string
 	Stage                                                                    string
 	StartedNS, SocketReadyNS, SentNS, ReadStartedNS, CompletedNS, DeadlineNS int64
 	Sequence                                                                 uint32
@@ -28,8 +32,8 @@ type diagQueryError struct {
 }
 
 func (e *diagQueryError) Error() string {
-	return fmt.Sprintf("sock_diag %s: %v (elapsed=%s ready=%t kernel=%t sequence-match=%t peek=%q)", e.Trace.Stage, e.cause,
-		time.Duration(e.Trace.CompletedNS-e.Trace.StartedNS), e.Trace.ReplyReady, e.Trace.ReplyFromKernel, e.Trace.ReplySequenceMatches, e.Trace.PeekError)
+	return fmt.Sprintf("sock_diag %s: %v (elapsed=%s ready=%t kernel=%t sequence-match=%t reply-type=%d reply-errno=%d cookie=%q peek=%q)", e.Trace.Stage, e.cause,
+		time.Duration(e.Trace.CompletedNS-e.Trace.StartedNS), e.Trace.ReplyReady, e.Trace.ReplyFromKernel, e.Trace.ReplySequenceMatches, e.Trace.ReplyType, e.Trace.ReplyErrno, e.Trace.ReplyCookie, e.Trace.PeekError)
 }
 func (e *diagQueryError) Unwrap() error { return e.cause }
 
@@ -41,7 +45,9 @@ func (t *diagQueryTrace) peek(f *os.File) {
 		t.PeekError = err.Error()
 		return
 	}
-	var header [16]byte
+	// Netlink header plus the fixed inet_diag_msg. Extra attributes may be
+	// truncated here; this observes a cookie, not a validated admission row.
+	var header [88]byte
 	var n int
 	var peer unix.Sockaddr
 	var receiveErr error
@@ -52,10 +58,20 @@ func (t *diagQueryTrace) peek(f *os.File) {
 		t.PeekError = err.Error()
 		return
 	}
-	t.ReplyReady = n >= len(header)
+	t.ReplyReady = n >= 16
 	from, ok := peer.(*unix.SockaddrNetlink)
 	t.ReplyFromKernel = ok && from.Pid == 0
 	t.ReplySequenceMatches = t.ReplyReady && binary.NativeEndian.Uint32(header[8:12]) == t.Sequence
+	if t.ReplyReady {
+		t.ReplyType = binary.NativeEndian.Uint16(header[4:6])
+		if t.ReplyType == unix.NLMSG_ERROR && n >= 20 {
+			t.ReplyErrno = int32(binary.NativeEndian.Uint32(header[16:20]))
+		}
+		if t.ReplyType == 20 && n >= len(header) {
+			cookie := uint64(binary.NativeEndian.Uint32(header[60:64])) | uint64(binary.NativeEndian.Uint32(header[64:68]))<<32
+			t.ReplyCookie = strconv.FormatUint(cookie, 16)
+		}
+	}
 }
 
 type udpGenerationFailure struct {

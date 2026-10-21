@@ -18,7 +18,9 @@ import (
 )
 
 func TestExpiredNetlinkDeadlineLeavesReadyReplyUnconsumed(t *testing.T) {
-	app, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	// The isolated kernel-test namespace can begin with loopback down.
+	// A wildcard socket needs no configured interface or outbound traffic.
+	app, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,12 +62,14 @@ func TestExpiredNetlinkDeadlineLeavesReadyReplyUnconsumed(t *testing.T) {
 	if n, err := readNetlink(socket.file, data[:]); n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("RawRead oracle did not reject the ready reply at its expired deadline: n=%d err=%v", n, err)
 	}
+	var peekCookie string
 	for range 2 {
 		trace := diagQueryTrace{Sequence: sequence}
 		trace.peek(socket.file)
-		if !trace.ReplyReady || !trace.ReplyFromKernel || !trace.ReplySequenceMatches || trace.PeekError != "" {
+		if !trace.ReplyReady || !trace.ReplyFromKernel || !trace.ReplySequenceMatches || trace.ReplyType != 20 || trace.ReplyCookie == "" || trace.PeekError != "" {
 			t.Fatalf("diagnostic peek lost or consumed the queued reply: %+v", trace)
 		}
+		peekCookie = trace.ReplyCookie
 	}
 	// Clearing the deadline is an oracle control only, never production.
 	if err := socket.file.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
@@ -80,7 +84,7 @@ func TestExpiredNetlinkDeadlineLeavesReadyReplyUnconsumed(t *testing.T) {
 		t.Fatalf("queued message was not this socket's exact kernel answer: %+v %v", messages, err)
 	}
 	row, err := parseDiag(messages[0].Data)
-	if err != nil || row.local != source || row.cookie == 0 {
+	if err != nil || row.local != source || row.cookie == 0 || row.generation() != peekCookie {
 		t.Fatalf("queued answer had no independently live socket cookie: %+v %v", row, err)
 	}
 	t.Logf("expired RawRead hid ready kernel response for %s cookie=%s; repeated diagnostic peeks left it intact", source, row.generation())
