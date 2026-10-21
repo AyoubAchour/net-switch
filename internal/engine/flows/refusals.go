@@ -32,6 +32,19 @@ func (t *Table) refusal(protocol string) *Refusals {
 	return &t.gauges.RefusedTCP
 }
 
+// Setup rejection is not a capacity decision, even if a pool happened to
+// fill meanwhile. Detailed UDP counters distinguish the underlying failure.
+func (f *ticket) RefuseSetup() {
+	t := f.table
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if f.closed || f.retired || f.setupRefused {
+		return
+	}
+	f.setupRefused = true
+	t.refusal(f.record.Protocol).Unexplained++
+}
+
 func (t *Table) refuseBegin(protocol string) {
 	r := t.refusal(protocol)
 	switch {

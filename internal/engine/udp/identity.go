@@ -153,6 +153,10 @@ func (n *NAT) Destroy(source netip.AddrPort, generation string) {
 	if s == nil {
 		return
 	}
+	s.destroyGeneration(generation)
+}
+
+func (s *session) destroyGeneration(generation string) {
 	s.mu.Lock()
 	if !s.closed && s.owner.Generation == "" && generation != "" {
 		// Lookup may have read this cookie before the destroy notification
@@ -168,6 +172,15 @@ func (n *NAT) Destroy(source netip.AddrPort, generation string) {
 	s.mu.Unlock()
 	if match {
 		s.close()
+		// A failed setup can publish its negative entry after our first shard
+		// lookup but before close marks the session closed. Remove that exact
+		// generation too; a reused port's newer generation stays untouched.
+		b := s.n.bucket(s.source)
+		b.Lock()
+		if entry, ok := b.negative[s.source]; ok && entry.owner.Generation == generation {
+			delete(b.negative, s.source)
+		}
+		b.Unlock()
 	}
 }
 func (n *NAT) RefreshNow() {
