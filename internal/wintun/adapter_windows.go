@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
@@ -23,6 +24,10 @@ import (
 )
 
 const DefaultGUID = "{D9B44E84-B5C7-4DC4-97A4-4E7CA6722686}"
+
+// crashRemovalWait bounds crash cleanup's wait for Windows to finish removing
+// a dead creator's software device before it treats the adapter as present.
+const crashRemovalWait = 5 * time.Second
 
 // Config is also usable by TestISP. A test must use its own name and GUID.
 // Address, MTU and route configuration belong to the engine's platform layer.
@@ -330,6 +335,14 @@ func recoverAfterCrash(config Config) (int, error) {
 		}
 		var status, problem uint32
 		err = windows.CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0)
+		// The owner has exited, but Windows removes a dead creator's software
+		// device asynchronously: right after the crash it can still be present
+		// (ARM64 run 39574636242). Wait a bounded time for that removal; an
+		// adapter still present afterwards is refused as before.
+		for deadline := time.Now().Add(crashRemovalWait); err == nil && time.Now().Before(deadline); {
+			time.Sleep(50 * time.Millisecond)
+			err = windows.CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0)
+		}
 		if err == nil {
 			return 0, fmt.Errorf("refusing crash cleanup of present adapter %s", config.GUID)
 		}
