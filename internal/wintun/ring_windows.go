@@ -31,6 +31,12 @@ const (
 var ErrCorrupt = errors.New("Wintun ring corruption")
 var ErrDisconnected = errors.New("Wintun adapter disconnected")
 var ErrAdapterRemoved = errors.New("Wintun adapter removed")
+
+// ErrRegistrarExited reports that the process owning the registration ended.
+// The driver then releases the rings, so the session is lost exactly as on
+// adapter removal; callers see it joined with ErrAdapterRemoved.
+var ErrRegistrarExited = fmt.Errorf("Wintun registrar exited: %w", ErrDisconnected)
+var errRegistrationHeld = errors.New("Wintun registrar ended without the driver's release markers")
 var errRingsRetained = errors.New("Wintun teardown incomplete; ring memory retained until process exit")
 
 func corrupt(r ring, direction, reason string, head, tail uint32) error {
@@ -75,19 +81,34 @@ func (r ring) store(offset int, n uint32) { atomic.StoreUint32(r.word(offset), n
 func (r ring) data() []byte               { return r.bytes[ringHeader:] }
 
 // Go atomics are sequentially consistent (stronger than the ABI's acquire and
-// release requirements), including on ARM64. Native memory has no Go finalizer:
-// an incomplete driver teardown must retain it even after the session is gone.
+// release requirements), including on ARM64. Both rings live in one unnamed
+// pagefile-backed section. The engine maps one view; the registrar maps its
+// own view of the same pages and registers that view with the driver.
 type rings struct {
-	send, receive                      ring
-	allocation                         uintptr
-	registered, closed                 bool
-	device, readEvent, writeEvent      windows.Handle
-	deviceOwner, readOwner, writeOwner winhandle.Owner
-	head, tail                         uint32
-	placeholders, oversized            uint64 // protected by the session's read lock
-	closeProfile                       CloseDetails
+	send, receive           ring
+	view                    uintptr // this process's mapped view; 0 once released or retained
+	section                 winhandle.Owner
+	readEvent, writeEvent   windows.Handle
+	readOwner, writeOwner   winhandle.Owner
+	owner                   ringOwner // nil for synthetic fixtures without a driver
+	closed                  bool
+	head, tail              uint32
+	placeholders, oversized uint64 // protected by the session's read lock
+	closeProfile            CloseDetails
 }
 
+// ringOwner ends the driver registration. Production uses the registrar
+// process; the in-process comparison owner exists only in test files.
+type ringOwner interface {
+	// exited is signalled when the registration owner itself ends, or 0.
+	exited() windows.Handle
+	// end returns retain=true when this process's view must stay mapped.
+	end(r *rings, closeHandle func(windows.Handle) error) (retain bool, err error)
+}
+
+// DeviceNanos is the registration owner's retirement (for the registrar:
+// stop request, process exit and handle closes). DriverWaitNanos waits for
+// both release markers afterwards.
 type CloseDetails struct {
 	QueueNanos, ReadLockNanos, StateLockNanos              uint64
 	DeviceNanos, DriverWaitNanos, EventsNanos, MemoryNanos uint64
@@ -100,22 +121,41 @@ type ringRegistration struct {
 }
 type registration struct{ Send, Receive ringRegistration }
 
+func ringBytes(capacity uint32) int { return int(capacity) + ringHeader + ringSlack }
+
+// viewBytes is the exact size of both rings, as mapped by each process.
+func viewBytes(capacity uint32) int { return 2 * ringBytes(capacity) }
+
+func mappedSlice(address uintptr, size int) []byte {
+	// A mapped view is outside the Go heap. Reinterpret that native address
+	// without Go pointer arithmetic (also valid under checkptr).
+	pointer := *(*unsafe.Pointer)(unsafe.Pointer(&address))
+	return unsafe.Slice((*byte)(pointer), size)
+}
+
+// allocateRings creates the unnamed section and this process's view. Synthetic
+// fixtures use the same memory as production sessions.
 func allocateRings(capacity uint32) (*rings, error) {
 	if !validCapacity(capacity) {
 		return nil, fmt.Errorf("invalid ring capacity %d", capacity)
 	}
-	size := int(capacity) + ringHeader + ringSlack
-	address, err := windows.VirtualAlloc(0, uintptr(size*2), windows.MEM_COMMIT|windows.MEM_RESERVE, windows.PAGE_READWRITE)
+	size := ringBytes(capacity)
+	total := uint64(viewBytes(capacity))
+	h, err := windows.CreateFileMapping(windows.InvalidHandle, nil, windows.PAGE_READWRITE, uint32(total>>32), uint32(total), nil)
 	if err != nil {
-		return nil, fmt.Errorf("allocate Wintun rings: %w", err)
+		return nil, fmt.Errorf("create Wintun ring section: %w", err)
 	}
-	// VirtualAlloc returns an address outside the Go heap. Reinterpret that
-	// native address without Go pointer arithmetic (also valid under checkptr).
-	pointer := *(*unsafe.Pointer)(unsafe.Pointer(&address))
-	buffer := unsafe.Slice((*byte)(pointer), size*2)
-	return &rings{allocation: address, send: ring{buffer[:size], capacity}, receive: ring{buffer[size:], capacity}}, nil
+	section := winhandle.Open(h, "Wintun ring section open")
+	address, err := windows.MapViewOfFile(section.Handle("Wintun ring section map"), windows.FILE_MAP_READ|windows.FILE_MAP_WRITE, 0, 0, uintptr(total))
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("map Wintun ring section: %w", err), section.HandleClose("Wintun ring section map failure close"))
+	}
+	buffer := mappedSlice(address, int(total))
+	return &rings{view: address, section: section, send: ring{buffer[:size], capacity}, receive: ring{buffer[size:], capacity}}, nil
 }
 
+// openRings returns registered rings. The registration's device handle exists
+// only in the registrar process; see registrar_windows.go.
 func openRings(path string, capacity uint32) (_ *rings, err error) {
 	r, err := allocateRings(capacity)
 	if err != nil {
@@ -126,41 +166,54 @@ func openRings(path string, capacity uint32) (_ *rings, err error) {
 			err = errors.Join(err, r.close())
 		}
 	}()
-	r.readEvent, err = windows.CreateEvent(nil, 0, 0, nil)
+	if err = r.createEvents(); err != nil {
+		return nil, err
+	}
+	g, err := startRegistrar(path, r)
 	if err != nil {
 		return nil, err
 	}
-	r.readOwner = winhandle.Open(r.readEvent, "Wintun read event open")
-	r.writeEvent, err = windows.CreateEvent(nil, 0, 0, nil)
-	if err != nil {
-		return nil, err
-	}
-	r.writeOwner = winhandle.Open(r.writeEvent, "Wintun write event open")
-	p, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	r.device, err = windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, 0, 0)
-	if err != nil {
-		r.device = 0
-		return nil, err
-	}
-	r.deviceOwner = winhandle.OpenDriverHandle(r.device, "Wintun ring device open")
-	desc := registration{
-		Send:    ringRegistration{uint32(len(r.send.bytes)), &r.send.bytes[0], r.readHandle()},
-		Receive: ringRegistration{uint32(len(r.receive.bytes)), &r.receive.bytes[0], r.writeHandle()},
-	}
-	var returned uint32
-	err = windows.DeviceIoControl(r.deviceOwner.Handle("Wintun ring registration"), registerRingsIOCTL, (*byte)(unsafe.Pointer(&desc)), uint32(unsafe.Sizeof(desc)), nil, 0, &returned, nil)
-	if err != nil {
-		return nil, fmt.Errorf("register Wintun rings: %w", err)
-	}
-	r.registered = true
+	r.owner = g
 	return r, nil
+}
+
+func (r *rings) createEvents() error {
+	h, err := windows.CreateEvent(nil, 0, 0, nil)
+	if err != nil {
+		return err
+	}
+	r.readEvent, r.readOwner = h, winhandle.Open(h, "Wintun read event open")
+	h, err = windows.CreateEvent(nil, 0, 0, nil)
+	if err != nil {
+		return err
+	}
+	r.writeEvent, r.writeOwner = h, winhandle.Open(h, "Wintun write event open")
+	return nil
 }
 
 func (r *rings) close() error {
 	return r.closeWith(windows.CloseHandle)
+}
+
+// released reports both driver release markers: Receive.Head, then Send.Tail.
+func (r *rings) released() bool {
+	return r.send.load(4) == ^uint32(0) && r.receive.load(0) == ^uint32(0)
+}
+
+func (r *rings) exited() windows.Handle {
+	if r.owner == nil {
+		return 0
+	}
+	return r.owner.exited()
+}
+
+func (r *rings) ownerExited(timeout time.Duration) bool {
+	h := r.exited()
+	if h == 0 {
+		return false
+	}
+	result, err := windows.WaitForSingleObject(h, uint32(timeout/time.Millisecond))
+	return err == nil && result == windows.WAIT_OBJECT_0
 }
 
 func (r *rings) readHandle() windows.Handle {
@@ -179,7 +232,7 @@ func (r *rings) writeHandle() windows.Handle {
 
 func (r *rings) awaitRelease() bool {
 	deadline := winclock.Now() + 250*time.Millisecond
-	for r.send.load(4) != ^uint32(0) {
+	for !r.released() {
 		if winclock.Now() >= deadline {
 			return false
 		}
@@ -190,48 +243,18 @@ func (r *rings) awaitRelease() bool {
 
 // closeWith is also the fault-injection boundary for failed CloseHandle calls.
 // A close attempt consumes ownership even on error. Never retry a handle value.
+// Every value closed here is owned only by this process: the driver can force
+// close the registration's device handle, and that handle is never here.
 func (r *rings) closeWith(closeHandle func(windows.Handle) error) error {
 	if r.closed {
 		return nil
 	}
 	r.closed = true
 	var err error
-	h := r.device
-	r.device = 0
-	closedDevice := false
-	released := !r.registered || r.send.load(4) == ^uint32(0)
-	if r.registered && !released && r.receive.load(0) == ^uint32(0) {
-		// PnP closes the handle BEFORE Receive.Head, then publishes Send.Tail.
-		// Wait for that second marker. If it never comes, ownership is ambiguous:
-		// retain the allocation instead of closing a possibly recycled number.
-		started := winclock.Now()
-		released = r.awaitRelease()
-		r.closeProfile.DriverWaitNanos += uint64(winclock.Since(started))
-	} else if h != 0 && (!r.registered || !released) {
-		started := winclock.Now()
-		closedDevice = true
-		if r.deviceOwner.IsZero() {
-			err = closeHandle(h) // Injected synthetic close, not a native open.
-		} else {
-			err = r.deviceOwner.Close("Wintun ring device close", closeHandle)
-		}
-		r.closeProfile.DeviceNanos = uint64(winclock.Since(started))
-		if r.registered {
-			started = winclock.Now()
-			released = r.awaitRelease()
-			r.closeProfile.DriverWaitNanos += uint64(winclock.Since(started))
-			if released && errors.Is(err, windows.ERROR_INVALID_HANDLE) {
-				err = nil // PnP completed our close and published its final marker.
-			}
-		}
-	}
-	if !released {
-		err = errors.Join(err, errRingsRetained)
-	}
-	if !closedDevice && !r.deviceOwner.IsZero() {
-		// The driver's removal protocol closes this handle before publishing
-		// the ring markers. End our reference without closing its recycled value.
-		r.deviceOwner.DriverReleased("Wintun driver removal observed")
+	retain := false
+	if owner := r.owner; owner != nil {
+		r.owner = nil
+		retain, err = owner.end(r, closeHandle)
 	}
 	started := winclock.Now()
 	for _, event := range []struct {
@@ -249,12 +272,20 @@ func (r *rings) closeWith(closeHandle func(windows.Handle) error) error {
 		}
 	}
 	r.closeProfile.EventsNanos = uint64(winclock.Since(started))
-	if released && r.allocation != 0 {
-		started = winclock.Now()
-		err = errors.Join(err, windows.VirtualFree(r.allocation, 0, windows.MEM_RELEASE))
-		r.closeProfile.MemoryNanos = uint64(winclock.Since(started))
+	started = winclock.Now()
+	if retain {
+		err = errors.Join(err, errRingsRetained) // The view intentionally lives until exit.
+	} else if r.view != 0 {
+		// The driver locked the registrar's view of these pages, never this one,
+		// so unmapping here cannot free memory the driver may still write.
+		err = errors.Join(err, windows.UnmapViewOfFile(r.view))
 	}
-	r.allocation = 0 // Unreleased native pages intentionally live until exit.
+	r.view = 0
+	if !r.section.IsZero() {
+		err = errors.Join(err, r.section.Close("Wintun ring section close", closeHandle))
+		r.section = winhandle.Owner{}
+	}
+	r.closeProfile.MemoryNanos = uint64(winclock.Since(started))
 	r.send.bytes, r.receive.bytes = nil, nil
 	return err
 }

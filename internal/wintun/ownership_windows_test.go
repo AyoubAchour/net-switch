@@ -125,92 +125,207 @@ func TestRingHandleProtectionProbe(t *testing.T) {
 }
 
 // Wintun 0.14.1 PnP removal closes the registered handle before it writes
-// either ring marker. This injects that close, plus another owner receiving
-// the same number, after closeWith has checked the markers and before its
-// own native close.
+// either ring marker. The legacy subtests are the negative control: they
+// inject that close, plus another owner receiving the same number, after the
+// former in-process close checked the markers and before its native close, and
+// require the race to damage (or the tripwire to stop) the witnessed
+// replacement. The production subtests apply the same injection to the
+// registrar teardown, which must close only objects it owns.
 func TestRingRemovalBetweenMarkerCheckAndClose(t *testing.T) {
 	for _, tracked := range []bool{false, true} {
-		t.Run(fmt.Sprintf("tracked_replacement=%v", tracked), func(t *testing.T) {
-			runtime.LockOSThread()
-			defer runtime.UnlockOSThread()
-			r, err := allocateRings(MinCapacity)
-			must(t, err)
-			allocation := r.allocation
-			defer windows.VirtualFree(allocation, 0, windows.MEM_RELEASE)
-			device := testEvent(t)
-			deviceWitness := witness(t, device)
-			defer windows.CloseHandle(deviceWitness)
-			r.device, r.registered = device, true
-			r.deviceOwner = winhandle.OpenDriverHandle(device, "test Wintun device")
-			var replacement windows.Handle
-			var replacementWitness windows.Handle
-			defer func() {
-				if replacementWitness != 0 {
-					windows.CloseHandle(replacementWitness)
-				}
-			}()
-			var replacementOwner winhandle.Owner
-			var driverErr error
-			attempts := 0
-			inject := func(h windows.Handle) error {
-				if h == device {
-					driverErr = windows.CloseHandle(h) // TunDispatchPnp's ObCloseHandle(UserMode).
-					if driverErr == nil {
-						replacement, attempts = reuseValue(t, h)
-						if replacement != 0 {
-							replacementWitness = witness(t, replacement)
-						}
-						if replacement != 0 && tracked {
-							replacementOwner = winhandle.Open(replacement, "test replacement owner")
-						}
-					}
-				}
-				return windows.CloseHandle(h)
-			}
-			var violation any
-			func() {
-				defer func() { violation = recover() }()
-				err = r.closeWith(inject)
-			}()
-			// No driver exists here and neither marker is published. closeWith
-			// retains these pages; the fixture owns their deferred release.
-			report(t, map[string]any{"test": "removal_between_marker_check_and_close", "arch": runtime.GOARCH,
-				"tracked": tracked, "handlecheck": winhandle.Enabled, "driver_close_error": errText(driverErr),
-				"reuse_attempts": attempts, "replacement": replacement != 0,
-				"replacement_same_object": replacement != 0 && sameObject(replacement, replacementWitness),
-				"violation":               fmt.Sprint(violation), "close_error": errText(err)})
-			if violation != nil {
-				if replacement != 0 && sameObject(replacement, replacementWitness) {
-					if replacementOwner.IsZero() {
-						windows.CloseHandle(replacement)
-					} else {
-						replacementOwner.HandleClose("test replacement after violation")
-					}
-				}
-				if !strings.Contains(fmt.Sprint(violation), "WINDOWS HANDLE OWNERSHIP VIOLATION") {
-					panic(violation)
-				}
-				t.Fatalf("tripwire stopped closing a replaced device number: %v", violation)
-			}
-			if replacement == 0 && driverErr == nil {
-				t.Fatal("the injected removal never had its handle number reused; the race was not exercised")
-			}
-			if replacement != 0 {
-				if !sameObject(replacement, replacementWitness) {
-					t.Fatal("replacement handle no longer names its original object; a later reuse cannot rescue the check")
-				}
-				if err := windows.SetEvent(replacement); err != nil {
-					t.Fatalf("closed another owner's handle that reused the device number: %v", err)
-				}
-				if tracked {
-					must(t, replacementOwner.HandleClose("test replacement close"))
-				} else {
-					must(t, windows.CloseHandle(replacement))
-				}
-			}
-			if sameObject(device, deviceWitness) {
-				t.Fatal("the device handle was never closed")
-			}
+		t.Run(fmt.Sprintf("legacy_in_process/tracked_replacement=%v", tracked), func(t *testing.T) {
+			legacyCloseWindow(t, tracked)
 		})
+	}
+	for _, markers := range []string{"before", "during", "missing"} {
+		t.Run("production_registrar/markers="+markers, func(t *testing.T) {
+			productionCloseWindow(t, markers)
+		})
+	}
+}
+
+func legacyCloseWindow(t *testing.T, tracked bool) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	r, err := allocateRings(MinCapacity)
+	must(t, err)
+	view := r.view
+	// No driver exists and no marker is published: the legacy close retains
+	// this view. The fixture owns its deferred release.
+	defer windows.UnmapViewOfFile(view)
+	device := testEvent(t)
+	deviceWitness := witness(t, device)
+	defer windows.CloseHandle(deviceWitness)
+	r.owner = &inProcessOwner{device: device, registered: true,
+		deviceOwner: winhandle.OpenDriverHandle(device, "test Wintun device")}
+	var replacement windows.Handle
+	var replacementWitness windows.Handle
+	defer func() {
+		if replacementWitness != 0 {
+			windows.CloseHandle(replacementWitness)
+		}
+	}()
+	var replacementOwner winhandle.Owner
+	var driverErr error
+	attempts := 0
+	inject := func(h windows.Handle) error {
+		if h == device {
+			driverErr = windows.CloseHandle(h) // TunDispatchPnp's ObCloseHandle(UserMode).
+			if driverErr == nil {
+				replacement, attempts = reuseValue(t, h)
+				if replacement != 0 {
+					replacementWitness = witness(t, replacement)
+				}
+				if replacement != 0 && tracked {
+					replacementOwner = winhandle.Open(replacement, "test replacement owner")
+				}
+			}
+		}
+		return windows.CloseHandle(h)
+	}
+	var violation any
+	func() {
+		defer func() { violation = recover() }()
+		err = r.closeWith(inject)
+	}()
+	if violation != nil && !r.section.IsZero() {
+		// The tripwire stopped closeWith before its memory phase.
+		r.section.HandleClose("test section after violation")
+	}
+	survived := replacement != 0 && sameObject(replacement, replacementWitness)
+	tripwire := violation != nil && strings.Contains(fmt.Sprint(violation), "WINDOWS HANDLE OWNERSHIP VIOLATION")
+	report(t, map[string]any{"test": "removal_between_marker_check_and_close", "arch": runtime.GOARCH,
+		"owner": "legacy_in_process", "tracked": tracked, "handlecheck": winhandle.Enabled,
+		"driver_close_error": errText(driverErr), "reuse_attempts": attempts, "replacement": replacement != 0,
+		"replacement_survived": survived, "tripwire": tripwire, "violation": fmt.Sprint(violation), "close_error": errText(err)})
+	if survived {
+		if replacementOwner.IsZero() {
+			windows.CloseHandle(replacement)
+		} else {
+			replacementOwner.HandleClose("test replacement close")
+		}
+	}
+	if violation != nil && !tripwire {
+		panic(violation)
+	}
+	if replacement == 0 {
+		t.Fatalf("the injected removal never had its handle number reused (driver close: %v); the race was not exercised", driverErr)
+	}
+	if sameObject(device, deviceWitness) {
+		t.Fatal("the device handle was never closed")
+	}
+	// The control holds only if the legacy ordering really reaches the
+	// replacement: it is destroyed, or the handlecheck tripwire stops the close.
+	if survived && !tripwire {
+		t.Fatal("negative control lost: the legacy check-to-close ordering left the replacement intact")
+	}
+}
+
+// productionCloseWindow runs the real registrar launcher, job, inheritance,
+// validation and teardown against a device-less fixture registrar. Each close
+// the teardown performs is checked against a witness of an object the rings
+// own, and its number is immediately handed to another owner, as a concurrent
+// goroutine could. The driver's removal markers are published before, during
+// or never.
+func productionCloseWindow(t *testing.T, markers string) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	previous := registrarCommand
+	registrarCommand = registrarFixtureMode
+	defer func() { registrarCommand = previous }()
+	r, err := allocateRings(MinCapacity)
+	must(t, err)
+	if err := r.createEvents(); err != nil {
+		t.Fatal(errors.Join(err, r.close()))
+	}
+	g, err := startRegistrar(`\\?\SWD#Wintun#{00000000-0000-0000-0000-000000000000}#{cac88484-7515-4c03-82e6-71a87aba61c3}`, r)
+	if err != nil {
+		t.Fatal(errors.Join(err, r.close()))
+	}
+	r.owner = g
+	owned := map[windows.Handle]windows.Handle{}
+	for _, h := range []windows.Handle{r.readHandle(), r.writeHandle(), r.section.Handle("test section witness"),
+		g.process.Handle("test process witness"), g.job.Handle("test job witness"), g.control.Handle("test control witness")} {
+		owned[h] = witness(t, h)
+	}
+	process := witness(t, g.process.Handle("test exit witness"))
+	defer windows.CloseHandle(process)
+	defer func() {
+		for _, w := range owned {
+			windows.CloseHandle(w)
+		}
+	}()
+	publish := func() {
+		r.receive.store(0, ^uint32(0))
+		r.send.store(4, ^uint32(0))
+	}
+	if markers == "before" {
+		publish()
+	}
+	type replaced struct{ value, witness windows.Handle }
+	var replacements []replaced
+	defer func() {
+		for _, p := range replacements {
+			if sameObject(p.value, p.witness) {
+				windows.CloseHandle(p.value)
+			}
+			windows.CloseHandle(p.witness)
+		}
+	}()
+	var foreign []windows.Handle
+	closes := 0
+	inject := func(h windows.Handle) error {
+		w, ok := owned[h]
+		if !ok || !sameObject(h, w) {
+			foreign = append(foreign, h)
+			return windows.ERROR_INVALID_HANDLE // refuse: never close another owner's object
+		}
+		closes++
+		if closes == 1 && markers == "during" {
+			publish()
+		}
+		err := windows.CloseHandle(h)
+		if replacement, _ := reuseValue(t, h); replacement != 0 {
+			replacements = append(replacements, replaced{replacement, witness(t, replacement)})
+		}
+		return err
+	}
+	err = r.closeWith(inject)
+	exit, _ := windows.WaitForSingleObject(process, 0)
+	var code uint32
+	windows.GetExitCodeProcess(process, &code)
+	survivors := 0
+	for _, p := range replacements {
+		if sameObject(p.value, p.witness) && windows.SetEvent(p.value) == nil {
+			survivors++
+		}
+	}
+	report(t, map[string]any{"test": "removal_between_marker_check_and_close", "arch": runtime.GOARCH,
+		"owner": "production_registrar", "markers": markers, "handlecheck": winhandle.Enabled,
+		"owned": len(owned), "closes": closes, "foreign_closes": len(foreign), "replacements": len(replacements),
+		"replacements_survived": survivors, "registrar_exited": exit == windows.WAIT_OBJECT_0, "registrar_exit_code": code,
+		"close_error": errText(err)})
+	if len(foreign) != 0 {
+		t.Fatalf("teardown tried to close %d values it did not own: %v", len(foreign), foreign)
+	}
+	if closes != len(owned) {
+		t.Fatalf("teardown closed %d of its %d owned objects", closes, len(owned))
+	}
+	if len(replacements) == 0 {
+		t.Fatal("no closed number was reused; the race was not exercised")
+	}
+	if survivors != len(replacements) {
+		t.Fatalf("teardown destroyed %d of %d replacement objects", len(replacements)-survivors, len(replacements))
+	}
+	if exit != windows.WAIT_OBJECT_0 || code != 0 {
+		t.Fatalf("fixture registrar did not exit cleanly on its stop request: wait=%d code=%#x", exit, code)
+	}
+	switch markers {
+	case "missing":
+		if !errors.Is(err, errRegistrationHeld) || errors.Is(err, errRegistrarAlive) {
+			t.Fatalf("missing driver markers were not reported: %v", err)
+		}
+	default:
+		must(t, err)
 	}
 }

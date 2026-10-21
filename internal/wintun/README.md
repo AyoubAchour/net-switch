@@ -5,7 +5,7 @@ management. `Create` owns an adapter; `Open` borrows one after checking its GUID
 The engine configures addresses, interface MTUs and routes separately. TestISP
 can use the same package with a different name and GUID.
 
-`StartSession` registers two rings in one VirtualAlloc region with the driver. Each ring
+`StartSession` registers two rings in one unnamed, pagefile-backed section. Each ring
 has a 12-byte header, a power-of-two capacity (128 KiB–64 MiB), and 65536 bytes
 of wrap space. A packet has a four-byte length and four-byte alignment. Go's
 sequentially consistent atomics cover publication and consumption on x64 and
@@ -28,14 +28,47 @@ registration-lock conflict retries with bounded backoff. Recovery failures are
 terminal. Adapter removal returns `ErrAdapterRemoved`, logs once and does not
 count as failed recovery. Events are bounded hints; counters are authoritative.
 
-Close wakes readers, waits for the kernel to unregister its memory descriptors,
-then releases events and native memory. Closing the owning adapter also calls
-the DLL's adapter removal. PnP removal makes the 0.14.1 driver close the device
-handle itself before writing Receive.Head and then Send.Tail. Write-side
-disconnection waits up to 250 ms for that final marker and never closes an
-ambiguous handle number. Every close attempt consumes our ownership, even on
-failure. Registered memory is freed only after Send.Tail becomes MAXULONG;
-otherwise it remains allocated until process exit, without a Go Pinner finalizer.
+## Registration owner
+
+During removal the 0.14.1 driver itself closes the registering handle to its
+device, by numeric value in the holding process, before writing
+Receive.Head and then Send.Tail. A process that also opens and closes other
+handles cannot prove which object such a value names at that moment. A forced
+hosted reproduction showed the former in-process close destroying another
+owner's object that had received the same number; that ordering now survives
+only as a test-only negative control and comparison baseline.
+
+So the engine never holds a device handle. `StartSession` starts a **registrar**:
+the same executable in the hidden `RegistrarMode`, created suspended, assigned
+to its own unnamed kill-on-close job, then resumed. Exactly five handles are
+inherited through an explicit list: the control pipe (stdin), the reply pipe
+(stdout/stderr), the section and the two ring events. No kernel object is
+named. The engine passes the device interface path it already verified against
+the adapter GUID, so the registrar loads no SetupAPI. The registrar refuses to
+run unless both standard handles are pipes, the configuration matches, the path
+is a Wintun interface, and the inherited handles are a `Section` and two
+`Event`s. It maps its own view, opens the device once, registers that view and
+replies with its PID and footprint. It then waits for the control pipe's EOF.
+It never closes, reuses or touches the device value: process teardown owns it.
+
+Only the engine holds the job handle, so an engine crash kills the registrar,
+and the driver's handle-close cleanup releases the rings. A registrar that ends
+for any reason wakes the reader through its process handle; the session is
+then lost through the same `ErrAdapterRemoved` path as removal (joined with
+`ErrRegistrarExited`), never a recovery failure. Corruption recovery retires the
+registrar and starts a new one. Every engine program that starts sessions
+dispatches `RegistrarMode` first: the engine, TestISP and this package's tests.
+The registrar runs with `GOMAXPROCS=1`, `GOGC=50` and `GOMEMLIMIT=8MiB`.
+`Stats.Registrar` reports its start time, private bytes, heap, stacks and handles.
+
+Close wakes readers, closes the control pipe and waits up to 2 s for the
+registrar to exit (then terminates its job and waits up to 5 s), then requires
+both release markers within 250 ms. Only then are its events closed and this
+process's view unmapped. The driver locked the registrar's view, never the
+engine's, so unmapping the engine view cannot free memory the driver may still
+write. Every value the engine closes is one it alone owns. Every close attempt
+consumes our ownership, even on failure. Closing the owning adapter also calls
+the DLL's adapter removal.
 Process death makes the driver unregister its rings;
 the service manager calls `RecoverAfterCrash` with the journaled name and GUID
 under its ownership lock, as in system design section 2. Hosted tests confirmed
@@ -195,6 +228,19 @@ cannot overwrite it before detection. Removal runs
 with a busy reader and writer; close-failure tests force GC with retained memory.
 Crash cleanup runs in a fresh process, asserts the phantom existed, and removes
 it without loading the DLL.
+
+Registrar tests: `TestRingRemovalBetweenMarkerCheckAndClose` keeps the legacy
+ordering as a negative control (it must destroy the witnessed replacement, or
+the handlecheck tripwire must stop it) and applies the same injection to the
+production teardown with a device-less fixture registrar, which must close
+only its own objects. `TestRegistrarRefusesWithoutInheritedCapabilities` needs
+no adapter. Hosted: `TestWintunRegistrarSession` (8 MiB rings; no non-pipe file
+handle added to the engine, including the DLL's adapter creation),
+`TestWintunRegistrarLoss` (registrar termination, job termination,
+query-remove, creator death; a parked reader with no write traffic must wake and
+32 unrelated engine events must survive) and `TestWintunRegistrarEngineCrash`.
+`NETSWITCH_WINTUN_REFERENCE=inprocess` runs the unchanged performance gate
+against the test-only in-process registration.
 
 - [Windows high-resolution timing](https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps)
 - [Process handle snapshot ABI reference](https://github.com/winsiderss/phnt/blob/master/ntpsapi.h)

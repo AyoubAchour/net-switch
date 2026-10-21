@@ -173,7 +173,13 @@ func startIO(t *testing.T, a *Adapter, mode string) batchIO {
 	if mode == "dll" {
 		return startDLL(t, a)
 	}
-	s, err := a.StartSession()
+	start := a.StartSession // "ours": the production registrar path
+	if mode == "inprocess" {
+		start = a.startInProcessSession // test-only former baseline
+	} else if mode != "ours" {
+		t.Fatalf("unknown session mode %q", mode)
+	}
+	s, err := start()
 	must(t, err)
 	return s
 }

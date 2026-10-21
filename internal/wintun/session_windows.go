@@ -45,6 +45,7 @@ type Stats struct {
 	OversizedPackets uint64
 	CloseNanos       uint64
 	CloseDetails     CloseDetails
+	Registrar        RegistrarStats
 }
 
 // Events are advisory and bounded. Stats remain authoritative if a caller
@@ -68,6 +69,9 @@ type Session struct {
 	stop, stopped          chan struct{}
 	repair                 chan error
 	events                 chan Event
+	open                   func() (*rings, error)
+	registrars             atomic.Uint64
+	registrar              atomic.Pointer[RegistrarStats]
 
 	read, written, dropped            atomic.Uint64
 	corruptions, recoveries, failures atomic.Uint64
@@ -79,7 +83,15 @@ type Session struct {
 	closeDetails                      atomic.Pointer[CloseDetails]
 }
 
+// StartSession registers rings through a registrar process. There is no
+// in-process registration path in production code, and no fallback to one.
 func (a *Adapter) StartSession() (*Session, error) {
+	return a.startSession(func() (*rings, error) { return openRings(a.devicePath, a.config.Capacity) })
+}
+
+// startSession takes the ring opener for both the first registration and
+// recovery. Only tests pass anything other than StartSession's opener.
+func (a *Adapter) startSession(open func() (*rings, error)) (*Session, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.handle == 0 {
@@ -92,7 +104,7 @@ func (a *Adapter) StartSession() (*Session, error) {
 			return nil, fmt.Errorf("adapter already has a session")
 		}
 	}
-	r, err := openRings(a.devicePath, a.config.Capacity)
+	r, err := open()
 	if err != nil {
 		return nil, err
 	}
@@ -105,8 +117,9 @@ func (a *Adapter) StartSession() (*Session, error) {
 	if err != nil {
 		return nil, errors.Join(err, wakeOwner.HandleClose("Wintun session setup failure close"), r.close())
 	}
-	s := &Session{adapter: a, rings: r, wake: wake, cancelEvent: cancelEvent, changed: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}), repair: make(chan error, 1), events: make(chan Event, 8)}
+	s := &Session{adapter: a, rings: r, wake: wake, cancelEvent: cancelEvent, changed: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}), repair: make(chan error, 1), events: make(chan Event, 8), open: open}
 	s.wakeOwner, s.cancelOwner = wakeOwner, winhandle.Open(cancelEvent, "Wintun cancellation event open")
+	s.noteRings(r)
 	a.session = s
 	go s.maintain()
 	return s, nil
@@ -144,7 +157,17 @@ func (s *Session) Stats() Stats {
 	if details := s.closeDetails.Load(); details != nil {
 		result.CloseDetails = *details
 	}
+	if registrar := s.registrar.Load(); registrar != nil {
+		result.Registrar = *registrar
+	}
 	return result
+}
+
+func (s *Session) noteRings(r *rings) {
+	if g, ok := r.owner.(*registrar); ok {
+		stats := g.stats(s.registrars.Add(1))
+		s.registrar.Store(&stats)
+	}
 }
 
 // fail is called with mu held. Recovery runs elsewhere so neither a full ring
@@ -220,17 +243,29 @@ func (s *Session) maintain() {
 				s.mu.Unlock()
 				continue
 			}
+			// The driver publishes the markers during handle rundown, shortly
+			// before the registrar's process is signalled. Classify a marker the
+			// reader saw first by that exit; during removal the registrar lives.
+			if errors.Is(cause, ErrDisconnected) && !errors.Is(cause, ErrRegistrarExited) && s.rings.ownerExited(100*time.Millisecond) {
+				cause = errors.Join(ErrRegistrarExited, cause)
+			}
 			err := s.rings.close()
 			s.rings = nil
 			removed := errors.Is(cause, ErrDisconnected)
 			if !removed && err == nil {
 				s.event("recovering", cause)
-				s.rings, err = reopenRings(s.stop, func() (*rings, error) {
-					return openRings(s.adapter.devicePath, s.adapter.config.Capacity)
-				})
+				s.rings, err = reopenRings(s.stop, s.open)
 				removed = errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) || errors.Is(err, windows.ERROR_DEVICE_NOT_CONNECTED)
+				if err == nil {
+					s.noteRings(s.rings)
+				}
 			}
-			if removed {
+			if removed && errors.Is(cause, ErrRegistrarExited) {
+				// Same session loss as removal; the adapter itself may remain.
+				s.err = errors.Join(ErrAdapterRemoved, cause, err)
+				s.event("removed", s.err)
+				slog.Warn("Wintun registrar exited; session lost", "adapter", s.adapter.config.Name, "error", s.err)
+			} else if removed {
 				s.err = errors.Join(ErrAdapterRemoved, err)
 				s.event("removed", s.err)
 				slog.Info("Wintun adapter removed", "adapter", s.adapter.config.Name, "error", err)
@@ -411,13 +446,26 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 			}()
 		}
 		handles := []windows.Handle{s.wakeOwner.Handle("Wintun read wake"), s.rings.readHandle()}
+		// A registrar that ends for any reason (crash, job termination) loses
+		// the registration; wake now instead of waiting for later traffic.
+		exited := -1
+		if h := s.rings.exited(); h != 0 {
+			exited = len(handles)
+			handles = append(handles, h)
+		}
 		if cancelEvent != 0 {
 			handles = append(handles, s.cancelOwner.Handle("Wintun cancellation wait"))
 		}
 		s.readWaits.Add(1)
-		_, err = windows.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		event, err := windows.WaitForMultipleObjects(handles, false, windows.INFINITE)
 		if err == nil {
 			s.readWakes.Add(1)
+		}
+		if err == nil && exited >= 0 && event == windows.WAIT_OBJECT_0+uint32(exited) {
+			var code uint32
+			windows.GetExitCodeProcess(handles[exited], &code)
+			// Its process handle stays signalled; recovery state stops this loop.
+			s.fail(fmt.Errorf("%w with code %#x", ErrRegistrarExited, code))
 		}
 		s.mu.RUnlock()
 		if err != nil {

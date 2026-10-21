@@ -13,10 +13,16 @@ import (
 
 	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
 	winplatform "github.com/AyoubAchour/net-switch/internal/platform/windows"
+	"github.com/AyoubAchour/net-switch/internal/wintun"
 	"golang.org/x/sys/windows"
 )
 
 func run(args []string) error {
+	// The engine's own Wintun registrar child. It refuses to run without the
+	// pipes, section and events its parent session passes it.
+	if len(args) == 1 && args[0] == wintun.RegistrarMode {
+		os.Exit(wintun.RunRegistrar())
+	}
 	if len(args) > 0 && args[0] == "heap-capture" {
 		return winengine.CaptureHeapCommand(args[1:])
 	}

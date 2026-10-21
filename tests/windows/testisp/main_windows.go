@@ -23,10 +23,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/wintun"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 func main() {
+	// Before the hosted-runner check: the registrar child gets a minimal
+	// environment and only needs its parent session's inherited handles.
+	if len(os.Args) == 2 && os.Args[1] == wintun.RegistrarMode {
+		os.Exit(wintun.RunRegistrar())
+	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.LUTC)
 	if len(os.Args) == 2 && os.Args[1] == "version" {
 		fmt.Printf("TestISP 1 (%s %s/%s)\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)

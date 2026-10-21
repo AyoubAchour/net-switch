@@ -166,6 +166,8 @@ func TestRingRecoveryInjectionSurvivesPublication(t *testing.T) {
 	}
 }
 
+// The next three tests cover the test-only in-process baseline owner, which
+// must stay faithful to the former production close for comparisons.
 func TestRingDisconnectedHandleIsNotClosedTwice(t *testing.T) {
 	// Simulate the numeric device handle having been reused for a new event
 	// after the driver closed the original and published its disconnect marker.
@@ -178,7 +180,7 @@ func TestRingDisconnectedHandleIsNotClosedTwice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.device, r.registered = reused, true
+	r.owner = &inProcessOwner{device: reused, registered: true}
 	r.send.store(4, ^uint32(0))
 	if err := r.close(); err != nil {
 		t.Fatal(err)
@@ -194,7 +196,7 @@ func TestRingWriteSideRemovalWaitsForTail(t *testing.T) {
 	reused, err := windows.CreateEvent(nil, 0, 0, nil)
 	must(t, err)
 	defer windows.CloseHandle(reused)
-	r.device, r.registered = reused, true
+	r.owner = &inProcessOwner{device: reused, registered: true}
 	r.receive.store(0, ^uint32(0))
 	send := r.send
 	done := make(chan struct{})
@@ -214,21 +216,28 @@ func TestRingFailedCloseSurvivesGC(t *testing.T) {
 		t.Run(fmt.Sprint(writeDisconnected), func(t *testing.T) {
 			r, err := allocateRings(MinCapacity)
 			must(t, err)
-			address := r.allocation
+			address := r.view
 			// There is no driver in this unit test; release the deliberately
-			// retained pages ourselves after checking their post-GC lifetime.
-			defer windows.VirtualFree(address, 0, windows.MEM_RELEASE)
-			r.device, r.registered = windows.Handle(123), true
+			// retained view ourselves after checking its post-GC lifetime.
+			defer windows.UnmapViewOfFile(address)
+			owner := &inProcessOwner{device: windows.Handle(123), registered: true}
+			r.owner = owner
 			if writeDisconnected {
 				r.receive.store(0, ^uint32(0))
 			}
 			calls := 0
-			closeHandle := func(windows.Handle) error { calls++; return windows.ERROR_INVALID_HANDLE }
+			closeHandle := func(h windows.Handle) error {
+				if h != 123 {
+					return windows.CloseHandle(h) // the section is a real owned handle
+				}
+				calls++
+				return windows.ERROR_INVALID_HANDLE
+			}
 			err = r.closeWith(closeHandle)
 			if !errors.Is(err, errRingsRetained) || (!writeDisconnected && !errors.Is(err, windows.ERROR_INVALID_HANDLE)) {
 				t.Fatal(err)
 			}
-			if r.device != 0 {
+			if owner.device != 0 {
 				t.Fatal("retained stale handle")
 			}
 			must(t, r.closeWith(closeHandle))
