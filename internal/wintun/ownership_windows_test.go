@@ -3,11 +3,16 @@
 package wintun
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
@@ -134,7 +139,27 @@ func TestRingHandleProtectionProbe(t *testing.T) {
 func TestRingRemovalBetweenMarkerCheckAndClose(t *testing.T) {
 	for _, tracked := range []bool{false, true} {
 		t.Run(fmt.Sprintf("legacy_in_process/tracked_replacement=%v", tracked), func(t *testing.T) {
-			legacyCloseWindow(t, tracked)
+			// The old close intentionally destroys another owner's object. Its
+			// tracking record must remain live to expose that defect; resetting
+			// the registry would conceal it. Give each negative control its own
+			// process so the deliberate corruption cannot poison later tests.
+			if os.Getenv("NETSWITCH_WINTUN_LEGACY_CLOSE_CHILD") == "1" {
+				legacyCloseWindow(t, tracked)
+				return
+			}
+			exe, err := os.Executable()
+			must(t, err)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			pattern := fmt.Sprintf("^TestRingRemovalBetweenMarkerCheckAndClose$/^legacy_in_process$/^tracked_replacement=%v$", tracked)
+			cmd := exec.CommandContext(ctx, exe, "-test.v", "-test.run="+pattern)
+			cmd.Env = append(os.Environ(), "NETSWITCH_WINTUN_LEGACY_CLOSE_CHILD=1")
+			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+			output, err := cmd.CombinedOutput()
+			t.Logf("isolated legacy negative control:\n%s", output)
+			if err != nil || !strings.Contains(string(output), `"owner":"legacy_in_process"`) || !strings.Contains(string(output), "--- PASS: TestRingRemovalBetweenMarkerCheckAndClose/legacy_in_process/tracked_replacement=") {
+				t.Fatalf("legacy negative control did not complete its witness assertions: %v", err)
+			}
 		})
 	}
 	for _, markers := range []string{"before", "during", "missing"} {
