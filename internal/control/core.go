@@ -750,21 +750,19 @@ func (c *Core) Start(ctx context.Context) error {
 }
 func (c *Core) Routing(ctx context.Context, on bool) error {
 	ctx = c.ctx
-	c.mu.Lock()
-	c.wanted = on
-	if on {
-		c.retryAttempts = 0
-		c.retryAt = 0
-		c.failureTimes = nil
-	}
-	c.mu.Unlock()
+	// Turning routing on is a fresh intent with a full retry budget.
+	next := routingIntent{wanted: on, fresh: on}
 	if c.op.ServiceMode {
 		c.applyMu.Lock()
-		err := c.persistJournal()
+		err := c.commitIntent(next)
 		c.applyMu.Unlock()
 		if err != nil {
 			return err
 		}
+	} else {
+		c.mu.Lock()
+		c.publishIntentLocked(next)
+		c.mu.Unlock()
 	}
 	if c.op.ServiceMode && !on {
 		c.checkpoint("control-after-stop-intent")
@@ -795,16 +793,12 @@ func (c *Core) SignIn(ctx context.Context) error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
 	c.mu.Lock()
-	if !c.wanted {
-		// A new sign-in after logoff is a fresh routing intent. Repeated
-		// handshakes while that intent is already on keep its retry budget.
-		c.retryAttempts = 0
-		c.retryAt = 0
-		c.failureTimes = nil
-	}
-	c.wanted = true
+	// A new sign-in after logoff is a fresh routing intent. Repeated
+	// handshakes while that intent is already on keep its retry budget.
+	// applyMu keeps wanted from changing before the commit.
+	fresh := !c.wanted
 	c.mu.Unlock()
-	return c.persistJournal()
+	return c.commitIntent(routingIntent{wanted: true, fresh: fresh})
 }
 
 // ResumeRouting preserves the crash budget when SCM restarts Control.
@@ -1094,17 +1088,20 @@ func (c *Core) SaveUsage() error {
 	return settings.AtomicWrite(filepath.Join(c.op.UserDir, "usage.json"), b, c.op.IO)
 }
 func (c *Core) Shutdown(ctx context.Context) error {
+	// quitting holds off new starts while the stop intent is written. It is
+	// not intent: a refused write puts it back and leaves wanted untouched.
 	c.mu.Lock()
+	wasQuitting := c.quitting
 	c.quitting = true
-	if c.op.ServiceMode {
-		c.wanted = false
-	}
 	c.mu.Unlock()
 	if c.op.ServiceMode {
 		c.applyMu.Lock()
-		err := c.persistJournal()
+		err := c.commitIntent(routingIntent{wanted: false})
 		c.applyMu.Unlock()
 		if err != nil {
+			c.mu.Lock()
+			c.quitting = wasQuitting
+			c.mu.Unlock()
 			return err
 		}
 	}

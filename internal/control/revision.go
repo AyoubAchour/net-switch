@@ -32,6 +32,38 @@ type closureRetry struct {
 // milestone-one best-effort behavior. Services commit the complete desired
 // state before engine mutations and recover from that authoritative record.
 func (c *Core) persistJournal() error {
+	return c.writeJournal(nil)
+}
+
+// routingIntent is a change to the owner's routing choice. A fresh intent
+// also clears the retry backoff and the crash latch.
+type routingIntent struct{ wanted, fresh bool }
+
+// commitIntent writes the owner's routing choice before publishing it. The
+// supervisor reads wanted and the retry schedule without applyMu, so a choice
+// the journal refused must never appear in memory: it would start routing
+// once writes recover, after the owner was told the request failed. Callers
+// hold applyMu, which orders every journal write.
+func (c *Core) commitIntent(next routingIntent) error {
+	if err := c.writeJournal(&next); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.publishIntentLocked(next)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Core) publishIntentLocked(next routingIntent) {
+	c.wanted = next.wanted
+	if next.fresh {
+		c.retryAttempts, c.retryAt, c.failureTimes = 0, 0, nil
+	}
+}
+
+// writeJournal records the current state. A pending intent stands in for the
+// published one, so the record matches what commitIntent will publish.
+func (c *Core) writeJournal(pending *routingIntent) error {
 	if c.op.Journal == nil {
 		return nil
 	}
@@ -45,6 +77,12 @@ func (c *Core) persistJournal() error {
 	}
 	failures := append([]int64{}, c.failureTimes...)
 	wanted := c.wanted
+	if pending != nil {
+		wanted = pending.wanted
+		if pending.fresh {
+			failures = []int64{}
+		}
+	}
 	failureID := c.lastFailureID
 	c.mu.Unlock()
 	record := map[string]any{
