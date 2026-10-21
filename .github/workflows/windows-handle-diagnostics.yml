@@ -73,11 +73,13 @@ jobs:
         env:
           NETSWITCH_HANDLE_CLOSE_TRACE: '1'
         run: |
-          for ($round = 1; $round -le 3; $round++) {
-            Write-Output "CLOSE TRACE PACKAGE ROUND $round"
-            go test -count=1 -v -failfast -timeout=15m ./internal/engine/windows
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
+          # The defect has shown inside this one test (rounds 44 and 97 of
+          # 128) even when it ran second in the package; repeat it alone.
+          go test -count=30 -v -failfast -timeout=20m -run '^TestNativeTransferWithoutReadinessKeepsEndpoint$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Write-Output "CLOSE TRACE PACKAGE ROUND"
+          go test -count=1 -v -failfast -timeout=15m ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove native poll lifetime, callback collection and heap publication
         if: ${{ !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && !endsWith(github.ref, '-closetrace') }}
         run: |
