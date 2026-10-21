@@ -2,7 +2,7 @@ name: Windows handle diagnostics
 
 on:
   push:
-    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-section]
+    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section]
   workflow_dispatch:
     inputs:
       arch:
@@ -17,8 +17,8 @@ permissions:
 jobs:
   handles:
     if: ${{ !endsWith(github.ref, '-section') }}
-    name: Native handle diagnostics / ${{ inputs.arch || 'x64' }}
-    runs-on: ${{ inputs.arch == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    name: Native handle diagnostics / ${{ (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64')) && 'ARM64' || 'x64' }}
+    runs-on: ${{ (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64')) && 'windows-11-arm' || 'windows-latest' }}
     timeout-minutes: 15
     env:
       GOTOOLCHAIN: local
@@ -38,22 +38,22 @@ jobs:
           go-version-file: go.mod
           cache: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: ${{ endsWith(github.ref, '-socket-trace') }}
+        if: ${{ contains(github.ref, '-socket-trace') }}
         with:
           node-version: '24.21.0'
           package-manager-cache: false
       - name: Prove native poll lifetime, callback collection and heap publication
-        if: ${{ !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-socket-trace') }}
+        if: ${{ !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') }}
         run: |
           go test -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check the same ownership boundaries under race
-        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-socket-trace') && inputs.arch != 'ARM64' }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && inputs.arch != 'ARM64' }}
         run: |
           go test -race -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check shared UDP destroy and setup-refusal accounting
-        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-socket-trace') }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') }}
         run: |
           go test -count=1 -v -run '^Test(DestroyFinishesAcrossFailedSetupCachePublication|FailedUDPSetupRetiresBeforeRefusalAndBoundsNegativeCache)$' ./internal/engine/udp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -73,7 +73,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build the opt-in OS socket trace fixture
         id: socket-build
-        if: ${{ endsWith(github.ref, '-socket-trace') }}
+        if: ${{ contains(github.ref, '-socket-trace') }}
         run: |
           go test -c -o dist/windows-test/socket-diagnostics.exe ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -88,7 +88,7 @@ jobs:
         if: ${{ always() && steps.socket-build.outcome == 'success' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: socket-trace-${{ inputs.arch || 'x64' }}
+          name: socket-trace-${{ (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64')) && 'ARM64' || 'x64' }}
           path: dist/windows-test/socket-diagnostics.exe
           if-no-files-found: error
           retention-days: 14
