@@ -439,7 +439,18 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
           return stats.flows.UDP <= before.flows.UDP - 512 && stats;
         }, 'UDP native ports and sessions released by the one-second reconciliation', 3000);
         const preReopen = othersBeforeReopen(await engineStats().catch(() => ({})));
-        const returned = await clients[0].call('open', { ...target, count: 512 });
+        // Like TCP recovery, release 512 and reopen 256. Reopening all 512
+        // put the pool back exactly at the OS limit, so any transient socket
+        // elsewhere failed one reopen (ARM64 run 39614744644: app-side
+        // ENOBUFS with no other process grown). With half reopened, the pool
+        // must have room for every reopen and its engine socket; that is
+        // read here and required, so a later failure is the engine's.
+        const reopen = 256, family = target.host.includes(':') ? 'ipv6' : 'ipv4';
+        const poolBefore = await udpPortSpaceAtFailure().catch((error) => ({ error: String(error) }));
+        const availableBefore = poolBefore.families?.find((item) => item.family === family)?.available;
+        console.log(`WINDOWS UDP RECOVERY POOL ${JSON.stringify({ released: 512, reopen, availableBefore, state: poolBefore.state })}`);
+        assert(availableBefore >= 2 * reopen, `Released UDP ports did not return to the pool: ${availableBefore} free before reopening ${reopen}`);
+        const returned = await clients[0].call('open', { ...target, count: reopen });
         const failures = returned.attempts.filter((item) => item.Error);
         if (failures.length) {
           // Evidence only: who held the dynamic ports when a re-open failed
@@ -457,8 +468,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
             if (clientPIDs.has(group.pid)) owners.clients += dynamic;
             else owners.byPID[group.pid] = (owners.byPID[group.pid] ?? 0) + dynamic;
           }
-          const verdict = udpRecoveryVerdict({ failures, portSpace, othersAfter: owners.byPID, othersBefore: preReopen, enginePID,
-            family: target.host.includes(':') ? 'ipv6' : 'ipv4' });
+          const verdict = udpRecoveryVerdict({ failures, portSpace, othersAfter: owners.byPID, othersBefore: preReopen, enginePID, family });
           evidence.recoveryFailure = { failures, portSpace, dynamicPortOwners: owners, nonClientPortsBeforeReopen: preReopen, engineUDP: stats.flows?.UDP,
             heldBeforeReopen: held, socketExhaustions: stats.udpSocketExhaustions, enginePID, ...verdict };
           console.log(`WINDOWS UDP RECOVERY FAILURE ${JSON.stringify(evidence.recoveryFailure)}`);
@@ -468,10 +478,10 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
             assert.equal(failures.length, 0, `UDP capacity did not recover on first attempts: ${JSON.stringify(failures)}`);
           }
         }
-        console.log(`WINDOWS UDP RECOVERY VERDICT ${JSON.stringify({ reopened: 512 - failures.length, failed: failures.length,
+        console.log(`WINDOWS UDP RECOVERY VERDICT ${JSON.stringify({ reopened: reopen - failures.length, failed: failures.length,
           oldVerdict: failures.length ? 'fail' : 'pass', newVerdict: failures.length ? evidence.recoveryFailure.newVerdict : 'pass' })}`);
-        held += 512 - failures.length;
-        evidence.recovery = { released, reconciled, returned, ms: performance.now() - started, verified: await verify('after-recovery') };
+        held += reopen - failures.length;
+        evidence.recovery = { released, reconciled, returned, reopen, availableBefore, ms: performance.now() - started, verified: await verify('after-recovery') };
       },
     };
   } catch (error) {
