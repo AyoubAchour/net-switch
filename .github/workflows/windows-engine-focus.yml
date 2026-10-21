@@ -2,7 +2,7 @@ name: Windows engine focus
 
 on:
   push:
-    branches: [engine/windows-platform-ci, engine/windows-platform-ci-x64, engine/windows-platform-native, engine/windows-platform-native-x64, engine/windows-platform-native-ports, engine/windows-platform-lifecycle, engine/windows-platform-udp, engine/windows-platform-capacity]
+    branches: [engine/windows-platform-ci, engine/windows-platform-ci-x64, engine/windows-platform-native, engine/windows-platform-native-x64, engine/windows-platform-native-ports, engine/windows-platform-lifecycle, engine/windows-platform-udp, engine/windows-platform-capacity, engine/windows-platform-health]
   workflow_dispatch:
     inputs:
       arch:
@@ -19,7 +19,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  harness-health:
+    if: ${{ endsWith(github.ref, '-health') }}
+    name: Acceptance controller health ordering
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Exercise the actual driver functions with controlled I/O ordering
+        run: node --test test/windows-driver-health.test.mjs
   engine:
+    if: ${{ !endsWith(github.ref, '-health') }}
     name: Windows engine / ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'x64' || 'ARM64' }}
     runs-on: ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'windows-latest' || 'windows-11-arm' }}
     timeout-minutes: 40
