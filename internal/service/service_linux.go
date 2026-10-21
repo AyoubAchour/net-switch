@@ -70,6 +70,31 @@ func RequestRestart(ctx context.Context, name string) error {
 	return systemctl(ctx, "kill", "--kill-whom=main", "--signal=SIGUSR1", unit(name))
 }
 
+// ClearRestartDelay forgets the unit's earlier automatic restarts once it has
+// run healthy, and returns how many there were. systemd's restart counter
+// drives RestartSteps, and a long healthy run never decays it: it resets only
+// on reset-failed or a stop without restart. Without this, four crashes over
+// a machine's lifetime would make every later crash wait RestartMaxDelaySec,
+// longer than the engine lease. reset-failed also works on a running unit.
+func ClearRestartDelay(ctx context.Context, name string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--property=NRestarts", "--value", unit(name))
+	cmd.Env = ChildEnvironment()
+	b, err := cmd.Output()
+	if err != nil {
+		return 0, fmt.Errorf("read restart counter: %w", err)
+	}
+	restarts, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return 0, fmt.Errorf("read restart counter %q: %w", b, err)
+	}
+	if restarts == 0 {
+		return 0, nil
+	}
+	return restarts, systemctl(ctx, "reset-failed", unit(name))
+}
+
 // Connecting to netswitch.socket activates Control without granting the
 // desktop root or polkit privileges.
 func Activate(ctx context.Context) error {

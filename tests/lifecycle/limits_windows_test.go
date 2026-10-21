@@ -12,3 +12,6 @@ func enrollmentRestarts(t *testing.T, _ context.Context, _ actor, _ string) {
 func controlCrashStorm(t *testing.T, _ context.Context, _ actor, _ string) {
 	t.Skip("systemd crash recovery")
 }
+func controlRestartDelayDecays(t *testing.T, _ context.Context, _ actor, _ string) {
+	t.Skip("systemd restart counter; the Windows service manager resets its failure count after 600 s")
+}

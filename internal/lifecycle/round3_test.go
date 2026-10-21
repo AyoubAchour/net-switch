@@ -54,7 +54,7 @@ func TestProductionSessionLoopDispatchesStandbyCycles(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	defer func() { cancel(); <-done }()
-	events := make(chan service.Event)
+	events := service.NewEventQueue()
 	power := make(chan bool, 1)
 	r := NewRemote(ctx, func(string) {})
 	go func() {
@@ -63,7 +63,7 @@ func TestProductionSessionLoopDispatchesStandbyCycles(t *testing.T) {
 	}()
 	for cycle := range 7 {
 		for _, paused := range []bool{true, false} {
-			events <- service.Event{Suspend: paused, Resume: !paused}
+			events.Publish(service.Event{Suspend: paused, Resume: !paused})
 			select {
 			case got := <-power:
 				if got != paused {
@@ -80,17 +80,14 @@ type resumeCounter int
 
 func (r *resumeCounter) Resume() { *r++ }
 
+// The Engine reads no sessions (it no longer holds SeTcbPrivilege), so every
+// resume gets the grace; Control alone decides whether routing continues.
 func TestEngineResumeOnlyControlsGrace(t *testing.T) {
 	var calls resumeCounter
-	for _, present := range []bool{false, true} {
-		resumeEngine(&calls, "owner", func(string, uint32) (bool, error) { return present, nil }, func(string) {})
-	}
-	if calls != 1 {
-		t.Fatal("engine must skip grace without an owner, not decide to stop routing", calls)
-	}
-	resumeEngine(&calls, "owner", func(string, uint32) (bool, error) { return false, errors.New("lookup failed") }, func(string) {})
+	resumeEngine(&calls, func(string) {})
+	resumeEngine(&calls, func(string) {})
 	if calls != 2 {
-		t.Fatal("unknown session state removed resume protection")
+		t.Fatal("resume did not grant lease renewal grace", calls)
 	}
 }
 
@@ -146,7 +143,7 @@ func TestSessionQueryFailurePreservesRouting(t *testing.T) {
 		default:
 		}
 	}
-	events := make(chan service.Event)
+	events := service.NewEventQueue()
 	query := func(owner string, excluded uint32) (bool, error) {
 		state := phase.Load()
 		if queries.Add(1) == 1 {
@@ -171,7 +168,7 @@ func TestSessionQueryFailurePreservesRouting(t *testing.T) {
 	}()
 	<-ready
 	phase.Store(1)
-	events <- service.Event{Logoff: true, Session: 7}
+	events.Publish(service.Event{Logoff: true, Session: 7})
 	select {
 	case <-logged:
 	case <-time.After(3 * time.Second):

@@ -12,6 +12,10 @@ import (
 
 var ErrPeer = errors.New("IPC peer could not be authenticated")
 
+// LowIntegrity prefixes the user SID of a Windows TCP client running below
+// medium integrity. The result never equals an owner or service identity.
+const LowIntegrity = "low-integrity:"
+
 // Observable proof that the real NPFS closed-before-accept path ran.
 var EarlyDisconnects atomic.Uint64
 

@@ -382,10 +382,17 @@ func TestRealServices(t *testing.T) {
 			if realWTSOwner == "" {
 				t.Fatal("real WTS probe returned no owner SID")
 			}
-			if err := lifecycle.Save(filepath.Join(data, "fault-real-session.json"), realWTSOwner); err != nil {
-				t.Fatal(err)
-			}
 		})
+		// The installed Control queries real WTS for these users under its
+		// own service token. The other actor has a real logon but no WTS
+		// session, so it is the "signed out" case and needs no runner user.
+		probed := []string{other.id()}
+		if realWTSOwner != "" {
+			probed = append(probed, realWTSOwner)
+		}
+		if err := lifecycle.Save(filepath.Join(data, "fault-real-session.json"), probed); err != nil {
+			t.Fatal(err)
+		}
 	}
 	adapter := fixture(t, dir)
 	t.Run("held-hostile-store-cannot-block-install", func(t *testing.T) { blockedStoreInstallation(t, dir, adapter, other) })
@@ -419,23 +426,49 @@ func TestRealServices(t *testing.T) {
 	if err := service.Start(ctx, service.Control); err != nil {
 		t.Fatal(err)
 	}
-	if realWTSOwner != "" {
+	if runtime.GOOS == "windows" {
 		t.Run("real-WTS-query-inside-Control", func(t *testing.T) {
 			var result struct {
 				PID     uint32 `json:"pid"`
-				Owner   string `json:"owner"`
-				Present bool   `json:"present"`
-				Error   string `json:"error"`
+				Results []struct {
+					Owner   string `json:"owner"`
+					Present bool   `json:"present"`
+					Error   string `json:"error"`
+				} `json:"results"`
+				Sessions string `json:"sessions"`
 			}
 			wait(t, "real WTS result from installed Control", 10*time.Second, func() bool {
 				b, err := os.ReadFile(filepath.Join(data, "fault-real-session-result.json"))
 				return err == nil && json.Unmarshal(b, &result) == nil
 			})
+			t.Logf("REAL_WTS_SESSIONS %s", result.Sessions)
 			status, err := service.Query(service.Control)
-			if err != nil || result.PID != status.PID || result.Owner != realWTSOwner || !result.Present || result.Error != "" {
-				t.Fatalf("real WTS service-token probe: result=%+v service=%+v error=%v", result, status, err)
+			if err != nil || result.PID != status.PID {
+				t.Fatalf("real WTS probe did not come from the installed Control: result=%+v service=%+v error=%v", result, status, err)
 			}
-			t.Logf("REAL_WTS_SERVICE pid=%d owner=%s present=true", result.PID, result.Owner)
+			checked := map[string]bool{}
+			for _, r := range result.Results {
+				switch r.Owner {
+				case other.id():
+					// Every session kind on the runner must resolve; an
+					// error here means sign-out would never clear routing.
+					if r.Present || r.Error != "" {
+						t.Fatalf("signed-out user was not cleanly absent: %+v; sessions: %s", r, result.Sessions)
+					}
+					t.Logf("REAL_WTS_ABSENT pid=%d user=%s present=false error=none", result.PID, r.Owner)
+				case realWTSOwner:
+					if !r.Present || r.Error != "" {
+						t.Fatalf("signed-in user was not present: %+v; sessions: %s", r, result.Sessions)
+					}
+					t.Logf("REAL_WTS_SERVICE pid=%d owner=%s present=true", result.PID, r.Owner)
+				default:
+					t.Fatalf("unexpected probe result %+v", r)
+				}
+				checked[r.Owner] = true
+			}
+			if !checked[other.id()] || realWTSOwner != "" && !checked[realWTSOwner] {
+				t.Fatalf("probe results incomplete: %+v", result)
+			}
 		})
 	}
 	t.Run("pending-enrollment-and-sign-in", func(t *testing.T) {
@@ -1165,6 +1198,7 @@ func TestRealServices(t *testing.T) {
 	})
 	t.Run("control-crash-storm-keeps-socket-and-recovers", func(t *testing.T) { controlCrashStorm(t, ctx, owner, echo) })
 	t.Run("enrollment-restarts-do-not-backoff", func(t *testing.T) { enrollmentRestarts(t, ctx, owner, echo) })
+	t.Run("control-restart-delay-decays-after-healthy-run", func(t *testing.T) { controlRestartDelayDecays(t, ctx, owner, echo) })
 	t.Run("CLI-activates-stopped-Control", func(t *testing.T) { cliActivation(t, owner) })
 	t.Run("real-tun-fail-open", func(t *testing.T) { tunServices(t, config, owner) })
 }

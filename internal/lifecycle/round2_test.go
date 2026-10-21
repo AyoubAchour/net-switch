@@ -200,7 +200,7 @@ func TestOwnerLogoffAndHybridResumeWaitForSignIn(t *testing.T) {
 		{service.Event{Resume: true}, true},
 	} {
 		ctx, cancel := context.WithCancel(context.Background())
-		events := make(chan service.Event)
+		events := service.NewEventQueue()
 		ready, done, stopped := make(chan struct{}), make(chan struct{}), make(chan struct{})
 		var queries, stops atomic.Int32
 		r := NewRemote(ctx, func(string) {})
@@ -223,7 +223,7 @@ func TestOwnerLogoffAndHybridResumeWaitForSignIn(t *testing.T) {
 			}, func(string) {}, query)
 		}()
 		<-ready
-		events <- test.event
+		events.Publish(test.event)
 		if test.present {
 			deadline := time.Now().Add(3 * time.Second)
 			for queries.Load() < 2 && time.Now().Before(deadline) {

@@ -17,9 +17,11 @@ import (
 )
 
 type handler struct {
+	name  string
 	run   Program
 	err   error
-	power func(chan Event) (func(), error)
+	power func(*EventQueue) (func(), error)
+	warn  func(string, error)
 }
 
 func ReportError(name string, err error) {
@@ -31,17 +33,30 @@ func ReportError(name string, err error) {
 	fmt.Fprintln(os.Stderr, name+":", err)
 }
 
+func reportWarning(name string, err error) {
+	log, openErr := eventlog.Open(name)
+	if openErr == nil {
+		defer log.Close()
+		_ = log.Warning(2, err.Error())
+	}
+	fmt.Fprintln(os.Stderr, name+":", err)
+}
+
 func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates chan<- svc.Status) (bool, uint32) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	ctx, events := eventContext(ctx)
 	if h.power != nil {
-		unregister, err := h.power(events)
-		if err != nil {
-			h.err = err
-			return true, 1
+		// The callback adds Modern Standby transitions. Without it the
+		// service manager's power events still arrive, so routing is not
+		// worth losing over the missing subscription.
+		if unregister, err := h.power(events); err != nil {
+			if h.warn != nil {
+				h.warn(h.name, fmt.Errorf("power notification subscription failed; using service manager power events only: %w", err))
+			}
+		} else {
+			defer unregister()
 		}
-		defer unregister()
 	}
 	status := svc.Status{State: svc.StartPending, WaitHint: 30000}
 	updates <- status
@@ -71,10 +86,7 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 				publishPowerEvent(events, request.EventType)
 			case svc.SessionChange:
 				// EventData belongs to a callback that has already returned.
-				select {
-				case events <- Event{SessionChanged: true, Logoff: request.EventType == 6}:
-				default:
-				}
+				events.Publish(Event{SessionChanged: true, Logoff: request.EventType == 6})
 			case svc.Interrogate:
 				updates <- status
 			}
@@ -108,7 +120,7 @@ func Run(name string, program Program) error {
 	if !ok {
 		return errors.New("service mode must be started by the Windows service manager")
 	}
-	h := &handler{run: program, power: registerPowerEvents}
+	h := &handler{name: name, run: program, power: registerPowerEvents, warn: reportWarning}
 	if err := svc.Run(name, h); err != nil {
 		return err
 	}
@@ -182,6 +194,10 @@ func Start(ctx context.Context, name string) error {
 	}
 }
 func Activate(ctx context.Context) error { return Start(ctx, Control) }
+
+// ClearRestartDelay has nothing to do on Windows: the service manager resets
+// the failure count itself after the 600-second reset period set at install.
+func ClearRestartDelay(context.Context, string) (int, error) { return 0, nil }
 func Stop(ctx context.Context, name string) error {
 	s, err := open(name, windows.SERVICE_STOP|windows.SERVICE_QUERY_STATUS)
 	if err != nil {
@@ -271,12 +287,15 @@ func Install(c Config) error {
 		}
 		if err == nil {
 			// Keep the small set required by worker token creation and native
-			// reads. Only Engine can load the signed TUN driver.
+			// reads. Only Control reads owner sessions (WTSQueryUserToken needs
+			// SeTcbPrivilege); only Engine can load the signed TUN driver.
 			// MULTI_SZ needs embedded zeroes; build it explicitly.
 			var names []uint16
-			privileges := []string{"SeChangeNotifyPrivilege", "SeImpersonatePrivilege", "SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege", "SeTcbPrivilege"}
+			privileges := []string{"SeChangeNotifyPrivilege", "SeImpersonatePrivilege", "SeAssignPrimaryTokenPrivilege", "SeIncreaseQuotaPrivilege"}
 			if entry.name == Engine {
 				privileges = append(privileges, "SeLoadDriverPrivilege")
+			} else {
+				privileges = append(privileges, "SeTcbPrivilege")
 			}
 			for _, name := range privileges {
 				part, _ := windows.UTF16FromString(name)

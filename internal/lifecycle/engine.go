@@ -104,22 +104,20 @@ func EngineService(ctx context.Context, ready func(), c Config, log func(string)
 	defer watch.Stop()
 	var result error
 	var health healthWatch
-	suspended := false
+	var pause powerPause
+	events := service.Events(ctx)
 running:
 	for {
 		select {
-		case event := <-service.Events(ctx):
-			if event.Suspend || event.Resume {
-				health = healthWatch{}
-				suspended = event.Suspend
-			}
-			if event.Resume {
-				owner, err := LoadOwner(c.Data)
-				if err != nil {
-					log("resume owner lookup: " + err.Error())
-					continue
+		case <-events.Ready():
+			for _, event := range events.Take() {
+				if event.Suspend || event.Resume {
+					health = healthWatch{}
+					pause.set(event.Suspend, time.Now())
 				}
-				resumeEngine(server, owner.User, sessionPresence(c.Data), log)
+				if event.Resume {
+					resumeEngine(server, log)
+				}
 			}
 		case <-ctx.Done():
 			break running
@@ -128,6 +126,12 @@ running:
 		case result = <-accepted:
 			break running
 		case <-watch.C:
+			if pause.expired(time.Now()) {
+				// A lost resume must not switch the hung-engine watchdog
+				// off for good. See maxPowerPause.
+				log("no resume notification within two minutes of suspend; health checks resume")
+				health = healthWatch{}
+			}
 			if server.Expired() {
 				result = errors.New("control lease expired")
 				break running
@@ -139,7 +143,7 @@ running:
 				}
 				break running
 			}
-			if !suspended && runtime.adapter.Snapshot().Status == "on" {
+			if !pause.on && runtime.adapter.Snapshot().Status == "on" {
 				if err := health.check(runCtx, runtime.adapter, time.Now); err != nil {
 					runtime.adapter.Fail(err)
 					result = err
@@ -199,15 +203,11 @@ running:
 	return result
 }
 
-func resumeEngine(server interface{ Resume() }, owner string, present func(string, uint32) (bool, error), log func(string)) {
-	signedIn, err := present(owner, ^uint32(0))
-	if err != nil {
-		log("resume owner session check: " + err.Error())
-	}
-	if err == nil && !signedIn {
-		log("resume without an owner session; Control decides routing intent")
-		return
-	}
+// resumeEngine gives an attached engine ten seconds to receive a renewal
+// after wake. It never decides routing intent: Control checks the owner's
+// session after resume and stops routing itself if they signed out, so the
+// Engine reads no sessions and does not hold SeTcbPrivilege.
+func resumeEngine(server interface{ Resume() }, log func(string)) {
 	server.Resume()
 	log("power resume: ten-second lease renewal grace")
 }

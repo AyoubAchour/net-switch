@@ -8,9 +8,24 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// TCPOwner asks sock_diag for the exact client tuple. No /proc scan or PID
-// inference is involved; the kernel supplies the socket's owning UID.
-func TCPOwner(client, server *net.TCPAddr) (string, error) {
+// TCPOwners asks sock_diag for each exact client tuple. Each request names
+// the full tuple, so the kernel looks the socket up directly instead of
+// dumping the table, and the cost does not grow with other users' sockets.
+func TCPOwners(tuples []TCPTuple) []TCPIdentity {
+	out := make([]TCPIdentity, len(tuples))
+	for i, t := range tuples {
+		if t.Client == nil || t.Server == nil {
+			out[i].Err = ErrPeer
+			continue
+		}
+		out[i].User, out[i].Err = tcpTupleOwner(t.Client, t.Server)
+	}
+	return out
+}
+
+// tcpTupleOwner involves no /proc scan or PID inference; the kernel supplies
+// the socket's owning UID.
+func tcpTupleOwner(client, server *net.TCPAddr) (string, error) {
 	if client.IP.To4() == nil || server.IP.To4() == nil || !client.IP.IsLoopback() || !server.IP.IsLoopback() {
 		return "", ErrPeer
 	}

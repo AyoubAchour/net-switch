@@ -111,18 +111,14 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 			l.pending = 0
 		}
 	}()
-	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	op, err := newPipeOp()
 	if err != nil {
 		return nil, err
 	}
-	defer windows.CloseHandle(event)
-	over := windows.Overlapped{HEvent: event}
-	err = windows.ConnectNamedPipe(h, &over)
+	defer op.close()
+	err = windows.ConnectNamedPipe(h, &op.over)
 	if err == windows.ERROR_IO_PENDING {
-		stop := context.AfterFunc(ctx, func() { _ = windows.CancelIoEx(h, &over) })
-		var transferred uint32
-		err = windows.GetOverlappedResult(h, &over, &transferred, true)
-		stop()
+		_, err = op.wait(ctx, h)
 	}
 	// A client can connect and close between CreateNamedPipe and this wait.
 	// Replace the listener while the old instance still protects its name.
@@ -182,31 +178,70 @@ func (l *listener) Accept(ctx context.Context) (*Conn, error) {
 func readPipePreamble(ctx context.Context, h windows.Handle) error {
 	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	op, err := newPipeOp()
 	if err != nil {
 		return err
 	}
-	defer windows.CloseHandle(event)
-	over := windows.Overlapped{HEvent: event}
-	var data [1]byte
-	var read uint32
-	err = windows.ReadFile(h, data[:], &read, &over)
-	if err == windows.ERROR_IO_PENDING {
-		finished := make(chan struct{})
-		stop := context.AfterFunc(ctx, func() { _ = windows.CancelIoEx(h, &over); close(finished) })
-		err = windows.GetOverlappedResult(h, &over, &read, true)
-		if !stop() {
-			<-finished
-		}
+	defer op.close()
+	// The byte count of an asynchronous read is only valid from the
+	// completed OVERLAPPED, so the call itself gets no count pointer.
+	err = windows.ReadFile(h, op.data[:], nil, &op.over)
+	if err != nil && err != windows.ERROR_IO_PENDING {
+		return err
 	}
+	read, err := op.wait(ctx, h)
 	if err != nil {
 		return err
 	}
-	if read != 1 || data[0] != 0 {
+	if read != 1 || op.data[0] != 0 {
 		return fmt.Errorf("invalid pipe identity handshake")
 	}
 	return nil
 }
+
+// pipeOp is everything the kernel may write during one overlapped pipe call:
+// the OVERLAPPED and the read buffer. Go can move a goroutine's stack while
+// such a call is pending, so both live in one heap object that the waiting
+// code and the cancel path reference until the call has completed or been
+// cancelled and drained.
+type pipeOp struct {
+	over windows.Overlapped
+	data [1]byte
+}
+
+// newPipeOp is not inlined so the object always escapes to the heap, whatever
+// the caller does with it. go build -gcflags=-m reports "new(pipeOp) escapes".
+//
+//go:noinline
+func newPipeOp() (*pipeOp, error) {
+	op := new(pipeOp)
+	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return nil, err
+	}
+	op.over.HEvent = event
+	return op, nil
+}
+
+// wait blocks until the call issued with op on h completes. Cancelling ctx
+// cancels only that call, and the wait still lasts until the kernel reports
+// it finished, so op is never released while the kernel holds its address.
+func (op *pipeOp) wait(ctx context.Context, h windows.Handle) (uint32, error) {
+	finished := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(finished)
+		_ = windows.CancelIoEx(h, &op.over)
+	})
+	var transferred uint32
+	err := windows.GetOverlappedResult(h, &op.over, &transferred, true)
+	if !stop() {
+		<-finished
+	}
+	runtime.KeepAlive(op)
+	return transferred, err
+}
+
+func (op *pipeOp) close() { windows.CloseHandle(op.over.HEvent) }
 
 var impersonatePipe = windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateNamedPipeClient")
 
@@ -230,43 +265,66 @@ func pipePeer(pipe windows.Handle, pid uint32) (peer Peer, err error) {
 		return Peer{}, err
 	}
 	defer token.Close()
-	var integrity [64]uint64
-	var size uint32
-	if err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&integrity[0])), uint32(unsafe.Sizeof(integrity)), &size); err != nil {
+	medium, err := mediumIntegrity(token)
+	if err != nil {
 		return Peer{}, err
 	}
-	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&integrity[0]))
-	if label.Label.Sid == nil || label.Label.Sid.SubAuthorityCount() == 0 || label.Label.Sid.SubAuthority(uint32(label.Label.Sid.SubAuthorityCount()-1)) < 0x2000 {
+	if !medium {
 		return Peer{}, fmt.Errorf("pipe client integrity is below medium")
 	}
 	return tokenPeer(token, pid)
 }
 
-func processPeer(pid uint32) (Peer, error) {
-	return processPeerAt(pid, 0)
+// mediumIntegrity reports whether the token's mandatory label is at least
+// medium. The owner's sandboxed or low-integrity processes stay below it.
+func mediumIntegrity(token windows.Token) (bool, error) {
+	var integrity [64]uint64
+	var size uint32
+	if err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&integrity[0])), uint32(unsafe.Sizeof(integrity)), &size); err != nil {
+		return false, err
+	}
+	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&integrity[0]))
+	sid := label.Label.Sid
+	if sid == nil || sid.SubAuthorityCount() == 0 {
+		return false, nil
+	}
+	return sid.SubAuthority(uint32(sid.SubAuthorityCount()-1)) >= 0x2000, nil // SECURITY_MANDATORY_MEDIUM_RID
 }
 
+// processPeerAt identifies a TCP client from its owning process. A process
+// created after the connection reused the PID and is rejected. A process
+// below medium integrity keeps its user SID behind LowIntegrity, so it is
+// never mistaken for the owner, exactly as the pipes refuse it.
 func processPeerAt(pid uint32, connectionCreated uint64) (Peer, error) {
 	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
 		return Peer{}, err
 	}
 	defer windows.CloseHandle(p)
-	if connectionCreated != 0 {
-		var created, exited, kernel, user windows.Filetime
-		if err := windows.GetProcessTimes(p, &created, &exited, &kernel, &user); err != nil {
-			return Peer{}, err
-		}
-		if uint64(created.HighDateTime)<<32|uint64(created.LowDateTime) > connectionCreated {
-			return Peer{}, ErrPeer
-		}
+	var created, exited, kernel, user windows.Filetime
+	if err := windows.GetProcessTimes(p, &created, &exited, &kernel, &user); err != nil {
+		return Peer{}, err
+	}
+	if connectionCreated == 0 || uint64(created.HighDateTime)<<32|uint64(created.LowDateTime) > connectionCreated {
+		return Peer{}, ErrPeer
 	}
 	var token windows.Token
 	if err := windows.OpenProcessToken(p, windows.TOKEN_QUERY, &token); err != nil {
 		return Peer{}, err
 	}
 	defer token.Close()
-	return tokenPeer(token, pid)
+	peer, err := tokenPeer(token, pid)
+	if err != nil {
+		return Peer{}, err
+	}
+	medium, err := mediumIntegrity(token)
+	if err != nil {
+		return Peer{}, err
+	}
+	if !medium {
+		peer.User = LowIntegrity + peer.User
+	}
+	return peer, nil
 }
 
 func tokenPeer(token windows.Token, pid uint32) (Peer, error) {

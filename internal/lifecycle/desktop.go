@@ -156,19 +156,24 @@ func Desktop(ctx context.Context, show bool) error {
 			signCtx, stop := context.WithTimeout(ctx, 40*time.Second)
 			err = rpc.Call(signCtx, map[string]any{"method": "signin"}, nil)
 			stop()
-			if err != nil {
+			var rejected rpcError
+			switch {
+			case errors.As(err, &rejected):
+				// Control answered and refused. Exiting would leave the
+				// owner without Net Switch for the whole session, so stay
+				// connected, show why, and let them act from the window.
+				showRejectedSignIn(fmt.Sprintf("Net Switch did not turn routing on at sign-in: %v", err))
+				first = false
+			case err != nil:
 				rpc.Close()
-				var rejected rpcError
-				if errors.As(err, &rejected) {
-					return fmt.Errorf("sign-in was rejected: %w", err)
-				}
 				if localipc.Pause(ctx, backoff) != nil {
 					return nil
 				}
 				continue
+			default:
+				first = false
+				registered = true
 			}
-			first = false
-			registered = true
 		}
 		err = desktopSession(ctx, rpc, show, registered)
 		rpc.Close()
@@ -183,6 +188,13 @@ func Desktop(ctx context.Context, show bool) error {
 	}
 	return nil
 }
+
+// showRejectedSignIn reports a refused sign-in without blocking the desktop.
+var showRejectedSignIn = func(message string) {
+	fmt.Println(message)
+	go func() { _ = ShowStatus(message) }()
+}
+
 func desktopSession(ctx context.Context, rpc *RPC, show, registered bool) error {
 	var session struct {
 		Token string `json:"token"`

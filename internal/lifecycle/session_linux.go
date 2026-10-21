@@ -4,7 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -18,7 +22,7 @@ func ownerSessionPresent(owner string, _ uint32) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	bus, err := dbus.SystemBus()
+	bus, err := logindBus(2 * time.Second)
 	if err != nil {
 		return false, err
 	}
@@ -27,6 +31,51 @@ func ownerSessionPresent(owner string, _ uint32) (bool, error) {
 	return logindOwnerPresent(ctx, uint32(uid), func(path dbus.ObjectPath) dbus.BusObject {
 		return bus.Object("org.freedesktop.login1", path)
 	})
+}
+
+func describeSessions() string { return "" }
+
+var systemBus struct {
+	sync.Mutex
+	conn *dbus.Conn
+}
+
+// logindBus returns the shared system bus connection, reconnecting after a
+// failure. godbus's own connect has no deadline for dialling, authentication
+// or Hello, so a stuck bus would stall the session loop; this one is bounded.
+func logindBus(timeout time.Duration) (*dbus.Conn, error) {
+	systemBus.Lock()
+	defer systemBus.Unlock()
+	if systemBus.conn != nil && systemBus.conn.Connected() {
+		return systemBus.conn, nil
+	}
+	path := "/run/dbus/system_bus_socket"
+	if address := os.Getenv("DBUS_SYSTEM_BUS_ADDRESS"); address != "" {
+		var ok bool
+		if path, ok = strings.CutPrefix(address, "unix:path="); !ok || strings.ContainsAny(path, ",;") {
+			return nil, fmt.Errorf("unsupported system bus address %q", address)
+		}
+	}
+	raw, err := (&net.Dialer{Timeout: timeout}).Dial("unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("connect to the system bus: %w", err)
+	}
+	socket := raw.(*net.UnixConn)
+	if err := socket.SetDeadline(time.Now().Add(timeout)); err != nil {
+		socket.Close()
+		return nil, err
+	}
+	bus, err := dbus.ConnectUnix(socket)
+	if err != nil {
+		socket.Close()
+		return nil, fmt.Errorf("authenticate to the system bus: %w", err)
+	}
+	if err := socket.SetDeadline(time.Time{}); err != nil {
+		bus.Close()
+		return nil, err
+	}
+	systemBus.conn = bus
+	return bus, nil
 }
 
 func logindOwnerPresent(ctx context.Context, uid uint32, object func(dbus.ObjectPath) dbus.BusObject) (bool, error) {

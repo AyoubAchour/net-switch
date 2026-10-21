@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 )
 
 func Hit(data, point string) {
@@ -33,6 +36,20 @@ func Hit(data, point string) {
 	select {} // the test kills this exact process after verifying the barrier
 }
 
+// RestartDecayWindow lets the hosted suite shorten how long Control must run
+// healthy before it clears its automatic restart delay.
+func RestartDecayWindow(data string) (time.Duration, bool) {
+	b, err := os.ReadFile(filepath.Join(data, "fault-restart-decay-seconds"))
+	if err != nil {
+		return 0, false
+	}
+	seconds, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || seconds <= 0 {
+		return 0, false
+	}
+	return time.Duration(seconds) * time.Second, true
+}
+
 // Hosted Windows actors have real tokens but no WTS desktop. This explicit
 // fixture substitutes only their session presence, never their IPC identity.
 func OwnerSession(data, user string) (bool, bool) {
@@ -48,9 +65,10 @@ func OwnerSession(data, user string) (bool, bool) {
 	return present, known
 }
 
-// ProbeSession exercises the real query with the installed service's token.
-// Unlike OwnerSession this observes the OS and does not inject a result.
-func ProbeSession(data string, query func(string, uint32) (bool, error)) error {
+// ProbeSession exercises the real query with the installed service's token
+// for each listed user. Unlike OwnerSession this observes the OS and does not
+// inject a result. describe records the sessions the service saw.
+func ProbeSession(data string, query func(string, uint32) (bool, error), describe func() string) error {
 	b, err := os.ReadFile(filepath.Join(data, "fault-real-session.json"))
 	if os.IsNotExist(err) {
 		return nil
@@ -58,16 +76,25 @@ func ProbeSession(data string, query func(string, uint32) (bool, error)) error {
 	if err != nil {
 		return err
 	}
-	var owner string
-	if err := json.Unmarshal(b, &owner); err != nil {
+	var users []string
+	if err := json.Unmarshal(b, &users); err != nil {
 		return err
 	}
-	present, queryErr := query(owner, ^uint32(0))
-	message := ""
-	if queryErr != nil {
-		message = queryErr.Error()
+	type result struct {
+		Owner   string `json:"owner"`
+		Present bool   `json:"present"`
+		Error   string `json:"error"`
 	}
-	b, err = json.Marshal(map[string]any{"pid": os.Getpid(), "owner": owner, "present": present, "error": message})
+	results := []result{}
+	for _, user := range users {
+		present, queryErr := query(user, ^uint32(0))
+		r := result{Owner: user, Present: present}
+		if queryErr != nil {
+			r.Error = queryErr.Error()
+		}
+		results = append(results, r)
+	}
+	b, err = json.Marshal(map[string]any{"pid": os.Getpid(), "results": results, "sessions": describe()})
 	if err != nil {
 		return err
 	}

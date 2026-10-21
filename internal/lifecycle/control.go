@@ -24,7 +24,7 @@ import (
 func ControlService(serviceCtx context.Context, ready func(), c Config, log func(string)) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := faultpoint.ProbeSession(c.Data, ownerSessionPresent); err != nil {
+	if err := faultpoint.ProbeSession(c.Data, ownerSessionPresent, describeSessions); err != nil {
 		return fmt.Errorf("hosted real-session probe: %w", err)
 	}
 	owner, err := LoadOwner(c.Data)
@@ -149,7 +149,8 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	server := &http.Server{Handler: mux, ConnContext: httpPeerContext, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 40 * time.Second, IdleTimeout: 15 * time.Second}
 	defer server.Close()
 	failures := make(chan error, 4)
-	boundedHTTP := &httpListener{Listener: listener, limits: &connectionLimits{owner: owner.User, users: map[string]int{}}, log: log}
+	boundedHTTP := newHTTPListener(listener, &connectionLimits{owner: owner.User, users: map[string]int{}}, log, nil)
+	defer boundedHTTP.Close()
 	go func() { defer crash.Recover("service HTTP"); failures <- server.Serve(boundedHTTP) }()
 	paths := []string{"desktop", "status"}
 	var listeners []localipc.Listener
@@ -194,6 +195,7 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	core.Run()
 	go runSessionEvents(ctx, service.Events(serviceCtx), owner.User, remote, core.SetPowerSuspended, func() error { return core.Routing(ctx, false) }, log, sessionPresence(c.Data))
 	ready()
+	go clearRestartDelayWhenHealthy(ctx, c.Data, log)
 	// No credential, HTTP port or session token is published to a file.
 	log(fmt.Sprintf("Control ready (PID %d); owner=%s", os.Getpid(), owner.Name))
 	alreadyStopped := false
@@ -228,6 +230,35 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	}
 	workers.Wait()
 	return err
+}
+
+// healthyRunWindow is how long Control must run before its earlier crashes
+// stop lengthening the next automatic restart.
+const healthyRunWindow = 10 * time.Minute
+
+// clearRestartDelayWhenHealthy resets the service manager's restart counter
+// once this Control has run healthy for healthyRunWindow, so a crash weeks
+// after an old crash storm restarts in one second, within the engine lease,
+// instead of after the longest step. A storm still gets growing delays: its
+// short-lived processes never reach the window.
+func clearRestartDelayWhenHealthy(ctx context.Context, data string, log func(string)) {
+	window := healthyRunWindow
+	if test, ok := faultpoint.RestartDecayWindow(data); ok {
+		window = test
+	}
+	for {
+		if localipc.Pause(ctx, window) != nil {
+			return
+		}
+		restarts, err := service.ClearRestartDelay(ctx, service.Control)
+		if err == nil {
+			if restarts != 0 {
+				log(fmt.Sprintf("healthy for %s; cleared %d earlier automatic restarts so the next crash restarts promptly", window, restarts))
+			}
+			return
+		}
+		log("could not clear the automatic restart delay; retrying: " + err.Error())
+	}
 }
 
 func Log(data, process string) func(string) {

@@ -2,53 +2,61 @@ package service
 
 import (
 	"context"
+	"errors"
 	"golang.org/x/sys/windows/svc"
 	"testing"
 	"time"
 )
 
 func TestSCMPowerResumeReachesProgram(t *testing.T) {
-	testSCMEvent(t, svc.ChangeRequest{Cmd: svc.PowerEvent, EventType: 18}, Event{Resume: true})
+	testSCMEvent(t, nil, svc.ChangeRequest{Cmd: svc.PowerEvent, EventType: 18}, Event{Resume: true})
 }
 
 func TestSCMLogoffDispatchIgnoresExpiredCallbackPointer(t *testing.T) {
-	testSCMEvent(t, svc.ChangeRequest{Cmd: svc.SessionChange, EventType: 6, EventData: 1}, Event{Logoff: true, SessionChanged: true})
+	testSCMEvent(t, nil, svc.ChangeRequest{Cmd: svc.SessionChange, EventType: 6, EventData: 1}, Event{Logoff: true, SessionChanged: true})
+}
+
+func TestFailedPowerSubscriptionFallsBackToSCMEvents(t *testing.T) {
+	var warned error
+	h := &handler{name: "test", power: func(*EventQueue) (func(), error) { return nil, errors.New("registration refused") }, warn: func(_ string, err error) { warned = err }}
+	testSCMEvent(t, h, svc.ChangeRequest{Cmd: svc.PowerEvent, EventType: 7}, Event{Resume: true})
+	if warned == nil {
+		t.Fatal("failed power subscription was not logged")
+	}
 }
 
 func TestModernStandbyCallbackCycles(t *testing.T) {
-	events := make(chan Event, 64)
+	events := NewEventQueue()
 	for range 7 {
 		publishPowerEvent(events, 4)
 		publishPowerEvent(events, 18)
 		publishPowerEvent(events, 7)
-		if e := <-events; !e.Suspend {
-			t.Fatal(e)
-		}
-		if e := <-events; !e.Resume {
-			t.Fatal(e)
-		}
-		if e := <-events; !e.Resume {
-			t.Fatal(e)
+		got := events.Take()
+		if len(got) != 2 || !got[0].Suspend || !got[1].Resume {
+			t.Fatal(got)
 		}
 	}
 }
 
-func testSCMEvent(t *testing.T, request svc.ChangeRequest, want Event) {
+func testSCMEvent(t *testing.T, h *handler, request svc.ChangeRequest, want Event) {
 	requests := make(chan svc.ChangeRequest, 1)
 	updates := make(chan svc.Status, 8)
 	observed := make(chan Event, 1)
 	done := make(chan struct{})
-	h := &handler{run: func(ctx context.Context, ready func()) error {
+	if h == nil {
+		h = &handler{}
+	}
+	h.run = func(ctx context.Context, ready func()) error {
 		ready()
 		select {
-		case e := <-Events(ctx):
-			observed <- e
+		case <-Events(ctx).Ready():
+			observed <- Events(ctx).Take()[0]
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 		<-ctx.Done()
 		return nil
-	}}
+	}
 	go func() { h.Execute(nil, requests, updates); close(done) }()
 	timer := time.NewTimer(time.Second)
 	defer timer.Stop()
@@ -68,7 +76,7 @@ func testSCMEvent(t *testing.T, request svc.ChangeRequest, want Event) {
 					t.Fatal(event)
 				}
 			case <-timer.C:
-				t.Fatal("program did not see power resume")
+				t.Fatal("program did not see the event")
 			}
 			requests <- svc.ChangeRequest{Cmd: svc.Stop}
 			select {
