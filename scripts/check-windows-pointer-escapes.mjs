@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 
 // Compiler proof complements native completion/cancellation tests. It cannot
 // prove an API's ownership contract; that audit is recorded separately.
@@ -8,31 +9,47 @@ assert.equal(process.platform, 'win32');
 const env = { ...process.env, GOTOOLCHAIN: 'local', GOFLAGS: '-mod=vendor -p=2', GOMAXPROCS: '2' };
 const version = spawnSync('go', ['version'], { env, encoding: 'utf8', windowsHide: true });
 assert.equal(version.status, 0, version.stderr);
-const build = spawnSync('go', ['build',
-  '-gcflags=github.com/AyoubAchour/net-switch/internal/...=-m', '-gcflags=internal/poll=-m',
-  './internal/engine/windows', './internal/wintun', './internal/winlock'],
-{ env, encoding: 'utf8', windowsHide: true, maxBuffer: 16 << 20 });
-assert.equal(build.status, 0, build.error?.message ?? build.stderr);
-const lines = `${build.stdout}\n${build.stderr}`.split(/\r?\n/);
+function functionRange(file, declaration) {
+  const source = readFileSync(file, 'utf8').split(/\r?\n/);
+  const starts = source.flatMap((line, index) => line.startsWith(declaration) ? [index] : []);
+  assert.equal(starts.length, 1, `Expected one declaration for ${declaration}`);
+  const start = starts[0];
+  let end = source.findIndex((line, index) => index > start && line.startsWith('func '));
+  if (end < 0) end = source.length;
+  return { file, first: start + 1, last: end };
+}
+const accept = functionRange('internal/engine/windows/pipe_windows.go', 'func (p *Pipe) Accept(');
+const watch = functionRange('internal/engine/windows/readiness_windows.go', 'func (p *readiness) watch(');
+const echo = functionRange('internal/engine/windows/dial_windows.go', 'func (d *Dialer) Echo(');
+const mtu = functionRange('internal/engine/windows/dial_windows.go', 'func (s *udpSocket) pathMTU(');
 const sites = [
-  ['pipe accept OVERLAPPED', /pipe_windows\.go:\d+:\d+: moved to heap: op$/],
-  ['TCP receive OVERLAPPED and flags owner', /readiness_windows\.go:\d+:\d+: &socketWatch\{.*escapes to heap$/],
-  ['ICMP caller request', /dial_windows\.go:\d+:\d+: leaking param: request$/],
-  ['ICMP aligned reply', /dial_windows\.go:\d+:\d+: make\(\[\]uint64,.*escapes to heap$/],
-  ['ICMP options', /dial_windows\.go:\d+:\d+: moved to heap: options$/],
-  ['ICMP IPv6 source', /dial_windows\.go:\d+:\d+: moved to heap: src$/],
-  ['ICMP IPv6 destination', /dial_windows\.go:\d+:\d+: moved to heap: dst$/],
-  ['IP Helper pointer through Go wrapper', /dial_windows\.go:\d+:\d+: moved to heap: row$/],
+  ['pipe accept OVERLAPPED', /pipe_windows\.go:\d+:\d+: moved to heap: op$/, accept],
+  ['TCP receive OVERLAPPED and flags owner', /readiness_windows\.go:\d+:\d+: &socketWatch\{.*escapes to heap$/, watch],
+  ['ICMP caller request', /dial_windows\.go:\d+:\d+: leaking param: request$/, echo],
+  ['ICMP aligned reply', /dial_windows\.go:\d+:\d+: make\(\[\]uint64,.*escapes to heap$/, echo],
+  ['ICMP options', /dial_windows\.go:\d+:\d+: moved to heap: options$/, echo],
+  ['ICMP IPv6 source', /dial_windows\.go:\d+:\d+: moved to heap: src$/, echo],
+  ['ICMP IPv6 destination', /dial_windows\.go:\d+:\d+: moved to heap: dst$/, echo],
+  ['IP Helper pointer through Go wrapper', /dial_windows\.go:\d+:\d+: moved to heap: row$/, mtu],
   ['Go file/socket OVERLAPPED operation', /fd_windows\.go:\d+:\d+: new\(operation\) escapes to heap$/],
   ['Go file/socket pinned buffers', /fd_windows\.go:\d+:\d+: leaking param content: pinPtrs$/],
 ];
-const proof = sites.map(([site, pattern]) => {
-  const evidence = lines.find((line) => pattern.test(line));
-  assert(evidence, `Missing heap proof for ${site}; inspect escape analysis before changing this assertion`);
-  // Keep the exact compiler finding without presenting successful escape
-  // diagnostics as errors to Actions' filename:line:column problem matcher.
-  const match = evidence.match(/^(.+\.go):(\d+):(\d+): (.*)$/);
-  assert(match, `Unexpected compiler diagnostic for ${site}`);
-  return { site, file: match[1], line: Number(match[2]), column: Number(match[3]), message: match[4] };
-});
-console.log(`WINDOWS POINTER ESCAPE ${JSON.stringify({ version: version.stdout.trim(), proof })}`);
+for (const tags of ['', 'netswitch_handlecheck']) {
+  const build = spawnSync('go', ['build',
+    '-gcflags=github.com/AyoubAchour/net-switch/internal/...=-m', '-gcflags=internal/poll=-m',
+    './internal/engine/windows', './internal/wintun', './internal/winlock'],
+  { env: { ...env, GOFLAGS: `${env.GOFLAGS}${tags ? ` -tags=${tags}` : ''}` },
+    encoding: 'utf8', windowsHide: true, maxBuffer: 16 << 20 });
+  assert.equal(build.status, 0, build.error?.message ?? build.stderr);
+  const lines = `${build.stdout}\n${build.stderr}`.split(/\r?\n/);
+  const proof = sites.map(([site, pattern, scope]) => {
+    const matches = lines.filter((line) => pattern.test(line))
+      .map((line) => line.match(/^(.+\.go):(\d+):(\d+): (.*)$/));
+    const match = matches.find((m) => m && (!scope || (m[1].replaceAll('\\', '/').endsWith(scope.file) &&
+      Number(m[2]) >= scope.first && Number(m[2]) <= scope.last)));
+    assert(match, `Missing heap proof for ${site} in its owning function; inspect before changing this assertion`);
+    // Avoid Actions' filename:line:column error matcher for successful proof.
+    return { site, file: match[1], line: Number(match[2]), column: Number(match[3]), message: match[4] };
+  });
+  console.log(`WINDOWS POINTER ESCAPE ${JSON.stringify({ version: version.stdout.trim(), tags: tags || 'release', proof })}`);
+}
