@@ -184,7 +184,11 @@ export async function startHarness(directory) {
     }, 'TestISP ready');
     await network('configure');
     await writeFile(path.join(dir, 'network.json'), JSON.stringify({ uplink, testisp: state }, null, 2));
+    // failure: false, true (any failure before an HTTP response or TLS error),
+    // or 'unreachable': the local TLS connect itself must be refused with
+    // WSAENETUNREACH or WSAEHOSTUNREACH, as with no default route.
     const probe = async (line, failure = false, target) => {
+      assert(failure !== 'unreachable' || target, 'Only local TLS probes report the connect phase');
       const nonce = randomBytes(16).toString('hex');
       const targetArgs = target ? ['--url', `https://${target.address}:${target.port}/?nonce=${nonce}`,
         '--ca', target.caFile, '--servername', 'netswitch.invalid'] : [];
@@ -200,6 +204,10 @@ export async function startHarness(directory) {
       }
       assert.notEqual(result.code, 0, 'Failure injection did not stop the selected path');
       assert(!/HTTP [45]\d\d|certificate|x509:/i.test(result.stderr), 'Negative path check got an HTTP response or TLS setup failure');
+      if (failure === 'unreachable') {
+        assert.match(result.stderr, /local TLS failure: endpoint=\S+; phase=connect; winsock=100(?:51|65): /,
+          'Expected the connect to fail at once as unreachable, not a timeout or a later failure');
+      }
       return result;
     };
     return { uplink, testisp: state, control, diagnosticClient: { url: state.control, token }, network, probe, close };

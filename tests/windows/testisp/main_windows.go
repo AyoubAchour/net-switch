@@ -22,6 +22,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -256,12 +257,18 @@ func probe(args []string) (probeErr error) {
 			probeErr = publicProbeFailure(*url, phase, status, verified, probeErr)
 		}
 	}()
-	transport := &http.Transport{DialContext: dialer.DialContext, TLSClientConfig: tlsConfig, DisableKeepAlives: true, Proxy: nil}
+	var connect connectTracker
+	transport := &http.Transport{DialContext: connect.dial(dialer.DialContext), TLSClientConfig: tlsConfig, DisableKeepAlives: true, Proxy: nil}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: *timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	start := time.Now()
 	response, err := client.Get(*url)
 	if err != nil {
+		var errno syscall.Errno
+		phase, errno = connect.phase()
+		if *caFile != "" {
+			return localProbeFailure(*url, phase, errno, err)
+		}
 		return err
 	}
 	defer response.Body.Close()

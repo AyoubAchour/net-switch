@@ -20,9 +20,12 @@ accepted as evidence.
   Physical failover and main-line cap exceptions retain `1.0.0.1:443`.
   Pin changes, combining and TestISP failback use local TLS through a single
   non-final destination rewrite, retaining process rules and interface binding.
-  The native bound probe must reach that exact endpoint, fail when TestISP's
-  default route is withdrawn without reaching the responder, and recover after
-  restoration. No route to the TLS target is added. Physical selection in the
+  The native probe must reach the rewrite's exact address and port, fail at
+  connect time as unreachable when TestISP's default route is withdrawn,
+  without reaching the responder, and recover after restoration. It binds the
+  source address and `IP_UNICAST_IF`, while the product binds the interface
+  only; the exact TestISP destination counts below show the engine's own flows
+  crossed TestISP. No route to the TLS target is added. Physical selection in the
   local cases proves engine binding and TestISP +0, not physical egress; the
   retained public cases cover that. The response and TestISP's packet,
   byte, connection and destination counters distinguish the two paths.

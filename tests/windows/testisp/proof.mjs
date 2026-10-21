@@ -48,7 +48,7 @@ try {
   }
   await check('withdraw TestISP default route', async () => {
     await network('withdraw');
-    const failed = await probe(testisp, true, responder);
+    const failed = await probe(testisp, 'unreachable', responder);
     const direct = await probe(uplink);
     await network('restore');
     return { failed, direct, recovered: await probe(testisp, false, responder) };

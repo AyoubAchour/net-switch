@@ -1,8 +1,8 @@
 # Control HTTPS dependency audit
 
 20 October 2026. Scope: Control's tests and an inventory of the other workflows'
-network assertions. The separate acceptance and TestISP proof suites are not
-changed here; their public egress checks need individual decisions.
+network assertions. Follow-up #53 then applied that inventory to the acceptance
+and TestISP proof suites and the installer smoke test; see its section below.
 
 ## Control changes
 
@@ -62,8 +62,9 @@ retried or counted as a pass.
 Every retained public dependency in that follow-up needs a distinct
 `public target unavailable` classification only for HTTP 5xx received over a
 verified public TLS session, with the endpoint and phase recorded. Resets and
-early closes must retain an unproven-origin label. The acceptance client and TestISP probe currently
-lack that label. Add it at the test-reporting boundary; do not waive a failed
+early closes must retain an unproven-origin label. Follow-up #53 added these
+labels to the acceptance client and TestISP probe at the test-reporting
+boundary. They must not waive a failed
 case, retry it into green, or blame a public endpoint for an unproven engine
 failure. Background health failures need correlation with independent public
 baseline results; a generic failed health vote alone cannot identify a 5xx/reset.
@@ -94,8 +95,8 @@ the same single public egress request.
 ## Follow-up #53 routing boundary
 
 Follow-up #53 applies the inventory with one explicit distinction: local traffic
-on the physical line proves selection, not physical egress. The owner requested
-keeping physical-egress assertions public. Acceptance therefore moves pins,
+on the physical line proves selection, not physical egress. The coordinator
+decided to keep physical-egress assertions public. Acceptance therefore moves pins,
 pin-change survival, combining and recovered TestISP traffic to local TLS;
 failover onto main and both main-line cap cases stay on `1.0.0.1`.
 Public `1.1.1.1` baselines and post-crash connectivity also remain.
@@ -104,11 +105,16 @@ TestISP pause/drop/withdrawal and recovery use local TLS. Their direct physical
 probes stay public. The direct firewall block keeps both probes public: it tests
 isolation between two programs sharing the real uplink, so the unaffected
 TestISP relay must still cross that uplink.
-Both suites require the exact local TLS endpoint to fail with TestISP's default
-route withdrawn, without a request reaching the responder or a new TestISP
+Both suites require the local TLS endpoint, at the rewrite's exact address and
+port, to fail at connect time as unreachable with TestISP's default route
+withdrawn, without a request reaching the responder or a new TestISP
 destination count, then recover on restoration. There is no target host route.
-Product health traffic is untouched. Installer smoke setup seeds the existing
-update preference off before the installed shortcut first runs.
+That native probe binds the TestISP source address and `IP_UNICAST_IF`, while
+the product binds the interface only; acceptance's exact TestISP destination
+counts show the engine's own flows really crossed TestISP.
+Product health traffic is untouched. The installer smoke test leaves the first
+start fresh, then turns the existing update preference off through the app's
+own settings API before its first check can fire, and checks it stays off.
 
 The [default-route proof dispatch](https://github.com/AyoubAchour/net-switch/actions/runs/39508044986)
 passed on x64 (job 118921850928) and ARM64 (118921850646). For each local TLS

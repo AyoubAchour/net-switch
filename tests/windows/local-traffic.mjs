@@ -14,8 +14,13 @@ export async function localTraffic(harness, directory) {
   } catch (error) { await responder.close(); throw error; }
 }
 
-// Use exactly the same endpoint as the engine rewrite, with both source and
-// IP_UNICAST_IF bound by the native probe. No route to the target is installed.
+// The native probe uses the same address and port as the engine rewrite, but
+// binds both the TestISP source address and IP_UNICAST_IF, while the product's
+// outbound binds the interface only. So acceptance's moved pin, combining and
+// failback cases also require TestISP's destination counter to change by
+// exactly their TestISP flow count: the gateway counts only connections that
+// really arrived over its adapter, however the engine chose the source.
+// No route to the target is installed.
 export async function proveDefaultRoute(harness, responder) {
   const before = await harness.control('stats');
   const working = await harness.probe(harness.testisp, false, responder);
@@ -25,7 +30,7 @@ export async function proveDefaultRoute(harness, responder) {
     await harness.network('withdraw');
     assert.equal((await harness.network('state')).defaultRoute, false);
     const seen = responder.seen.length;
-    const failed = await harness.probe(harness.testisp, true, responder);
+    const failed = await harness.probe(harness.testisp, 'unreachable', responder);
     assert.equal(responder.seen.length, seen, 'Withdrawn line still reached the responder');
     const withdrawn = await harness.control('stats');
     assert.equal(withdrawn.destinations[responder.destination], after.destinations[responder.destination], 'Withdrawn line still reached TestISP');

@@ -36,8 +36,10 @@ TestISP's own fixed GUID. It refuses present adapters and never loads the DLL.
 
 `proof.mjs` keeps public HTTPS baselines on both explicitly bound interfaces.
 Pause, drop, withdrawal and TestISP recovery use the same local TLS endpoint.
-Before those cases, the exact bound endpoint must fail with TestISP's default
-route withdrawn and recover on restoration; counters and responder nonces prove
+Before those cases, the bound probe to that endpoint's address and port must
+fail at connect time as unreachable (WSAENETUNREACH or WSAEHOSTUNREACH, not a
+timeout) with TestISP's default route withdrawn, and recover on restoration;
+the withdrawal case below checks the same failure. Counters and responder nonces prove
 the path. No host route is added. The direct path still uses public HTTPS: its
 assertion means physical egress, which a same-runner responder cannot prove.
 A process-and-interface-scoped firewall rule then stops only the direct probe.

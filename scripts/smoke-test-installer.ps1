@@ -196,6 +196,7 @@ function Start-InstalledApp {
       return $true
     } catch { return $false }
   } 'Installed shortcut did not create an authenticated, reachable server within 60 seconds.'
+  if (-not $script:updateChecksOff) { Disable-UpdateChecks $script:runningServer }
   # An installed copy runs its tray icon as tray\NetSwitchTray.exe, never as
   # tray.ps1 in PowerShell. Stop-InstalledApp then checks it notices the quit and ends.
   Wait-Until { @(Get-AppProcesses | Where-Object { $_.ExecutablePath -eq $trayProgram }).Count -gt 0 } 'Installed shortcut did not start tray\NetSwitchTray.exe.'
@@ -226,6 +227,23 @@ function Start-InstalledApp {
   Wait-Routing $script:runningServer
   Write-Host 'Installed shortcut started its own server and tray program; authenticated ping succeeded; routing is on'
   return $script:runningServer
+}
+
+# Test setup only: the first start stays a fresh one, with no user data folder
+# beforehand. The app's own settings call then turns the background release
+# check off before its first-check timer can fire, so the installed app never
+# calls api.github.com. Every later start and the upgrade keep that setting.
+function Disable-UpdateChecks($Server) {
+  $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $($Server.pid)"
+  if (-not $owner) { throw 'The installed server exited before update checks could be turned off.' }
+  $state = Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:$($Server.port)/api/settings" -Headers @{ 'X-Token' = $Server.token } -ContentType 'application/json' -Body '{"checkForUpdates":false}' -TimeoutSec 10
+  $elapsed = ((Get-Date) - $owner.CreationDate).TotalMilliseconds
+  if ($state.updateChecks -ne $false) { throw 'Turning off update checks through the settings API did not stick.' }
+  # The timer starts after the server process does, so finishing before this
+  # bound means the first check had not fired.
+  if ($elapsed -ge $firstCheckMs) { throw "Update checks were turned off $([int]$elapsed) ms after the server started, too late to rule out the first release check ($firstCheckMs ms)." }
+  $script:updateChecksOff = $true
+  Write-Host "Update checks turned off through the settings API $([int]$elapsed) ms after the first server started (first check waits $firstCheckMs ms)"
 }
 
 # A server that answers is not enough: the routing engine must really be on.
@@ -327,11 +345,11 @@ $trayProgram = Join-Path $app 'tray\NetSwitchTray.exe'
 try {
 Invoke-Setup 'install'
 Assert-Installed
-
-# Test setup only: the updater reads this existing preference before its timer
-# fires. Keep the installed payload, shortcut, helper modes and tasks intact.
-New-Item -ItemType Directory -Force -Path $userData | Out-Null
-[IO.File]::WriteAllText((Join-Path $userData 'settings.json'), '{"checkForUpdates":false}')
+if (Test-Path -LiteralPath $userData) { throw "Installing created $userData before the first start." }
+$updatesSource = Get-Content -LiteralPath (Join-Path $app 'lib\updates.mjs') -Raw
+if ($updatesSource -notmatch 'export const FIRST_CHECK_MS = ([\d_]+);') { throw 'Could not read the installed first update check delay.' }
+$firstCheckMs = [int]($Matches[1] -replace '_', '')
+$script:updateChecksOff = $false
 
 $version = & $node --version
 Write-Host "Bundled Node.js $version"

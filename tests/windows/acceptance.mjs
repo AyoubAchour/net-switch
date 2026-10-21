@@ -175,15 +175,20 @@ async function selectedSockets(opened, line) {
   return snapshot;
 }
 
-async function healthUntil(check, label, timeout) {
+// fault names the TestISP fault injected while waiting, or null once it is
+// cleared, so a TestISP baseline failure during the fault isn't read as an
+// outage of 1.1.1.1.
+async function healthUntil(check, label, timeout, fault) {
   try { return await until(check, label, timeout); }
   catch (cause) {
     // These are independent diagnostics, never a retry of a failed health vote.
     const baselines = await Promise.all([harness.uplink, harness.testisp].map(async (line) => ({
       line: line.alias, endpoint: 'https://1.1.1.1/cdn-cgi/trace', at: new Date().toISOString(),
+      activeFault: line === harness.testisp ? fault : null,
       result: await harness.probe(line).catch((error) => ({ error: error.message })),
     })));
-    throw new Error(`${cause.message}; health-vote origin unproven. Independent public baseline evidence: ${JSON.stringify(baselines)}. Other product endpoints were not independently measured.`, { cause });
+    const injected = fault ? `Injected fault still active on TestISP: ${fault}; its TestISP baseline is expected to fail and is not a 1.1.1.1 outage.` : 'No injected fault was active.';
+    throw new Error(`${cause.message}; health-vote origin unproven. ${injected} Independent public baseline evidence: ${JSON.stringify(baselines)}. Other product endpoints were not independently measured.`, { cause });
   }
 }
 
@@ -436,6 +441,7 @@ try {
     return { byLine, before, after };
   });
   for (const fault of ['withdraw', 'drop']) await report.test(`${fault === 'withdraw' ? 'default-route loss' : 'dead gateway with route present'} fails over and restoration fails back`, 'parity', async () => {
+    const injected = fault === 'withdraw' ? 'default route withdrawn' : 'gateway drop mode';
     await pin(second.id);
     if (fault === 'withdraw') await harness.network('withdraw');
     else await harness.control('mode', { mode: 'drop' });
@@ -443,7 +449,7 @@ try {
       const failedOver = await healthUntil(async () => {
         const state = await server.api('state');
         return state.lines.find((line) => line.id === second.id)?.target === main.id && state.lines;
-      }, 'TestISP failover', 60_000);
+      }, 'TestISP failover', 60_000, injected);
       const routes = await harness.network('state');
       assert.equal(routes.defaultRoute, fault === 'drop', 'Fault injection changed the wrong failure domain');
       const before = await harness.control('stats');
@@ -456,7 +462,7 @@ try {
       const failedBack = await healthUntil(async () => {
         const state = await server.api('state');
         return state.lines.find((line) => line.id === second.id)?.target === second.id && state.lines;
-      }, 'TestISP failback', 90_000);
+      }, 'TestISP failback', 90_000, null);
       return { fault, routes, failedOver, byLine, before, after, failedBack, traffic: await newTrafficOn(second) };
     } finally {
       if (fault === 'drop') await harness.control('mode', { mode: 'running' });
@@ -465,6 +471,11 @@ try {
     }
   });
   // Later restarts and all lifecycle cycles use the ordinary product config.
+  // The running engine keeps the config it started with, so the rewrite rule
+  // and info logging stay until the next engine start, when the ICMP case
+  // reorders the lines. The controlled HTTP, reset, UDP, STUN, QUIC, IPv6 and
+  // DF cases run on it before then. The rule is inert for them: it matches
+  // only TCP to 203.0.113.44:443, and they address the controlled responder.
   await unlink(path.join(dataDir, httpsMarker));
   await pin(second.id);
   await report.test('controlled HTTP crosses the app TUN and TestISP', 'parity', async () => {
