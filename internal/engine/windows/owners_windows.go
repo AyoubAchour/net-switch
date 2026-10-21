@@ -453,7 +453,22 @@ func (o *Owners) process(pid uint32) (platform.Owner, error) {
 
 func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.Owner, err error) {
 	start := winclock.Now()
-	defer func() { o.measure(start, err) }()
+	// Where a failed lookup stopped, for the failure ring: at the OS port
+	// limit (x64 run 39602903586) eleven misses sent SYNs to the default line.
+	// Constant stages and plain fields, so a successful lookup pays nothing.
+	var at struct {
+		stage           string
+		attempt, family int
+		pid             uint32
+	}
+	at.stage = "start"
+	defer func() {
+		o.measure(start, err)
+		if err != nil {
+			o.noteFailure("tcp-lookup", fmt.Sprintf("%s (attempt %d, family %d, pid %d) after %d µs", at.stage, at.attempt,
+				at.family, at.pid, winclock.Since(start).Microseconds()), tuple.Source, "", err)
+		}
+	}()
 	ctx, cancel := winclock.System.WithTimeout(ctx, 50*time.Millisecond)
 	defer cancel()
 	var after [2]time.Duration
@@ -462,11 +477,13 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 		primary = 1
 	}
 	for attempt := 0; attempt < 3; attempt++ {
+		at.stage, at.attempt = "bound check", attempt
 		if winclock.Since(start) >= 50*time.Millisecond {
 			return owner, context.DeadlineExceeded
 		}
 		if attempt != 0 {
 			o.tcpRetries.Add(1)
+			at.stage = "retry wait"
 			if err := winclock.System.Wait(ctx, 2*time.Millisecond); err != nil {
 				return owner, err
 			}
@@ -474,6 +491,7 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 		// Mapped IPv4 sockets may appear in the IPv6 table. Fall back there
 		// after an IPv4 miss; an IPv6 tuple needs only the IPv6 table.
 		for family := primary; family < 2; family++ {
+			at.stage, at.family = "snapshot", family
 			s, e := o.tcpSnapshot(ctx, after[family], family)
 			if e != nil {
 				if family == primary || ctx.Err() != nil {
@@ -491,6 +509,7 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 			// out of the 50 ms bound this way).
 			if candidates.count == 0 && s.at < start {
 				o.cacheMissRefreshes.Add(1)
+				at.stage = "fresh read"
 				s, e = o.tcpSnapshot(ctx, max(s.at, start), family)
 				if e != nil {
 					if family == primary || ctx.Err() != nil {
@@ -504,6 +523,7 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 				return owner, platform.ErrAmbiguous
 			}
 			if candidates.count == 1 {
+				at.stage, at.pid = "process", candidates.pid
 				processStart := winclock.Now()
 				owner, err = o.process(candidates.pid)
 				measureStage(&o.processHist, processStart)
@@ -518,6 +538,7 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 			after[family] = s.at
 		}
 	}
+	at.stage = "not in any read"
 	return owner, errOwnerMissing
 }
 
