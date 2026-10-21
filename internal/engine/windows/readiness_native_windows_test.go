@@ -43,6 +43,21 @@ func completionTestPool(t *testing.T, policy tcpCompletionPolicy) *readiness {
 // ordinary synchronous-success packets. Only the controlled peer belongs to Go.
 func freshNativeReadinessPair(t *testing.T, p *readiness, wake func()) (*readySocket, *net.TCPConn) {
 	t.Helper()
+	return nativeReadinessPair(t, p, wake, false)
+}
+
+func nativeReadinessPair(t *testing.T, p *readiness, wake func(), seedSkip bool) (*readySocket, *net.TCPConn) {
+	t.Helper()
+	if seedSkip {
+		// This is deliberate fixture setup on an actual all-IFS host. The
+		// registration policy remains forced false; no Go/duplicated handle
+		// or overwritten watch flag is used to manufacture the inherited bit.
+		actual := queryTCPCompletionPolicy(windows.WSAEnumProtocols)
+		if actual.err != nil || !actual.allowSkip || p.policy.allowSkip {
+			t.Fatalf("native skip seed requires actual all-IFS and forced-false registration: actual=%+v forced=%+v", actual, p.policy)
+		}
+		t.Logf("native seed environment: arch=%s catalogEntries=%d actualPolicy=%s registrationPolicy=%s", runtime.GOARCH, actual.entries, actual.reason, p.policy.reason)
+	}
 	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
@@ -104,16 +119,30 @@ func freshNativeReadinessPair(t *testing.T, p *readiness, wake func()) (*readySo
 	if localAddr.AddrPort() != peer.RemoteAddr().(*net.TCPAddr).AddrPort() || remoteAddr.AddrPort() != addr.AddrPort() {
 		t.Fatalf("wrong stream source/destination: local=%s peer=%s remote=%s listener=%s", localAddr, peer.RemoteAddr(), remoteAddr, addr)
 	}
+	beforeWatch := initialModes
+	if seedSkip {
+		// Seed only the success bit, before watch or any overlapped receive.
+		// The same exclusively owned socket reaches watch; there is no
+		// transfer or retry between establishing and checking this condition.
+		if err := windows.SetFileCompletionNotificationModes(owner.Handle("readiness test explicit native skip seed"), windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS); err != nil {
+			t.Fatal(err)
+		}
+		beforeWatch |= windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS
+		if modes, err := socketCompletionModes(owner); err != nil || modes != beforeWatch {
+			t.Fatalf("native skip seed not established before watch: modes=%#x want=%#x err=%v", modes, beforeWatch, err)
+		}
+		t.Logf("native skip provenance: explicit SetFileCompletionNotificationModes before watch; freshModes=%#x seededModes=%#x", initialModes, beforeWatch)
+	}
 	w, err := p.watch(owner, uint16(local4.Port), wake)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c = &readySocket{handle: owner, pool: p, watch: w, local: localAddr, remote: remoteAddr}
-	expectedModes := initialModes
+	expectedModes := beforeWatch
 	if p.policy.allowSkip {
 		expectedModes |= windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS | windows.FILE_SKIP_SET_EVENT_ON_HANDLE
 	}
-	if modes, err := socketCompletionModes(owner); err != nil || modes != expectedModes || w.skipSuccess != p.policy.allowSkip || w.inheritedSkip {
+	if modes, err := socketCompletionModes(owner); err != nil || modes != expectedModes || w.skipSuccess != (seedSkip || p.policy.allowSkip) || w.inheritedSkip != seedSkip {
 		t.Fatalf("fresh native modes=%#x want=%#x skip=%t inherited=%t err=%v", modes, expectedModes, w.skipSuccess, w.inheritedSkip, err)
 	}
 	return c, peer
@@ -348,10 +377,11 @@ func TestTCPReadinessNativeIFSOptimization(t *testing.T) {
 	t.Log("all-IFS policy enabled skip-success on a fresh native socket; inline and pending paths preserved the stream")
 }
 
-func TestTCPReadinessInheritedSkipUnderNormalPolicy(t *testing.T) {
+func TestTCPReadinessGoDerivedCompletionModesUnderNormalPolicy(t *testing.T) {
 	hosted(t)
-	// This companion is intentionally Go-derived. It proves that a false
-	// enabling policy cannot make us wait for Go's suppressed success packet.
+	// Go's transfer uses WSADuplicateSocket/WSASocket to create descriptors.
+	// Shared Winsock state does not establish the final descriptor's file
+	// completion mode. Mode zero is legitimate; observe it without retries.
 	p := completionTestPool(t, tcpCompletionPolicy{reason: "non-ifs-provider"})
 	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -376,20 +406,85 @@ func TestTCPReadinessInheritedSkipUnderNormalPolicy(t *testing.T) {
 	if err := peer.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	c.goOwner, err = ownGoDescriptor(client, "readiness test Go source before mode query")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := client.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sourceModes uint32
+	var queryErr error
+	borrowErr := raw.Control(func(handle uintptr) {
+		// The raw value is borrowed only for this synchronous query; it is
+		// neither a new owner nor retained beyond the Go control callback.
+		if windows.Handle(handle) != c.goOwner.GoBorrow("readiness test Go source mode query") {
+			queryErr = errors.New("Go source handle changed during mode query")
+			return
+		}
+		sourceModes, queryErr = querySocketCompletionModes(windows.Handle(handle), windows.NtQueryInformationFile)
+	})
+	if err := errors.Join(borrowErr, queryErr); err != nil {
+		t.Fatal(err)
+	}
+	var beforeWatch uint32
+	queries := 0
+	p.queryModes = func(owner winhandle.Owner) (uint32, error) {
+		queries++
+		modes, err := socketCompletionModes(owner)
+		beforeWatch = modes
+		return modes, err // observe the real registration query unchanged
+	}
 	wakes := make(chan uint32, 16)
 	if _, err := c.Watch(completionThreadWake(wakes)); err != nil {
 		t.Fatal(err)
 	}
 	modes, err := socketCompletionModes(c.handle)
-	if err != nil || modes&windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS == 0 || !c.watch.skipSuccess || !c.watch.inheritedSkip {
-		t.Fatalf("Go-derived inherited skip precondition not met; no forced flag/retry: %#x %v", modes, err)
+	oldWouldPass := err == nil && modes&windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS != 0 && c.watch.skipSuccess && c.watch.inheritedSkip
+	t.Logf("Go-derived modes: source=%#x nativeBeforeWatch=%#x nativeAfterWatch=%#x queryError=%v old-fixture-would-pass=%t", sourceModes, beforeWatch, modes, err, oldWouldPass)
+	if err != nil || queries != 1 || modes != beforeWatch {
+		t.Fatalf("false-policy registration changed or failed to query the native mode: before=%#x after=%#x queries=%d err=%v", beforeWatch, modes, queries, err)
+	}
+	skip := beforeWatch&windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS != 0
+	if c.watch.skipSuccess != skip || c.watch.inheritedSkip != skip {
+		t.Fatalf("watch disagrees with native mode=%#x: skip=%t inherited=%t", beforeWatch, c.watch.skipSuccess, c.watch.inheritedSkip)
+	}
+	normal, skipped := 1, 0
+	if skip {
+		normal, skipped = 0, 1
 	}
 	stats := p.stats()
-	if stats["allowSkipCompletionOnSuccess"] != false || stats["normalCompletionSockets"] != 0 || stats["skipSuccessSockets"] != 1 || stats["inheritedSkipSuccessSockets"] != 1 {
+	if stats["allowSkipCompletionOnSuccess"] != false || stats["normalCompletionSockets"] != normal || stats["skipSuccessSockets"] != skipped || stats["inheritedSkipSuccessSockets"] != skipped {
 		t.Fatalf("policy and inherited mode conflated: %v", stats)
 	}
 	exerciseTCPCompletionStream(t, c, peer, wakes)
-	t.Logf("Go-derived skip-success survived a forced-false policy without waiting for a suppressed packet: %v", p.stats())
+	t.Logf("Go-derived stream passed for observed skip=%t; old-fixture-would-pass=%t; %v", skip, oldWouldPass, p.stats())
+}
+
+func TestTCPReadinessNativeSeededSkipUnderNormalPolicy(t *testing.T) {
+	hosted(t)
+	for _, policy := range []tcpCompletionPolicy{
+		{reason: "non-ifs-provider"},
+		{reason: "provider-query-error", err: windows.WSAENETDOWN},
+	} {
+		t.Run(policy.reason, func(t *testing.T) {
+			p := completionTestPool(t, policy)
+			wakes := make(chan uint32, 16)
+			c, peer := nativeReadinessPair(t, p, completionThreadWake(wakes), true)
+			// This setup must prove inherited skip; mode zero cannot satisfy
+			// this separate test, even if the Go-derived test observes zero.
+			stats := p.stats()
+			if stats["allowSkipCompletionOnSuccess"] != false || stats["normalCompletionSockets"] != 0 || stats["skipSuccessSockets"] != 1 || stats["inheritedSkipSuccessSockets"] != 1 || stats["completionPolicy"] != policy.reason {
+				t.Fatalf("explicit native seed was not retained under false policy: %v", stats)
+			}
+			if (stats["providerQueryError"] != "") != (policy.err != nil) {
+				t.Fatalf("lost forced query-error diagnostic: %v", stats)
+			}
+			exerciseTCPCompletionStream(t, c, peer, wakes)
+			t.Logf("explicitly seeded native skip passed: synchronous success suppressed packets, pending receive still queued, exact stream/source/FIN preserved; %v", p.stats())
+		})
+	}
 }
 
 func TestTCPReadinessUnexpectedCancelIsFatal(t *testing.T) {
