@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os/exec"
 	"syscall"
-	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/winjob"
 	"golang.org/x/sys/windows"
 )
 
@@ -15,7 +15,7 @@ func guardedStart(cmd *exec.Cmd) (func(), error) {
 		return nil, err
 	}
 	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE}}
-	if _, err = windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
+	if err = winjob.Set(job, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
 		windows.CloseHandle(job)
 		return nil, err
 	}
