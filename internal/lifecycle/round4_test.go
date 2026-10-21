@@ -129,8 +129,8 @@ func TestHTTPAdmissionResolvesQueuedConnectionsInOneBatch(t *testing.T) {
 		}
 		out := make([]localipc.TCPIdentity, len(tuples))
 		for i, tuple := range tuples {
-			if tuple.Client == nil || tuple.Server == nil || tuple.Accepted.IsZero() {
-				t.Error("tuple lacks its addresses or acceptance time", tuple)
+			if tuple.Client == nil || tuple.Server == nil {
+				t.Error("tuple lacks its addresses", tuple)
 			}
 			out[i].User = "owner"
 		}
@@ -156,6 +156,45 @@ func TestHTTPAdmissionResolvesQueuedConnectionsInOneBatch(t *testing.T) {
 	defer mu.Unlock()
 	if len(batches) != 2 || batches[1] != 20 {
 		t.Fatal("queued connections were not resolved as one batch", batches)
+	}
+}
+
+// Churn must not buy one machine-wide snapshot per connection: lookups are
+// at least httpLookupInterval apart, and connections wait in one batch.
+func TestHTTPAdmissionSpacesLookupsUnderChurn(t *testing.T) {
+	raw, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var starts []time.Time
+	resolve := func(tuples []localipc.TCPTuple) []localipc.TCPIdentity {
+		mu.Lock()
+		starts = append(starts, time.Now())
+		mu.Unlock()
+		out := make([]localipc.TCPIdentity, len(tuples))
+		for i := range out {
+			out[i].User = "owner"
+		}
+		return out
+	}
+	l := newHTTPListener(raw, &connectionLimits{owner: "owner", users: map[string]int{}}, func(string) {}, resolve)
+	defer l.Close()
+	for range 30 {
+		dialAll(t, raw.Addr().String(), 1)
+		if _, err := l.Accept(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 1; i < len(starts); i++ {
+		if gap := starts[i].Sub(starts[i-1]); gap < httpLookupInterval-5*time.Millisecond {
+			t.Fatal("lookups closer than the interval", gap)
+		}
+	}
+	if len(starts) > 30 {
+		t.Fatal("more lookups than connections", len(starts))
 	}
 }
 

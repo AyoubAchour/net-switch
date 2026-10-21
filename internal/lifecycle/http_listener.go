@@ -28,10 +28,12 @@ func (c *admittedHTTPConn) Close() error {
 // Connections accepted but not yet resolved or handed to the HTTP server.
 const httpAdmissionQueue = 256
 
-type queuedHTTPConn struct {
-	conn     net.Conn
-	accepted time.Time
-}
+// httpLookupInterval is the shortest gap between identity lookups. Under
+// connection churn, connections gather into larger batches instead of each
+// costing a machine-wide table snapshot, so another user's churn costs
+// Control at most twenty snapshots a second and the owner at most this
+// much extra wait.
+const httpLookupInterval = 50 * time.Millisecond
 
 // httpListener admits loopback HTTP connections by their OS identity. The
 // raw accept loop never waits for that identity. A separate resolver takes
@@ -45,11 +47,12 @@ type httpListener struct {
 	limits   *connectionLimits
 	log      func(string)
 	resolve  func([]localipc.TCPTuple) []localipc.TCPIdentity
+	interval time.Duration
 	rejected rejectionLog
 	overflow rejectionLog
 
 	mu        sync.Mutex
-	queue     []queuedHTTPConn
+	queue     []net.Conn
 	drained   bool
 	wake      chan struct{}
 	ready     chan *admittedHTTPConn
@@ -65,7 +68,7 @@ func newHTTPListener(l net.Listener, limits *connectionLimits, log func(string),
 		resolve = localipc.TCPOwners
 	}
 	h := &httpListener{
-		Listener: l, limits: limits, log: log, resolve: resolve,
+		Listener: l, limits: limits, log: log, resolve: resolve, interval: httpLookupInterval,
 		wake:   make(chan struct{}, 1),
 		ready:  make(chan *admittedHTTPConn, httpAdmissionQueue),
 		done:   make(chan struct{}),
@@ -139,7 +142,7 @@ func (l *httpListener) acceptRaw() {
 			l.overflow.report(l.log, "HTTP admission queue full; connection refused")
 			continue
 		}
-		l.queue = append(l.queue, queuedHTTPConn{conn, time.Now()})
+		l.queue = append(l.queue, conn)
 		l.mu.Unlock()
 		select {
 		case l.wake <- struct{}{}:
@@ -150,34 +153,43 @@ func (l *httpListener) acceptRaw() {
 
 func (l *httpListener) admit() {
 	defer l.drain()
+	var last time.Time
 	for {
 		select {
 		case <-l.wake:
 		case <-l.done:
 			return
 		}
+		if wait := l.interval - time.Since(last); wait > 0 {
+			select {
+			case <-time.After(wait):
+			case <-l.done:
+				return
+			}
+		}
+		last = time.Now()
 		l.mu.Lock()
 		batch := l.queue
 		l.queue = nil
 		l.mu.Unlock()
 		tuples := make([]localipc.TCPTuple, len(batch))
-		for i, q := range batch {
-			client, _ := q.conn.RemoteAddr().(*net.TCPAddr)
-			server, _ := q.conn.LocalAddr().(*net.TCPAddr)
-			tuples[i] = localipc.TCPTuple{Client: client, Server: server, Accepted: q.accepted}
+		for i, conn := range batch {
+			client, _ := conn.RemoteAddr().(*net.TCPAddr)
+			server, _ := conn.LocalAddr().(*net.TCPAddr)
+			tuples[i] = localipc.TCPTuple{Client: client, Server: server}
 		}
 		identities := l.resolve(tuples)
-		for i, q := range batch {
+		for i, conn := range batch {
 			user := "unresolved"
 			if i < len(identities) && identities[i].Err == nil && identities[i].User != "" {
 				user = identities[i].User
 			}
 			if !l.limits.take(user) {
-				q.conn.Close()
+				conn.Close()
 				l.rejected.report(l.log, "HTTP connection limit reached; owner slots remain reserved")
 				continue
 			}
-			admitted := &admittedHTTPConn{Conn: q.conn, user: user, limits: l.limits}
+			admitted := &admittedHTTPConn{Conn: conn, user: user, limits: l.limits}
 			select {
 			case l.ready <- admitted:
 			case <-l.done:
@@ -194,8 +206,8 @@ func (l *httpListener) drain() {
 	l.queue = nil
 	l.drained = true
 	l.mu.Unlock()
-	for _, q := range batch {
-		q.conn.Close()
+	for _, conn := range batch {
+		conn.Close()
 	}
 	for {
 		select {

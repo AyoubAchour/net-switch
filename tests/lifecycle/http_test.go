@@ -41,17 +41,6 @@ func httpFlood(rawURL string) error {
 	}
 	// Admission refuses a user's connections beyond its cap at once; the
 	// old code would have kept all 64 until the header deadline.
-	closedBy := func(conns []net.Conn, deadline time.Time) (open, closed []net.Conn) {
-		for _, c := range conns {
-			c.SetReadDeadline(deadline)
-			if _, err := c.Read(make([]byte, 1)); err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
-				closed = append(closed, c)
-			} else {
-				open = append(open, c)
-			}
-		}
-		return open, closed
-	}
 	open, refused := closedBy(held, time.Now().Add(1500*time.Millisecond))
 	if time.Since(dialed) > 4*time.Second {
 		return fmt.Errorf("classification took %s, too close to the header deadline", time.Since(dialed))
@@ -65,8 +54,35 @@ func httpFlood(rawURL string) error {
 	return err
 }
 
-// httpChurn opens and immediately closes HTTP connections from several
-// workers, so every one of them goes through identity admission.
+// closedBy splits connections into those the server closed before deadline
+// and those still open. The reads run concurrently: once a shared deadline
+// has passed, Go fails a read at once without looking at the socket, so a
+// sequential loop would count closed peers after the first timeout as open.
+func closedBy(conns []net.Conn, deadline time.Time) (open, closed []net.Conn) {
+	shut := make([]bool, len(conns))
+	var readers sync.WaitGroup
+	for i, c := range conns {
+		readers.Go(func() {
+			c.SetReadDeadline(deadline)
+			_, err := c.Read(make([]byte, 1))
+			shut[i] = err != nil && !errors.Is(err, os.ErrDeadlineExceeded)
+		})
+	}
+	readers.Wait()
+	for i, c := range conns {
+		if shut[i] {
+			closed = append(closed, c)
+		} else {
+			open = append(open, c)
+		}
+	}
+	return open, closed
+}
+
+// httpChurn opens and immediately resets HTTP connections from several
+// workers, so every one of them goes through identity admission. An abortive
+// close leaves no TIME_WAIT behind, so the churn cannot exhaust the runner's
+// loopback ports for later cases, and it stops by itself after 20 seconds.
 func httpChurn(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -74,8 +90,12 @@ func httpChurn(rawURL string) error {
 	}
 	var opened atomic.Uint64
 	stop := make(chan struct{})
+	var once sync.Once
+	halt := func() { once.Do(func() { close(stop) }) }
+	limit := time.AfterFunc(20*time.Second, halt)
+	defer limit.Stop()
 	var workers sync.WaitGroup
-	for range 8 {
+	for range 4 {
 		workers.Go(func() {
 			for {
 				select {
@@ -84,6 +104,7 @@ func httpChurn(rawURL string) error {
 				default:
 				}
 				if c, err := net.DialTimeout("tcp4", u.Host, time.Second); err == nil {
+					c.(*net.TCPConn).SetLinger(0)
 					c.Close()
 					opened.Add(1)
 				}
@@ -92,8 +113,8 @@ func httpChurn(rawURL string) error {
 	}
 	time.Sleep(time.Second)
 	fmt.Printf("HTTP churn running: %d connections in the first second\n", opened.Load())
-	_, _ = io.Copy(io.Discard, os.Stdin)
-	close(stop)
+	go func() { _, _ = io.Copy(io.Discard, os.Stdin); halt() }()
+	<-stop
 	workers.Wait()
 	fmt.Printf("HTTP churn total=%d\n", opened.Load())
 	return nil
@@ -161,17 +182,33 @@ func httpChurnLatency(t *testing.T, c *client, owner, other actor) {
 	if err := churn.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// A failed sample must never leave the churn running into later cases.
+	var waitOnce sync.Once
+	var waitErr error
+	finish := func() error {
+		in.Close()
+		waitOnce.Do(func() {
+			done := make(chan error, 1)
+			go func() { done <- churn.Wait() }()
+			select {
+			case waitErr = <-done:
+			case <-time.After(25 * time.Second):
+				_ = churn.Process.Kill()
+				waitErr = errors.Join(errors.New("churn did not stop"), <-done)
+			}
+		})
+		return waitErr
+	}
+	t.Cleanup(func() { _ = finish() })
 	reader := bufio.NewReader(out)
 	line, err := reader.ReadString('\n')
 	if err != nil || !strings.HasPrefix(line, "HTTP churn running: ") {
-		in.Close()
-		_ = churn.Wait()
 		t.Fatal("churn precondition", line, err)
 	}
 	loadMax, loadMedian := ownerLatency(t, owner, session.URL, session.Token)
 	in.Close()
 	total, _ := reader.ReadString('\n')
-	if err := churn.Wait(); err != nil {
+	if err := finish(); err != nil {
 		t.Fatal(err)
 	}
 	var connections int

@@ -145,9 +145,11 @@ func lowPipeClient() error {
 	}
 	// Keep zero-access opens going while the parent connects the medium
 	// owner, so owner admission is proven under this load, not after it.
+	// Attempts that reached the pipe (opened or denied) are counted, not
+	// busy answers, and the ready line waits until they are under way.
 	stop := make(chan struct{})
 	var workers sync.WaitGroup
-	var flooded atomic.Uint64
+	var attempts, opened atomic.Uint64
 	for range 4 {
 		workers.Go(func() {
 			for {
@@ -156,21 +158,31 @@ func lowPipeClient() error {
 					return
 				default:
 				}
-				if h, err := ntZeroOpen(desktopNT); err == nil {
-					flooded.Add(1)
+				h, err := ntZeroOpen(desktopNT)
+				switch {
+				case err == nil:
+					attempts.Add(1)
+					opened.Add(1)
 					time.Sleep(300 * time.Millisecond)
 					windows.CloseHandle(h)
-				} else {
+				case errors.Is(err, windows.STATUS_ACCESS_DENIED):
+					attempts.Add(1)
+					time.Sleep(2 * time.Millisecond)
+				default:
 					time.Sleep(2 * time.Millisecond)
 				}
 			}
 		})
 	}
-	fmt.Printf("low integrity access checked: read_denied=%d zero_denied=%d zero_held=%d nt_zero_opened=%d nt_zero_denied=%d\n", readDenied, zeroDenied, len(held), ntOpened, ntDenied)
+	defer func() { close(stop); workers.Wait() }()
+	for deadline := time.Now().Add(10 * time.Second); attempts.Load() < 16; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("sustained zero-access load did not start: %d attempts", attempts.Load())
+		}
+	}
+	fmt.Printf("low integrity access checked: read_denied=%d zero_denied=%d zero_held=%d nt_zero_opened=%d nt_zero_denied=%d sustained_before=%d\n", readDenied, zeroDenied, len(held), ntOpened, ntDenied, attempts.Load())
 	_, err = io.Copy(io.Discard, os.Stdin)
-	close(stop)
-	workers.Wait()
-	fmt.Printf("sustained zero-access opens during owner admission: %d\n", flooded.Load())
+	fmt.Printf("sustained zero-access attempts total=%d opened=%d\n", attempts.Load(), opened.Load())
 	return err
 }
 
@@ -222,6 +234,13 @@ func lowIntegrityCapacity(t *testing.T, owner actor) {
 		_ = attack.Wait()
 		t.Fatal("low integrity attack precondition", line, err)
 	}
+	var before uint64
+	_, rest, _ := strings.Cut(line, "sustained_before=")
+	if _, err := fmt.Sscanf(rest, "%d", &before); err != nil || before == 0 {
+		in.Close()
+		_ = attack.Wait()
+		t.Fatal("load barrier", line, err)
+	}
 	started := time.Now()
 	fresh := openClient(t, owner, false)
 	fresh.must(t, "session", nil, nil)
@@ -232,13 +251,17 @@ func lowIntegrityCapacity(t *testing.T, owner actor) {
 	if err := attack.Wait(); err != nil {
 		t.Fatal(err)
 	}
+	var total, opened uint64
+	if _, err := fmt.Sscanf(strings.TrimSpace(final), "sustained zero-access attempts total=%d opened=%d", &total, &opened); err != nil || total <= before {
+		t.Fatal("zero-access load did not continue across owner admission", final, err)
+	}
 	if admitted > 20*time.Second {
 		t.Fatal("medium owner admission under low-integrity load took", admitted)
 	}
 	t.Log(strings.TrimSpace(line))
 	t.Log(strings.TrimSpace(final))
 	t.Log("the same owner SID opened the pipe for reading at medium integrity and was denied at low integrity, so the mandatory label, not the DACL, denies it")
-	t.Logf("medium owner connected in %s while zero-access opens continued", admitted.Round(time.Millisecond))
+	t.Logf("medium owner connected in %s while low-integrity zero-access attempts continued (%d before, %d by the end, %d of them opened)", admitted.Round(time.Millisecond), before, total, opened)
 }
 
 // lowIntegrityPairing proves the TCP identity floor: the owner's own SID at

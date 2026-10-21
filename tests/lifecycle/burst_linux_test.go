@@ -1,11 +1,9 @@
 package lifecycle_test
 
 import (
-	"errors"
 	"fmt"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"net"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,16 +45,8 @@ func disconnectBurst() error {
 		}
 		held = append(held, c)
 	}
-	open, closed := 0, 0
-	deadline := time.Now().Add(1500 * time.Millisecond)
-	for _, c := range held {
-		c.SetReadDeadline(deadline)
-		if _, err := c.Read(make([]byte, 1)); err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
-			closed++
-		} else {
-			open++
-		}
-	}
+	stillOpen, refused := closedBy(held, time.Now().Add(1500*time.Millisecond))
+	open, closed := len(stillOpen), len(refused)
 	if open > 2 || closed < 8 {
 		return fmt.Errorf("per-user public socket cap not enforced: open=%d closed=%d", open, closed)
 	}

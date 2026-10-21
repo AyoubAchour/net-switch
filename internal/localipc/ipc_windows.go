@@ -184,8 +184,9 @@ func readPipePreamble(ctx context.Context, h windows.Handle) error {
 	}
 	defer op.close()
 	// The byte count of an asynchronous read is only valid from the
-	// completed OVERLAPPED, so the call itself gets no count pointer.
-	err = windows.ReadFile(h, op.data[:], nil, &op.over)
+	// completed OVERLAPPED; op.issued only satisfies x/sys's race build,
+	// which dereferences the count pointer.
+	err = windows.ReadFile(h, op.data[:], &op.issued, &op.over)
 	if err != nil && err != windows.ERROR_IO_PENDING {
 		return err
 	}
@@ -205,8 +206,9 @@ func readPipePreamble(ctx context.Context, h windows.Handle) error {
 // code and the cancel path reference until the call has completed or been
 // cancelled and drained.
 type pipeOp struct {
-	over windows.Overlapped
-	data [1]byte
+	over   windows.Overlapped
+	data   [1]byte
+	issued uint32
 }
 
 // newPipeOp is not inlined so the object always escapes to the heap, whatever
