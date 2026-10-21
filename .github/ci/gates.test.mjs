@@ -10,6 +10,8 @@ const workflow = name => readWorkflow(readFileSync(new URL(`../workflows/${name}
 // a moved or new job fails here until someone decides what it depends on.
 // investigation: manual-only jobs that existed before gating. oracle: the go
 // list check of the drift guard, which must not depend on the classifier.
+// manual: jobs a workflow_dispatch input selects and nothing else starts, so
+// they depend on no changed file and wait for no classifier.
 const expected = {
   ci: {
     'windows-acceptance': 'legacy_windows', testisp: 'testisp', engine: 'legacy_windows',
@@ -18,8 +20,17 @@ const expected = {
     'control-security': 'investigation', 'testisp-reproduction': 'investigation', 'golist-oracle': 'oracle',
   },
   control: { windows: 'control' },
-  'linux-acceptance': { linux: 'acceptance' },
+  'linux-acceptance': { linux: 'acceptance', 'release-gate': 'manual', 'trace-analysis': 'manual' },
 };
+
+// A manual Acceptance run is a release-gate check, a saved-trace analysis, or
+// the regular engine run, chosen by these two inputs.
+const acceptanceInputs = [
+  { run: '', release_gate: false, trace_artifact: '' },
+  { run: '', release_gate: true, trace_artifact: '' },
+  { run: '', release_gate: false, trace_artifact: '123' },
+  { run: '', release_gate: true, trace_artifact: '123' },
+];
 
 // What each job should do, from the PR's description rather than the files:
 // main pushes run everything; a manual CI run starts only the investigation
@@ -36,7 +47,13 @@ function shouldRun(file, group, s) {
     if (s.event !== 'workflow_dispatch') return false;
     return s.job === 'control-security' ? s.inputs.control_security : !s.inputs.control_security && !s.inputs.regular_jobs;
   }
+  if (group === 'manual') {
+    if (s.event !== 'workflow_dispatch') return false;
+    return s.job === 'release-gate' ? Boolean(s.inputs.release_gate) : !s.inputs.release_gate && s.inputs.trace_artifact !== '';
+  }
   if (s.event === 'workflow_dispatch' && file === 'ci' && !s.inputs.regular_jobs) return false;
+  // The engine run steps aside for the two manual-only jobs.
+  if (s.event === 'workflow_dispatch' && file === 'linux-acceptance' && (s.inputs.release_gate || s.inputs.trace_artifact)) return false;
   if (s.event !== 'pull_request') return true;
   return s.changesResult !== 'success' || s.outputs[group] !== 'false';
 }
@@ -60,7 +77,7 @@ function context(job, s) {
 function* scenarios(file, changes) {
   const inputSets = file === 'ci'
     ? [false, true].flatMap(regular_jobs => [false, true].map(control_security => ({ regular_jobs, control_security, packet_capture: false })))
-    : [{ run: '' }];
+    : file === 'linux-acceptance' ? acceptanceInputs : [{ run: '' }];
   // Every group alone true or alone false, plus all true and all false, so a
   // gate reading another group's output is caught as well as a wrong value.
   // Job outputs are strings; boolean false must not count as 'false', so a
@@ -108,6 +125,10 @@ function checkGates(file, { jobs }) {
     if (group === 'oracle') {
       assert.deepEqual(job.needs, [], id);
       assert.doesNotMatch(job.if ?? '', /needs\./, id);
+    } else if (group === 'manual') {
+      assert.deepEqual(job.needs, [], id);
+      assert.match(job.if ?? '', /github\.event_name == 'workflow_dispatch'/, id);
+      assert.doesNotMatch(job.if, /needs\./, id);
     } else if (group !== 'investigation') {
       assert.deepEqual(job.needs, ['changes'], id);
       // The job must read its own group's output and no other.
@@ -195,4 +216,17 @@ test('a broken gate fails the gate check', () => {
     assert.throws(() => checkGates('ci', readWorkflow(text.replace(gate, broken))), assert.AssertionError, name);
   }
   assert.throws(() => checkGates('ci', readWorkflow(text.replace('  installer:\n    needs: changes\n', '  installer:\n'))), assert.AssertionError, 'no needs');
+});
+
+test('a broken Acceptance gate fails the gate check', () => {
+  const text = readFileSync(new URL('../workflows/linux-acceptance.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const check = broken => checkGates('linux-acceptance', readWorkflow(broken));
+  const engine = "!cancelled() && !inputs.release_gate && !inputs.trace_artifact && (github.event_name != 'pull_request'";
+  const gate = "if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_gate }}";
+  assert.ok(text.includes(engine) && text.includes(gate), 'gates as written today');
+  assert.doesNotThrow(() => check(text));
+  assert.throws(() => check(text.replace(engine, "!cancelled() && !inputs.trace_artifact && (github.event_name != 'pull_request'")), assert.AssertionError, 'engine run beside the release gate');
+  assert.throws(() => check(text.replace(engine, "!cancelled() && !inputs.release_gate && (github.event_name != 'pull_request'")), assert.AssertionError, 'engine run beside a trace analysis');
+  assert.throws(() => check(text.replace(gate, "if: ${{ inputs.release_gate }}")), assert.AssertionError, 'release gate on pushes');
+  assert.throws(() => check(text.replace(gate, "if: ${{ github.event_name == 'workflow_dispatch' }}")), assert.AssertionError, 'release gate on every manual run');
 });

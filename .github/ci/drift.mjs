@@ -61,6 +61,14 @@ export const declared = [{
   from: 'tests/lifecycle/lifecycle_test.go', call: 'os.ReadFile(path)', sites: 2,
   outside: 'executables lifecycle.yml builds into NETSWITCH_LIFECYCLE_DIR (under Program Files or /usr/lib), and a sing-box binary extracted into a temporary folder',
   why: 'the real-service test hashes the binaries it runs; it fails unless NETSWITCH_LIFECYCLE_DIR is an absolute path, and the other site reads the download it just extracted',
+}, {
+  from: 'internal/engine/linux/hooks_acceptance_linux.go', call: 'os.OpenFile(path)',
+  outside: 'the CPU profile file that NETSWITCH_ACCEPTANCE_PROFILE names, which the acceptance-tagged engine creates (O_CREATE|O_EXCL|O_WRONLY) wherever the person running it chose',
+  why: 'it only writes a new profile; no workflow or harness in this repository sets the variable, and nothing reads the file back as a repository input',
+}, {
+  from: 'internal/engine/linux/hooks_acceptance_linux.go', call: 'os.OpenFile(filepath.Join(filepath.Dir(path), "block-"+p.Instance+".pprof"))',
+  outside: 'the block profile that the engine writes beside the CPU profile above',
+  why: 'it only writes a new file next to the CPU profile; it reads nothing from the repository',
 }];
 
 // What a declaration may say: a reason, one call, and either repository

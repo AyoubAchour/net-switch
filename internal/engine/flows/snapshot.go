@@ -50,8 +50,7 @@ func (t *Table) Page(cursor string) (Page, error) {
 		records := make([]Record, 0, count)
 		for _, f := range t.flows {
 			if f.resolved && !f.retired {
-				r := f.record
-				r.Up, r.Down = f.up.Load(), f.down.Load()
+				r := f.snapshotRecord()
 				records = append(records, r)
 			}
 		}

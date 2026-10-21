@@ -64,8 +64,14 @@ export function constraintHolds(source, goos, exact) {
     : item.op === '!' ? !evaluate(item.operand, assignment)
     : item.op === '&&' ? evaluate(item.left, assignment) && evaluate(item.right, assignment)
     : evaluate(item.left, assignment) || evaluate(item.right, assignment);
+  // A build is for one architecture: when a line names both runner
+  // architectures, exactly one is set. Otherwise "!amd64 && !arm64" would hold
+  // for a build on neither, which CI never runs and go list never shows.
+  const arches = free.filter(tag => runnerArch.has(tag));
   for (let bits = 0; bits < 2 ** free.length; bits += 1) {
-    if (evaluate(node, new Map(free.map((tag, index) => [tag, Boolean(bits & (1 << index))])))) return true;
+    const assignment = new Map(free.map((tag, index) => [tag, Boolean(bits & (1 << index))]));
+    if (arches.length === 2 && assignment.get(arches[0]) === assignment.get(arches[1])) continue;
+    if (evaluate(node, assignment)) return true;
   }
   return false;
 }

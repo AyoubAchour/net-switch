@@ -320,12 +320,19 @@ func flatpakIdentity(e *Env) {
 		id   string
 		want engine.LineID
 	}{{"com.netswitch.TestA", "b"}, {"com.netswitch.TestB", "c"}} {
-		var r app.TCPResult
-		e.RunJSON(Run{Program: "flatpak", Args: []string{"run", c.id, "app", "tcp", "--to", To(topo.Server4, wire.PortWhoami), "--count", "3"}, Timeout: 2 * time.Minute}, &r)
-		lines := Lines(r.Seen)
-		e.T.Check(r.OK == 3, "Flatpak %s ran and connected 3 times (errors %v)", c.id, r.Errors)
-		ok = ok && lines[c.want] == 3
-		got = append(got, fmt.Sprintf("%s pinned to %s: lines %s", c.id, c.want, Describe(lines)))
+		for _, large := range []bool{false, true} {
+			var r app.TCPResult
+			args := []string{"run"}
+			if large {
+				args = append(args, "--env=NETSWITCH_TEST_LARGE_FLATPAK=1", "--env=PAD="+strings.Repeat("x", 70000))
+			}
+			args = append(args, c.id, "app", "tcp", "--to", To(topo.Server4, wire.PortWhoami), "--count", "3")
+			e.RunJSON(Run{Program: "flatpak", Args: args, Timeout: 2 * time.Minute}, &r)
+			lines := Lines(r.Seen)
+			e.T.Check(r.OK == 3, "Flatpak %s (large environment=%t) ran and connected 3 times (errors %v)", c.id, large, r.Errors)
+			ok = ok && lines[c.want] == 3
+			got = append(got, fmt.Sprintf("%s large=%t pinned to %s: lines %s", c.id, large, c.want, Describe(lines)))
+		}
 	}
 	e.T.Expect(ok, "each Flatpak app (both /app/bin/nsapp) uses its own pinned line (%s)", strings.Join(got, "; "))
 }

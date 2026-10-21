@@ -26,6 +26,17 @@ func (n *NAT) sessions() []*session {
 	return out
 }
 
+func (n *NAT) NegativeCacheSize() int {
+	total := 0
+	for i := range n.table {
+		b := &n.table[i]
+		b.Lock()
+		total += len(b.negative)
+		b.Unlock()
+	}
+	return total
+}
+
 // Reconcile serializes dumps. A result is only as fresh as the dump's start,
 // so a stalled snapshot cannot give an old identity two more seconds of life.
 func (n *NAT) Reconcile(ctx context.Context) {
@@ -35,17 +46,35 @@ func (n *NAT) Reconcile(ctx context.Context) {
 	sessions := n.sessions()
 	keys := make([]netip.AddrPort, 0, len(sessions))
 	active := make([]*session, 0, len(sessions))
+	for i := range n.table {
+		b := &n.table[i]
+		b.Lock()
+		for key, entry := range b.negative {
+			if started.Sub(entry.at) >= RejectLifetime {
+				delete(b.negative, key)
+			} else {
+				keys = append(keys, key)
+			}
+		}
+		b.Unlock()
+	}
 	for _, s := range sessions {
 		s.mu.Lock()
-		ready := (s.active || s.rejected) && !s.closed
+		closed := s.closed
+		ready := (s.active || s.rejected) && !closed
 		idle := started.Sub(s.last) >= IdleTimeout || (s.rejected && started.Sub(s.rejectedAt) >= RejectLifetime)
 		s.mu.Unlock()
 		if idle {
 			s.close()
 			continue
 		}
-		if ready {
+		// Pending lookups may already have published their owner before the
+		// egress socket is ready. Keep that cache reference too, while only
+		// validating active/rejected sessions below.
+		if !closed {
 			keys = append(keys, s.source)
+		}
+		if ready {
 			active = append(active, s)
 		}
 	}
@@ -56,10 +85,26 @@ func (n *NAT) Reconcile(ctx context.Context) {
 		n.IdentityErrors.Add(1)
 		return
 	}
-	owners, err := n.identities.Snapshot(ctx, keys)
+	var owners map[netip.AddrPort]platform.Owner
+	var err error
+	if timed, ok := n.identities.(platform.UDPIdentityAt); ok {
+		owners, err = timed.SnapshotAt(ctx, keys, started)
+	} else {
+		owners, err = n.identities.Snapshot(ctx, keys)
+	}
 	if err != nil {
 		n.IdentityErrors.Add(1)
 		return
+	}
+	for i := range n.table {
+		b := &n.table[i]
+		b.Lock()
+		for key, entry := range b.negative {
+			if !entry.at.After(started) && !same(entry.owner, owners[key]) {
+				delete(b.negative, key)
+			}
+		}
+		b.Unlock()
 	}
 	for _, s := range active {
 		s.mu.Lock()
@@ -78,18 +123,64 @@ func (n *NAT) Reconcile(ctx context.Context) {
 // Destroy matches the generation, never just the reused port. A dropped event
 // or listener restart calls RefreshNow; the periodic dump remains the bound.
 func (n *NAT) Destroy(source netip.AddrPort, generation string) {
+	if source.Addr().IsUnspecified() {
+		b := n.bucket(source)
+		b.Lock()
+		var keys []netip.AddrPort
+		for key := range b.m {
+			if key.Port() == source.Port() {
+				keys = append(keys, key)
+			}
+		}
+		for key, entry := range b.negative {
+			if key.Port() == source.Port() && entry.owner.Generation == generation {
+				delete(b.negative, key)
+			}
+		}
+		b.Unlock()
+		for _, key := range keys {
+			n.Destroy(key, generation)
+		}
+		return
+	}
 	b := n.bucket(source)
 	b.Lock()
 	s := b.m[source]
+	if entry, ok := b.negative[source]; ok && entry.owner.Generation == generation && generation != "" {
+		delete(b.negative, source)
+	}
 	b.Unlock()
 	if s == nil {
 		return
 	}
+	s.destroyGeneration(generation)
+}
+
+func (s *session) destroyGeneration(generation string) {
 	s.mu.Lock()
+	if !s.closed && s.owner.Generation == "" && generation != "" {
+		// Lookup may have read this cookie before the destroy notification
+		// arrived. Keep it until lookup publishes the generation. Bound the
+		// queue; an overflow requires a fresh kernel snapshot before dialing.
+		if len(s.pendingDestroys) < 32 {
+			s.pendingDestroys = append(s.pendingDestroys, generation)
+		} else {
+			s.destroyOverflow = true
+		}
+	}
 	match := s.owner.Generation == generation && generation != ""
 	s.mu.Unlock()
 	if match {
 		s.close()
+		// A failed setup can publish its negative entry after our first shard
+		// lookup but before close marks the session closed. Remove that exact
+		// generation too; a reused port's newer generation stays untouched.
+		b := s.n.bucket(s.source)
+		b.Lock()
+		if entry, ok := b.negative[s.source]; ok && entry.owner.Generation == generation {
+			delete(b.negative, s.source)
+		}
+		b.Unlock()
 	}
 }
 func (n *NAT) RefreshNow() {
@@ -138,4 +229,6 @@ func (n *NAT) Close() {
 		s.close()
 	}
 	n.wg.Wait()
+	close(n.io.stop)
+	n.io.wg.Wait()
 }

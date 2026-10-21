@@ -1,10 +1,8 @@
 name: Acceptance
 
-# Net Switch 1.0, milestone 0: the Linux acceptance suite (tests/linux) against
-# the baseline engine, sing-box at the version packaging/versions.json pins.
-# Strict: any failing case fails the job. Known baseline defects are recorded,
-# must reproduce, and don't fail it. Nothing here ships; 0.3.x keeps building
-# from ci.yml.
+# The 1.0 profile runs the real Linux engine in isolated namespaces. Every
+# ordinary assertion remains mandatory. Explicitly declared load-attribution
+# requirements are reported as release blockers until the eBPF follow-up lands.
 on:
   push:
     branches: [main]
@@ -13,10 +11,39 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      release_gate:
+        description: 'Check Linux 1.0 release blockers and pending gates only (no engine workload)'
+        type: boolean
+        required: false
+        default: false
+      profile:
+        description: 'Record CPU profiles and a bounded scheduling trace for selected cases'
+        type: boolean
+        required: false
+        default: false
       run:
         description: 'Only cases whose id matches this regular expression (empty: all)'
         required: false
         default: ''
+      engine_build:
+        description: 'Both ordinary release cases and tagged fault cases, or a focused build'
+        type: choice
+        options: [all, release, faults]
+        default: all
+      runner:
+        description: 'A single runner for focused diagnostics; PR checks always use all four'
+        type: choice
+        options: [all, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm]
+        default: all
+      trace_artifact:
+        description: 'Analyse an existing trace artifact only (no new engine workload)'
+        required: false
+        default: ''
+      shared_tests:
+        description: 'Also run shared relay, UDP and Linux lookup race regressions'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -65,17 +92,69 @@ jobs:
         id: filter
         run: node .github/ci/changes.mjs
 
+  # The two manual-only jobs below start from a workflow_dispatch input and
+  # never on a push or pull request, so they have no changed-files gate.
+  release-gate:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.release_gate }}
+    name: Linux 1.0 release gate
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Test release classification and mandatory failures
+        run: go test -count=1 -v ./tests/linux/harness ./tests/linux/suite
+      - name: Refuse a release while any declared gate is unfinished
+        run: go run ./tests/linux/cmd/nsaccept release-gate
+  trace-analysis:
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.release_gate && inputs.trace_artifact != '' }}
+    name: Analyse saved runtime trace
+    runs-on: ubuntu-26.04-arm
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - name: Summarize saved scheduler and syscall timing in memory
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ inputs.trace_artifact }}
+        run: |
+          [[ "$ARTIFACT" =~ ^[0-9]+$ ]]
+          gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT/zip" | node scripts/ci-trace-summary.mjs
   linux:
     needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.acceptance != 'false') }}
+    if: ${{ !cancelled() && !inputs.release_gate && !inputs.trace_artifact && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.acceptance != 'false') }}
     name: Linux acceptance / ${{ matrix.runner }}
     # Pinned labels: ubuntu-latest moves between releases.
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
-        runner: [ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm]
+        runner: ${{ fromJSON(inputs.runner && inputs.runner != 'all' && format('["{0}"]', inputs.runner) || '["ubuntu-24.04","ubuntu-26.04","ubuntu-24.04-arm","ubuntu-26.04-arm"]') }}
     env:
       GOTOOLCHAIN: local
       CGO_ENABLED: '0'
@@ -124,12 +203,53 @@ jobs:
           node-version: ${{ steps.pins.outputs.node_version }}
           package-manager-cache: false
       - name: Build the harness
+        id: harness
         env:
           GOFLAGS: -mod=vendor
-        run: go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
+        run: |
+          go test -count=1 -v ./tests/linux/harness ./tests/linux/suite
+          go test -count=1 -v ./internal/journal
+          go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
+          go build -trimpath -o "$RUNNER_TEMP/netswitch-engine" ./cmd/netswitch-engine
+          go build -trimpath -tags acceptance -o "$RUNNER_TEMP/netswitch-engine-faults" ./cmd/netswitch-engine
+          node scripts/engine-notices.mjs "$RUNNER_TEMP/netswitch-engine" --check
+          go test -c -o "$RUNNER_TEMP/linux-platform.test" ./internal/engine/linux
+      - name: Test Linux kernel interfaces and crash recovery in a private namespace
+        env:
+          COLD_REPEATS: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && '100' || '20' }}
+        run: |
+          sudo unshare --net -- env NETSWITCH_ISOLATED_NETNS=1 "$RUNNER_TEMP/linux-platform.test" -test.v
+          sudo unshare --net -- "$RUNNER_TEMP/linux-platform.test" -test.run '^TestConcurrentColdHoldersShareDescriptorScans$' -test.count "$COLD_REPEATS" -test.v
+      - name: Check shared TCP setup and lookup races
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && !cancelled() && steps.harness.outcome == 'success' }}
+        env:
+          CGO_ENABLED: '1'
+          GOMAXPROCS: '4'
+          GOFLAGS: -mod=vendor -p=2
+        run: |
+          go test -race -v -count=1 ./internal/engine/tcp ./internal/engine/linux ./internal/journal
+          go test -race -v -count=100 -run '^TestConcurrentColdHoldersShareDescriptorScans$' ./internal/engine/linux
+      - name: Check repeated Wait and close admission at capacity
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && !cancelled() && steps.harness.outcome == 'success' }}
+        env:
+          NETSWITCH_TIMEWAIT_GATE: '1'
+          GOMAXPROCS: '4'
+          GOFLAGS: -mod=vendor -p=2
+        run: go test -v -count=1 -run '^TestCloseAtCapUnderLoad$' ./internal/engine/stack
+      - name: Check shared UDP quotations and packet races
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.shared_tests && !cancelled() && steps.harness.outcome == 'success' }}
+        env:
+          CGO_ENABLED: '1'
+          GOMAXPROCS: '4'
+          GOFLAGS: -mod=vendor -p=2
+        run: go test -race -v -count=1 ./internal/engine/udp ./internal/engine/packet
       # The QUIC fixture is its own module at a pinned quic-go, so QUIC never
       # enters Net Switch's go.mod or vendor/.
       - name: Check and build the QUIC fixture
+        id: quic
+        # Collect independent acceptance evidence even if a kernel regression
+        # failed. The failed kernel step still makes this job fail.
+        if: ${{ !cancelled() && steps.harness.outcome == 'success' }}
         working-directory: tests/quicfixture
         env:
           GOFLAGS: -mod=readonly
@@ -138,21 +258,64 @@ jobs:
           go vet ./...
           go test -count=1 -v ./...
           go build -trimpath -o "$RUNNER_TEMP/nsquic" .
-      - name: Fetch sing-box at the pinned version and check its SHA-256
-        run: sudo "$RUNNER_TEMP/nsaccept" fetch-sing-box --dest /opt/sing-box
       # In a transient scope with Delegate=yes: systemd lets a program create
       # cgroups only in a subtree delegated to it, and the lookup cases need some.
-      - name: Run the acceptance suite as root
+      - name: Run ordinary acceptance against the release binary
+        if: ${{ !cancelled() && inputs.engine_build != 'faults' && steps.harness.outcome == 'success' && steps.quic.outcome == 'success' }}
         env:
           RUN_FILTER: ${{ inputs.run }}
+          PROFILE: ${{ inputs.profile }}
         run: >-
           sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-${{ github.run_id }}-${{ strategy.job-index }}" --
           env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
           "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs"
-          "$RUNNER_TEMP/nsaccept" run --engine sing-box --engine-path /opt/sing-box/sing-box
-          --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance"
+          "NSACCEPT_PROFILE=$PROFILE"
+          "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine"
+          --build-mode release
+          --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance/release"
           --quic "$RUNNER_TEMP/nsquic"
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
+      - name: Run fault-injection acceptance against the tagged binary
+        if: ${{ !cancelled() && inputs.engine_build != 'release' && steps.harness.outcome == 'success' && steps.quic.outcome == 'success' }}
+        env:
+          RUN_FILTER: ${{ inputs.run }}
+          PROFILE: ${{ inputs.profile }}
+        run: >-
+          sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-faults-${{ github.run_id }}-${{ strategy.job-index }}" --
+          env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
+          "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs"
+          "NSACCEPT_PROFILE=$PROFILE"
+          "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine-faults"
+          --build-mode faults
+          --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance/faults"
+          --quic "$RUNNER_TEMP/nsquic"
+          --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
+      - name: Summarize capacity heap and goroutine profiles
+        if: ${{ always() }}
+        run: |
+          if test -d "$RUNNER_TEMP/acceptance"; then
+            find "$RUNNER_TEMP/acceptance" -name 'heap.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -nodecount=30 "$RUNNER_TEMP/netswitch-engine" {} \;
+            find "$RUNNER_TEMP/acceptance" -name 'goroutine.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -nodecount=20 "$RUNNER_TEMP/netswitch-engine" {} \;
+          fi
+      - name: Summarize the requested CPU profiles
+        if: ${{ always() && inputs.profile }}
+        run: |
+          if test -d "$RUNNER_TEMP/acceptance"; then
+            find "$RUNNER_TEMP/acceptance" -name 'cpu.pprof' -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodecount=35 "$RUNNER_TEMP/netswitch-engine" {} \;
+            find "$RUNNER_TEMP/acceptance" \( -name 'block*.pprof' -o -name 'mutex*.pprof' \) -print -exec sudo "$(command -v go)" tool pprof -top -cum -nodefraction=0 -focus='Owners' -nodecount=20 "$RUNNER_TEMP/netswitch-engine" {} \;
+            find "$RUNNER_TEMP/acceptance" -name 'runtime*.trace' -print0 | while IFS= read -r -d '' trace; do
+              echo "trace window: $trace"
+              for kind in sched syscall; do
+                sudo env "PATH=$PATH" go tool trace -pprof="$kind" "$trace" | node scripts/profile-summary.mjs "$kind"
+              done
+            done
+          fi
+      - name: Make root-produced evidence readable by the artifact uploader
+        if: ${{ always() }}
+        run: |
+          if test -d "$RUNNER_TEMP/acceptance"; then
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/acceptance"
+          fi
       - name: Upload the report and logs
         if: ${{ always() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

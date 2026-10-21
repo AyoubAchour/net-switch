@@ -31,6 +31,11 @@ test('//go:build lines hold when some open tag setting compiles the file', () =>
   assert.equal(constraintHolds('unix', 'windows'), false);
   assert.equal(constraintHolds('linux && (amd64 || arm64)', 'linux'), true);
   assert.equal(constraintHolds('linux && 386', 'linux'), false);
+  // One architecture per build: CI runs amd64 and arm64, never neither.
+  assert.equal(constraintHolds('linux && !amd64 && !arm64', 'linux'), false);
+  assert.equal(constraintHolds('linux && !amd64', 'linux'), true, 'arm64');
+  assert.equal(constraintHolds('amd64 && arm64', 'linux'), false);
+  assert.equal(constraintHolds('amd64 || arm64', 'linux'), true);
   assert.equal(constraintHolds('close_fence_disabled', 'linux'), true, 'custom tags are open');
   assert.equal(constraintHolds('!close_fence_disabled', 'linux'), true);
   assert.equal(constraintHolds('tag && !tag', 'linux'), false);

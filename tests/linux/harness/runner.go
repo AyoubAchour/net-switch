@@ -31,6 +31,9 @@ type Case struct {
 	// Defect names the known baseline defect a baseline-defect case's one
 	// Expect assertion checks for. Only baseline-defect cases have one.
 	Defect string
+	// ReleaseBlocker names the recorded design decision deferring the case's
+	// ReleaseChecks. Every ordinary Check and Expect remains mandatory on 1.0.
+	ReleaseBlocker string
 	// Waits says what a pending gate needs before it can be checked. Only
 	// pending cases have one, and they have no Run.
 	Waits   string
@@ -56,6 +59,8 @@ func Validate(cases []*Case) error {
 			return fmt.Errorf("case %s needs a title", c.ID)
 		case c.Label == Pending && (c.Waits == "" || c.Run != nil):
 			return fmt.Errorf("pending case %s must say what it waits for and have no Run function", c.ID)
+		case c.Label == Pending && c.ReleaseBlocker != "":
+			return fmt.Errorf("pending case %s cannot also declare an executable release check", c.ID)
 		case c.Label != Pending && c.Run == nil:
 			return fmt.Errorf("case %s needs a Run function", c.ID)
 		case c.Label != Pending && c.Waits != "":
@@ -75,7 +80,8 @@ type Check struct {
 	OK      bool   `json:"ok"`
 	Message string `json:"message"`
 	// Defect marks the baseline-defect case's one Expect assertion.
-	Defect bool `json:"defect,omitempty"`
+	Defect         bool `json:"defect,omitempty"`
+	ReleaseBlocker bool `json:"releaseBlocker,omitempty"`
 }
 
 // T is a running case. Like testing.T, Require and Fatalf stop the case and
@@ -147,6 +153,25 @@ func (t *T) Check(ok bool, format string, args ...any) bool {
 	} else {
 		t.write("FAIL", text)
 	}
+	return ok
+}
+
+// ReleaseCheck retains the exact assertion and measurement for a declared
+// release requirement. It cannot waive a prerequisite or an ordinary Check.
+func (t *T) ReleaseCheck(ok bool, format string, args ...any) bool {
+	if t.c.ReleaseBlocker == "" || t.kind != V1 {
+		t.markError("release check used without a declared 1.0 release blocker")
+		return false
+	}
+	text := fmt.Sprintf(format, args...)
+	t.mu.Lock()
+	t.checks = append(t.checks, Check{OK: ok, Message: text, ReleaseBlocker: true})
+	t.mu.Unlock()
+	result := "threshold FAILED"
+	if ok {
+		result = "threshold met"
+	}
+	t.write("blocker", result+": "+text)
 	return ok
 }
 
@@ -245,7 +270,7 @@ func Run(ctx context.Context, cases []*Case, report *Report, opts Options) *Repo
 }
 
 func runCase(parent context.Context, c *Case, opts Options) (CaseResult, string) {
-	result := CaseResult{ID: c.ID, Title: c.Title, Label: c.Label, Defect: c.Defect, Waits: c.Waits, Spec: c.Spec}
+	result := CaseResult{ID: c.ID, Title: c.Title, Label: c.Label, Defect: c.Defect, Waits: c.Waits, Spec: c.Spec, ReleaseBlocker: c.ReleaseBlocker}
 	console := opts.Console
 	if c.Label == Requires10 && opts.Kind == Baseline {
 		result.Outcome = NotRun
@@ -346,6 +371,11 @@ func runCase(parent context.Context, c *Case, opts Options) (CaseResult, string)
 	var tally Tally
 	for _, check := range result.Checks {
 		switch {
+		case check.ReleaseBlocker:
+			tally.ReleaseChecks++
+			if !check.OK {
+				tally.ReleaseFailed++
+			}
 		case check.Defect:
 			tally.Expects++
 			if !check.OK {
@@ -358,6 +388,13 @@ func runCase(parent context.Context, c *Case, opts Options) (CaseResult, string)
 			}
 		}
 	}
+	if opts.Kind == V1 && c.ReleaseBlocker != "" && tally.ReleaseChecks == 0 && tally.Failed == 0 && tally.ExpectFailed == 0 && result.Error == "" {
+		// A failed prerequisite may stop the case before attribution can be
+		// measured. Preserve that real failure instead of replacing its cause
+		// with a secondary missing-measurement error.
+		result.Error = "a declared release blocker must measure its release checks"
+		t.write("ERROR", result.Error)
+	}
 	var why string
 	result.Outcome, why = Decide(c.Label, opts.Kind, result.Error != "", tally)
 	if result.Error == "" && why != "" {
@@ -369,7 +406,7 @@ func runCase(parent context.Context, c *Case, opts Options) (CaseResult, string)
 	if opts.GitHub {
 		fmt.Fprintln(console, "::endgroup::")
 	}
-	verb := map[Outcome]string{Pass: "PASS", Fail: "FAIL", KnownDefect: "DEFECT", NotReproduced: "FAIL", Error: "FAIL"}[result.Outcome]
+	verb := map[Outcome]string{Pass: "PASS", Fail: "FAIL", KnownDefect: "DEFECT", NotReproduced: "FAIL", Error: "FAIL", ReleaseBlocked: "BLOCKER"}[result.Outcome]
 	fmt.Fprintf(console, "--- %-6s %s (%.1fs): %s\n", verb, c.ID, time.Since(started).Seconds(), Explain(result.Outcome))
 	if detail := result.Detail(); detail != "" && result.Outcome != Pass {
 		fmt.Fprintf(console, "           %s\n", detail)
@@ -380,6 +417,8 @@ func runCase(parent context.Context, c *Case, opts Options) (CaseResult, string)
 			fmt.Fprintf(console, "::error title=%s::%s: %s\n", annotationEscape(c.ID), annotationEscape(Explain(result.Outcome)), annotationEscape(result.Detail()))
 		case result.Outcome == KnownDefect:
 			fmt.Fprintf(console, "::notice title=%s::known baseline defect (%s): %s\n", annotationEscape(c.ID), annotationEscape(c.Defect), annotationEscape(result.Detail()))
+		case result.Outcome == ReleaseBlocked:
+			fmt.Fprintf(console, "::warning title=%s::release blocker: %s\n", annotationEscape(c.ID), annotationEscape(result.Detail()))
 		}
 	}
 	return result, strings.Join(stuck, "; ")

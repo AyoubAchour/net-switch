@@ -1,0 +1,322 @@
+//go:build linux
+
+package linux
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"strconv"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"time"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
+)
+
+var errKernelFileLimit = errors.New("kernel file exceeds read limit")
+var errNotRegular = errors.New("identity metadata is not a regular file")
+
+// The lookup deadline also applies under memory pressure. Unlike sync.Pool,
+// these bounded scratch caches survive GC, so checking a PID does not create
+// a fresh 16 KiB allocation/assist after each collection. At most 1 MiB of
+// ordinary and 4 MiB of Flatpak scratch is retained, allocated only on demand.
+type procScratch[T any] struct {
+	mu    sync.Mutex
+	items [64]*T
+	count int
+}
+
+func (p *procScratch[T]) Get() *T {
+	p.mu.Lock()
+	if p.count != 0 {
+		p.count--
+		b := p.items[p.count]
+		p.items[p.count] = nil
+		p.mu.Unlock()
+		return b
+	}
+	p.mu.Unlock()
+	return new(T)
+}
+
+func (p *procScratch[T]) Put(b *T) {
+	p.mu.Lock()
+	if p.count < len(p.items) {
+		p.items[p.count] = b
+		p.count++
+	}
+	p.mu.Unlock()
+}
+
+var processBuffers procScratch[[16 << 10]byte]
+var flatpakBuffers procScratch[[64 << 10]byte]
+var rejectedMetadata atomic.Uint64
+var lastRejectedMetadata atomic.Pointer[string]
+
+// The process root is deliberately followed once. Nothing below that pinned
+// directory may resolve a symlink, including a procfs magic link. Flatpak bind
+// mounts its regular metadata file here, so crossing a mount is legitimate.
+func readFlatpakInfo(root string, b []byte) ([]byte, error) {
+	return readFlatpakInfoTimed(root, b, nil)
+}
+
+func readFlatpakInfoTimed(root string, b []byte, timing *lookupTiming) ([]byte, error) {
+	started := time.Now()
+	dir, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	timing.add(phaseMetadataRootOpen, time.Since(started))
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		started := time.Now()
+		unix.Close(dir)
+		timing.add(phaseMetadataRootClose, time.Since(started))
+	}()
+	started = time.Now()
+	fd, err := unix.Openat2(dir, ".flatpak-info", &unix.OpenHow{
+		Flags:   unix.O_PATH | unix.O_CLOEXEC | unix.O_NOFOLLOW,
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS,
+	})
+	timing.add(phaseMetadataInfoOpen, time.Since(started))
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(fd)
+	// O_RDONLY would invoke a bind-mounted device's open handler before
+	// fstat could reject it. O_PATH pins the inode without opening the device.
+	if err := regularFile(fd, -1); err != nil {
+		return nil, err
+	}
+	// This sole intentional magic-link reopen belongs to this engine, not
+	// the target process. fd remains open, so rename/mount races cannot swap
+	// its inode. NONBLOCK applies here; NOFOLLOW would reject our own fd link.
+	readFD, err := unix.Open(fmt.Sprintf("/proc/self/fd/%d", fd), unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(readFD)
+	data, err := readBounded(readFD, b)
+	if errors.Is(err, errKernelFileLimit) {
+		// Flatpak serializes environment overrides and arguments after its
+		// identity. A complete name line within the bound is sufficient;
+		// never interpret a line cut off at the cap as an application ID.
+		section, offset := false, 0
+		for offset < len(data) {
+			end := bytes.IndexByte(data[offset:], '\n')
+			if end < 0 {
+				break
+			}
+			line := bytes.TrimSpace(data[offset : offset+end])
+			offset += end + 1
+			if bytes.HasPrefix(line, []byte("[")) {
+				section = bytes.Equal(line, []byte("[Application]"))
+			}
+			if section && bytes.HasPrefix(line, []byte("name=")) && len(line) > 5 {
+				return data[:offset], nil
+			}
+		}
+		return nil, err
+	}
+	return data, err
+}
+
+func regularFile(fd int, limit int) error {
+	return regularKernelFile(fd, limit, false)
+}
+
+func regularKernelFile(fd int, limit int, direct bool) error {
+	var st unix.Stat_t
+	if err := statKernelFile(fd, direct, &st); err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return errNotRegular
+	}
+	if limit >= 0 && st.Size > int64(limit) {
+		return errKernelFileLimit
+	}
+	return nil
+}
+
+// Repeated identity checks borrow scratch space. No bytes from this buffer
+// may escape the caller; only parsed numbers or copied identity strings do.
+func readInto(path string, b []byte) ([]byte, error) {
+	fd, direct, err := openKernelFile(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOFOLLOW)
+	if err != nil {
+		return nil, err
+	}
+	defer closeKernelFile(fd, direct)
+	if err := regularKernelFile(fd, len(b), direct); err != nil {
+		return nil, err
+	}
+	// Even proc stat can release the last mm reference of an exiting task
+	// and wait for its AIO/mapping cleanup. Its small size is not a bound on
+	// syscall duration; let the runtime schedule other work during the read.
+	return readBounded(fd, b)
+}
+
+func readRegularInto(fd int, b []byte) ([]byte, error) {
+	if err := regularFile(fd, len(b)); err != nil {
+		return nil, err
+	}
+	return readBounded(fd, b)
+}
+
+func readBounded(fd int, b []byte) ([]byte, error) {
+	return readBoundedWith(fd, b, unix.Read)
+}
+
+func readBoundedWith(fd int, b []byte, read func(int, []byte) (int, error)) ([]byte, error) {
+	n := 0
+	for n < len(b) {
+		got, err := read(fd, b[n:])
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if got == 0 {
+			return b[:n], nil
+		}
+		n += got
+	}
+	var extra [1]byte
+	for {
+		got, err := read(fd, extra[:])
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if got == 0 {
+			return b[:n], nil
+		}
+		return b[:n], errKernelFileLimit
+	}
+}
+
+// procfs and cgroupfs generate these small files synchronously. Registering
+// each one with Go's network poller adds fcntl/epoll calls that the kernel then
+// rejects. Use ordinary bounded reads, retaining EINTR handling and a hard
+// allocation ceiling. Only kernel-owned paths use this helper.
+func readKernelFile(path string, limit int) ([]byte, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NONBLOCK|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(fd)
+	if err := regularFile(fd, limit); err != nil {
+		return nil, err
+	}
+	b := make([]byte, min(512, limit))
+	n := 0
+	for {
+		if n == len(b) {
+			if n == limit {
+				var extra [1]byte
+				got, err := unix.Read(fd, extra[:])
+				if errors.Is(err, unix.EINTR) {
+					continue
+				}
+				if err != nil {
+					return nil, err
+				}
+				if got == 0 {
+					return b[:n], nil
+				}
+				return nil, errKernelFileLimit
+			}
+			b = append(b, make([]byte, min(len(b), limit-len(b)))...)
+		}
+		got, err := unix.Read(fd, b[n:])
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if got == 0 {
+			return b[:n], nil
+		}
+		n += got
+	}
+}
+
+// exe and fd entries are read as link text, never opened. The kernel limits
+// their targets to PATH_MAX; reject truncation instead of growing indefinitely.
+func readProcLink(path string) (string, error) {
+	var b [128]byte
+	n, err := readKernelLink(path, b[:])
+	if err != nil {
+		return "", err
+	}
+	if n < len(b) {
+		return string(b[:n]), nil
+	}
+	storage := processBuffers.Get()
+	defer processBuffers.Put(storage)
+	n, err = readKernelLink(path, storage[:4096])
+	if err != nil {
+		return "", err
+	}
+	if n == 4096 {
+		return "", errKernelFileLimit
+	}
+	return string(storage[:n]), nil
+}
+
+// Descriptor links need only the kernel's short socket:[inode] form. Reading
+// relative to an already opened fd directory avoids resolving /proc/PID/fd
+// again for every descriptor in a shared scan. Long ordinary-file links are
+// deliberately ignored; they can never be socket identities.
+func socketInodeAt(dir int, name string) (uint32, bool) {
+	inode, ok, _ := socketInodeAtChecked(dir, name)
+	return inode, ok
+}
+
+// A mandatory recheck of a known holder must distinguish an absent descriptor
+// from an unreadable one. Ordinary exploratory scans remain best-effort above.
+func socketInodeAtChecked(dir int, name string) (uint32, bool, error) {
+	var b [64]byte
+	var n int
+	var err error
+	if dir >= 0 {
+		// Pin the kernel directory and keep the numeric path on the stack.
+		// Although readlink never opens the target, its temporary reference
+		// can become the last one after a concurrent close. Final socket
+		// cleanup may linger, so this must be an ordinary scheduling syscall.
+		var entry [16]byte
+		if len(name) == 0 || len(name) >= len(entry) {
+			return 0, false, unix.EINVAL
+		}
+		for i := range name {
+			if name[i] < '0' || name[i] > '9' {
+				return 0, false, unix.EINVAL
+			}
+			entry[i] = name[i]
+		}
+		count, _, errno := syscall.Syscall6(unix.SYS_READLINKAT, uintptr(dir), uintptr(unsafe.Pointer(&entry[0])), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), 0, 0)
+		n = int(count)
+		if errno != 0 {
+			err = errno
+		}
+	} else if dir == unix.AT_FDCWD {
+		// Short literal proc paths avoid allocating their NUL terminator.
+		n, err = readKernelLink(name, b[:])
+	} else {
+		n, err = unix.Readlinkat(dir, name, b[:])
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if n >= len(b) || n < 10 || !bytes.HasPrefix(b[:n], []byte("socket:[")) || b[n-1] != ']' {
+		return 0, false, nil
+	}
+	inode, err := strconv.ParseUint(string(b[8:n-1]), 10, 32)
+	return uint32(inode), err == nil, err
+}

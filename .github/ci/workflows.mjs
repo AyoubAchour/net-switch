@@ -132,7 +132,20 @@ function matrixEntries(runsOn, strategy) {
     else if (field && include.length && !['matrix', 'include', 'fail-fast', 'max-parallel'].includes(field[1])) include.at(-1)[field[1]] = stripComment(field[2]);
   }
   const listed = /^\s+runner: (\[.*\])$/m.exec(strategy);
-  const runners = listed ? flowList(listed[1]) : [];
+  let runners = listed ? flowList(listed[1]) : [];
+  // A list chosen by an expression, like fromJSON(inputs.runner != 'all' &&
+  // format('["{0}"]', inputs.runner) || '["a","b"]'): the runners are the
+  // literal JSON arrays in it. A single-runner template ('{0}') names a
+  // runner the input's own options already restrict to this list.
+  const computed = /^\s+runner: \$\{\{\s*fromJSON\((.*)\)\s*\}\}$/m.exec(strategy);
+  if (computed) {
+    for (const [, array] of computed[1].matchAll(/'(\[[^']*\])'/g)) {
+      if (array.includes('{')) continue;
+      const parsed = JSON.parse(array);
+      if (!Array.isArray(parsed) || !parsed.every(name => typeof name === 'string')) throw new Error(`Unsupported runner list: ${array}`);
+      runners = runners.concat(parsed);
+    }
+  }
   const entries = include.filter(entry => entry.runner && !runners.includes(entry.runner));
   for (const runner of runners) entries.push({ ...include.find(entry => entry.runner === runner), runner });
   if (!entries.length) throw new Error(`No runners found for matrix job: ${strategy}`);

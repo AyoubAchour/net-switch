@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -98,8 +99,12 @@ func runUDP(args []string) (any, error) {
 	connect := fs.Bool("connect", false, "use a connected socket (one server), so ICMP errors are reported")
 	wait := fs.Int("wait", 1500, "ms to wait for the last replies")
 	localPort := fs.Int("local-port", 0, "source port")
+	release := fs.String("release-file", "", "keep the single socket open for flow inspection after reporting held results")
 	if err := parse(fs, args); err != nil {
 		return nil, err
+	}
+	if *release != "" && *sockets != 1 {
+		return nil, usageError{fmt.Errorf("UDP flow inspection requires one socket")}
 	}
 	list, err := targets(*to)
 	if err != nil {
@@ -173,6 +178,22 @@ func runUDP(args []string) (any, error) {
 				break
 			}
 			time.Sleep(20 * time.Millisecond)
+		}
+		if *release != "" {
+			mu.Lock()
+			data, marshalErr := json.Marshal(r)
+			mu.Unlock()
+			if marshalErr != nil {
+				conn.Close()
+				<-done
+				return nil, marshalErr
+			}
+			fmt.Printf("held %s\n", data)
+			if err := waitFile(*release, ReleaseTimeout); err != nil {
+				conn.Close()
+				<-done
+				return nil, err
+			}
 		}
 		_ = conn.Close()
 		<-done
@@ -533,6 +554,7 @@ func runUDPBurst(args []string) (any, error) {
 type FloodResult struct {
 	// Token marks every datagram: socket i sends "T:<token>:0:<i> ".
 	Token      string         `json:"token"`
+	Locals     []string       `json:"locals"`
 	Sockets    int            `json:"sockets"`
 	Opened     int            `json:"opened"`
 	Sent       int            `json:"sent"` // datagrams the kernel took
@@ -552,7 +574,8 @@ type FloodResult struct {
 // runUDPFlood opens many UDP sockets (each a new session to the engine), sends
 // one datagram on each, then sees which are answered, refused (ICMP
 // unreachable) or ignored. All sockets stay open until the end, or with
-// --release-file until the case releases them.
+// --release-file until the case releases them; --sweep-file lets the case
+// time an echo through each held session first (udp_sweep.go).
 func runUDPFlood(args []string) (any, error) {
 	fs := flag.NewFlagSet("udpflood", flag.ContinueOnError)
 	to := fs.String("to", "", "echo servers ip:port,...; socket i uses server i mod n")
@@ -561,6 +584,7 @@ func runUDPFlood(args []string) (any, error) {
 	timeout := fs.Int("timeout", 3000, "ms to wait for answers after the last datagram")
 	times := fs.Bool("times", false, "record when each refusal arrived")
 	release := fs.String("release-file", "", "print the result, then keep every socket open until this file exists")
+	sweepFile := fs.String("sweep-file", "", "while holding, when this file appears, echo once through each socket it lists (a SweepRequest) and print \"sweep {json}\"")
 	if err := parse(fs, args); err != nil {
 		return nil, err
 	}
@@ -578,6 +602,7 @@ func runUDPFlood(args []string) (any, error) {
 			continue
 		}
 		conns = append(conns, c)
+		r.Locals = append(r.Locals, c.LocalAddr().String())
 	}
 	defer func() {
 		for _, c := range conns {
@@ -630,5 +655,8 @@ func runUDPFlood(args []string) (any, error) {
 		}()
 	}
 	wg.Wait()
+	if *sweepFile != "" {
+		return sweepThenHold(conns, tok, *sweepFile, *release, r)
+	}
 	return holdUntil(*release, r)
 }

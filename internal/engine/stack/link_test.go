@@ -100,6 +100,37 @@ func TestLinkConcurrentClose(t *testing.T) {
 	wg.Wait()
 }
 
+func TestInboundAndMTUDoNotWaitForOutputCopy(t *testing.T) {
+	l := NewLink()
+	dispatcher := &orderDispatcher{seen: map[uint32]uint32{}, t: t}
+	l.Attach(dispatcher)
+	observed := false
+	l.SetObserver(func(*gv.PacketBuffer) { observed = true })
+	copying, resume, written := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		l.enqueue(1, packetOther, false, func(dst []byte) { close(copying); <-resume; dst[0] = 7 })
+		close(written)
+	}()
+	defer func() { close(resume); <-written; l.Close() }()
+	<-copying
+	done := make(chan bool, 1)
+	go func() {
+		ok := l.MTU() == MTU && l.IsAttached()
+		p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(make([]byte, 8))})
+		l.InjectInbound(0, p)
+		p.DecRef()
+		done <- ok
+	}()
+	select {
+	case ok := <-done:
+		if !ok || !observed || dispatcher.seen[0] != 1 {
+			t.Fatal("inbound snapshot lost state or delivery")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("inbound delivery or MTU waited for an output copy")
+	}
+}
+
 func TestStackOptions(t *testing.T) {
 	o := DefaultOptions()
 	o.ClockResolution = 500 * time.Microsecond

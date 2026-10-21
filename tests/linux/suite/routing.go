@@ -26,10 +26,45 @@ func addRouting(r *registry) {
 	r.add("closeflows.reconnect", "Reconnect closes an app's flows that aren't on its lane target", harness.Parity, "4.6", 0, closeReconnect)
 	r.add("ipv6.not-allowed-rejected-fast", "Public IPv6 is refused at once while IPv6 isn't allowed; link-local IPv6 still works", harness.Parity, "5.4", 0, ipv6Rejected)
 	r.add("ipv6.routed-per-line", "With IPv6 allowed, IPv6 TCP and UDP take each app's line", harness.Parity, "5.4, 5.5", 0, ipv6PerLine)
+	r.add("ipv6.disabled-default-with-capable-line", "A disabled IPv6 default cannot bypass pins, blocked lines or IPv6 refusal", harness.Requires10, "5.4, 5.5", 0, ipv6DisabledDefault)
 	r.defect("flows.ipv6-off-closes-only-ipv6", "Turning IPv6 off closes the IPv6 flows and only them",
 		"today's app restarts the engine to change IPv6, which closes every flow", "5.7", 0, ipv6Off)
 	r.add("icmp.echo-follows-main-lane", "Ping (IPv4 and IPv6) reaches the server over the main line's lane target, with real replies", harness.Parity, "5.4, 5.8", 0, icmpEcho)
 	r.add("dns.queries-per-line", "DNS over UDP and TCP leaves on each app's line", harness.Parity, "5.4", 0, dnsPerLine)
+}
+
+func ipv6DisabledDefault(e *Env) {
+	out, err := e.Net.R.In(e.Ctx(), topo.DUT, "sysctl", "-w", "net.ipv6.conf.default.disable_ipv6=1")
+	e.T.Require(err == nil, "disable IPv6 only for subsequently created interfaces (%s, %v)", out, err)
+	e.T.Require(e.SysctlDUT("net.ipv6.conf."+topo.Line("b").Iface+".disable_ipv6") == "0", "line b retains IPv6 despite the disabled default")
+	cfg := e.DefaultConfig()
+	cfg.Policy.IPv6 = true
+	e.StartEngine(cfg)
+	e.ExpectTCP("pinned IPv6 with disabled default", "bravo", AsUser, "b", topo.Server6, 3)
+	e.ExpectUDP("pinned IPv6 UDP with disabled default", "bravo", AsUser, "b", topo.Server6, 3)
+	for _, blocked := range []bool{true, false} {
+		p := cfg.Policy
+		label := "blocked/capped line"
+		if blocked {
+			p.Blocked = []engine.LineID{"b"}
+		} else {
+			p.IPv6 = false
+			label = "IPv6 not allowed"
+		}
+		e.Apply(p)
+		from := e.Mark()
+		tcp := e.TCP("bravo", AsUser, "--to", To(topo.Server6, wire.PortWhoami), "--count", "3", "--timeout", "3000")
+		var udp app.UDPResult
+		e.RunJSON(Run{App: "bravo", Args: []string{"udp", "--to", To(topo.Server6, wire.PortUDPEcho), "--count", "3", "--wait", "1000", "--connect"}}, &udp)
+		refused := udp.RecvErrors["ECONNREFUSED"] + udp.SendErrors["ECONNREFUSED"]
+		e.T.Check(tcp.OK == 0 && tcp.FailedMS.Max < 1000 && tcp.Errors["ECONNREFUSED"]+tcp.Errors["ECONNRESET"] == 3 && udp.Received == 0 && refused == 3,
+			"%s promptly refuses every IPv6 TCP and UDP attempt (%d/%d replies, %d UDP refusals)", label, tcp.OK, udp.Received, refused)
+		escaped := Select(e.Records(), func(r inet.Record) bool {
+			return r.T >= from && (r.Kind == "tcp" || r.Kind == "udp") && strings.HasPrefix(r.Dst, "[")
+		})
+		e.T.Check(len(escaped) == 0, "%s sends no public IPv6 to a server (%d escaped)", label, len(escaped))
+	}
+	e.T.Check(e.SysctlDUT("net.ipv6.conf.default.disable_ipv6") == "1", "enabling our TUN did not change the system default")
 }
 
 func threeLines(e *Env) {

@@ -57,6 +57,42 @@ func addKernel(r *registry) {
 		"sing-box sets DF on its own UDP sockets (udp_fragment is off by default), so an app's oversized datagram is silently dropped", "5.3, 5.8", 0, bigUDP)
 	r.defect("mtu.df-too-big-reported", "Datagrams that mustn't fragment get 'too big' back, and none of them gets out",
 		"no ICMP frag-needed or Packet Too Big ever reaches the app", "5.3, 5.8", 0, dfTooBig)
+	r.add("mtu.large-udp-replies", "12,000-byte and maximum-size UDP replies arrive intact through the real TUN, over IPv4 and IPv6", harness.Parity, "5.3", 0, largeUDPReplies)
+}
+
+func largeUDPReplies(e *Env) {
+	cfg := e.DefaultConfig()
+	cfg.Policy.IPv6 = true
+	e.StartEngine(cfg)
+	_, controller := e.v1()
+	before := stats(e, controller)
+	for _, family := range []struct {
+		server  netip.Addr
+		maximum int
+	}{{topo.Server4, 65507}, {topo.Server6, 65527}} {
+		for _, size := range []int{12000, family.maximum - 1, family.maximum} {
+			const count = 3
+			var result app.UDPReplyResult
+			e.RunJSON(Run{App: "charlie", Args: []string{"udpreply", "--to", To(family.server, wire.PortUDPReply), "--size", strconv.Itoa(size), "--count", strconv.Itoa(count)}}, &result)
+			e.T.Check(len(result.Replies) == count, "%s: all %d requests were attempted without retries", family.server, count)
+			for _, reply := range result.Replies {
+				e.T.Check(reply.OK && reply.Bytes == size && reply.Hash == reply.WantHash && reply.From == To(family.server, wire.PortUDPReply) && reply.Err == "",
+					"%s reply %d: %d bytes, SHA-256 %s (wanted %s), source %s, error %q", family.server, reply.Sequence, reply.Bytes, reply.Hash, reply.WantHash, reply.From, reply.Err)
+			}
+			records, complete := e.WaitRecords(2*time.Second, func(records []inet.Record) bool {
+				return len(Select(records, Tagged("udp-reply", result.Token))) == count
+			})
+			arrived := Select(records, Tagged("udp-reply", result.Token))
+			e.T.Check(complete && len(arrived) == count && RecordLines(arrived)["c"] == count, "%d-byte requests all reached the server on line c (%s)", size, Describe(RecordLines(arrived)))
+			for _, record := range arrived {
+				e.T.Check(record.ReplyBytes == size && record.Err == "", "server sent the full %d-byte reply (%d bytes, error %q)", size, record.ReplyBytes, record.Err)
+			}
+		}
+	}
+	after := stats(e, controller)
+	e.T.Check(after.Counters["udpOversize"] == before.Counters["udpOversize"], "no representable reply was counted as oversized")
+	e.T.Check(after.LookupMisses == before.LookupMisses, "every reply session had an identified owner (%d misses)", after.LookupMisses-before.LookupMisses)
+	e.T.Check(after.PendingBytes == 0 && after.UDPReadBytes == 0, "no reply storage remains after delivery (%d pending, %d reading)", after.PendingBytes, after.UDPReadBytes)
 }
 
 func rpFilterStrict(e *Env) {
@@ -280,14 +316,34 @@ func defaultRouteRemoved(e *Env) {
 func uplinkDown(e *Env) {
 	e.StartEngine(e.DefaultConfig())
 	alpha := e.StartStream("alpha", AsUser, 20*time.Second)
+	_, ready := e.WaitFlow(3*time.Second, func(f engine.Flow) bool {
+		return f.Protocol == "tcp" && f.Destination.Port() == wire.PortStream && f.Line == "a" && f.Up > 0 && f.Down > 0
+	})
+	e.T.Require(ready, "alpha's stream carries data before the router is cut off")
 	if err := e.Net.UplinkDown(e.Ctx(), "b"); err != nil {
 		e.T.Fatalf("%v", err)
 	}
+	var before engine.Stats
+	v1, isV1 := e.Eng.(engine.V1)
+	if isV1 {
+		var err error
+		before, err = v1.Session().Stats(e.Ctx())
+		e.T.Require(err == nil, "stats before the bound dials (%v)", err)
+	}
 	r := e.TCP("bravo", AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "2", "--concurrency", "2", "--timeout", "15000")
 	connected := handshakes(r)
-	e.T.Check(r.OK == 0 && connected == 0 && r.FailedMS.Max <= 12000,
-		"bravo's connections over a line that reaches nothing fail without the handshake ever completing, within the 10 s dial deadline (completed handshakes %d, slowest failure %.0f ms, errors %v)",
-		connected, r.FailedMS.Max, r.Errors)
+	unknown := 0
+	if isV1 {
+		after, err := v1.Session().Stats(e.Ctx())
+		e.T.Require(err == nil, "stats after the bound dials (%v)", err)
+		unknown = int(after.AdmittedUnknown - before.AdmittedUnknown)
+		e.T.Require(unknown == 0, "both attempts were identified and exercised line b (%d unknown)", unknown)
+		e.T.Check(after.Counters["tcpDialFailed"]-before.Counters["tcpDialFailed"] == uint64(2-unknown), "every identified attempt failed in the bound physical dial (%d failures for %d attempts)", after.Counters["tcpDialFailed"]-before.Counters["tcpDialFailed"], 2-unknown)
+		e.T.Check(Lines(r.Seen)["a"] == unknown, "only separately counted unknown flows used the main lane (%s; %d unknown)", Describe(Lines(r.Seen)), unknown)
+	}
+	e.T.Check(r.OK == unknown && connected == unknown && r.FailedMS.Max <= 12000,
+		"identified attempts over the dead uplink fail before their handshakes complete, within the dial deadline (%d connected, %d explicitly unknown; slowest failure %.0f ms, errors %v)",
+		connected, unknown, r.FailedMS.Max, r.Errors)
 	e.ExpectTCP("charlie while b's router is cut off", "charlie", AsUser, "c", topo.Server4, 3)
 	if err := e.Net.UplinkUp(e.Ctx(), "b"); err != nil {
 		e.T.Fatalf("%v", err)
@@ -314,14 +370,30 @@ func handshakes(r app.TCPResult) int {
 // checks a few in a row do.
 func (e *Env) retryLine(label, name string, want engine.LineID, within time.Duration) {
 	deadline := time.Now().Add(within)
+	attempt := 0
 	for time.Now().Before(deadline) {
+		attempt++
+		var before engine.Stats
+		v1, isV1 := e.Eng.(engine.V1)
+		if isV1 {
+			before = stats(e, v1.Session())
+		}
 		r := e.TCP(name, AsUser, "--to", To(topo.Server4, wire.PortWhoami), "--count", "1", "--timeout", "2000")
+		e.T.Logf("%s convergence attempt %d: OK=%d lines=%s errors=%v; this attempt does not count toward the hard owner probes", label, attempt, r.OK, Describe(Lines(r.Seen)), r.Errors)
+		if isV1 {
+			after := stats(e, v1.Session())
+			e.T.Logf("%s convergence attempt %d ownership: lookups=%d unknown=%d detail=%s", label, attempt, after.LookupCount-before.LookupCount, after.LookupMisses-before.LookupMisses, after.OwnerLookup)
+		}
 		if r.OK == 1 && Lines(r.Seen)[want] == 1 {
 			break
 		}
 		e.Sleep(250 * time.Millisecond)
 	}
-	e.ExpectTCP(label, name, AsUser, want, topo.Server4, 3)
+	if _, v1 := e.Eng.(engine.V1); v1 {
+		e.expectSteadyTCP(label, name, want, topo.Server4, 3)
+	} else {
+		e.ExpectTCP(label, name, AsUser, want, topo.Server4, 3)
+	}
 }
 
 var newAddrB = netip.MustParsePrefix("192.168.2.3/24")
@@ -346,6 +418,12 @@ func addressChange(e *Env) {
 // still running, so a case acts on a flow that really exists. (Its answers
 // are checked from its result afterwards.)
 func (e *Env) streamUp(name string, bg *Bg) {
+	if e.deferAttribution {
+		// StartStream already checked this exact live tuple, including an
+		// explicit unknown owner, before allowing the load to begin.
+		e.T.Require(bg.Running(), "%s's inspected stream is still running", name)
+		return
+	}
 	_, ok := e.WaitFlow(3*time.Second, func(f engine.Flow) bool {
 		return f.App == AppPath(name) && f.Destination.Port() == wire.PortStream && f.Down > 0
 	})
@@ -409,8 +487,8 @@ func adapterDownCloses(e *Env) {
 }
 
 // dnsChange changes the resolver configuration the engine sees mid-flow.
-// The engine runs under `ip netns exec`, which mounts /etc/netns/<ns>/ files
-// over /etc; rewriting the file in place is a DNS change it can notice.
+// The engine sees the namespace's resolver through a private bind mount.
+// Rewriting the source inode must change that view without closing flows.
 func dnsChange(e *Env) {
 	dir := "/etc/netns/" + topo.DUT
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -422,18 +500,57 @@ func dnsChange(e *Env) {
 		e.T.Fatalf("%v", err)
 	}
 	e.StartEngine(e.DefaultConfig())
-	streams := map[string]*Bg{}
-	for _, name := range []string{"alpha", "bravo", "charlie"} {
-		streams[name] = e.StartStream(name, AsUser, 10*time.Second)
+	visible := func(want string) {
+		if reader, ok := e.Eng.(interface{ ResolverContents() (string, error) }); ok {
+			got, err := reader.ResolverContents()
+			e.T.Require(err == nil && got == want, "the engine sees the actual resolver-file contents (%q; %v)", got, err)
+		}
 	}
+	visible("nameserver " + topo.Server4.String() + "\n")
+	release := e.NewRelease("dns-streams")
+	streams := map[string]*Bg{}
+	retries := 0
+	for name, line := range map[string]engine.LineID{"alpha": "a", "bravo": "b", "charlie": "c"} {
+		for attempt := 0; attempt < 3; attempt++ {
+			stream := e.StartStream(name, AsUser, time.Minute, release.Arg()...)
+			var port int
+			for i, arg := range stream.r.Args {
+				if arg == "--local-port" && i+1 < len(stream.r.Args) {
+					port, _ = strconv.Atoi(stream.r.Args[i+1])
+					break
+				}
+			}
+			e.T.Require(port > 0, "the stream has its own source port")
+			_, ready := e.WaitFlow(2*time.Second, func(f engine.Flow) bool {
+				return f.Source.Port() == uint16(port) && f.App == AppPath(name) && f.Protocol == "tcp" && f.Destination.Port() == wire.PortStream && f.Line == line && f.Up > 0 && f.Down > 0
+			})
+			if ready {
+				streams[name] = stream
+				break
+			}
+			_, unknown := e.WaitFlow(100*time.Millisecond, func(f engine.Flow) bool {
+				return f.Source.Port() == uint16(port) && f.Protocol == "tcp" && f.Destination.Port() == wire.PortStream && f.App == "" && f.AppID == "" && f.PID == 0 && f.Line == "a" && f.Up > 0 && f.Down > 0
+			})
+			e.T.Require(unknown, "%s retry %d discards only an explicitly unknown, data-carrying stream", name, attempt+1)
+			retries++
+			stream.Stop()
+		}
+		e.T.Require(streams[name] != nil, "%s has a live data-carrying stream on %s before the DNS change", name, line)
+	}
+	e.T.Logf("DNS precondition retried %d explicitly unknown streams; the original no-retry precondition would pass: %t", retries, retries == 0)
+	e.T.Check(retries == 0, "DNS survival requires zero discarded precondition streams (%d retries)", retries)
 	e.Sleep(2 * time.Second)
 	if err := os.WriteFile(conf, []byte("nameserver "+topo.Server4b.String()+"\nnameserver "+topo.Server6.String()+"\n"), 0o644); err != nil {
 		e.T.Fatalf("%v", err)
 	}
+	visible("nameserver " + topo.Server4b.String() + "\nnameserver " + topo.Server6.String() + "\n")
 	e.Sleep(2 * time.Second)
 	if err := os.WriteFile(conf, []byte("nameserver "+topo.Server6b.String()+"\n"), 0o644); err != nil {
 		e.T.Fatalf("%v", err)
 	}
+	visible("nameserver " + topo.Server6b.String() + "\n")
+	e.Sleep(time.Second)
+	release.Open(e)
 	for name, want := range map[string]engine.LineID{"alpha": "a", "bravo": "b", "charlie": "c"} {
 		var s Stream
 		streams[name].WaitJSON(e, 20*time.Second, &s)
@@ -511,6 +628,8 @@ func crashCleanup(e *Env) {
 	e.ExpectTCP("alpha after the crash, before cleanup", "alpha", AsUser, "a", topo.Server4, 3)
 	e.ExpectTCP("bravo after the crash, before cleanup (main route)", "bravo", AsUser, "a", topo.Server4, 3)
 	e.ExpectUDP("bravo UDP after the crash, before cleanup", "bravo", AsUser, "a", topo.Server4, 5)
+	left := e.Snapshot().Diff(e.Before)
+	e.T.Require(len(left) > 0, "owned routing objects still exist before explicit cleanup (%d differences)", len(left))
 	err := e.Eng.Cleanup(e.Ctx())
 	e.T.Check(err == nil, "cleanup succeeds (%v)", err)
 	e.ExpectSameState("after cleanup", e.Before)

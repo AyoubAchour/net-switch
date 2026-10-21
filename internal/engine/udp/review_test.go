@@ -60,7 +60,27 @@ type errorSocket struct {
 	errors chan error
 }
 
+func (s *errorSocket) WaitReadable(ctx context.Context) error {
+	if s.ready != nil {
+		return nil
+	}
+	select {
+	case err := <-s.errors:
+		return err
+	case w := <-s.in:
+		s.ready = &w
+		return nil
+	case <-s.done:
+		return net.ErrClosed
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (s *errorSocket) ReadFrom(b []byte) (int, netip.AddrPort, error) {
+	if s.ready != nil {
+		return s.socket.ReadFrom(b)
+	}
 	select {
 	case err := <-s.errors:
 		return 0, netip.AddrPort{}, err
