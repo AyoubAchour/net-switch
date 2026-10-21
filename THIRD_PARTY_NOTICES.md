@@ -113,6 +113,7 @@ netns are used unmodified for Linux routing and network namespaces.
 <!-- engine-modules:start -->
 Go 1.27.3 runtime and standard library: BSD-3-Clause (the toolchain's LICENSE and PATENTS).
 
+- github.com/godbus/dbus/v5 `v5.2.4`, BSD-2-Clause; license: `vendor/github.com/godbus/dbus/v5/LICENSE`.
 - github.com/google/btree `v1.1.2`, Apache-2.0; license: `vendor/github.com/google/btree/LICENSE`.
 - github.com/vishvananda/netlink `v1.3.1`, Apache-2.0; license: `vendor/github.com/vishvananda/netlink/LICENSE`.
 - github.com/vishvananda/netns `v0.0.5`, Apache-2.0; license: `vendor/github.com/vishvananda/netns/LICENSE`.

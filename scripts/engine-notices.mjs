@@ -12,6 +12,7 @@ const go = process.env.GO_BINARY || 'go';
 const result = spawnSync(go, ['version', '-m', binary], { encoding: 'utf8' });
 if (result.error || result.status !== 0) throw result.error || new Error(result.stderr);
 const licenses = {
+  'github.com/godbus/dbus/v5': ['BSD-2-Clause', 'vendor/github.com/godbus/dbus/v5/LICENSE'],
   'github.com/google/btree': ['Apache-2.0', 'vendor/github.com/google/btree/LICENSE'],
   'github.com/vishvananda/netlink': ['Apache-2.0', 'vendor/github.com/vishvananda/netlink/LICENSE'],
   'github.com/vishvananda/netns': ['Apache-2.0', 'vendor/github.com/vishvananda/netns/LICENSE'],
