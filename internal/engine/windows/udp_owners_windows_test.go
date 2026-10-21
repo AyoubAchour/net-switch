@@ -69,8 +69,8 @@ func TestUDPConcurrentOwnersShareFreshNativeSnapshots(t *testing.T) {
 	if h.UDPRefreshes >= count/4 {
 		t.Fatalf("native dumps were not shared: %d for %d callers", h.UDPRefreshes, count)
 	}
-	if h.UDPParallelPeak < 1 || h.UDPParallelPeak > udpOwnerParallelReads {
-		t.Fatalf("native reads in flight peaked at %d; the bound is %d", h.UDPParallelPeak, udpOwnerParallelReads)
+	if h.UDPParallelPeak < 1 || h.UDPParallelPeak > ownerParallelReads {
+		t.Fatalf("native reads in flight peaked at %d; the bound is %d", h.UDPParallelPeak, ownerParallelReads)
 	}
 	// A later query must not turn a warm positive row into a generation oracle.
 	before := h.UDPRefreshes

@@ -104,10 +104,7 @@ func (index *tcpIndex) add(tuple platform.Tuple, pid uint32) {
 	}
 }
 
-type tcpRefresh struct {
-	done   chan struct{}
-	result *ownerSnapshot
-}
+type tcpRefresh = tableRead[*ownerSnapshot]
 
 type LookupHistogram struct {
 	Count     uint64 `json:"count"`
@@ -136,6 +133,7 @@ type LookupHistogram struct {
 	UDPReadMaxUS       uint64          `json:"udpReadMaxUS"`    // slowest native read
 	UDPPeakRows        uint64          `json:"udpPeakRows"`     // largest table read
 	UDPParallelPeak    int             `json:"udpParallelPeak"` // most reads in flight for one family
+	TCPParallelPeak    int             `json:"tcpParallelPeak"` // most reads in flight for one family
 	Failures           []lookupFailure `json:"failures,omitempty"`
 }
 
@@ -144,12 +142,12 @@ var lookupBounds = [...]uint64{100, 250, 500, 1000, 2000, 3000, 4000, 5000, 1000
 type Owners struct {
 	mu                                                            sync.Mutex
 	snapshot                                                      [2]atomic.Pointer[ownerSnapshot]
-	refresh                                                       [2]atomic.Pointer[tcpRefresh]
+	tcpReads                                                      [2]tableReads[*ownerSnapshot]
 	paths                                                         map[processKey]platform.Owner
-	tcpBuffers                                                    [2][]uint64
+	tcpBuffers                                                    [2][ownerParallelReads][]uint64
 	udpSnapshots                                                  [2]atomic.Pointer[udpOwnerSnapshot]
-	udpReads                                                      [2]udpOwnerReads
-	udpBuffers                                                    [2][udpOwnerParallelReads][]uint64
+	udpReads                                                      [2]tableReads[*udpOwnerSnapshot]
+	udpBuffers                                                    [2][ownerParallelReads][]uint64
 	udpDumps, udpReadNanos, udpIndexNanos                         atomic.Uint64
 	udpReadHist                                                   [len(lookupBounds)]atomic.Uint64
 	udpReadMaxUS, udpPeakRows                                     atomic.Uint64
@@ -209,7 +207,11 @@ func (o *Owners) Stats() LookupHistogram {
 	for i := range h.UDPReadBuckets {
 		h.UDPReadBuckets[i] = o.udpReadHist[i].Load()
 	}
-	h.UDPReadMaxUS, h.UDPPeakRows, h.UDPParallelPeak = o.udpReadMaxUS.Load(), o.udpPeakRows.Load(), o.udpParallelPeak()
+	h.UDPReadMaxUS, h.UDPPeakRows = o.udpReadMaxUS.Load(), o.udpPeakRows.Load()
+	for family := range 2 {
+		h.UDPParallelPeak = max(h.UDPParallelPeak, o.udpReads[family].peakInFlight())
+		h.TCPParallelPeak = max(h.TCPParallelPeak, o.tcpReads[family].peakInFlight())
+	}
 	h.Failures = o.failureSnapshot()
 	for family := range o.snapshot {
 		if snapshot := o.snapshot[family].Load(); snapshot != nil {
@@ -316,8 +318,9 @@ func parseTCP(b []byte, v6 bool, rows *tcpIndex) error {
 }
 
 // GetExtendedTcpTable accepts one family per call. A five-millisecond snapshot
-// and one in-flight refresh are shared by all SYNs of that family. A lookup
-// never waits for the unrelated family's dump. Both waits remain cancellable.
+// and at most ownerParallelReads staggered refreshes are shared by all SYNs of
+// that family. A lookup never waits for the unrelated family's dump. Both
+// waits remain cancellable.
 func freshSnapshot(s *ownerSnapshot, after, now time.Duration) bool {
 	return s != nil && s.at > after && now >= s.at && now-s.at < 5*time.Millisecond
 }
@@ -325,6 +328,7 @@ func freshSnapshot(s *ownerSnapshot, after, now time.Duration) bool {
 func (o *Owners) tcpSnapshot(ctx context.Context, after time.Duration, family int) (ownerSnapshot, error) {
 	start := winclock.Now()
 	defer measureStage(&o.snapshotHist, start)
+	run := func(r *tcpRefresh) { o.refreshTCP(r, family) }
 	for {
 		if err := ctx.Err(); err != nil {
 			return ownerSnapshot{}, err
@@ -332,22 +336,7 @@ func (o *Owners) tcpSnapshot(ctx context.Context, after time.Duration, family in
 		if s := o.snapshot[family].Load(); freshSnapshot(s, after, winclock.Now()) {
 			return *s, s.err
 		}
-		pending := o.refresh[family].Load()
-		if pending == nil {
-			pending = &tcpRefresh{done: make(chan struct{})}
-			if !o.refresh[family].CompareAndSwap(nil, pending) {
-				continue
-			}
-			// A different refresh may have published between our two loads.
-			// Reuse it rather than starting another dump after winning the slot.
-			if s := o.snapshot[family].Load(); freshSnapshot(s, after, winclock.Now()) {
-				pending.result = s
-				o.refresh[family].Store(nil)
-				close(pending.done)
-				return *s, s.err
-			}
-			go o.refreshTCP(pending, family)
-		}
+		pending := o.tcpReads[family].join(after, run)
 		select {
 		case <-ctx.Done():
 			return ownerSnapshot{}, ctx.Err()
@@ -363,18 +352,20 @@ func (o *Owners) tcpSnapshot(ctx context.Context, after time.Duration, family in
 
 func (o *Owners) refreshTCP(pending *tcpRefresh, family int) {
 	// The IP Helper call is synchronous and cannot be cancelled. Keep at
-	// most one snapshot per family in flight, while every lookup can leave at
-	// its own 50 ms deadline. One caller's cancellation cannot poison peers.
+	// most ownerParallelReads snapshots per family in flight, while every
+	// lookup can leave at its own 50 ms deadline. One caller's cancellation
+	// cannot poison peers.
 	ctx, cancel := winclock.System.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	s := ownerSnapshot{at: winclock.Now()}
+	s := ownerSnapshot{at: pending.at}
 	o.tcpRefreshes.Add(1)
 	af, stride := uint32(windows.AF_INET), 24
 	if family == 1 {
 		af, stride = windows.AF_INET6, 56
 	}
 	readStart := winclock.Now()
-	b, err := readOwnerTableInto(ctx, tcpTable, af, tcpOwnerPIDAll, &o.tcpBuffers[family])
+	// Each slot owns its scratch buffer; the reads may overlap.
+	b, err := readOwnerTableInto(ctx, tcpTable, af, tcpOwnerPIDAll, &o.tcpBuffers[family][pending.slot])
 	o.tcpReadNanos.Add(uint64(winclock.Since(readStart)))
 	s.err = err
 	if s.err == nil {
@@ -404,9 +395,13 @@ func (o *Owners) refreshTCP(pending *tcpRefresh, family int) {
 	// The map and result never change after publication. Wake-up readers
 	// need no shared mutex, including the burst immediately after a dump.
 	pending.result = &s
-	o.snapshot[family].Store(&s)
-	o.refresh[family].Store(nil)
-	close(pending.done)
+	// Reads may finish out of order; keep the newest-started snapshot.
+	for current := o.snapshot[family].Load(); current == nil || current.at < s.at; current = o.snapshot[family].Load() {
+		if o.snapshot[family].CompareAndSwap(current, &s) {
+			break
+		}
+	}
+	o.tcpReads[family].finish(pending, func(r *tcpRefresh) { o.refreshTCP(r, family) })
 }
 
 func (o *Owners) process(pid uint32) (platform.Owner, error) {
