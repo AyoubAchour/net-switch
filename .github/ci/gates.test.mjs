@@ -8,13 +8,14 @@ const workflow = name => readWorkflow(readFileSync(new URL(`../workflows/${name}
 
 // Which group each job belongs to, written out independently of the files, so
 // a moved or new job fails here until someone decides what it depends on.
-// investigation: manual-only jobs that existed before gating.
+// investigation: manual-only jobs that existed before gating. oracle: the go
+// list check of the drift guard, which must not depend on the classifier.
 const expected = {
   ci: {
     'windows-acceptance': 'legacy_windows', testisp: 'testisp', engine: 'legacy_windows',
     'go1-windows': 'go_windows', 'go1-linux': 'go_linux', wintun: 'wintun', linux: 'node',
     'linux-helper': 'helper', 'test-node-22': 'node', 'test-node-24': 'node', installer: 'installer', arm64: 'node',
-    'control-security': 'investigation', 'testisp-reproduction': 'investigation',
+    'control-security': 'investigation', 'testisp-reproduction': 'investigation', 'golist-oracle': 'oracle',
   },
   control: { windows: 'control' },
   'linux-acceptance': { linux: 'acceptance' },
@@ -27,6 +28,9 @@ const expected = {
 // false for its group; nothing starts in a cancelled run.
 function shouldRun(file, group, s) {
   if (s.cancelled) return false;
+  // Every push and pull request, whatever the classifier did; manual runs
+  // only with the regular jobs.
+  if (group === 'oracle') return s.event !== 'workflow_dispatch' || s.inputs.regular_jobs;
   if (group === 'investigation') {
     // Either option replaces the default TestISP investigation.
     if (s.event !== 'workflow_dispatch') return false;
@@ -101,7 +105,10 @@ function checkGates(file, { jobs }) {
   assert.deepEqual([...jobs.keys()].filter(id => id !== 'changes').sort(), Object.keys(expected[file]).sort());
   for (const [id, group] of Object.entries(expected[file])) {
     const job = jobs.get(id);
-    if (group !== 'investigation') {
+    if (group === 'oracle') {
+      assert.deepEqual(job.needs, [], id);
+      assert.doesNotMatch(job.if ?? '', /needs\./, id);
+    } else if (group !== 'investigation') {
       assert.deepEqual(job.needs, ['changes'], id);
       // The job must read its own group's output and no other.
       assert.deepEqual([...job.if.matchAll(/needs\.changes\.outputs\.(\w+)/g)].map(match => match[1]), [group], id);

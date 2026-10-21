@@ -11,6 +11,8 @@ import { posix } from 'node:path';
 // GOOS is exact. Architecture and custom build tags are left open: a file is
 // compiled if some setting of them would compile it on amd64 or arm64, the
 // only architectures CI runs. That over-counts, which can only add checks.
+// golist-check.mjs also asks for exact settings ({ goarch, tags }), to
+// compare these rules with go list for each setting the workflows use.
 
 const knownOS = new Set(['aix', 'android', 'darwin', 'dragonfly', 'freebsd', 'hurd', 'illumos', 'ios', 'js', 'linux', 'nacl', 'netbsd', 'openbsd', 'plan9', 'solaris', 'wasip1', 'windows', 'zos']);
 const unixOS = new Set(['aix', 'android', 'darwin', 'dragonfly', 'freebsd', 'hurd', 'illumos', 'ios', 'linux', 'netbsd', 'openbsd', 'solaris']);
@@ -19,11 +21,18 @@ const runnerArch = new Set(['amd64', 'arm64']);
 export const goosOf = { Windows: 'windows', Linux: 'linux' };
 
 // The value a tag has for this GOOS: true, false, or null when it's open.
-function tagValue(tag, goos) {
+// With exact settings nothing is open: the architecture is the one given,
+// gc is the compiler, and every other tag is set only if listed (race comes
+// from -race, cgo from CGO_ENABLED).
+function tagValue(tag, goos, exact) {
   if (tag === 'unix') return unixOS.has(goos);
   if (knownOS.has(tag)) return tag === goos || (goos === 'android' && tag === 'linux');
-  if (knownArch.has(tag)) return runnerArch.has(tag) ? null : false;
-  return null;
+  if (knownArch.has(tag)) return exact ? tag === exact.goarch : runnerArch.has(tag) ? null : false;
+  if (!exact) return null;
+  if (/^go1\.\d+$/.test(tag)) throw new Error(`release tag ${tag} isn't modelled`);
+  if (tag === 'gc') return true;
+  if (tag === 'gccgo') return false;
+  return exact.tags.has(tag);
 }
 
 function parseExpression(source) {
@@ -44,14 +53,14 @@ function parseExpression(source) {
   return node;
 }
 
-export function constraintHolds(source, goos) {
+export function constraintHolds(source, goos, exact) {
   const node = parseExpression(source);
   const open = new Set();
-  const collect = item => item.tag ? (tagValue(item.tag, goos) === null && open.add(item.tag)) : [item.left, item.right, item.operand].filter(Boolean).forEach(collect);
+  const collect = item => item.tag ? (tagValue(item.tag, goos, exact) === null && open.add(item.tag)) : [item.left, item.right, item.operand].filter(Boolean).forEach(collect);
   collect(node);
   const free = [...open];
   if (free.length > 12) throw new Error(`Too many open tags in //go:build ${source}`);
-  const evaluate = (item, assignment) => item.tag ? (tagValue(item.tag, goos) ?? assignment.get(item.tag))
+  const evaluate = (item, assignment) => item.tag ? (tagValue(item.tag, goos, exact) ?? assignment.get(item.tag))
     : item.op === '!' ? !evaluate(item.operand, assignment)
     : item.op === '&&' ? evaluate(item.left, assignment) && evaluate(item.right, assignment)
     : evaluate(item.left, assignment) || evaluate(item.right, assignment);
@@ -63,14 +72,14 @@ export function constraintHolds(source, goos) {
 
 // go/build's goodOSArchFile: name_GOOS, name_GOARCH and name_GOOS_GOARCH,
 // each optionally followed by _test, and only after the first underscore.
-export function nameHolds(name, goos) {
+export function nameHolds(name, goos, exact) {
   const stem = name.split('.')[0];
   const underscore = stem.indexOf('_');
   if (underscore < 0) return true;
   const parts = stem.slice(underscore).split('_');
   if (parts.at(-1) === 'test') parts.pop();
   const last = parts.at(-1), before = parts.at(-2);
-  const value = tag => tagValue(tag, goos) !== false;
+  const value = tag => tagValue(tag, goos, exact) !== false;
   if (parts.length >= 2 && knownOS.has(before) && knownArch.has(last)) return value(before) && value(last);
   if (parts.length >= 1 && (knownOS.has(last) || knownArch.has(last))) return value(last);
   return true;
@@ -193,18 +202,18 @@ export class GoTree {
   hasGoMod(dir) { return (this.byDir.get(dir) ?? []).includes('go.mod'); }
   moduleOf(dir) { return this.modules.find(module => module.root === '' || dir === module.root || dir.startsWith(`${module.root}/`)); }
 
-  // Files of the package in dir that compile for goos.
-  packageFiles(dir, goos, tests) {
-    const key = `${dir}\0${goos}\0${tests}`;
+  // Files of the package in dir that compile for goos (and exact settings).
+  packageFiles(dir, goos, tests, exact) {
+    const key = `${dir}\0${goos}\0${tests}\0${exact ? `${exact.goarch} ${[...exact.tags].sort()}` : ''}`;
     if (this.cache.has(key)) return this.cache.get(key);
     const files = [];
     for (const name of this.byDir.get(dir) ?? []) {
       if (!name.endsWith('.go') || /^[._]/.test(name)) continue;
       if (!tests && name.endsWith('_test.go')) continue;
       const file = this.join(dir, name);
-      if (!nameHolds(name, goos)) continue;
+      if (!nameHolds(name, goos, exact)) continue;
       const line = buildLine(this.repo.read(file));
-      if (line !== null && !constraintHolds(line, goos)) continue;
+      if (line !== null && !constraintHolds(line, goos, exact)) continue;
       files.push(file);
     }
     this.cache.set(key, files);
@@ -257,7 +266,7 @@ export class GoTree {
 
   // Files these packages and their local imports compile, as a map from file
   // to the package path that pulled it in.
-  load(dirs, goos, tests) {
+  load(dirs, goos, tests, exact) {
     const files = new Map();
     const seen = new Set();
     const queue = dirs.map(dir => ({ dir, tests, via: dir || '.' }));
@@ -267,7 +276,7 @@ export class GoTree {
       if (seen.has(key)) continue;
       seen.add(key);
       const module = this.moduleOf(dir);
-      for (const file of this.packageFiles(dir, goos, withTests)) {
+      for (const file of this.packageFiles(dir, goos, withTests, exact)) {
         if (!files.has(file)) files.set(file, via);
         for (const path of imports(this.repo.read(file))) {
           if (module && (path === module.path || path.startsWith(`${module.path}/`))) {

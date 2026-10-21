@@ -101,6 +101,7 @@ export function readWorkflow(text) {
     const strategy = fields.strategy ? [fields.strategy.inline, ...fields.strategy.lines].join('\n') : '';
     const defaults = fields.defaults ? blocks(fields.defaults.lines, 6) : [];
     const runDefaults = defaults.find(entry => entry.key === 'run');
+    const runKeys = runDefaults ? Object.fromEntries(blocks(runDefaults.lines, 8).map(entry => [entry.key, entry.inline])) : {};
     result.set(id, {
       id,
       name: fields.name?.inline,
@@ -111,7 +112,8 @@ export function readWorkflow(text) {
       hasStrategy: Boolean(fields.strategy),
       outputs: fields.outputs ? Object.fromEntries(blocks(fields.outputs.lines, 6).map(entry => [entry.key, entry.inline])) : {},
       env: fields.env ? Object.fromEntries(blocks(fields.env.lines, 6).map(entry => [entry.key, entry.inline])) : {},
-      workingDirectory: runDefaults ? Object.fromEntries(blocks(runDefaults.lines, 8).map(entry => [entry.key, entry.inline]))['working-directory'] : undefined,
+      workingDirectory: runKeys['working-directory'],
+      shell: runKeys.shell,
       steps,
     });
   }

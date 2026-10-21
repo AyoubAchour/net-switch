@@ -10,7 +10,9 @@ export const groups = [
 ];
 export const areas = {
   docs: [],
-  frozen: ['node', 'helper', 'installer', 'legacy_windows', 'go_linux', 'acceptance', 'control'],
+  // The TestISP proof imports tests/windows/local-traffic.mjs, which imports
+  // scripts/tun-test-https.mjs and through it lib/engine.mjs.
+  frozen: ['node', 'helper', 'installer', 'legacy_windows', 'testisp', 'go_linux', 'acceptance', 'control'],
   go_shared: ['go_windows', 'go_linux', 'legacy_windows', 'testisp', 'wintun', 'acceptance', 'control'],
   go_windows: ['go_windows', 'legacy_windows', 'testisp', 'wintun', 'control'],
   go_linux: ['go_linux', 'acceptance'],
@@ -18,17 +20,16 @@ export const areas = {
   tests_windows: ['node', 'go_windows', 'legacy_windows', 'testisp', 'control'],
 };
 
-const windowsGo = /_windows(?:_(?:amd64|arm64|386))?(?:_test)?\.go$/;
+// An area name, or several joined by '+' for a file that sits among code of
+// more than one area.
+export const groupsOfArea = area => [...new Set(area.split('+').flatMap(name => areas[name]))];
 
-export function areaFor(path) {
-  // These exclusions precede documentation and platform matching. A README
-  // in vendor or a fixture is still an input, not documentation-only work.
-  if (/^(?:\.github|scripts|vendor|third_party)\//.test(path)
-      || /(?:^|\/)(?:go\.(?:mod|sum)|package(?:-lock)?\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock)$/.test(path)
-      || /(?:^|\/)(?:fixtures?|testdata)(?:\/|$)/.test(path)) return null;
-  // The installer copies these entire trees, not just today's user guide.
-  if (path === 'THIRD_PARTY_NOTICES.md' || (/^(?:lib|ui|tools|licenses|docs)\//.test(path) && path.endsWith('.md'))) return null;
-  if (path.endsWith('.md') && !path.startsWith('test/')) return 'docs';
+const windowsGo = /_windows(?:_(?:amd64|arm64|386))?(?:_test)?\.go$/;
+// Code, for the locality rule below. Everything else is data some code reads.
+const isCode = path => /\.(?:go|mjs|ps1)$/.test(path);
+
+// The area of a code file, by where it lives and what it builds for.
+function codeArea(path) {
   // Node's trace coverage test reads this Go source. drift.test.mjs fails if
   // a test or script reads another mapped file its area wouldn't select.
   if (path === 'internal/control/http.go') return null;
@@ -43,12 +44,64 @@ export function areaFor(path) {
     return 'go_shared';
   }
   // tests/linux contains portable Go packages tested on Windows as well.
-  if (/^tests\/linux\/.+\.(?:go|mjs|sh|json)$/.test(path)) return 'tests_linux';
+  if (/^tests\/linux\//.test(path)) return 'tests_linux';
   // Node unit tests import this harness on both operating systems.
-  if (/^tests\/windows\/.+\.(?:go|mjs|ps1|json)$/.test(path)) return 'tests_windows';
-  if (path === 'server.mjs' || /^lib\/.+\.(?:mjs|cs|json)$/.test(path)
-      || /^helper\/.+\.go$/.test(path) || /^test\/.+\.mjs$/.test(path)) return 'frozen';
+  if (/^tests\/windows\//.test(path)) return 'tests_windows';
+  if (path === 'server.mjs' || /^lib\//.test(path) || /^helper\/.+\.go$/.test(path) || /^test\//.test(path)) return 'frozen';
   return null;
+}
+
+// Code files directly in each folder, per tracked-file set.
+const codeByFolder = new WeakMap();
+function codeIn(tracked, dir) {
+  let index = codeByFolder.get(tracked);
+  if (!index) {
+    codeByFolder.set(tracked, index = new Map());
+    for (const file of tracked) {
+      if (!isCode(file)) continue;
+      const folder = file.includes('/') ? file.slice(0, file.lastIndexOf('/')) : '';
+      if (!index.has(folder)) index.set(folder, []);
+      index.get(folder).push(file);
+    }
+  }
+  return index.get(dir) ?? [];
+}
+
+// tracked is the set of files at the merge base; the locality rule needs it.
+export function areaFor(path, tracked = new Set()) {
+  // Shared inputs and generated trees: a change runs everything.
+  if (/^(?:\.github|scripts|vendor|third_party)\//.test(path)
+      || /(?:^|\/)(?:go\.(?:mod|sum)|package(?:-lock)?\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock)$/.test(path)) return null;
+  // Documentation-only: Markdown at the repository root. The installer ships
+  // THIRD_PARTY_NOTICES.md and LICENSE, and copies all of docs/.
+  if (!path.includes('/') && /\.md$/i.test(path) && path !== 'THIRD_PARTY_NOTICES.md') return 'docs';
+  if (isCode(path)) return codeArea(path);
+  // Fixtures that the 0.3.x Node tests and the Go ports beside them both read:
+  // test/pure-port-fixtures.test.mjs reads internal/*/node-*.json, and
+  // internal/engine/singbox/config_test.go reads the Windows golden configs.
+  if (/^internal\/[^/]+\/node-[\w-]+\.json$/.test(path) || path === 'test/fixtures/windows-golden.json') return 'frozen+go_shared';
+  // The snap pins and the sing-box config at the top of tests/linux, which
+  // holds no code itself; the Linux acceptance job reads both.
+  if (/^tests\/linux\/[^/]+\.(?:json|sh)$/.test(path)) return 'tests_linux';
+  // Locality: anything else belongs to the code in its folder, or in the
+  // nearest folder above that has code. A test that reads a file beside it by
+  // a computed name then selects that file's jobs by construction; readers
+  // further away build paths drift.mjs follows and checks. No code around it,
+  // or code the map doesn't place: everything runs.
+  const found = new Set();
+  const parts = path.split('/').slice(0, -1);
+  for (let depth = parts.length; depth >= 1 && !found.size; depth -= 1) {
+    for (const file of codeIn(tracked, parts.slice(0, depth).join('/'))) {
+      const area = codeArea(file);
+      if (area === null) return null;
+      found.add(area);
+    }
+  }
+  if (!found.size) return null;
+  // Drop an area whose groups another one already selects.
+  const names = [...found].sort();
+  const covers = (other, name) => areas[name].every(group => areas[other].includes(group));
+  return names.filter(name => !names.some(other => other !== name && covers(other, name) && (!covers(name, other) || other < name))).join('+');
 }
 
 export function classify(paths, knownPaths, { eventName = 'pull_request', labels = [] } = {}) {
@@ -57,10 +110,10 @@ export function classify(paths, knownPaths, { eventName = 'pull_request', labels
   let full = eventName !== 'pull_request' || labels.includes('ci:full') || paths.length === 0;
   if (full) reasons.push(eventName !== 'pull_request' ? `event: ${eventName}` : labels.includes('ci:full') ? 'label: ci:full' : 'empty diff');
   for (const path of paths) {
-    const area = knownPaths.has(path) ? areaFor(path) : null;
+    const area = knownPaths.has(path) ? areaFor(path, knownPaths) : null;
     reasons.push(`${JSON.stringify(path)}: ${area ?? 'new or unclassified; full run'}`);
     if (area === null) full = true;
-    else for (const group of areas[area]) selected.add(group);
+    else for (const group of groupsOfArea(area)) selected.add(group);
   }
   return { full, reasons, outputs: Object.fromEntries(groups.map(group => [group, full || selected.has(group)])) };
 }

@@ -37,6 +37,26 @@ test('//go:build lines hold when some open tag setting compiles the file', () =>
   assert.throws(() => constraintHolds('linux &&', 'linux'), /Unsupported/);
 });
 
+test('exact settings decide every tag, the way go list sees one command', () => {
+  const control = { goarch: 'arm64', tags: new Set(['control_test_https']) };
+  assert.equal(constraintHolds('control_test_https', 'windows', control), true);
+  assert.equal(constraintHolds('!control_test_https', 'windows', control), false);
+  assert.equal(constraintHolds('!close_fence_disabled', 'windows', control), true, 'an unnamed tag is off');
+  assert.equal(constraintHolds('close_fence_disabled', 'windows', control), false);
+  assert.equal(constraintHolds('linux && amd64', 'linux', control), false, 'the architecture is the runner\'s');
+  assert.equal(constraintHolds('race', 'linux', { goarch: 'amd64', tags: new Set(['race']) }), true, '-race sets race');
+  assert.equal(constraintHolds('gc && !gccgo', 'linux', control), true);
+  assert.equal(nameHolds('sys_amd64.go', 'windows', control), false);
+  assert.equal(nameHolds('sys_arm64.go', 'windows', control), true);
+  assert.throws(() => constraintHolds('go1.30', 'linux', control), /release tag go1\.30 isn't modelled/);
+  const tree = treeOf({
+    'zz/c/files.go': '//go:build !control_test_https\n\npackage c\n', 'zz/c/fixture.go': '//go:build control_test_https\n\npackage c\n',
+    'zz/c/c_amd64.go': 'package c\n',
+  });
+  assert.deepEqual([...tree.load(['zz/c'], 'windows', false, control).keys()].sort(), ['zz/c/fixture.go']);
+  assert.deepEqual([...tree.load(['zz/c'], 'windows', false).keys()].sort(), ['zz/c/c_amd64.go', 'zz/c/files.go', 'zz/c/fixture.go'], 'open: every setting');
+});
+
 test('only the header before the package clause carries //go:build', () => {
   assert.equal(buildLine('// Copyright\n\n//go:build windows\n\npackage x\n'), 'windows');
   assert.equal(buildLine('/* block\n comment */\n//go:build linux\npackage x\n'), 'linux');

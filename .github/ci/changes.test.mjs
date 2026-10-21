@@ -1,34 +1,45 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
 import { areaFor, changedFiles, classify, decide, groups, outputLines, run } from './changes.mjs';
 
-const known = paths => classify(paths, new Set(paths));
+// The locality rule reads the tree, so the cases run against the real file
+// list plus the case's own paths.
+const tracked = execFileSync('git', ['ls-files', '-z'], { cwd: new URL('../..', import.meta.url), encoding: 'utf8', maxBuffer: 256 << 20 }).split('\0').filter(Boolean);
+const tree = (...paths) => new Set([...tracked, ...paths]);
+const known = paths => classify(paths, tree(...paths));
+const area = (path, ...more) => areaFor(path, tree(path, ...more));
 const enabled = result => groups.filter(group => result.outputs[group]).sort();
 const cases = {
-  docs: ['README.md', 'notes/design.md', 'tests/windows/README.md'],
-  frozen: ['lib/engine.mjs', 'server.mjs', 'lib/tray.cs', 'helper/main.go', 'test/engine.test.mjs'],
-  go_shared: ['internal/engine/stack/stack.go', 'cmd/netswitch/main.go', 'internal/platform/windows/meters.go'],
-  go_windows: ['internal/wintun/ring_windows.go', 'internal/platform/windows/com_windows_test.go', 'cmd/netswitch/process_windows.go'],
+  // Only Markdown at the repository root is documentation-only.
+  docs: ['README.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md'],
+  frozen: ['lib/engine.mjs', 'server.mjs', 'lib/tray.cs', 'lib/tray.manifest', 'helper/main.go', 'test/engine.test.mjs', 'lib/README.md'],
+  go_shared: ['internal/engine/stack/stack.go', 'cmd/netswitch/main.go', 'internal/platform/windows/meters.go', 'internal/usage/GO-LICENSE.txt'],
+  go_windows: ['internal/wintun/ring_windows.go', 'internal/platform/windows/com_windows_test.go', 'cmd/netswitch/process_windows.go', 'internal/wintun/README.md'],
   go_linux: ['internal/platform/linux/socket_linux.go', 'cmd/netswitch/main_linux_arm64.go'],
-  tests_linux: ['tests/linux/wire/wire.go', 'tests/linux/suite/suite.go', 'tests/linux/snap-inputs.sh'],
-  tests_windows: ['tests/windows/client.mjs', 'tests/windows/testisp/stack_windows.go'],
+  tests_linux: ['tests/linux/wire/wire.go', 'tests/linux/suite/suite.go', 'tests/linux/snap-inputs.sh', 'tests/linux/suite/snap-inputs.json', 'tests/linux/sing-box-linux.json'],
+  tests_windows: ['tests/windows/client.mjs', 'tests/windows/testisp/stack_windows.go', 'tests/windows/README.md', 'tests/windows/testisp/README.md'],
+  'frozen+go_shared': ['internal/apps/node-tests.json', 'internal/usage/node-zones.json', 'test/fixtures/windows-golden.json'],
 };
 // Expected dependencies are deliberately independent of the classifier's map.
 // Changing that map must also explain why this coverage contract has changed.
+const frozen = ['node', 'helper', 'installer', 'legacy_windows', 'testisp', 'go_linux', 'acceptance', 'control'];
+const goShared = ['go_windows', 'go_linux', 'legacy_windows', 'testisp', 'wintun', 'acceptance', 'control'];
 const expected = {
   docs: [],
-  frozen: ['node', 'helper', 'installer', 'legacy_windows', 'go_linux', 'acceptance', 'control'],
-  go_shared: ['go_windows', 'go_linux', 'legacy_windows', 'testisp', 'wintun', 'acceptance', 'control'],
+  frozen,
+  go_shared: goShared,
   go_windows: ['go_windows', 'legacy_windows', 'testisp', 'wintun', 'control'],
   go_linux: ['go_linux', 'acceptance'],
   tests_linux: ['go_windows', 'go_linux', 'acceptance'],
   tests_windows: ['node', 'go_windows', 'legacy_windows', 'testisp', 'control'],
+  'frozen+go_shared': [...new Set([...frozen, ...goShared])],
 };
-for (const [area, paths] of Object.entries(cases)) {
-  test(`${area}: every known path selects its complete dependency group`, () => {
+for (const [name, paths] of Object.entries(cases)) {
+  test(`${name}: every known path selects its complete dependency group`, () => {
     for (const path of paths) {
-      assert.equal(areaFor(path), area);
-      assert.deepEqual(enabled(known([path])), [...expected[area]].sort());
+      assert.equal(area(path), name, path);
+      assert.deepEqual(enabled(known([path])), [...expected[name]].sort(), path);
     }
   });
 }
@@ -37,8 +48,26 @@ test('mixed areas take the union, never their intersection', () => {
   assert.deepEqual(enabled(known(['README.md', 'lib/tray.cs', 'internal/wintun/ring_windows.go'])), [...new Set([...expected.frozen, ...expected.go_windows])].sort());
 });
 
-test('unclassified dependencies and fixtures run everything, before docs matching', () => {
-  for (const path of ['.github/workflows/ci.yml', '.github/README.md', 'scripts/build-release.ps1', 'scripts/generate-gvisor.mjs', 'scripts/readme.md', 'go.mod', 'go.sum', 'helper/go.mod', 'tests/quicfixture/go.sum', 'vendor/README.md', 'third_party/gvisor/patches/fix.patch', 'package.json', 'package-lock.json', 'ui/app.js', 'packaging/versions.json', 'internal/control/http.go', 'internal/apps/node-tests.json', 'test/fixtures/README.md', 'tests/linux/testdata/input.md', 'unknown.txt', 'internal/new.data', 'assets.go']) {
+test('a non-code file takes the area of the code beside it, wherever it is', () => {
+  // The reviewer's case: a README beside Wintun's code is Wintun's input,
+  // whether or not today's code reads it.
+  assert.equal(area('internal/wintun/notes.txt'), 'go_windows');
+  assert.equal(area('internal/wintun/testdata/frames.bin'), 'go_windows', 'the nearest folder with code');
+  assert.equal(area('internal/engine/stack/README.md'), 'go_shared');
+  assert.equal(area('tests/windows/testisp/fixture.json'), 'tests_windows');
+  // Beside code of two areas: both, minus any the other already covers.
+  assert.equal(area('zz/mixed/data.json', 'zz/mixed/a.mjs', 'zz/mixed/b.go'), null, 'unmapped code: everything');
+  assert.equal(area('internal/zz/data.json', 'internal/zz/a.go', 'internal/zz/b_linux.go'), 'go_shared', 'go_shared selects every go_linux job');
+  assert.equal(area('tests/windows/zz/data.json', 'tests/windows/zz/a.mjs', 'tests/windows/zz/b_windows.go'), 'tests_windows');
+  // Beside code the map can't place, or no code at all: everything runs.
+  for (const path of ['tests/oracle/README.md', 'tests/differential/README.md', 'notes/design.md', 'engine/LICENSE', 'packaging/NetSwitch.iss', 'assets/net-switch.ico']) {
+    assert.equal(area(path), null, path);
+    assert.equal(known([path]).full, true, path);
+  }
+});
+
+test('unclassified dependencies run everything, before docs matching', () => {
+  for (const path of ['.github/workflows/ci.yml', '.github/README.md', 'scripts/build-release.ps1', 'scripts/generate-gvisor.mjs', 'scripts/readme.md', 'go.mod', 'go.sum', 'helper/go.mod', 'tests/quicfixture/go.sum', 'vendor/README.md', 'third_party/gvisor/patches/fix.patch', 'package.json', 'package-lock.json', 'ui/app.js', 'packaging/versions.json', 'internal/control/http.go', 'unknown.txt', 'LICENSE', '.gitattributes', 'assets.go']) {
     assert.equal(known(['README.md', path]).full, true, path);
     assert.deepEqual(enabled(known([path])), [...groups].sort(), path);
   }
@@ -46,10 +75,12 @@ test('unclassified dependencies and fixtures run everything, before docs matchin
 
 test('portable Go under tests/windows runs everything, because go1-linux builds ./tests/...', () => {
   for (const path of ['tests/windows/testisp/helpers.go', 'tests/windows/socket/bind.go', 'tests/windows/socket/bind_test.go', 'tests/windows/doc.go', 'tests/windows/testisp/udp_linux.go']) {
-    assert.equal(areaFor(path), null, path);
+    assert.equal(area(path), null, path);
     assert.deepEqual(enabled(known([path])), [...groups].sort(), path);
   }
-  for (const path of ['tests/windows/socket/bind_windows.go', 'tests/windows/testisp/udp_windows_test.go', 'tests/windows/quicprobe/main_windows_arm64.go']) assert.equal(areaFor(path), 'tests_windows', path);
+  for (const path of ['tests/windows/socket/bind_windows.go', 'tests/windows/testisp/udp_windows_test.go', 'tests/windows/quicprobe/main_windows_arm64.go']) assert.equal(area(path), 'tests_windows', path);
+  // Data beside portable Go is the portable Go's input.
+  assert.equal(area('tests/windows/socket/data.json', 'tests/windows/socket/bind.go'), null);
 });
 
 test('new files run everything, including familiar code and documentation paths', () => {
@@ -58,19 +89,24 @@ test('new files run everything, including familiar code and documentation paths'
   }
 });
 
-test('Markdown bundled in the installer is a product input', () => {
-  for (const path of ['THIRD_PARTY_NOTICES.md', 'docs/user-guide.md', 'docs/design.md', 'lib/README.md', 'ui/help.md', 'tools/help.md', 'licenses/notice.md']) assert.equal(known([path]).full, true, path);
+test('documentation the installer ships, and Markdown below the root, is a product input', () => {
+  // build-release.ps1 copies all of docs/, lib/, ui/, tools/ and licenses/,
+  // and ships THIRD_PARTY_NOTICES.md and LICENSE from the root.
+  for (const path of ['THIRD_PARTY_NOTICES.md', 'LICENSE', 'docs/user-guide.md', 'docs/design.md', 'docs/images/tray.png', 'ui/help.md', 'tools/help.md', 'licenses/notice.md', '.github/README.md']) {
+    assert.notEqual(area(path), 'docs', path);
+    assert.ok(enabled(known([path])).includes('installer'), path);
+  }
 });
 
 test('deleted files use their original area and mixed deletions stay conservative', () => {
   assert.deepEqual(enabled(known(['lib/tray.cs'])), [...expected.frozen].sort());
-  assert.equal(known(['lib/tray.cs', 'old-unmapped-input']).full, true);
+  assert.equal(classify(['lib/tray.cs', 'old-unmapped-input'], tree('lib/tray.cs', 'old-unmapped-input')).full, true);
 });
 
 test('renames account for both source and destination and new destinations force full', () => {
   const paths = ['internal/engine/old.go', 'notes/old.md'];
-  assert.equal(classify(paths, new Set([paths[0]])).full, true);
-  assert.deepEqual(enabled(known(paths)), [...expected.go_shared].sort());
+  assert.equal(classify(paths, tree(paths[0])).full, true);
+  assert.deepEqual(enabled(classify(['internal/engine/old.go', 'OLD.md'], tree('internal/engine/old.go', 'OLD.md'))), [...expected.go_shared].sort());
 });
 
 test('all non-PR events, tags, full label and empty diffs run everything', () => {

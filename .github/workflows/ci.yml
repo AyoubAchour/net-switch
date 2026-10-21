@@ -73,6 +73,35 @@ jobs:
         id: filter
         run: node .github/ci/changes.mjs
 
+  # The drift guard reimplements Go's file selection. This compares it with
+  # go list for every GOOS, GOARCH and tag set the gated jobs' go commands
+  # use. It has no gate and needs nothing from the classifier, so it runs
+  # whatever the classification says. Not a required check.
+  golist-oracle:
+    name: Drift guard / go list oracle
+    if: github.event_name != 'workflow_dispatch' || inputs.regular_jobs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read the pinned Go version
+        id: pins
+        run: echo "go_version=$(jq -r .go.version packaging/versions.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.pins.outputs.go_version }}
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Compare the drift guard's Go file selection with go list
+        run: node .github/ci/golist-check.mjs
+
   control-security:
     name: Control security / Windows x64
     if: github.event_name == 'workflow_dispatch' && inputs.control_security
@@ -443,11 +472,6 @@ jobs:
         run: |
           go build -o ./bin/differential ./tests/differential/runner
           node tests/differential/run.mjs ./bin/differential
-      # The changed-file drift guard reimplements Go's file selection; this
-      # compares it with go list for both operating systems.
-      - name: Check the drift guard's Go file selection against go list
-        if: matrix.name == 'Linux x64'
-        run: node .github/ci/golist-check.mjs
       - name: Race detector
         if: matrix.name == 'Linux x64' || matrix.name == 'Linux ARM64' || matrix.name == 'Windows x64'
         run: go test -race -v ./internal/... ./cmd/... ./tests/...
