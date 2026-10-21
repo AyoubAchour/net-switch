@@ -30,6 +30,10 @@ import (
 // hostile user would attempt against the private desktop pipe. FILE_OPEN with
 // no FILE_SYNCHRONOUS_IO_* option means the handle never needs SYNCHRONIZE.
 func ntZeroOpen(ntPath string) (windows.Handle, error) {
+	return ntPipeOpen(ntPath, 0)
+}
+
+func ntPipeOpen(ntPath string, access uint32) (windows.Handle, error) {
 	name, err := windows.NewNTUnicodeString(ntPath)
 	if err != nil {
 		return 0, err
@@ -38,7 +42,7 @@ func ntZeroOpen(ntPath string) (windows.Handle, error) {
 	oa.Length = uint32(unsafe.Sizeof(oa))
 	var h windows.Handle
 	var iosb windows.IO_STATUS_BLOCK
-	err = windows.NtCreateFile(&h, 0, &oa, &iosb, nil, 0,
+	err = windows.NtCreateFile(&h, access, &oa, &iosb, nil, 0,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, 0, 0)
 	if err != nil {
@@ -67,42 +71,43 @@ func ntPipePath(kind string) string {
 //     pipe with an empty access mask (Win32 CreateFile cannot express this);
 //     denials are counted separately.
 //
-// A bounded number of successful opens of each kind are held open as durable
-// evidence; the rest are closed immediately so the pools can keep opening
-// without exhausting handles. One machine-readable ready line is printed once
+// Each worker holds its connection through two handshake deadlines and then
+// replenishes it. One machine-readable ready line is printed once
 // the public flood is proven active, after which both pools keep running until
 // stdin closes.
 func idleAdmissionFlood() error {
 	if lifecycle.Administrator() {
 		return errors.New("admission flood was not a standard user")
 	}
-	const evidenceCap = 128
+	var integrity [64]uint64
+	var size uint32
+	if err := windows.GetTokenInformation(windows.GetCurrentProcessToken(), windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&integrity[0])), uint32(unsafe.Sizeof(integrity)), &size); err != nil {
+		return err
+	}
+	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&integrity[0]))
+	if label.Label.Sid.String() != "S-1-16-8192" {
+		return errors.New("admission flood must run at medium integrity")
+	}
 	var publicConnected, privateConnected, privateDenied, privateHeld atomic.Int64
-	var held struct {
-		sync.Mutex
-		handles []windows.Handle
-	}
-	keep := func(h windows.Handle) bool {
-		held.Lock()
-		defer held.Unlock()
-		if len(held.handles) >= 2*evidenceCap {
-			return false
-		}
-		held.handles = append(held.handles, h)
-		return true
-	}
-	defer func() {
-		held.Lock()
-		for _, h := range held.handles {
-			windows.CloseHandle(h)
-		}
-		held.Unlock()
-	}()
-
 	statusPath, _ := windows.UTF16PtrFromString(localipc.DefaultPath("status"))
+	// A successful native data open on the public endpoint proves the
+	// NT path and open options work before a private denial is credited.
+	positive, err := ntPipeOpen(ntPipePath("status"), windows.FILE_READ_DATA|windows.FILE_WRITE_DATA)
+	if err != nil {
+		return fmt.Errorf("native public positive control: %w", err)
+	}
+	windows.CloseHandle(positive)
 	desktopNT := ntPipePath("desktop")
 	stop := make(chan struct{})
 	var workers sync.WaitGroup
+	unexpected := make(chan error, 1)
+	hold := func(h windows.Handle) {
+		select {
+		case <-stop:
+		case <-time.After(500 * time.Millisecond):
+		}
+		windows.CloseHandle(h)
+	}
 
 	for range 6 {
 		workers.Go(func() {
@@ -115,10 +120,8 @@ func idleAdmissionFlood() error {
 				h, err := windows.CreateFile(statusPath, windows.FILE_READ_DATA|windows.FILE_WRITE_DATA, 0, nil, windows.OPEN_EXISTING, windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
 				if err == nil {
 					publicConnected.Add(1)
-					if publicConnected.Load() > evidenceCap || !keep(h) {
-						windows.CloseHandle(h)
-					}
-				} else if err == windows.ERROR_PIPE_BUSY {
+					hold(h)
+				} else {
 					time.Sleep(2 * time.Millisecond)
 				}
 			}
@@ -135,13 +138,18 @@ func idleAdmissionFlood() error {
 				h, err := ntZeroOpen(desktopNT)
 				if err == nil {
 					privateConnected.Add(1)
-					if keep(h) {
-						privateHeld.Add(1)
-					} else {
-						windows.CloseHandle(h)
-					}
+					privateHeld.Add(1)
+					hold(h)
+					privateHeld.Add(-1)
 				} else {
-					privateDenied.Add(1)
+					if errors.Is(err, windows.STATUS_ACCESS_DENIED) {
+						privateDenied.Add(1)
+					} else if !errors.Is(err, windows.STATUS_PIPE_NOT_AVAILABLE) && !errors.Is(err, windows.STATUS_PIPE_BUSY) {
+						select {
+						case unexpected <- err:
+						default:
+						}
+					}
 					time.Sleep(2 * time.Millisecond)
 				}
 			}
@@ -149,7 +157,7 @@ func idleAdmissionFlood() error {
 	}
 
 	deadline := time.Now().Add(15 * time.Second)
-	for publicConnected.Load() < 64 && time.Now().Before(deadline) {
+	for publicConnected.Load() < 8 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	// Give the private pool a brief settling window so the ready line reports a
@@ -159,7 +167,7 @@ func idleAdmissionFlood() error {
 		time.Sleep(20 * time.Millisecond)
 	}
 	pub := publicConnected.Load()
-	if pub < 64 {
+	if pub < 8 {
 		close(stop)
 		workers.Wait()
 		return fmt.Errorf("public flood never took hold: public_connected=%d", pub)
@@ -168,11 +176,15 @@ func idleAdmissionFlood() error {
 
 	// Sustain both pools until the parent has finished its owner probes.
 	_, _ = io.Copy(io.Discard, os.Stdin)
-	before := publicConnected.Load()
 	close(stop)
 	workers.Wait()
-	grew := publicConnected.Load() - before
-	if grew < 32 {
+	select {
+	case err := <-unexpected:
+		return fmt.Errorf("unexpected native private open error: %w", err)
+	default:
+	}
+	grew := publicConnected.Load() - pub
+	if grew < 2 {
 		return fmt.Errorf("public flood stalled while held: only %d further opens", grew)
 	}
 	fmt.Printf("admission flood sustained public_connected=%d private_connected=%d private_held=%d private_denied=%d\n", publicConnected.Load(), privateConnected.Load(), privateHeld.Load(), privateDenied.Load())
@@ -217,6 +229,14 @@ func parseFloodReady(line string) (floodVerdict, bool) {
 // operations while every hostile handle is held open.
 func idleAdmissionCapacity(t *testing.T, dir, data string, owner, other actor) {
 	t.Helper()
+	initialControl, err := service.Query(service.Control)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialEngine, err := service.Query(service.Engine)
+	if err != nil {
+		t.Fatal(err)
+	}
 	exe, _ := os.Executable()
 	attack := other.command(exe, "client", "admission-flood")
 	input, err := attack.StdinPipe()
@@ -234,7 +254,19 @@ func idleAdmissionCapacity(t *testing.T, dir, data string, owner, other actor) {
 	}
 	reader := bufio.NewReader(out)
 	exit := make(chan error, 1)
-	go func() { exit <- attack.Wait() }()
+	type firstLine struct {
+		line string
+		err  error
+	}
+	first := make(chan firstLine, 1)
+	var remaining []byte
+	var readErr error
+	go func() {
+		line, err := reader.ReadString('\n')
+		first <- firstLine{line, err}
+		remaining, readErr = io.ReadAll(reader)
+		exit <- attack.Wait()
+	}()
 	exited := false
 	waitExit := func() error {
 		if exited {
@@ -252,13 +284,17 @@ func idleAdmissionCapacity(t *testing.T, dir, data string, owner, other actor) {
 	}
 	defer func() { release(); _ = attack.Process.Kill(); _ = waitExit() }()
 
-	ready, err := reader.ReadString('\n')
+	line := <-first
+	ready, err := line.line, line.err
 	verdict, ok := parseFloodReady(ready)
 	if err != nil || !ok {
 		t.Fatal("admission flood precondition", ready, err, diagnostics.String())
 	}
-	if verdict.publicConnected < 64 {
+	if verdict.publicConnected < 8 {
 		t.Fatalf("public flood not independently observed: %+v", verdict)
+	}
+	if verdict.privateConnected+verdict.privateDenied == 0 {
+		t.Fatalf("native private probe had neither a connection nor an access denial: %+v", verdict)
 	}
 	t.Logf("hostile flood active: public_connected=%d private_connected=%d private_held=%d private_denied=%d", verdict.publicConnected, verdict.privateConnected, verdict.privateHeld, verdict.privateDenied)
 	if verdict.privateConnected > 0 {
@@ -338,16 +374,25 @@ func idleAdmissionCapacity(t *testing.T, dir, data string, owner, other actor) {
 		t.Fatalf("owner token blocked during flood: %d", code)
 	}
 	fresh.input.Close()
+	// Even fast owner probes must overlap at least two further accept cycles.
+	time.Sleep(time.Second)
 
 	release()
 	if err := waitExit(); err != nil {
 		t.Fatal(err, diagnostics.String())
 	}
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	t.Log(strings.TrimSpace(string(remaining)))
 	t.Log("owner CLI, fresh desktop, token and administrator enrollment all completed while the idle-open flood was held")
 	t.Log(strings.TrimSpace(diagnostics.String()))
 
 	// Services were never restarted by the flood.
-	if s, err := service.Query(service.Control); err != nil || !s.Running {
+	if s, err := service.Query(service.Control); err != nil || !s.Running || s.PID != initialControl.PID {
 		t.Fatalf("Control not healthy after flood: %+v err=%v", s, err)
+	}
+	if s, err := service.Query(service.Engine); err != nil || !s.Running || s.PID != initialEngine.PID {
+		t.Fatalf("Engine changed during flood: %+v err=%v", s, err)
 	}
 }
