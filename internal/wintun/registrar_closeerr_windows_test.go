@@ -4,6 +4,7 @@ package wintun
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -43,7 +44,7 @@ func TestRegistrarReplyPreservesReadError(t *testing.T) {
 // first closes its actual owned handle successfully, then reports an error:
 // the caller must propagate that error and must never retry the consumed owner.
 func TestWintunRegistrarStartupCloseErrors(t *testing.T) {
-	for _, tc := range []struct {
+	cases := []struct {
 		name, site, fault string
 		threadError       bool
 	}{
@@ -51,8 +52,26 @@ func TestWintunRegistrarStartupCloseErrors(t *testing.T) {
 		{"parent pipe and thread", "Wintun registrar control read close", "", true},
 		{"ready reply", "Wintun registrar reply read close", "", false},
 		{"timeout reply", "Wintun registrar reply read close", "hang", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	}
+	// Every case runs twice. The first pass gets every assertion except the
+	// handle delta, which it only logs: run first in a fresh process (the
+	// ordinary Wintun job, run 39564185852), it counted one-time lazy handles
+	// (ETW registrations, a registry key, a new Go thread's events) as leaks.
+	// The second pass runs the same paths again and fails on any new handle,
+	// so a leak per failed start still shows.
+	type run struct {
+		pass    int
+		enforce bool
+	}
+	var runs []run
+	for pass, enforce := range []bool{false, true} {
+		for range cases {
+			runs = append(runs, run{pass + 1, enforce})
+		}
+	}
+	for i, current := range runs {
+		tc, enforce := cases[i%len(cases)], current.enforce
+		t.Run(fmt.Sprintf("pass%d/%s", current.pass, tc.name), func(t *testing.T) {
 			originalClose, originalCommand, originalEnv := registrarClose, registrarCommand, registrarExtraEnv
 			originalTimeout := registrarStartTimeout
 			var mu sync.Mutex
@@ -133,6 +152,10 @@ func TestWintunRegistrarStartupCloseErrors(t *testing.T) {
 			kinds := newHandleKinds(t, before, handleSnapshot(t))
 			for _, kind := range []string{"Section", "Job", "File", "Pipe", "Process", "Event", "unreadable"} {
 				if kinds[kind] != 0 {
+					if !enforce {
+						t.Logf("warm-up pass new handles %v old_pass=false (not enforced; the second pass is)", kinds)
+						break
+					}
 					t.Fatalf("startup close failure leaked handles: %v", kinds)
 				}
 			}

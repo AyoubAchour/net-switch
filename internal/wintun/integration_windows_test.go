@@ -647,6 +647,7 @@ func TestWintunParallelUDP(t *testing.T) {
 
 func TestWintunRecoveryAndCancellation(t *testing.T) {
 	requireRunner(t)
+	useProductionRegistrar(t, "recovery_registrar_provenance")
 	f := newFixture(t, "ours", MinCapacity)
 	s := f.io.(*Session)
 	f.stopEcho()
@@ -846,6 +847,9 @@ func warmRuntimeThreads() {
 
 func TestWintunLifetime(t *testing.T) {
 	requireRunner(t)
+	// Under -race a test-binary registrar spent about 1 s starting each of
+	// the 1,000 cycles (run 39564185852); production's is the release engine.
+	useProductionRegistrar(t, "lifetime_registrar_provenance")
 	a := newAdapter(t, MinCapacity)
 	warmRuntimeThreads()
 	for i := 0; i < 100; i++ {

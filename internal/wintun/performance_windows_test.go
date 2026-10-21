@@ -400,21 +400,30 @@ func pairedRatios(ours, dll []float64) ([]float64, error) {
 	return ratios, nil
 }
 
+// useProductionRegistrar makes the hashed release engine the registrar for
+// the rest of the test when CI provides one, as production does. Otherwise
+// the test binary keeps serving as its own registrar.
+func useProductionRegistrar(t *testing.T, label string) {
+	t.Helper()
+	if os.Getenv(productionEngineEnv) == "" {
+		return
+	}
+	engine := productionEngine(t)
+	previous := registrarExecutable
+	registrarExecutable = func() (string, error) { return engine.Path, nil }
+	t.Cleanup(func() { registrarExecutable = previous })
+	report(t, map[string]any{"test": label, "engine": engine})
+}
+
 // The reference is the signed DLL. NETSWITCH_WINTUN_REFERENCE=inprocess runs
 // the same matched pairs and unchanged gate against the test-only in-process
 // registration, isolating the registrar's cost from the DLL comparison.
 func TestWintunPerformance(t *testing.T) {
 	requireRunner(t)
-	if os.Getenv(productionEngineEnv) != "" {
-		// Keep every matched sample and threshold unchanged, while making the
-		// registration owner the exact release engine measured by the footprint
-		// test. The packet loop still runs through these same shared rings.
-		engine := productionEngine(t)
-		previous := registrarExecutable
-		registrarExecutable = func() (string, error) { return engine.Path, nil }
-		t.Cleanup(func() { registrarExecutable = previous })
-		report(t, map[string]any{"test": "performance_registrar_provenance", "engine": engine})
-	}
+	// Keep every matched sample and threshold unchanged, while making the
+	// registration owner the exact release engine measured by the footprint
+	// test. The packet loop still runs through these same shared rings.
+	useProductionRegistrar(t, "performance_registrar_provenance")
 	reference := "dll"
 	switch os.Getenv("NETSWITCH_WINTUN_REFERENCE") {
 	case "", "dll":
