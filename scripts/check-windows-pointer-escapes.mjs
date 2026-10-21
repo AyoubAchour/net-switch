@@ -24,6 +24,10 @@ const echo = functionRange('internal/engine/windows/dial_windows.go', 'func (d *
 const mtu = functionRange('internal/engine/windows/dial_windows.go', 'func (s *udpSocket) pathMTU(');
 const registrar = functionRange('internal/wintun/registrar_windows.go', 'func startRegistrar(');
 const modes = functionRange('internal/engine/windows/readiness_modes_windows.go', 'func querySocketCompletionModes(');
+const session = functionRange('internal/wintun/session_windows.go', 'func (a *Adapter) startSession(');
+const udpReady = functionRange('internal/engine/windows/udp_readiness_windows.go', 'func newUDPReadiness(');
+const heapOpen = functionRange('internal/engine/windows/heap_profile_windows.go', 'func openHeapProfile(');
+const xsysWait = functionRange('vendor/golang.org/x/sys/windows/syscall_windows.go', 'func WaitForMultipleObjects(');
 const terminalWrite = functionRange('internal/engine/windows/terminal_pipe_windows_test.go', 'func (p *terminalPipeObserver) Write(');
 const terminalTest = functionRange('internal/engine/windows/terminal_pipe_windows_test.go', 'func TestTerminalLossCancelsRealEnginePipeBlockedWrite(');
 const sites = [
@@ -43,16 +47,41 @@ const sites = [
   ['completion-mode status block', /readiness_modes_windows\.go:\d+:\d+: moved to heap: status$/, modes],
   ['Go file/socket OVERLAPPED operation', /fd_windows\.go:\d+:\d+: new\(operation\) escapes to heap$/],
   ['Go file/socket pinned buffers', /fd_windows\.go:\d+:\d+: leaking param content: pinPtrs$/],
+  // Wait arrays live in heap owners and go through internal/winwait, which
+  // converts the address only inside the non-splitting SyscallN call.
+  ['Wintun read wait array owner', /session_windows\.go:\d+:\d+: &Session\{.*escapes to heap$/, session],
+  ['UDP readiness wait arrays owner', /udp_readiness_windows\.go:\d+:\d+: &udpReadiness\{.*escapes to heap$/, udpReady],
+  // Old-path evidence, not a heap proof: x/sys leaves a caller's handle array
+  // where the caller put it, so a stack array can move before the kernel call.
+  ['x/sys WaitForMultipleObjects keeps caller arrays in place', /syscall_windows\.go:\d+:\d+: handles does not escape$/, xsysWait],
 ];
+const handlecheckSites = [
+  ['heap capture wait array owner', /heap_profile_windows\.go:\d+:\d+: &heapProfile\{.*escapes to heap$/, heapOpen],
+];
+
+// Source gate: no Go file outside vendor may call the x/sys wait wrapper,
+// except the deliberate negative control that reproduces its hazard.
+const listed = spawnSync('git', ['grep', '-n', '-F', 'windows.WaitForMultipleObjects(', '--', '*.go', ':!vendor/'],
+  { encoding: 'utf8', windowsHide: true });
+assert(listed.status === 0 || listed.status === 1, listed.stderr);
+const unsafeWaits = listed.stdout.split(/\r?\n/).filter(Boolean)
+  .filter((line) => !line.startsWith('internal/winwait/wait_windows_test.go:'));
+assert.deepEqual(unsafeWaits, [], 'Use internal/winwait for handle-array waits');
+const helperSource = readFileSync('internal/winwait/wait_windows.go', 'utf8');
+assert.match(helperSource, /syscall\.SyscallN\(addr, uintptr\(len\(handles\)\), uintptr\(unsafe\.Pointer\(&handles\[0\]\)\), all, uintptr\(milliseconds\)\)/,
+  'winwait must convert the array address inside the SyscallN argument list');
+assert.equal(helperSource.match(/unsafe\.Pointer/g)?.length, 1, 'winwait must not convert the array address anywhere else');
+
 for (const tags of ['', 'netswitch_handlecheck']) {
   const build = spawnSync('go', ['build',
     '-gcflags=github.com/AyoubAchour/net-switch/internal/...=-m', '-gcflags=internal/poll=-m',
+    '-gcflags=golang.org/x/sys/windows=-m',
     './internal/engine/windows', './internal/wintun', './internal/winlock'],
   { env: { ...env, GOFLAGS: `${env.GOFLAGS}${tags ? ` -tags=${tags}` : ''}` },
     encoding: 'utf8', windowsHide: true, maxBuffer: 16 << 20 });
   assert.equal(build.status, 0, build.error?.message ?? build.stderr);
   const lines = `${build.stdout}\n${build.stderr}`.split(/\r?\n/);
-  const proof = sites.map(([site, pattern, scope]) => {
+  const proof = [...sites, ...(tags ? handlecheckSites : [])].map(([site, pattern, scope]) => {
     const matches = lines.filter((line) => pattern.test(line))
       .map((line) => line.match(/^(.+\.go):(\d+):(\d+): (.*)$/));
     const match = matches.find((m) => m && (!scope || (m[1].replaceAll('\\', '/').endsWith(scope.file) &&

@@ -13,6 +13,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
+	"github.com/AyoubAchour/net-switch/internal/winwait"
 	"golang.org/x/sys/windows"
 )
 
@@ -40,6 +41,10 @@ type udpReadiness struct {
 	onError  func(error)
 	capture  bool
 	poll     func([]pollFD) (int32, error)
+	// waits holds each waiter's native wait array, written only by that
+	// waiter. It lives in this heap object so no stack copy can move it
+	// under the kernel.
+	waits [udpWaiters][udpShardCount/udpWaiters + 1]windows.Handle
 }
 
 type udpShard struct {
@@ -235,7 +240,7 @@ func (p *udpReadiness) fail(err error) {
 func (p *udpReadiness) run(worker int) {
 	defer p.wg.Done()
 	const perWaiter = udpShardCount / udpWaiters
-	var handles [perWaiter + 1]windows.Handle
+	handles := &p.waits[worker]
 	var events [perWaiter]windows.Handle
 	// These values remain owned until both waiters have joined in close().
 	handles[0] = p.stops[worker].Handle("UDP waiter stop")
@@ -250,9 +255,9 @@ func (p *udpReadiness) run(worker int) {
 		for i := range perWaiter {
 			handles[i+1] = events[(cursor+i)%perWaiter]
 		}
-		result, err := windows.WaitForMultipleObjects(handles[:], false, windows.INFINITE)
+		result, err := winwait.WaitForMultipleObjects(handles[:], false, windows.INFINITE)
 		if err != nil {
-			p.fail(err)
+			p.fail(fmt.Errorf("UDP readiness waiter %d wait (stop %#x and %d shard events %#x): %w", worker, handles[0], perWaiter, handles[1:], err))
 			return
 		}
 		if result == windows.WAIT_OBJECT_0 {

@@ -22,6 +22,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
+	"github.com/AyoubAchour/net-switch/internal/winwait"
 	"golang.org/x/sys/windows"
 )
 
@@ -60,6 +61,9 @@ type heapProfile struct {
 	done          chan struct{}
 	once          sync.Once
 	err           error
+	// waits is run's native wait array, kept in this heap object so no
+	// stack copy can move it under the kernel.
+	waits [2]windows.Handle
 }
 
 func validProfileNonce(value string) bool {
@@ -190,10 +194,10 @@ func (p *heapProfile) run() {
 	defer close(p.done)
 	var sequence uint64
 	for {
-		result, err := windows.WaitForMultipleObjects([]windows.Handle{
-			p.stop.Handle("heap stop wait"), p.request.Handle("heap request wait")}, false, windows.INFINITE)
+		p.waits = [2]windows.Handle{p.stop.Handle("heap stop wait"), p.request.Handle("heap request wait")}
+		result, err := winwait.WaitForMultipleObjects(p.waits[:], false, windows.INFINITE)
 		if err != nil {
-			p.err = err
+			p.err = fmt.Errorf("heap capture wait (stop %#x, request %#x): %w", p.waits[0], p.waits[1], err)
 			return
 		}
 		if result == windows.WAIT_OBJECT_0 {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
+	"github.com/AyoubAchour/net-switch/internal/winwait"
 	"golang.org/x/sys/windows"
 )
 
@@ -72,6 +73,9 @@ type Session struct {
 	open                   func() (*rings, error)
 	registrars             atomic.Uint64
 	registrar              atomic.Pointer[RegistrarStats]
+	// waitHandles is the reader's native wait array, guarded by readMu. It
+	// lives in this heap object so no stack copy can move it under the kernel.
+	waitHandles [4]windows.Handle
 
 	read, written, dropped            atomic.Uint64
 	corruptions, recoveries, failures atomic.Uint64
@@ -475,7 +479,8 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 				}
 			}()
 		}
-		handles := []windows.Handle{s.wakeOwner.Handle("Wintun read wake"), s.rings.readHandle()}
+		handles := s.waitHandles[:0]
+		handles = append(handles, s.wakeOwner.Handle("Wintun read wake"), s.rings.readHandle())
 		// A registrar that ends for any reason (crash, job termination) loses the
 		// registration; wake a parked reader now instead of waiting for traffic.
 		// The reason (owner exit vs adapter removal) is settled during teardown.
@@ -484,11 +489,17 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 			exitIdx = len(handles)
 			handles = append(handles, h)
 		}
+		cancelIdx := -1
 		if cancelEvent != 0 {
+			cancelIdx = len(handles)
 			handles = append(handles, s.cancelOwner.Handle("Wintun cancellation wait"))
 		}
 		s.readWaits.Add(1)
-		event, err := windows.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		event, err := winwait.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		if err != nil {
+			err = fmt.Errorf("Wintun read wait (wake %#x, read event %#x, registrar exit %#x, cancel %#x): %w",
+				handles[0], handles[1], waitRole(handles, exitIdx), waitRole(handles, cancelIdx), err)
+		}
 		if err == nil {
 			s.readWakes.Add(1)
 		}
@@ -501,6 +512,15 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		}
 		spins = 0
 	}
+}
+
+// waitRole returns the handle at i for an error message, or zero when that
+// role was not part of this wait.
+func waitRole(handles []windows.Handle, i int) windows.Handle {
+	if i < 0 || i >= len(handles) {
+		return 0
+	}
+	return handles[i]
 }
 
 func (s *Session) ReadPacket(ctx context.Context, buffer []byte) (int, error) {

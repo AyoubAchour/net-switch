@@ -233,6 +233,10 @@ jobs:
         run: |
           node scripts/check-windows-pointer-escapes.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Reproduce the x/sys wait-array stack move and prove the helper
+        run: |
+          go test -count=1 -v -timeout=5m ./internal/winwait
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build and hash the uninstrumented release engine
         id: engine
         env:
