@@ -42,15 +42,15 @@ jobs:
         with:
           node-version: '24.21.0'
           package-manager-cache: false
-      - name: Prove native poll lifetime and callback collection
+      - name: Prove native poll lifetime, callback collection and heap publication
         if: ${{ !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-socket-trace') }}
         run: |
-          go test -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll)' ./internal/engine/windows
+          go test -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check the same ownership boundaries under race
         if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-socket-trace') && inputs.arch != 'ARM64' }}
         run: |
-          go test -race -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll)' ./internal/engine/windows
+          go test -race -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check shared UDP destroy and setup-refusal accounting
         if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-socket-trace') }}
