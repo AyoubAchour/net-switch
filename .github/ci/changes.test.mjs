@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { areaFor, changedFiles, classify, decide, groups } from './changes.mjs';
+import { areaFor, changedFiles, classify, decide, groups, outputLines, run } from './changes.mjs';
 
 const known = paths => classify(paths, new Set(paths));
 const enabled = result => groups.filter(group => result.outputs[group]).sort();
@@ -42,6 +42,14 @@ test('unclassified dependencies and fixtures run everything, before docs matchin
     assert.equal(known(['README.md', path]).full, true, path);
     assert.deepEqual(enabled(known([path])), [...groups].sort(), path);
   }
+});
+
+test('portable Go under tests/windows runs everything, because go1-linux builds ./tests/...', () => {
+  for (const path of ['tests/windows/testisp/helpers.go', 'tests/windows/socket/bind.go', 'tests/windows/socket/bind_test.go', 'tests/windows/doc.go', 'tests/windows/testisp/udp_linux.go']) {
+    assert.equal(areaFor(path), null, path);
+    assert.deepEqual(enabled(known([path])), [...groups].sort(), path);
+  }
+  for (const path of ['tests/windows/socket/bind_windows.go', 'tests/windows/testisp/udp_windows_test.go', 'tests/windows/quicprobe/main_windows_arm64.go']) assert.equal(areaFor(path), 'tests_windows', path);
 });
 
 test('new files run everything, including familiar code and documentation paths', () => {
@@ -95,8 +103,49 @@ test('git diff uses the merge base, no rename detection and NUL delimiters', () 
   assert.equal(classify(diff.paths, diff.knownPaths).full, true);
 });
 
+const prEvent = (base, defaultBranch = 'main') => ({
+  pull_request: { base: { ref: base, sha: 'a'.repeat(40) }, head: { sha: 'b'.repeat(40) }, labels: [] },
+  repository: { default_branch: defaultBranch },
+});
+const docsOnlyGit = args => args[0] === 'merge-base' ? `${'c'.repeat(40)}\n` : 'README.md\0';
+
+test('a pull request into the default branch is classified from its diff', () => {
+  const result = decide('pull_request', prEvent('main'), docsOnlyGit);
+  assert.equal(result.full, false);
+  assert.deepEqual(enabled(result), []);
+});
+
+test('stacked pull requests run everything, because a retarget to main starts no run', () => {
+  // PR-B (feat-b -> feat-a) changes only README.md while feat-a changes lib/.
+  // Skipped required checks would still count after PR-B is retargeted.
+  const mustNotDiff = () => { throw new Error('must not read a diff'); };
+  for (const event of [prEvent('feat-a'), prEvent('main', 'trunk'), prEvent('main', null), prEvent(null), { pull_request: { base: { ref: 'main' } } }]) {
+    const result = decide('pull_request', event, mustNotDiff);
+    assert.equal(result.full, true, JSON.stringify(event));
+    assert.deepEqual(enabled(result), [...groups].sort());
+  }
+});
+
 test('missing history and malformed event commits cannot produce a skip decision', () => {
   assert.throws(() => changedFiles('--bad', 'b'.repeat(40)), /full base and head/);
   assert.throws(() => changedFiles('a'.repeat(40), 'b'.repeat(40), () => { throw new Error('missing history'); }), /missing history/);
-  assert.throws(() => decide('pull_request', {}), /full base and head/);
+  assert.throws(() => decide('pull_request', { pull_request: { base: { ref: 'main', sha: 'main' } }, repository: { default_branch: 'main' } }), /full base and head/);
+});
+
+test('any classification failure runs everything and says why', () => {
+  const failures = [
+    ['unreadable event', () => { throw new Error('ENOENT: no event file'); }, docsOnlyGit],
+    ['malformed event', () => '{not json', docsOnlyGit],
+    ['missing history', () => JSON.stringify(prEvent('main')), () => { throw new Error('bad object\nmerge base'); }],
+    ['malformed commits', () => JSON.stringify({ ...prEvent('main'), pull_request: { base: { ref: 'main', sha: 'HEAD~1' }, head: { sha: 'HEAD' } } }), docsOnlyGit],
+  ];
+  for (const [name, readEvent, git] of failures) {
+    const result = run('pull_request', readEvent, git);
+    assert.equal(result.full, true, name);
+    assert.match(result.warning, /^Changed-file classification failed; running everything: [^\r\n]+$/, name);
+    assert.equal(outputLines(result), groups.map(group => `${group}=true\n`).join(''), name);
+  }
+  const docs = run('pull_request', () => JSON.stringify(prEvent('main')), docsOnlyGit);
+  assert.equal(docs.warning, undefined);
+  assert.equal(outputLines(docs), groups.map(group => `${group}=false\n`).join(''));
 });
