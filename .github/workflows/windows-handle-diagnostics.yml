@@ -2,7 +2,7 @@ name: Windows handle diagnostics
 
 on:
   push:
-    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace]
+    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-section]
   workflow_dispatch:
     inputs:
       arch:
@@ -16,6 +16,7 @@ permissions:
 
 jobs:
   handles:
+    if: ${{ !endsWith(github.ref, '-section') }}
     name: Native handle diagnostics / ${{ inputs.arch || 'x64' }}
     runs-on: ${{ inputs.arch == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
     timeout-minutes: 15
@@ -91,3 +92,38 @@ jobs:
           path: dist/windows-test/socket-diagnostics.exe
           if-no-files-found: error
           retention-days: 14
+
+  section:
+    if: ${{ endsWith(github.ref, '-section') }}
+    name: Shared Wintun section / ${{ inputs.arch || 'x64' }}
+    runs-on: ${{ inputs.arch == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2 -tags=netswitch_handlecheck
+      NETSWITCH_WINTUN_CI: '1'
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build the native shared-section probe
+        run: |
+          go test -c -o bin/wintun-section.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - name: Prepare the unchanged signed driver DLL
+        run: ./scripts/prepare-wintun-tests.ps1
+      - name: Register shared pages, exchange packets and retire the helper
+        run: |
+          ./bin/wintun-section.test.exe '-test.v' '-test.timeout=4m' '-test.run=^TestWintunSharedSectionOwner$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
