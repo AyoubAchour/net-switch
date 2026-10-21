@@ -90,9 +90,9 @@ backend targets that PR's shared TCP relay; there is no second relay design.
 `wintun.ErrAdapterRemoved` hands shutdown to the Windows runtime. Both packet pumps use the same instance
 latch. The engine does not rebuild or enter `OnFatal` for this condition.
 Ordinary TUN failures keep their existing fatal cleanup path.
-Helper-death support depends on importing helper commit `b02af6f` first and its
-separate read/batch-write sentinel tests. This contract's wrapped-sentinel test
-does not itself prove helper-death normalization.
+The process-owned Wintun registrar maps helper death to the removal sentinel
+on both read and batch-write paths. Its native lifetime tests are separate;
+this contract's wrapped-sentinel test alone does not prove helper death.
 
 `Server.StopWithReason` takes the existing command/attach fence, runs normal
 `Runtime.Stop`, then sends one reserved terminal record to the connection that

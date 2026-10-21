@@ -24,6 +24,8 @@ const echo = functionRange('internal/engine/windows/dial_windows.go', 'func (d *
 const mtu = functionRange('internal/engine/windows/dial_windows.go', 'func (s *udpSocket) pathMTU(');
 const registrar = functionRange('internal/wintun/registrar_windows.go', 'func startRegistrar(');
 const modes = functionRange('internal/engine/windows/readiness_modes_windows.go', 'func querySocketCompletionModes(');
+const terminalWrite = functionRange('internal/engine/windows/terminal_pipe_windows_test.go', 'func (p *terminalPipeObserver) Write(');
+const terminalTest = functionRange('internal/engine/windows/terminal_pipe_windows_test.go', 'func TestTerminalLossCancelsRealEnginePipeBlockedWrite(');
 const sites = [
   ['pipe accept OVERLAPPED', /pipe_windows\.go:\d+:\d+: moved to heap: op$/, accept],
   ['TCP receive OVERLAPPED and flags owner', /readiness_windows\.go:\d+:\d+: &socketWatch\{.*escapes to heap$/, watch],
@@ -61,3 +63,23 @@ for (const tags of ['', 'netswitch_handlecheck']) {
   });
   console.log(`WINDOWS POINTER ESCAPE ${JSON.stringify({ version: version.stdout.trim(), tags: tags || 'release', proof })}`);
 }
+
+// This observer is test-only, but exercises a real overlapped File.Write. Its
+// explicit retention/pin must have compiler evidence too, not just a comment
+// citing the standard library's separate operation allocation.
+const fixture = spawnSync('go', ['test', '-c', '-o', 'dist/windows-pointer-audit.test.exe',
+  '-gcflags=github.com/AyoubAchour/net-switch/internal/engine/windows=-m', './internal/engine/windows'],
+{ env: { ...env, GOFLAGS: `${env.GOFLAGS} -tags=netswitch_handlecheck` }, encoding: 'utf8', windowsHide: true, maxBuffer: 16 << 20 });
+assert.equal(fixture.status, 0, fixture.error?.message ?? fixture.stderr);
+const fixtureLines = `${fixture.stdout}\n${fixture.stderr}`.split(/\r?\n/);
+const fixtureProof = [
+  ['terminal pipe fixture payload', /leaking param: b$/, terminalWrite],
+  ['terminal pipe fixture owner', /&terminalPipeObserver\{.*escapes to heap$/, terminalTest],
+].map(([site, pattern, scope]) => {
+  const match = fixtureLines.filter((line) => pattern.test(line))
+    .map((line) => line.match(/^(.+\.go):(\d+):(\d+): (.*)$/))
+    .find((m) => m && m[1].replaceAll('\\', '/').endsWith(scope.file) && Number(m[2]) >= scope.first && Number(m[2]) <= scope.last);
+  assert(match, `Missing heap proof for ${site} in its owning function`);
+  return { site, file: match[1], line: Number(match[2]), column: Number(match[3]), message: match[4] };
+});
+console.log(`WINDOWS FIXTURE POINTER ESCAPE ${JSON.stringify({ version: version.stdout.trim(), proof: fixtureProof })}`);
