@@ -71,3 +71,5 @@ func Reset(src, dst netip.AddrPort, seq, ack uint32, ackFlag bool) []byte {
 	binary.BigEndian.PutUint16(b[16:], ^Sum(b, Pseudo(src.Addr(), dst.Addr(), 6, len(b))))
 	return IP(src.Addr(), dst.Addr(), 6, b)
 }
+
+// Validation-only change for PR #54 job gating (shared Go case). Do not merge.
