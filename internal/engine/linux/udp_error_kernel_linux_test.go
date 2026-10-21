@@ -428,15 +428,22 @@ func TestKernelUDPStalePacketTooBigAndLocalMTU(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+		if !readerDrains {
+			// The queue is empty here. Establish A's PTB arrival before
+			// adding the stale LOCAL report, so POLLERR cannot come from
+			// that older LOCAL while A's packet is still in flight.
+			forgePacketTooBig(t, local, a, 1100, "A")
+			waitQueuedError(t, s)
+		}
 		if err := plainSend(s, make([]byte, 1400), c); err != unix.EMSGSIZE {
 			t.Fatalf("stale LOCAL starting condition: %v", err)
 		}
 		waitQueuedError(t, s)
 		if readerDrains {
 			s.drainErrors()
+			forgePacketTooBig(t, local, a, 1100, "A")
+			waitQueuedError(t, s)
 		}
-		forgePacketTooBig(t, local, a, 1100, "A")
-		waitQueuedError(t, s)
 		if n, err := s.TryWriteTo(make([]byte, 1400), c, false); err != nil || n != 1400 {
 			t.Fatalf("old LOCAL report fabricated TooBig after DF was disabled (reader drained=%t): %d %v", readerDrains, n, err)
 		}
