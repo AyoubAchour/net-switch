@@ -430,8 +430,65 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
       oldUncollectedStackBytes: (last.stackBytes - before.stackBytes) / held,
       oldUncollectedManagedBytes: (last.runtimeBytes - before.runtimeBytes) / held,
     };
+    // Release/reopen cycles for the UDP recovery rates. Free ports come from
+    // the engine's native UDP table, minus the excluded ranges read once.
+    const cycleFamily = target.host.includes(':') ? 'ipv6' : 'ipv4';
+    let cyclePool;
+    const freeFrom = async (stats) => {
+      cyclePool ??= (await udpPortSpaceAtFailure().catch(() => ({}))).families?.find((item) => item.family === cycleFamily);
+      if (!cyclePool?.dynamicRange || !stats.nativeUDPState?.groups) return null;
+      const used = new Set(stats.nativeUDPState.groups.filter((group) => !group.source.includes(':')).flatMap((group) => group.ports));
+      let free = 0;
+      for (let port = cyclePool.dynamicRange.start; port <= cyclePool.dynamicRange.end; port++) {
+        if (!used.has(port) && !(cyclePool.excludedRanges ?? []).some((range) => port >= range.start && port <= range.end)) free++;
+      }
+      return free;
+    };
+    const refusalsOf = async (phase, attempts) => {
+      const refused = attempts.filter((item) => item.Error);
+      if (!refused.length) return [];
+      const stats = await engineStats().catch(() => ({}));
+      const free = await freeFrom(stats);
+      // ECONNRESET here is the engine's own port unreachable after a failed
+      // outbound send; its Winsock error is in udpSendFailures.
+      console.log(`WINDOWS UDP RECOVERY SEND FAILURES ${JSON.stringify({ phase, refused: refused.length,
+        sendFailures: stats.udpSendFailures, udpOpenFailed: stats.udpOpenFailed, udpSocketExhaustions: stats.udpSocketExhaustions })}`);
+      await delay(200);
+      const retry = await clients[0].call('open', { ...target, count: refused.length }).catch((error) => ({ error: String(error), attempts: [] }));
+      const retried = retry.attempts ?? [];
+      held += retried.filter((item) => !item.Error).length;
+      return refused.map((item, i) => ({ phase, code: item.Error, errno: item.NativeCode, call: item.NativeCall,
+        freeAfterBatch: free, retryAfter200msOK: retried[i] ? !retried[i].Error : false, retryCode: retried[i]?.Error || retry.error }));
+    };
+    // Evidence only, never gated: release 512, wait for the reconciliation,
+    // reopen 256, restore 256, count times; then print one rate line.
+    const evidenceCycles = async (count, label, cycles = []) => {
+      for (let n = 0; n < count; n++) {
+        const cycleBefore = await engineStats();
+        const freed = await clients[0].call('release', { count: 512 });
+        held -= freed.released;
+        await until(async () => (await engineStats()).flows.UDP <= cycleBefore.flows.UDP - freed.released,
+          'UDP sessions released before an evidence cycle', 3000);
+        const freeBeforeReopen = await freeFrom(await engineStats());
+        const reopened = await clients[0].call('open', { ...target, count: 256 });
+        held += reopened.attempts.filter((item) => !item.Error).length;
+        const reopenRefusals = await refusalsOf('reopen', reopened.attempts);
+        const restored = await clients[0].call('open', { ...target, count: 256 });
+        held += restored.attempts.filter((item) => !item.Error).length;
+        const restoreRefusals = await refusalsOf('restore', restored.attempts);
+        cycles.push({ releasedPairs: freed.released, freeBeforeReopen, reopenAttempts: 256, reopenRefused: reopenRefusals.length,
+          restoreAttempts: 256, restoreRefused: restoreRefusals.length, refusals: [...reopenRefusals, ...restoreRefusals] });
+      }
+      console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path: label, cycles: cycles.length,
+        attempts: cycles.reduce((n, cycle) => n + cycle.reopenAttempts, 0), refused: cycles.reduce((n, cycle) => n + cycle.reopenRefused, 0),
+        restoreRefused: cycles.reduce((n, cycle) => n + (cycle.restoreRefused ?? 0), 0), refusals: cycles.flatMap((cycle) => cycle.refusals) })}`);
+      return cycles;
+    };
     return {
       checkStats, verify, close,
+      // The matched comparison with the native control: same cycles, UDP
+      // held at the limit, no TCP load, so only the engine differs.
+      evidenceCycles: (count) => evidenceCycles(count, 'engine, UDP only'),
       get held() { return held; },
       recover: async () => {
         const before = await engineStats();
@@ -494,58 +551,13 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         }
         held += reopen - failures.length;
         // The rate evidence (SYSTEM-DESIGN 5.9 open question): this gated
-        // cycle plus evidence-only cycles of the same shape, beside the native
-        // control in nativeUDPCapacity. Retries are separate attempts and never
-        // change the gated verdict below.
-        const freeFrom = (stats) => {
-          const pool = poolBefore.families?.find((item) => item.family === family);
-          if (!pool?.dynamicRange || !stats.nativeUDPState?.groups) return null;
-          const used = new Set(stats.nativeUDPState.groups.filter((group) => group.source === '0.0.0.0' || !group.source.includes(':'))
-            .flatMap((group) => group.ports));
-          let free = 0;
-          for (let port = pool.dynamicRange.start; port <= pool.dynamicRange.end; port++) {
-            if (!used.has(port) && !(pool.excludedRanges ?? []).some((range) => port >= range.start && port <= range.end)) free++;
-          }
-          return free;
-        };
-        const refusalsOf = async (phase, attempts) => {
-          const refused = attempts.filter((item) => item.Error);
-          if (!refused.length) return [];
-          const stats = await engineStats().catch(() => ({}));
-          const free = freeFrom(stats);
-          // ECONNRESET here is the engine's own port unreachable after a failed
-          // outbound send; its Winsock error is in udpSendFailures.
-          console.log(`WINDOWS UDP RECOVERY SEND FAILURES ${JSON.stringify({ phase, refused: refused.length,
-            sendFailures: stats.udpSendFailures, udpOpenFailed: stats.udpOpenFailed, udpSocketExhaustions: stats.udpSocketExhaustions })}`);
-          await delay(200);
-          const retry = await clients[0].call('open', { ...target, count: refused.length }).catch((error) => ({ error: String(error), attempts: [] }));
-          const retried = retry.attempts ?? [];
-          held += retried.filter((item) => !item.Error).length;
-          return refused.map((item, i) => ({ phase, code: item.Error, errno: item.NativeCode, call: item.NativeCall,
-            freeAfterBatch: free, retryAfter200msOK: retried[i] ? !retried[i].Error : false, retryCode: retried[i]?.Error || retry.error }));
-        };
-        const cycles = [{ gated: true, freeBeforeReopen: availableBefore, reopenAttempts: reopen, reopenRefused: failures.length,
-          refusals: await refusalsOf('reopen', returned.attempts) }];
-        for (let n = 1; n < udpRecoveryCycles; n++) {
-          const cycleBefore = await engineStats();
-          const freed = await clients[0].call('release', { count: 512 });
-          held -= freed.released;
-          await until(async () => (await engineStats()).flows.UDP <= cycleBefore.flows.UDP - freed.released,
-            'UDP sessions released before an evidence cycle', 3000);
-          const freeBeforeReopen = freeFrom(await engineStats());
-          const reopened = await clients[0].call('open', { ...target, count: reopen });
-          held += reopened.attempts.filter((item) => !item.Error).length;
-          const reopenRefusals = await refusalsOf('reopen', reopened.attempts);
-          const restored = await clients[0].call('open', { ...target, count: reopen });
-          held += restored.attempts.filter((item) => !item.Error).length;
-          const restoreRefusals = await refusalsOf('restore', restored.attempts);
-          cycles.push({ releasedPairs: freed.released, freeBeforeReopen, reopenAttempts: reopen, reopenRefused: reopenRefusals.length,
-            restoreAttempts: reopen, restoreRefused: restoreRefusals.length, refusals: [...reopenRefusals, ...restoreRefusals] });
-        }
-        evidence.recoveryCycles = cycles;
-        console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path: 'engine', cycles: cycles.length,
-          attempts: cycles.reduce((n, cycle) => n + cycle.reopenAttempts, 0), refused: cycles.reduce((n, cycle) => n + cycle.reopenRefused, 0),
-          restoreRefused: cycles.reduce((n, cycle) => n + (cycle.restoreRefused ?? 0), 0), refusals: cycles.flatMap((cycle) => cycle.refusals) })}`);
+        // cycle plus evidence-only cycles of the same shape, here with the TCP
+        // corner held. The matched comparison with the native control is the
+        // UDP-only set run before any TCP load (evidenceCycles). Retries are
+        // separate attempts and never change the gated verdict below.
+        const gated = { gated: true, freeBeforeReopen: availableBefore, reopenAttempts: reopen, reopenRefused: failures.length,
+          refusals: await refusalsOf('reopen', returned.attempts) };
+        evidence.recoveryCycles = await evidenceCycles(udpRecoveryCycles - 1, 'engine, TCP corner held', [gated]);
         console.log(`WINDOWS UDP RECOVERY VERDICT ${JSON.stringify({ reopened: reopen - failures.length, failed: failures.length,
           oldVerdict: failures.length ? 'fail' : 'pass', newVerdict: failures.length ? evidence.recoveryFailure.newVerdict : 'pass' })}`);
         // The gate, unchanged: the first cycle's reopens, before any retry.
