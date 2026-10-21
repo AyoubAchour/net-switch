@@ -1,7 +1,25 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { heldSweepLatency, heldUDPSweepGate, ledgerDigest } from '../tests/windows/udp-capacity.mjs';
+import { heldSweepLatency, heldUDPSweepGate, ledgerDigest, udpRecoveryVerdict } from '../tests/windows/udp-capacity.mjs';
+
+test('UDP recovery reports a port another process took, and fails everything else', () => {
+  // ARM64 job 119178917661: 1 of 512 reopens failed with ENOBUFS while PID
+  // 2096 took a dynamic port; the engine (PID 900 here) also grew by its reopens.
+  const full = { state: 'complete', families: [{ family: 'ipv4', available: 0 }, { family: 'ipv6', available: 16000 }] };
+  const base = { failures: [{ Error: 'ENOBUFS' }], portSpace: full, othersBefore: { 2096: 4, 900: 100 },
+    othersAfter: { 2096: 5, 900: 612 }, enginePID: 900, family: 'ipv4' };
+  assert.deepEqual(udpRecoveryVerdict(base), { oldVerdict: 'fail', newVerdict: 'reported', grownByOthers: 1, portErrors: true, poolFull: true, available: 0 });
+  const verdict = (change) => udpRecoveryVerdict({ ...base, ...change }).newVerdict;
+  assert.equal(verdict({ portSpace: { state: 'complete', families: [{ family: 'ipv4', available: 3 }] } }), 'fail', 'the pool had room');
+  assert.equal(verdict({ othersAfter: { 2096: 4, 900: 700 } }), 'fail', 'only the engine grew');
+  assert.equal(verdict({ failures: [{ Error: 'ENOBUFS' }, { Error: 'ENOBUFS' }] }), 'fail', 'more failures than ports taken');
+  assert.equal(verdict({ failures: [{ Error: 'ECONNRESET' }] }), 'fail', 'not a port-exhaustion error');
+  assert.equal(verdict({ portSpace: { state: 'partial', families: full.families } }), 'fail', 'incomplete port evidence');
+  assert.equal(verdict({ family: 'ipv6' }), 'fail', 'the other family had room');
+  assert.equal(verdict({ othersAfter: { 2096: 4, 900: 612, 3100: 1 } }), 'reported', 'a process that appeared inside the window');
+  assert.deepEqual(udpRecoveryVerdict({ ...base, failures: [] }).newVerdict, 'pass');
+});
 
 const token = (app, serial) => `${app.toString(16).padStart(8, '0')}${serial.toString(16).padStart(8, '0')}`;
 
