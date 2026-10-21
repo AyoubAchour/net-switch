@@ -54,7 +54,11 @@ export async function startHarness(directory) {
   const token = randomBytes(32).toString('hex');
   let state, processHandle;
   const network = async (action) => {
-    const result = await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.resolve('tests/windows/testisp/network.ps1'), '-Action', action], {
+    // PowerShell 7, not Windows PowerShell: on the windows-11-arm runner every
+    // powershell.exe that Node starts takes 22-28 s before its first line runs,
+    // however it is spawned (run 39646376132), while pwsh.exe starts in 0.4 s.
+    // The hosted images ship both; this script's cmdlets work in either.
+    const result = await run('pwsh.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.resolve('tests/windows/testisp/network.ps1'), '-Action', action], {
       env: { TESTISP_INDEX: String(state?.index ?? ''), TESTISP_UPLINK: String(uplink?.index ?? ''), TESTISP_PROBE: probeExe },
     });
     return JSON.parse(result.stdout.replace(/^\uFEFF/, ''));
