@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -286,11 +288,21 @@ func mediumIntegrity(token windows.Token) (bool, error) {
 		return false, err
 	}
 	label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&integrity[0]))
-	sid := label.Label.Sid
-	if sid == nil || sid.SubAuthorityCount() == 0 {
+	if label.Label.Sid == nil {
 		return false, nil
 	}
-	return sid.SubAuthority(uint32(sid.SubAuthorityCount()-1)) >= 0x2000, nil // SECURITY_MANDATORY_MEDIUM_RID
+	// A mandatory label is S-1-16-<level>. The string form avoids x/sys's
+	// SubAuthority helpers, which turn a syscall result back into a pointer
+	// into this Go buffer; the race build's checkptr rejects that.
+	level, ok := strings.CutPrefix(label.Label.Sid.String(), "S-1-16-")
+	if !ok {
+		return false, fmt.Errorf("token integrity label is not a mandatory label SID")
+	}
+	rid, err := strconv.ParseUint(level, 10, 32)
+	if err != nil {
+		return false, fmt.Errorf("token integrity label %q: %w", level, err)
+	}
+	return rid >= 0x2000, nil // SECURITY_MANDATORY_MEDIUM_RID
 }
 
 // processPeerAt identifies a TCP client from its owning process. A process

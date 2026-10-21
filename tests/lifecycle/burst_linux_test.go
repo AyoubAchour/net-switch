@@ -1,11 +1,13 @@
 package lifecycle_test
 
 import (
+	"errors"
 	"fmt"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"net"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -39,7 +41,16 @@ func disconnectBurst() error {
 		}
 	}()
 	for range 10 {
-		c, err := net.DialTimeout("unix", localipc.DefaultPath("status"), time.Second)
+		// The burst can leave the socket's accept backlog briefly full,
+		// which a Unix connect reports as EAGAIN.
+		var c net.Conn
+		var err error
+		for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+			c, err = net.DialTimeout("unix", localipc.DefaultPath("status"), time.Second)
+			if err == nil || !errors.Is(err, syscall.EAGAIN) || time.Now().After(deadline) {
+				break
+			}
+		}
 		if err != nil {
 			return err
 		}
