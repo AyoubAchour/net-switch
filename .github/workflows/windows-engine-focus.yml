@@ -131,6 +131,13 @@ jobs:
         run: |
           node tests/windows/udp-quote-profile.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Owner-table class and read time at 13,700–14,800 TCP rows
+        if: ${{ !cancelled() && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
+        env:
+          NETSWITCH_OWNER_READ_GATE: '1'
+        run: |
+          go test -count=1 -v -timeout=10m -run '^TestOwner(ConnectionsClassKeepsSynSent|ReadTimeAtPortLimit|OverloadHold)$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Measure real held flows without waiting for unrelated cases
         if: ${{ !cancelled() && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
         env:

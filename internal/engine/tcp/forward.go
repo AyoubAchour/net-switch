@@ -248,7 +248,14 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	}()
 	ticket.SetCancel(cancel)
 	t := tuple(id)
-	lookup, cancelLookup := context.WithTimeout(ctx, 50*time.Millisecond)
+	// 50 ms unless the platform's lookup needs longer: Windows holds a SYN
+	// for a fresh owner-table read under overload (spec 5.6) and applies the
+	// 50 ms bound itself otherwise.
+	lookupBound := 50 * time.Millisecond
+	if bounded, ok := f.owners.(interface{ TCPLookupBound() time.Duration }); ok {
+		lookupBound = bounded.TCPLookupBound()
+	}
+	lookup, cancelLookup := context.WithTimeout(ctx, lookupBound)
 	lookupStart := time.Now()
 	var lookupErr error
 	owner, lookupErr = f.owners.TCP(lookup, t)
