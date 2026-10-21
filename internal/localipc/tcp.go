@@ -2,7 +2,14 @@
 
 package localipc
 
-import "net"
+import (
+	"errors"
+	"net"
+)
+
+// ErrTCPTableLimit means the machine has more TCP connections than one
+// lookup will read. Other users can cause it, so callers fail closed.
+var ErrTCPTableLimit = errors.New("TCP owner table exceeds limit")
 
 // TCPTuple is one accepted loopback connection, seen from the server side.
 type TCPTuple struct {

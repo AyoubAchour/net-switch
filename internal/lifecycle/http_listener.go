@@ -31,11 +31,15 @@ const httpAdmissionQueue = 1024
 // httpLookupInterval is the usual gap between identity lookups. Under
 // connection churn, connections gather into larger batches instead of each
 // costing a machine-wide table snapshot. The gap is cut short once
-// httpLookupBatch connections wait, so a fast churn cannot fill the queue
-// and push the owner out: lookups then run back to back, each serving at
-// least that many connections. Either way another user's churn costs at
-// most forty snapshots a second or one per httpLookupBatch connections, and
-// an owner connection right after another waits at most the interval.
+// httpLookupBatch connections wait, so lookups then run back to back, each
+// serving at least that many connections. Either way another user's churn
+// costs at most forty snapshots a second or one per httpLookupBatch
+// connections, and an owner connection right after another waits at most
+// the interval. Batching only slows the queue's filling: a local flood
+// faster than lookups drain it still fills the queue, and then the owner's
+// browser connection is refused like any other. The browser UI is best
+// effort under such a flood; the owner's protected IPC path is separate and
+// keeps routing start and stop available.
 const (
 	httpLookupInterval = 25 * time.Millisecond
 	httpLookupBatch    = 128
@@ -46,16 +50,18 @@ const (
 // every connection queued since its previous pass and resolves the batch in
 // one lookup (one machine-wide TCP table snapshot on Windows). Connection
 // churn or a large table from other users then costs one lookup per batch,
-// so the owner's connection waits for at most one batch, not for every
+// so an admitted owner connection waits for at most one batch, not for every
 // connection accepted before it.
 type httpListener struct {
 	net.Listener
-	limits   *connectionLimits
-	log      func(string)
-	resolve  func([]localipc.TCPTuple) []localipc.TCPIdentity
-	interval time.Duration
-	rejected rejectionLog
-	overflow rejectionLog
+	limits     *connectionLimits
+	log        func(string)
+	resolve    func([]localipc.TCPTuple) []localipc.TCPIdentity
+	interval   time.Duration
+	rejected   rejectionLog
+	overflow   rejectionLog
+	tableLimit rejectionLog
+	unresolved rejectionLog
 
 	mu        sync.Mutex
 	queue     []net.Conn
@@ -215,6 +221,8 @@ func (l *httpListener) admit() {
 			user := "unresolved"
 			if i < len(identities) && identities[i].Err == nil && identities[i].User != "" {
 				user = identities[i].User
+			} else {
+				l.reportUnresolved(identities, i)
 			}
 			if !l.limits.take(user) {
 				conn.Close()
@@ -229,6 +237,21 @@ func (l *httpListener) admit() {
 			}
 		}
 	}
+}
+
+// reportUnresolved keeps the reason a connection fell into the public pool.
+// An oversized table is logged on its own: it points at another user's
+// connection count, not at a broken lookup.
+func (l *httpListener) reportUnresolved(identities []localipc.TCPIdentity, i int) {
+	err := errors.New("lookup returned no identity")
+	if i < len(identities) && identities[i].Err != nil {
+		err = identities[i].Err
+	}
+	if errors.Is(err, localipc.ErrTCPTableLimit) {
+		l.tableLimit.report(l.log, "HTTP identity lookup skipped: "+err.Error()+"; connection treated as unresolved")
+		return
+	}
+	l.unresolved.report(l.log, "HTTP identity lookup failed: "+err.Error()+"; connection treated as unresolved")
 }
 
 func (l *httpListener) queued() int {

@@ -95,7 +95,7 @@ func readTCPTable(wanted map[tcpKey][]int) (map[tcpKey]tcpOwner, error) {
 		code, _, _ := getTCPTable.Call(uintptr(unsafe.Pointer(&words[0])), uintptr(unsafe.Pointer(&size)), 0, windows.AF_INET, 7, 0) // TCP_TABLE_OWNER_MODULE_CONNECTIONS
 		if windows.Errno(code) == windows.ERROR_INSUFFICIENT_BUFFER {
 			if size > 32<<20 {
-				return nil, errors.New("TCP owner table exceeds limit")
+				return nil, ErrTCPTableLimit
 			}
 			words = make([]uint64, (size+4096+7)/8)
 			continue
