@@ -53,12 +53,20 @@ func setLineInterface(h windows.Handle, a Adapter, v6 bool) error {
 
 // newSocket creates an overlapped, non-inheritable socket and records its only
 // owner before any other call can see the value.
-func newSocket(v6 bool, kind, protocol int32, site string) (winhandle.Owner, error) {
+//
+// The protocol is 0, Winsock's default for the type, exactly as Go's network
+// package created these sockets before. Both 0 and IPPROTO_UDP select the same
+// catalog entry (MSAFD Tcpip [UDP/IP] on the hosted runners), yet with an
+// explicit IPPROTO_UDP the real-TUN port-limit gate held 2,047 (ARM64) and
+// 5,503 (x64) UDP flows instead of about 7,950: the apps' own connects were
+// refused WSAENOBUFS with thousands of ports free. Protocol 0 held 7,936.
+// The mechanism inside Winsock/AFD is not known; keep Go's exact call.
+func newSocket(v6 bool, kind int32, site string) (winhandle.Owner, error) {
 	family := int32(windows.AF_INET)
 	if v6 {
 		family = windows.AF_INET6
 	}
-	h, err := windows.WSASocket(family, kind, protocol, nil, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
+	h, err := windows.WSASocket(family, kind, 0, nil, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
 	if err != nil {
 		return winhandle.Owner{}, os.NewSyscallError("socket", err)
 	}
