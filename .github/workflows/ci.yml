@@ -172,7 +172,7 @@ jobs:
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Run acceptance against today's Node server and sing-box
         run: |
-          node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry server.mjs --engine-exe engine/sing-box.exe --profile baseline
+          node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry scripts/server-under-test-node.mjs --engine-exe engine/sing-box.exe --profile baseline
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep report, executable identities and traffic evidence
         if: always()
