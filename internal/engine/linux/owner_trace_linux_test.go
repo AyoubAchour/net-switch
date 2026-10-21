@@ -4,7 +4,9 @@ package linux
 
 import (
 	"context"
+	"encoding/json"
 	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -53,15 +55,28 @@ func TestDescriptorTraceDistinguishesQueueFromBlockedRead(t *testing.T) {
 	if after.CompletedNS < after.WorkerStartedNS {
 		t.Fatal("completion timestamp missing")
 	}
-	for _, read := range after.Reads {
+	for _, read := range after.Reads.stamps {
 		if read.FinishedNS < read.StartedNS {
 			t.Fatalf("finished read has no matching timestamp: %+v", read)
 		}
 	}
-	if before.Reads[len(before.Reads)-1].FinishedNS != 0 {
+	if before.Reads.stamps[len(before.Reads.stamps)-1].FinishedNS != 0 {
 		t.Fatal("later completion mutated the earlier snapshot")
 	}
-	t.Logf("queue=%d inflight=%d; blocked stage recorded before completion; %d read/stage pairs", before.QueueAtEnqueue, before.InFlightAtStart, len(after.Reads))
+	// On the wire the blocked scratch acquisition stays open: [-2, start].
+	b, err := json.Marshal(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire wireScan
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatal(err)
+	}
+	last := wire.ReadsRelativeToEnqueuedNS[len(wire.ReadsRelativeToEnqueuedNS)-1]
+	if !slices.Equal(wireReads(t, wire), before.Reads.stamps) || len(last) != 2 || last[0] != -2 {
+		t.Fatalf("blocked read changed on the wire: %s", b)
+	}
+	t.Logf("queue=%d inflight=%d; blocked stage recorded before completion; %d read/stage pairs", before.QueueAtEnqueue, before.InFlightAtStart, len(after.Reads.stamps))
 }
 
 func TestDescriptorTraceAndFailureHistoryAreBounded(t *testing.T) {

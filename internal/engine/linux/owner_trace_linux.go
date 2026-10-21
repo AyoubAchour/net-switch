@@ -18,10 +18,49 @@ import (
 // Eight failed scans survive beyond the ordinary completed-batch cache.
 const descriptorTraceReads = 1024
 
+// Wall-clock nanoseconds; FinishedNS stays 0 while the read is running.
 type descriptorReadStamp struct {
 	FD                    int64
 	StartedNS, FinishedNS int64
 }
+
+// descriptorReads is a snapshot's own copy of its scan's reads, oldest first.
+// Stats sends each read as a JSON array, its times in nanoseconds after the
+// snapshot's EnqueuedNS:
+//
+//	[fd, start, finish]  a finished read
+//	[fd, start]          a read still running when the snapshot was taken
+//
+// A read's wall-clock times are EnqueuedNS+start and EnqueuedNS+finish; an
+// offset is negative only if the wall clock stepped back during the scan.
+// Keyed objects with absolute times made eight failed and eight slow scans of
+// 1024 reads exceed the control protocol's 1 MiB reply limit.
+type descriptorReads struct {
+	enqueuedNS int64
+	stamps     []descriptorReadStamp
+}
+
+// MarshalJSON writes the list into one buffer, with no value per read.
+func (r descriptorReads) MarshalJSON() ([]byte, error) {
+	b := make([]byte, 0, 2+32*len(r.stamps))
+	b = append(b, '[')
+	for i, read := range r.stamps {
+		if i > 0 {
+			b = append(b, ',')
+		}
+		b = append(b, '[')
+		b = strconv.AppendInt(b, read.FD, 10)
+		b = append(b, ',')
+		b = strconv.AppendInt(b, read.StartedNS-r.enqueuedNS, 10)
+		if read.FinishedNS != 0 {
+			b = append(b, ',')
+			b = strconv.AppendInt(b, read.FinishedNS-r.enqueuedNS, 10)
+		}
+		b = append(b, ']')
+	}
+	return append(b, ']'), nil
+}
+
 type descriptorTrace struct {
 	mu      sync.Mutex
 	reads   []descriptorReadStamp
@@ -71,7 +110,7 @@ type descriptorScanSnapshot struct {
 	FailureStage                                                                string
 	Outcome                                                                     string
 	ObservedNS                                                                  int64
-	Reads                                                                       []descriptorReadStamp
+	Reads                                                                       descriptorReads `json:"ReadsRelativeToEnqueuedNS"`
 	OmittedReads                                                                int
 }
 
@@ -89,8 +128,9 @@ func (f *descriptorFailure) snapshot() descriptorScanSnapshot {
 	} else {
 		s.FailureStage = ""
 	}
+	// Copy under the scanner's lock; the reply encoder formats the copy later.
 	j.trace.mu.Lock()
-	s.Reads = append([]descriptorReadStamp(nil), j.trace.reads...)
+	s.Reads = descriptorReads{enqueuedNS: s.EnqueuedNS, stamps: append([]descriptorReadStamp(nil), j.trace.reads...)}
 	s.OmittedReads = j.trace.omitted
 	j.trace.mu.Unlock()
 	return s
