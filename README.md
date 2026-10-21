@@ -160,3 +160,5 @@ Net Switch's code is under the [MIT license](LICENSE). The installer also
 includes sing-box (GPL-3.0), Node.js (MIT) and other components under their own
 licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Net Switch isn't
 affiliated with the sing-box project.
+
+<!-- Validation-only change for PR #54 job gating (docs case). Do not merge. -->
