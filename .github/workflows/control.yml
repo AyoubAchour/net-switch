@@ -2,15 +2,62 @@ name: Go control service
 
 on:
   push:
-    branches: [port/control-service]
+    branches: [main, port/control-service]
+  # The ci:full label is read on the PR's next push. Label changes don't start
+  # a run: they would share the PR's concurrency group and cancel its run.
   pull_request:
-    paths: ['internal/**', 'cmd/**', 'assets.go', 'go.mod', 'go.sum', 'scripts/*e2e*', 'scripts/*under-test*', 'scripts/tun-*.mjs', 'scripts/tun-*.ps1', 'scripts/control-test-https.mjs', 'scripts/win32-parity.mjs', 'tests/oracle/**', 'tests/windows/**', '.github/workflows/control.yml']
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# A new commit replaces the same PR's older run. Every main run keeps its own
+# group, so each main commit is tested in full.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('control-pr-{0}', github.event.pull_request.number) || format('control-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Picks the jobs a pull request needs from its changed files
+  # (.github/ci/changes.mjs); pushes, manual runs, stacked PRs and the ci:full
+  # label get every group. A gated job runs unless this job succeeded and
+  # answered false for its group, so a failure here costs runner time, never
+  # coverage. .github/ci/gates.test.mjs checks every gate below.
+  changes:
+    name: Changed files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Every group, so this job is the same in each workflow that has one.
+    outputs:
+      node: ${{ steps.filter.outputs.node }}
+      helper: ${{ steps.filter.outputs.helper }}
+      installer: ${{ steps.filter.outputs.installer }}
+      legacy_windows: ${{ steps.filter.outputs.legacy_windows }}
+      testisp: ${{ steps.filter.outputs.testisp }}
+      wintun: ${{ steps.filter.outputs.wintun }}
+      go_windows: ${{ steps.filter.outputs.go_windows }}
+      go_linux: ${{ steps.filter.outputs.go_linux }}
+      acceptance: ${{ steps.filter.outputs.acceptance }}
+      control: ${{ steps.filter.outputs.control }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The merge base and its file list need the whole history.
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Test the classifier, its map against test readers, and the job gates
+        run: node --test .github/ci/*.test.mjs
+      - name: Choose jobs from the changed files
+        id: filter
+        run: node .github/ci/changes.mjs
+
   windows:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.control != 'false') }}
     name: Control / Windows ${{ matrix.arch }} / ${{ matrix.control }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
