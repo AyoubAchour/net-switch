@@ -56,6 +56,27 @@ func wireReads(t *testing.T, scan wireScan) []descriptorReadStamp {
 // absolute wall-clock times.
 type legacyRead struct{ FD, StartedNS, FinishedNS int64 }
 
+func TestReadOffsetsPreserveClockStepsAndFinishedZeroOffset(t *testing.T) {
+	const base = int64(1_792_500_000_000_000_000)
+	want := []descriptorReadStamp{
+		{FD: 9, StartedNS: base - 20, FinishedNS: base},
+		{FD: -2, StartedNS: base + 10, FinishedNS: 0},
+		{FD: 10, StartedNS: base + 20, FinishedNS: base - 10},
+	}
+	snapshot := descriptorScanSnapshot{EnqueuedNS: base, Reads: descriptorReads{enqueuedNS: base, stamps: want}}
+	b, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire wireScan
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(wireReads(t, wire), want) || len(wire.ReadsRelativeToEnqueuedNS[0]) != 3 || wire.ReadsRelativeToEnqueuedNS[0][2] != 0 || len(wire.ReadsRelativeToEnqueuedNS[1]) != 2 {
+		t.Fatalf("clock step or finished zero offset became an unfinished read: %s", b)
+	}
+}
+
 // fullTraceBatch is a scan at its 1024-read bound with the widest values it
 // records: 10-digit descriptors, which fs.nr_open allows, 19-digit wall-clock
 // nanoseconds, and every read 10 ms or more after enqueue, past the 8 ms batch
