@@ -6,8 +6,7 @@
 //   - singbox: the baseline, sing-box as today's app configures it, plus the
 //     Linux changes the feasibility spike found (LINUX-PLAN.md section 0).
 //   - nsengine: netswitch-engine, 1.0's own engine. It speaks
-//     internal/engine/protocol; the driver is a stub until the engine binary
-//     serves that protocol on a control socket.
+//     internal/engine/protocol over the real engine's Unix control socket.
 //
 // The suite plays the control service: it picks lines, pins apps, points
 // lanes and closes flows through a Driver, and judges the engine only by what
@@ -18,10 +17,13 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/netip"
 	"time"
+
+	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 
 	"github.com/AyoubAchour/net-switch/tests/linux/harness"
 )
@@ -138,6 +140,7 @@ type CloseResult struct {
 
 // Env is where a driver runs its engine.
 type Env struct {
+	CPUs int // optional real process affinity and Go scheduler limit
 	// Netns is the network namespace standing in for the PC.
 	Netns string
 	// WorkDir holds the engine's config, state and log for this case.
@@ -310,11 +313,22 @@ type FaultAck struct {
 
 // Stats are the engine's counters and gauges (5.6, 5.9, 5.10).
 type Stats struct {
+	RefusedTCP, RefusedUDP                                        flows.Refusals
+	PeakUnknown, PeakUnknownUDP                                   int
+	AdmittedUnknown, AdmittedUnknownUDP                           uint64
+	OwnerLookup                                                   json.RawMessage
+	TunKernel                                                     json.RawMessage
+	TCPFlows                                                      json.RawMessage
+	PeakFlows, PeakHandshakes, PeakUDP, PeakPerApp, PeakUDPPerApp int
 	// Gauges: what's in use now. TimeWait counts retained TIME_WAIT
 	// endpoints, which aren't live flows (5.9).
 	Flows, Handshakes, UDP, Unknown, UnknownUDP, TimeWait int64
 	// Byte budgets in use (5.9).
 	TCPBytes, PendingBytes, SnapshotBytes int64
+	UDPReadBytes                          int64
+	UDPReplyBytes, UDPReplyPeakBytes      int64
+	UDPAdapterBytes                       int64
+	PendingPeakBytes                      int64
 	// Counters since the engine started.
 	Admitted        uint64 // the combining counter k: flows admitted (5.4)
 	Rejected        uint64
@@ -325,6 +339,7 @@ type Stats struct {
 	// the time they took in total.
 	LookupCount, LookupMisses, LookupAmbiguous uint64
 	LookupTime                                 time.Duration
+	LookupHistogram                            [201]uint64
 	// Counters reports every other counter the engine sent, by name.
 	Counters map[string]uint64
 }

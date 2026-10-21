@@ -46,7 +46,17 @@ type Totals struct {
 	Lines map[string]Bytes `json:"lines"`
 }
 type Gauges struct {
+	RefusedTCP, RefusedUDP                                        Refusals
+	PeakUnknown, PeakUnknownUDP                                   int
+	AdmittedUnknown, AdmittedUnknownUDP                           uint64
+	PeakFlows, PeakHandshakes, PeakUDP, PeakPerApp, PeakUDPPerApp int
+	PendingPeakBytes                                              int64
+	// Non-cumulative buckets: 100 us wide through 20 ms, then overflow.
+	// Histograms can be subtracted across a cold-socket test phase.
+	LookupHistogram                                                                                   [201]uint64
 	UDPReadBytes                                                                                      int64
+	UDPReplyBytes, UDPReplyPeakBytes                                                                  int64
+	UDPAdapterBytes                                                                                   int64
 	DoubleReleases                                                                                    uint64
 	TimeWait                                                                                          int
 	TimeWaitSkipped                                                                                   uint64
@@ -80,6 +90,10 @@ type Table struct {
 	events               chan flowapi.Event
 	eventsDropped        atomic.Uint64
 	pendingBytes         atomic.Int64
+	udpReadBytes         atomic.Int64
+	replyBytes           atomic.Int64
+	replyPeakBytes       atomic.Int64
+	pendingPeakBytes     atomic.Int64
 	doubleReleases       atomic.Uint64
 }
 
@@ -153,6 +167,16 @@ func (t *Table) Predict(app string) (policy.Prediction, error) {
 	return t.policy.Predict(app), nil
 }
 
+func (t *Table) EchoLine(ipv6 bool) (string, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.policy == nil {
+		return "", ErrStopped
+	}
+	d, err := t.policy.Decide(platform.Owner{}, 0, ipv6, 0)
+	return d.Line, err
+}
+
 func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -166,41 +190,62 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 		return nil, errors.New("invalid tuple")
 	}
 	if tuple.Source.Addr().Is6() && !t.policy.IPv6() {
-		t.gauges.Rejected++
+		t.refusal(protocol).Policy++
 		return nil, policy.ErrIPv6
 	}
 	if t.gauges.Flows >= t.limits.Flows || (protocol == "udp" && t.gauges.UDP >= t.limits.UDP) || (protocol == "tcp" && t.gauges.Handshakes >= t.limits.Handshakes) {
-		t.gauges.Rejected++
+		t.refuseBegin(protocol)
 		return nil, ErrBudget
 	}
 	t.nextID++
-	f := &ticket{table: t, record: Record{ID: t.nextID, Epoch: t.epoch, Start: t.now(), Protocol: protocol, Source: tuple.Source, Destination: tuple.Destination}}
+	f := &ticket{table: t, record: liveRecord{ID: t.nextID, Epoch: t.epoch, Start: t.now().UnixNano(), Protocol: protocol, Source: tuple.Source, Destination: tuple.Destination}}
 	t.gauges.Flows++
+	t.gauges.PeakFlows = max(t.gauges.PeakFlows, t.gauges.Flows)
 	if protocol == "udp" {
 		t.gauges.UDP++
-		t.gauges.UDPReadBytes += flowapi.UDPReadBuffer
+		t.gauges.PeakUDP = max(t.gauges.PeakUDP, t.gauges.UDP)
+		t.gauges.UDPAdapterBytes += flowapi.UDPAdapterBuffer
 	} else {
 		f.handshake = true
 		f.receive, f.send = 64<<10, 64<<10
 		t.gauges.Handshakes++
+		t.gauges.PeakHandshakes = max(t.gauges.PeakHandshakes, t.gauges.Handshakes)
 	}
 	t.flows[f.record.ID] = f
 	return f, nil
 }
 
 type ticket struct {
-	accountMu                           sync.RWMutex
-	accountClosed                       bool
-	up, down                            atomic.Uint64
-	retired, timeWait, timeWaitReserved bool
-	closingOverflow                     bool
-	lineAddresses                       []netip.Addr
-	table                               *Table
-	record                              Record
-	resolved, closed, handshake         bool
-	tcpBytes                            int64
-	receive, send                       int
-	cancel                              context.CancelFunc
+	accountMu                                          sync.RWMutex
+	up, down                                           atomic.Uint64
+	lineAddresses                                      []netip.Addr
+	table                                              *Table
+	record                                             liveRecord
+	tcpBytes                                           int64
+	receive, send                                      int
+	cancel                                             context.CancelFunc
+	accountClosed, retired, timeWait, timeWaitReserved bool
+	closingOverflow, resolved, closed, handshake       bool
+	setupRefused                                       bool
+}
+
+// Wire snapshots carry counters and a time.Time, but live tickets already
+// own atomic counters and need only the start timestamp. Keep that duplication
+// out of all 65,536 live objects; materialize it only during pagination.
+type liveRecord struct {
+	ID, Epoch, Point    uint64
+	Start               int64
+	Owner               platform.Owner
+	Protocol            string
+	Source, Destination netip.AddrPort
+	PhysicalSource      netip.Addr
+	flowapi.Decision
+	Closing bool
+}
+
+func (f *ticket) snapshotRecord() Record {
+	r := f.record
+	return Record{ID: r.ID, Epoch: r.Epoch, Point: r.Point, Start: time.Unix(0, r.Start), Owner: r.Owner, Protocol: r.Protocol, Source: r.Source, Destination: r.Destination, PhysicalSource: r.PhysicalSource, Decision: r.Decision, Up: f.up.Load(), Down: f.down.Load(), Closing: r.Closing}
 }
 
 func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
@@ -218,25 +263,31 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	}
 	d, err := t.policy.Decide(owner, f.record.Source.Port(), f.record.Source.Addr().Is6(), t.k.Load()+1)
 	if err != nil {
-		t.gauges.Rejected++
+		t.refusal(f.record.Protocol).Policy++
 		return flowapi.Decision{}, err
 	}
 	c := t.apps[owner.AppID]
 	udp := f.record.Protocol == "udp"
 	unknown := owner.AppID == ""
 	if c.flows >= t.limits.PerApp || (udp && c.udp >= t.limits.UDPPerApp) || (unknown && (t.gauges.Unknown >= t.limits.Unknown || (udp && t.gauges.UnknownUDP >= t.limits.UnknownUDP))) {
-		t.gauges.Rejected++
+		t.refuseOwner(f.record.Protocol, owner.AppID)
 		return flowapi.Decision{}, ErrBudget
 	}
 	c.flows++
+	t.gauges.PeakPerApp = max(t.gauges.PeakPerApp, c.flows)
 	if udp {
 		c.udp++
+		t.gauges.PeakUDPPerApp = max(t.gauges.PeakUDPPerApp, c.udp)
 	}
 	t.apps[owner.AppID] = c
 	if unknown {
 		t.gauges.Unknown++
+		t.gauges.AdmittedUnknown++
+		t.gauges.PeakUnknown = max(t.gauges.PeakUnknown, t.gauges.Unknown)
 		if udp {
 			t.gauges.UnknownUDP++
+			t.gauges.AdmittedUnknownUDP++
+			t.gauges.PeakUnknownUDP = max(t.gauges.PeakUnknownUDP, t.gauges.UnknownUDP)
 		}
 	}
 	t.point++
@@ -377,7 +428,7 @@ func (f *ticket) retireLocked() {
 	udp := f.record.Protocol == "udp"
 	if udp {
 		t.gauges.UDP--
-		t.gauges.UDPReadBytes -= flowapi.UDPReadBuffer
+		t.gauges.UDPAdapterBytes -= flowapi.UDPAdapterBuffer
 	}
 	if f.resolved {
 		app := f.record.Owner.AppID
@@ -460,6 +511,8 @@ func (t *Table) ReservePending(n int) bool {
 			return false
 		}
 		if t.pendingBytes.CompareAndSwap(old, old+int64(n)) {
+			for peak := t.pendingPeakBytes.Load(); old+int64(n) > peak && !t.pendingPeakBytes.CompareAndSwap(peak, old+int64(n)); peak = t.pendingPeakBytes.Load() {
+			}
 			return true
 		}
 	}
@@ -477,6 +530,35 @@ func (t *Table) ReleasePending(n int) {
 		}
 	}
 }
+
+// Established replies cannot be starved by first-packet queues. This bound
+// covers both borrowed receive storage and fragments retained by the writer.
+func (t *Table) ReserveReply(n int) bool {
+	for {
+		old := t.replyBytes.Load()
+		if n < 0 || int64(n) > flowapi.UDPReplyBudget-old {
+			return false
+		}
+		if t.replyBytes.CompareAndSwap(old, old+int64(n)) {
+			for peak := t.replyPeakBytes.Load(); old+int64(n) > peak && !t.replyPeakBytes.CompareAndSwap(peak, old+int64(n)); peak = t.replyPeakBytes.Load() {
+			}
+			return true
+		}
+	}
+}
+func (t *Table) ReleaseReply(n int) {
+	for {
+		old := t.replyBytes.Load()
+		if n < 0 || int64(n) > old {
+			t.doubleReleases.Add(1)
+			t.Emit(flowapi.Event{Type: "log", Message: "invalid UDP reply byte release"})
+			return
+		}
+		if t.replyBytes.CompareAndSwap(old, old-int64(n)) {
+			return
+		}
+	}
+}
 func (t *Table) AllowReject(app string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -486,12 +568,17 @@ func (t *Table) AllowReject(app string) bool {
 		t.rejectTotal = 0
 		clear(t.rejectApps)
 	}
-	if t.rejectTotal >= 5000 || t.rejectApps[app] >= 1000 {
+	// Before attribution there is no app bucket: empty is not one shared
+	// application. Otherwise five apps at 800/s are incorrectly throttled
+	// together to 1,000/s when the total flow/session cap is reached.
+	if t.rejectTotal >= 5000 || (app != "" && t.rejectApps[app] >= 1000) {
 		t.gauges.DroppedNotices++
 		return false
 	}
 	t.rejectTotal++
-	t.rejectApps[app]++
+	if app != "" {
+		t.rejectApps[app]++
+	}
 	t.Emit(flowapi.Event{Type: "log", Message: "flow rejected", App: app})
 	return true
 }
@@ -500,10 +587,18 @@ func (t *Table) Stats() Gauges {
 	defer t.mu.Unlock()
 	g := t.gauges
 	g.PendingBytes = t.pendingBytes.Load()
+	g.UDPReadBytes = t.udpReadBytes.Load()
+	g.UDPReplyBytes = t.replyBytes.Load()
+	g.UDPReplyPeakBytes = t.replyPeakBytes.Load()
+	g.PendingPeakBytes = t.pendingPeakBytes.Load()
 	g.DoubleReleases = t.doubleReleases.Load()
 	g.EventsDropped = t.eventsDropped.Load()
 	return g
 }
+
+// Receive storage is borrowed only after readability and is already charged
+// to UDPReplyBytes. This gauge distinguishes it from per-socket adapter state.
+func (t *Table) ObserveUDPRead(delta int) { t.udpReadBytes.Add(int64(delta)) }
 
 func (t *Table) Events() <-chan flowapi.Event { return t.events }
 
@@ -527,6 +622,7 @@ func (t *Table) Lookup(d time.Duration, err error, owner platform.Owner) {
 	defer t.mu.Unlock()
 	t.gauges.LookupCount++
 	t.gauges.LookupNanoseconds += uint64(max(d, 0))
+	t.gauges.LookupHistogram[min(int(max(d, 0)/(100*time.Microsecond)), 200)]++
 	if err != nil || owner.AppID == "" {
 		t.gauges.LookupMisses++
 	}

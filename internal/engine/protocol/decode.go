@@ -27,6 +27,7 @@ type Request struct {
 	Line          string           `json:"line,omitempty"`
 	Operator      string           `json:"operator,omitempty"`
 	App           string           `json:"app,omitempty"`
+	Fault         json.RawMessage  `json:"fault,omitempty"`
 	// Adapter is the temporary milestone-two compatibility payload. It is
 	// accepted only by a runtime advertising singbox-adapter-v1; the lease and
 	// fencing are identical to the native engine protocol.

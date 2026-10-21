@@ -35,6 +35,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/tests/linux/topo"
 	"github.com/AyoubAchour/net-switch/tests/linux/wire"
+	"golang.org/x/sys/unix"
 )
 
 // EventsFile is where the inet role records what reached it.
@@ -42,13 +43,15 @@ const EventsFile = "events.jsonl"
 
 // Record is one observation.
 type Record struct {
-	T     int64  `json:"t"`    // Unix ms
-	Kind  string `json:"kind"` // tcp, udp, dns, stun, poke, icmp
-	Src   string `json:"src"`  // what the server saw: ip or ip:port
-	Dst   string `json:"dst,omitempty"`
-	Len   int    `json:"len,omitempty"` // UDP payload bytes
-	Proto string `json:"proto,omitempty"`
-	Data  string `json:"data,omitempty"` // payload prefix, query name...
+	T          int64  `json:"t"`    // Unix ms
+	Kind       string `json:"kind"` // tcp, udp, dns, stun, poke, icmp
+	Src        string `json:"src"`  // what the server saw: ip or ip:port
+	Dst        string `json:"dst,omitempty"`
+	Len        int    `json:"len,omitempty"` // UDP payload bytes
+	Proto      string `json:"proto,omitempty"`
+	Data       string `json:"data,omitempty"` // payload prefix, query name...
+	ReplyBytes int    `json:"replyBytes,omitempty"`
+	Err        string `json:"err,omitempty"`
 }
 
 type recorder struct {
@@ -107,7 +110,7 @@ func Main(args []string) error {
 			serveTCP(":"+strconv.Itoa(wire.PortHold), rec, holdOpen),
 			serveTCP(":"+strconv.Itoa(wire.PortBulk), rec, bulk),
 			serveTCP(":"+strconv.Itoa(wire.PortDNS), rec, dnsTCP(rec)),
-			serveTCP(":"+strconv.Itoa(wire.PortProbe), rec, func(net.Conn) {}),
+			serveProbes(*out, rec),
 			serveHTTP(":"+strconv.Itoa(wire.PortHTTP), rec),
 		)
 		echoAddrs := append([]netip.Addr{topo.Server4, topo.Server4b, topo.Third4, topo.Server6, topo.Server6b}, topo.ManyServers()...)
@@ -125,6 +128,7 @@ func Main(args []string) error {
 		}
 		for _, addr := range []netip.Addr{topo.Server4, topo.Server6} {
 			errs = append(errs, serveUDP(netip.AddrPortFrom(addr, wire.PortDNS), dnsUDP(rec)))
+			errs = append(errs, serveUDP(netip.AddrPortFrom(addr, wire.PortUDPReply), largeUDPReply(rec)))
 		}
 		third, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(topo.Third4, wire.PortPokeSrc)))
 		errs = append(errs, err)
@@ -214,12 +218,20 @@ func stream(conn net.Conn) {
 	}
 }
 
-// holdOpen keeps a connection until the client closes it, sending nothing:
-// tens of thousands of them cost a socket and a small goroutine each.
+// A holder can request one source observation, then keep the socket idle.
+// The full address/port correlates its exact tuple with our accept record.
 func holdOpen(conn net.Conn) {
+	reader := bufio.NewReaderSize(conn, 128)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		return
+	}
+	if strings.HasPrefix(line, "ping ") {
+		_, _ = fmt.Fprintf(conn, "pong %s %s\n", strings.TrimSpace(strings.TrimPrefix(line, "ping ")), addrString(conn.RemoteAddr()))
+	}
 	var b [1]byte
 	for {
-		if _, err := conn.Read(b[:]); err != nil {
+		if _, err := reader.Read(b[:]); err != nil {
 			return
 		}
 	}
@@ -358,6 +370,13 @@ func serveUDP(addr netip.AddrPort, handle func(c *net.UDPConn, src netip.AddrPor
 			// learns the path MTU. (10, 0: IP_MTU_DISCOVER, IP_PMTUDISC_DONT.)
 			serr = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, 10, 0)
 		}
+		if serr == nil && addr.Addr().Is6() && addr.Port() == wire.PortUDPReply {
+			// This fixture deliberately sends legal datagrams larger than its
+			// interface MTU. Fragment at the source on the first request too.
+			serr = errors.Join(
+				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, syscall.IPV6_MTU_DISCOVER, 0),
+				syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IPV6, unix.IPV6_DONTFRAG, 0))
+		}
 	}); err != nil || serr != nil {
 		return fmt.Errorf("receive buffer for %s: %v %v", addr, err, serr)
 	}
@@ -373,6 +392,23 @@ func serveUDP(addr netip.AddrPort, handle func(c *net.UDPConn, src netip.AddrPor
 		}
 	}()
 	return nil
+}
+
+func largeUDPReply(rec *recorder) func(c *net.UDPConn, src netip.AddrPort, b []byte) {
+	return func(c *net.UDPConn, src netip.AddrPort, b []byte) {
+		r := Record{Kind: "udp-reply", Src: src.String(), Dst: c.LocalAddr().String(), Len: len(b), Data: prefix(b, 128)}
+		payload, err := wire.UDPReplyPayload(string(b))
+		if err == nil && src.Addr().Is4() && len(payload) > 65507 {
+			err = errors.New("IPv4 UDP reply exceeds 65507 bytes")
+		}
+		if err == nil {
+			r.ReplyBytes, err = c.WriteToUDPAddrPort(payload, src)
+		}
+		if err != nil {
+			r.Err = err.Error()
+		}
+		rec.add(r)
+	}
 }
 
 func stun(rec *recorder) func(c *net.UDPConn, src netip.AddrPort, b []byte) {

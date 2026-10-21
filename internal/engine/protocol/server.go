@@ -55,6 +55,9 @@ type Server struct {
 	EventsDropped               atomic.Uint64
 	done                        chan struct{}
 	doneOnce                    sync.Once
+	// TestFault is nil in production. Acceptance binaries install it explicitly.
+	TestFault        func(context.Context, json.RawMessage) (any, error)
+	OnCleanupFailure func(error)
 }
 
 func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
@@ -207,6 +210,11 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		return nil, errors.New("adapter payload is not supported")
 	}
 	switch r.Method {
+	case "testFault":
+		if s.TestFault == nil {
+			return nil, errors.New("test faults unavailable in production")
+		}
+		return s.TestFault(ctx, r.Fault)
 	case "renew":
 		s.expires = s.now().Add(Lease)
 		return true, nil
@@ -392,6 +400,9 @@ func (s *Server) RunLease(ctx context.Context) {
 		case <-tick.C:
 			if err := s.CheckLease(ctx); err != nil {
 				s.Emit(Event{Type: "fatal", Message: err.Error()})
+				if s.OnCleanupFailure != nil {
+					s.OnCleanupFailure(err)
+				}
 			}
 		}
 	}

@@ -35,15 +35,25 @@ func IP(src, dst netip.Addr, protocol byte, payload []byte) []byte {
 }
 
 func allocateIP(src, dst netip.Addr, protocol byte, length int) ([]byte, []byte) {
-	if !src.IsValid() || !dst.IsValid() || src.Is4() != dst.Is4() || length < 0 || length > 65515 {
+	if !src.IsValid() || !dst.IsValid() || src.Is4() != dst.Is4() || length < 0 {
 		return nil, nil
 	}
 	n := 20
+	maximum := 65515
 	if src.Is6() {
 		n = 40
+		maximum = 65535
+	}
+	if length > maximum {
+		return nil, nil
 	}
 	b := make([]byte, n+length)
-	if n == 20 {
+	writeIPHeader(b, src, dst, protocol)
+	return b, b[n:]
+}
+
+func writeIPHeader(b []byte, src, dst netip.Addr, protocol byte) {
+	if src.Is4() {
 		b[0], b[8], b[9] = 0x45, 64, protocol
 		binary.BigEndian.PutUint16(b[2:], uint16(len(b)))
 		copy(b[12:16], src.AsSlice())
@@ -51,11 +61,10 @@ func allocateIP(src, dst netip.Addr, protocol byte, length int) ([]byte, []byte)
 		binary.BigEndian.PutUint16(b[10:], ^Sum(b[:20], 0))
 	} else {
 		b[0], b[6], b[7] = 0x60, protocol, 64
-		binary.BigEndian.PutUint16(b[4:], uint16(length))
+		binary.BigEndian.PutUint16(b[4:], uint16(len(b)-40))
 		copy(b[8:24], src.AsSlice())
 		copy(b[24:40], dst.AsSlice())
 	}
-	return b, b[n:]
 }
 
 func Reset(src, dst netip.AddrPort, seq, ack uint32, ackFlag bool) []byte {

@@ -3,6 +3,7 @@
 package suite
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,12 +35,11 @@ func init() { register(50, addLookup) }
 func addLookup(r *registry) {
 	const slow = "sing-box scans every open file of the socket's user on each new connection (about 3 µs per file), so its estimated p95 lookup is well over 10 ms"
 	r.defect("lookup.gate-terminal", "Owner lookup with 10,000 open files, from a plain terminal: owner found for 99.5% (p95: an estimate here, measured in lookup.p95-measured)", slow, "5.6", 4*time.Minute,
-		func(e *Env) { lookupGate(e, false) })
+		func(e *Env) { lookupGate(e, false, false) })
 	r.defect("lookup.gate-app-scope", "Owner lookup with 10,000 open files, app in its own scope: owner found for 99.5% (p95: an estimate here, measured in lookup.p95-measured)", slow, "5.6", 4*time.Minute,
-		func(e *Env) { lookupGate(e, true) })
-	r.pending("lookup.p95-measured", "The engine's own p95 owner-lookup time stays under 10 ms with 10,000 open files, in an app scope and from a plain terminal",
-		"5.6", "per-lookup timings in stats (a latency histogram): main's stats carry a lookup count and total time only, which give a mean, not a p95; "+
-			"the baseline's p95 is an estimate from outside and can't pass this gate")
+		func(e *Env) { lookupGate(e, true, false) })
+	r.add("lookup.p95-measured", "The engine's own p95 owner-lookup time stays under 10 ms with 10,000 open files, in an app scope and from a plain terminal",
+		harness.Requires10, "5.6", 8*time.Minute, func(e *Env) { lookupGate(e, false, true); e.StopEngine(); lookupGate(e, true, true) })
 	r.add("lookup.fork-exec", "A program started by another (fork and exec) is attributed to itself", harness.Parity, "5.6", 0, forkExec)
 	r.add("lookup.inherited-socket", "A socket inherited by a child that alone holds it is the child's", harness.Parity, "5.6", 0, inheritedSocket)
 	r.defect("lookup.ambiguous-holders", "A socket held by two apps on different lines at once is treated as unknown",
@@ -56,9 +56,10 @@ type phase struct {
 	// just before and after it.
 	lookups, misses uint64
 	lookupTime      time.Duration
+	histogram       [201]uint64
 }
 
-func lookupGate(e *Env, scoped bool) {
+func lookupGate(e *Env, scoped, measured bool) {
 	e.StartEngine(e.DefaultConfig())
 	var session engine.Controller
 	if v1, ok := e.Eng.(engine.V1); ok {
@@ -87,6 +88,16 @@ func lookupGate(e *Env, scoped bool) {
 		if session != nil {
 			after := stats()
 			p.lookups, p.misses, p.lookupTime = after.LookupCount-before.LookupCount, after.LookupMisses-before.LookupMisses, after.LookupTime-before.LookupTime
+			if scoped {
+				var first, last struct{ CgroupPopulated uint64 }
+				err1 := json.Unmarshal(before.OwnerLookup, &first)
+				err2 := json.Unmarshal(after.OwnerLookup, &last)
+				delta := last.CgroupPopulated - first.CgroupPopulated
+				e.T.Check(err1 == nil && err2 == nil && p.lookups > 0 && delta*200 >= p.lookups*199, "this scoped phase resolved populated cgroup hints for at least 99.5%% of its own lookups (%d of %d; %v %v)", delta, p.lookups, err1, err2)
+			}
+			for i := range p.histogram {
+				p.histogram[i] = after.LookupHistogram[i] - before.LookupHistogram[i]
+			}
 		}
 		e.T.Logf("%s: %d ok, errors %v, connect p50 %.2f p95 %.2f max %.2f ms", label, p.r.OK, p.r.Errors, p.r.Connect.P50, p.r.Connect.P95, p.r.Connect.Max)
 		return p
@@ -140,8 +151,26 @@ func lookupGate(e *Env, scoped bool) {
 		}
 		ok = ok && found >= gateFound
 		verdicts = append(verdicts, fmt.Sprintf("%s: the engine found %.1f%% of %d owners (mean lookup %v, for the record)", p.label, 100*found, p.lookups, mean))
+		var count, cumulative uint64
+		for _, n := range p.histogram {
+			count += n
+		}
+		p95 := 20100 * time.Microsecond
+		for i, n := range p.histogram {
+			cumulative += n
+			if count > 0 && cumulative >= (count*95+99)/100 {
+				p95 = time.Duration(i+1) * 100 * time.Microsecond
+				break
+			}
+		}
+		e.T.Check(count == p.lookups && count >= gateConnections, "histogram contains every measured cold lookup (%d buckets, %d lookups)", count, p.lookups)
+		e.T.Check(p95 < 10*time.Millisecond, "%s (app scope %v): measured lookup p95 upper bound %v is under 10 ms", p.label, scoped, p95)
 	}
-	e.T.Expect(ok, "with %d open files, each phase finds the owner for at least %.1f%%, as the servers and the engine both count (%s)",
+	check := e.T.Expect
+	if measured {
+		check = e.T.Check
+	}
+	check(ok, "with %d open files, each phase finds the owner for at least %.1f%%, as the servers and the engine both count (%s)",
 		gateFiles, 100*gateFound, strings.Join(verdicts, "; "))
 }
 

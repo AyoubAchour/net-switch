@@ -24,6 +24,8 @@ func main() {
 		fmt.Println("netswitch-engine", buildinfo.String())
 		return
 	}
-	fmt.Fprintln(os.Stderr, "usage: netswitch-engine version|service|worker")
-	os.Exit(2)
+	if err := run(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, "netswitch-engine:", err)
+		os.Exit(1)
+	}
 }

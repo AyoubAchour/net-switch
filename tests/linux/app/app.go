@@ -33,11 +33,13 @@ var modes = map[string]mode{
 	"tcphold":     {runTCPHold, "many TCP connections held open at once"},
 	"udpburst":    {runUDPBurst, "first datagrams to many destinations at once, from one socket"},
 	"udpflood":    {runUDPFlood, "one datagram on each of thousands of UDP sockets"},
+	"udpqueue":    {runUDPQueue, "paced datagrams on held UDP sockets to exercise byte and output queues"},
 	"stream":      {runStream, "one long TCP connection, pinging"},
 	"bulk":        {runBulk, "a hashed TCP download or upload"},
 	"bulkhold":    {runBulkHold, "a full-speed download that then trickles, every byte checked, held until released"},
 	"http":        {runHTTP, "one HTTP GET; the body is the source the server saw"},
 	"udp":         {runUDP, "UDP datagrams to echo servers"},
+	"udpreply":    {runUDPReply, "small UDP requests with large replies checked by SHA-256"},
 	"udpstream":   {runUDPStream, "continuous UDP from one source port"},
 	"stun":        {runSTUN, "STUN bindings from one socket, and a poke from a third host"},
 	"ping":        {runPing, "ICMP echo through an unprivileged ping socket"},
@@ -52,6 +54,14 @@ var modes = map[string]mode{
 
 // Main is "nsaccept app <mode> [flags]".
 func Main(args []string) int {
+	if os.Getenv("NETSWITCH_TEST_LARGE_FLATPAK") == "1" {
+		st, err := os.Stat("/.flatpak-info")
+		if err != nil || st.Size() <= 64<<10 {
+			fmt.Fprintln(os.Stderr, "large Flatpak metadata fixture did not exceed 64 KiB:", st, err)
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, "verified Flatpak metadata size:", st.Size())
+	}
 	if len(args) == 0 || modes[args[0]].run == nil {
 		names := make([]string, 0, len(modes))
 		for name, m := range modes {

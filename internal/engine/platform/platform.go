@@ -23,6 +23,15 @@ type TunDevice interface {
 	Close() error
 }
 
+// TunIOContext optionally installs a single cancellation hook for the forwarding
+// lifetime. Call once before starting I/O. Per-call contexts still work normally;
+// implementations may avoid per-packet hooks only for this same Done channel.
+type TunIOContext interface{ BindIOContext(context.Context) }
+
+// RouteQuiescer stops and joins background route repair before teardown can
+// remove the TUN. Cancelling sibling contexts alone does not order their work.
+type RouteQuiescer interface{ Quiesce() }
+
 // BatchWriter accepts packets already available in the link queue, without
 // waiting to fill a batch. The return count excludes packets dropped under load.
 type BatchWriter interface {
@@ -53,10 +62,23 @@ type OwnerLookup interface {
 	UDP(context.Context, netip.AddrPort) (Owner, error)
 }
 
+// DatagramOwnerLookup supplies the first remote endpoint for Linux's exact
+// sock_diag query. Source-only lookup remains available for other adapters.
+type DatagramOwnerLookup interface {
+	UDPFor(context.Context, Tuple) (Owner, error)
+}
+
 // A complete snapshot includes every requested endpoint, including absence.
 // On an incomplete dump return an error; never mark it as a fresh validation.
 type UDPIdentity interface {
 	Snapshot(context.Context, []netip.AddrPort) (map[netip.AddrPort]Owner, error)
+}
+
+// UDPIdentityAt supplies the beginning of session enumeration, so a cache
+// can retain lookups that completed after that list was collected. The list
+// includes pending sessions; only ready sessions consume its validation.
+type UDPIdentityAt interface {
+	SnapshotAt(context.Context, []netip.AddrPort, time.Time) (map[netip.AddrPort]Owner, error)
 }
 
 type TCPConn interface {
@@ -67,15 +89,67 @@ type TCPConn interface {
 	SetLinger(int) error
 }
 
+// ReadyTCP optionally transfers a connection to the nonblocking relay. Arm
+// replaces its one-shot interest; readiness invokes wake without doing I/O.
+// Detach removes the registration before the socket can be closed or reused.
+// TryRead/TryWrite report ErrWouldBlock without waiting or changing deadlines.
+// A successful Watch transfers exclusive I/O ownership: callers then use only
+// TryRead/TryWrite, addresses, shutdown, linger and Close, not blocking I/O or
+// deadlines. An adapter may release its original Go poll descriptor at transfer.
+var ErrWouldBlock = errors.New("socket would block")
+
+// ErrDatagramDropped is a local resource drop or an asynchronous error already
+// handled using its original destination. Count it without inventing an ICMP
+// unreachable for the datagram currently being sent.
+var ErrDatagramDropped = errors.New("datagram dropped")
+
+type ReadyTCP interface {
+	TCPConn
+	TryRead([]byte) (int, error)
+	// TryPeek leaves bytes in the source socket. TryDiscard consumes at most
+	// len(scratch) bytes already peeked and accepted by the destination. Both
+	// are nonblocking; the relay exclusively owns reads between these calls.
+	// Linux can discard with MSG_TRUNC; Windows may read into scratch.
+	TryPeek([]byte) (int, error)
+	TryDiscard(scratch []byte) (int, error)
+	TryWrite([]byte) (int, error)
+	Watch(func()) (Readiness, error)
+}
+type Readiness interface {
+	// Re-arm is level triggered: already-ready data, EOF, or write space
+	// must wake the caller again without requiring a new edge. Watch and Arm
+	// must not wait for I/O or worker progress; callbacks only enqueue work.
+	Arm(read, write bool) error
+	Detach()
+}
+
 // ReadFrom errors describe individual datagrams unless errors.Is(net.ErrClosed).
 // Translate EMSGSIZE/WSAEMSGSIZE to TooBig; other receive errors remain
 // recoverable. Close unblocks ReadFrom. The NAT keeps the same public port
 // across oversized or otherwise failed receives, until closure/cancellation.
 type UDPConn interface {
+	// WaitReadable must not consume a datagram. Close interrupts the wait.
+	// The NAT borrows receive storage only after this reports readiness.
+	WaitReadable(context.Context) error
 	ReadFrom([]byte) (int, netip.AddrPort, error)
 	WriteTo([]byte, netip.AddrPort, bool) (int, error)
 	LocalAddr() netip.AddrPort
 	Close() error
+}
+
+// ReadyUDP runs datagram I/O without parking a goroutine for each mapping.
+// Watch and Detach have the same lifetime rules as ReadyTCP. A datagram write
+// either succeeds whole or returns an error; ErrWouldBlock consumes nothing.
+// An empty datagram returns zero bytes with a valid source and nil error.
+// Asynchronous error records use UDPErrorHandler during Try operations; the
+// blocking UDPErrorQueue interface is only used by the legacy UDPConn path.
+type ReadyUDP interface {
+	UDPConn
+	// Watch installs bounded readiness bookkeeping without waiting for I/O or
+	// a worker. It may run under the session lock also used by packet ingress.
+	Watch(func()) (Readiness, error)
+	TryReadFrom([]byte) (int, netip.AddrPort, error)
+	TryWriteTo([]byte, netip.AddrPort, bool) (int, error)
 }
 
 // TooBig carries the path MTU from a synchronous write or an OS error queue.
@@ -100,9 +174,23 @@ type UDPErrorQueue interface {
 	ReadError(context.Context) (DatagramError, error)
 }
 
+// UDPErrorHandler lets an adapter deliver errors from its existing I/O paths.
+// Install the handler before the first read or write. It must not block or
+// call back into the socket. Error-queue state is unlocked before invocation.
+type UDPErrorHandler interface {
+	SetErrorHandler(func(DatagramError))
+}
+
 type LineDialer interface {
 	DialTCP(context.Context, string, netip.AddrPort) (TCPConn, error)
 	OpenUDP(context.Context, string, bool) (UDPConn, error)
+}
+
+// DestinationDialer lets an adapter ask the OS to choose a source address for
+// the first datagram, then bind it for the lifetime of an unconnected mapping.
+// This preserves endpoint-independent mapping on interfaces with many addresses.
+type DestinationDialer interface {
+	OpenUDPTo(context.Context, string, netip.AddrPort) (UDPConn, error)
 }
 
 // Prepare must use the ownership journal. Capture is enabled only after all
@@ -115,15 +203,27 @@ type RouteManager interface {
 
 type Line struct {
 	ID        string       `json:"id"`
+	Interface string       `json:"interface,omitempty"`
 	Addresses []netip.Addr `json:"addresses"`
+}
+
+// UDPNotifications is optional. Cancellation must stop the listener before
+// the NAT is destroyed. A lost notification requests an immediate full dump.
+type UDPNotifications interface {
+	WatchUDP(context.Context, func(netip.AddrPort, string), func())
 }
 
 type ProbeResult struct {
 	OK      bool          `json:"ok"`
+	Outcome string        `json:"outcome,omitempty"`
 	Latency time.Duration `json:"latency"`
 	Error   string        `json:"error,omitempty"`
 }
 
 type Prober interface {
 	Probe(context.Context, string, string) (ProbeResult, error)
+}
+
+type Echoer interface {
+	Echo(context.Context, string, netip.Addr, []byte) ([]byte, error)
 }

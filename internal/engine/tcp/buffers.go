@@ -13,7 +13,8 @@ import (
 
 type connection struct {
 	id               stack.TransportEndpointID
-	done             chan struct{}
+	completed        atomic.Bool
+	ready            atomic.Pointer[readyRelay]
 	ep               tcpip.Endpoint
 	ticket           flowapi.Ticket
 	up, down         atomic.Uint64
@@ -48,8 +49,15 @@ func (f *Forwarder) startMaintenance() {
 		mu.Unlock()
 		for _, c := range f.connectionSnapshot() {
 			c.ticket.Retire()
+			if relay := c.ready.Load(); relay != nil {
+				relay.cancel()
+			}
 			c.ep.Abort()
-			<-c.done
+			f.relays.mu.Lock()
+			for !c.completed.Load() {
+				f.relays.finished.Wait()
+			}
+			f.relays.mu.Unlock()
 			c.ticket.Close()
 			f.removeConnection(c)
 		}
@@ -57,8 +65,8 @@ func (f *Forwarder) startMaintenance() {
 }
 
 func (f *Forwarder) connectionSnapshot() []*connection {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	items := make([]*connection, 0, len(f.connections)+len(f.retired))
 	for _, c := range f.connections {
 		items = append(items, c)
@@ -84,11 +92,9 @@ func (f *Forwarder) sweep(now time.Time) {
 		state := gtcp.EndpointState(c.ep.State())
 		if state == gtcp.StateClose || state == gtcp.StateError {
 			c.releaseAdmission()
-			select {
-			case <-c.done:
+			if c.completed.Load() {
 				c.ticket.Close()
 				f.removeConnection(c)
-			default:
 			}
 			continue
 		}

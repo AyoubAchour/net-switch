@@ -35,6 +35,7 @@ func addProtocol(r *registry) {
 	add("protocol.predict-keeps-counter", "predict gives a shared app's distribution without advancing the combining counter", "5.4, 5.10", 0, predictKeepsCounter)
 	add("protocol.lookup-counters", "stats counts ambiguous owners and records lookup time", "5.6, 5.10", 0, lookupCounters)
 	add("protocol.probe-per-line", "A probe tests the physical line, not its lane, and repeating its operation id returns the recorded result", "4.5, 5.10", 0, probePerLine)
+	add("protocol.https-probe-validation", "Full probes validate TLS and operator bodies, require HTTP/2 for Quad9, and refuse redirects and login portals", "4.5", 0, httpsProbes)
 	add("udp.identity-without-notifications", "UDP port reuse is caught within 1 s with destroy notifications dropped or delayed, for an opposite pin and a blocked line", "5.3", 3*time.Minute, udpIdentityWithoutNotifications)
 }
 
@@ -178,6 +179,7 @@ func flowsPagination(e *Env) {
 	var cursors []string
 	var sizes []int
 	var wrong, stray []string
+	unknown := 0
 	cursor := ""
 	for page := 1; ; page++ {
 		e.T.Require(page <= 1000, "the cursor ends within 1,000 pages")
@@ -190,7 +192,12 @@ func flowsPagination(e *Env) {
 			switch {
 			case want[key]:
 				matched[key] = append(matched[key], got{f, page})
-				if f.Protocol != "tcp" || f.App != AppPath("bravo") || f.PID != hold.Pid() || f.Lane != "b" || f.Line != "b" ||
+				identified := f.App == AppPath("bravo") && f.AppID == AppPath("bravo") && f.PID == hold.Pid() && f.Lane == "b" && f.Line == "b"
+				unidentified := f.App == "" && f.AppID == "" && f.PID == 0 && f.Lane == "a" && f.Line == "a"
+				if unidentified {
+					unknown++
+				}
+				if f.Protocol != "tcp" || (!identified && !unidentified) ||
 					f.Revision != loaded.N || f.Epoch != s.Epoch() || f.Point <= loaded.Point {
 					wrong = append(wrong, fmt.Sprintf("%s: %s app %q pid %d lane %s line %s revision %d epoch %d point %d", key, f.Protocol, f.App, f.PID, f.Lane, f.Line, f.Revision, f.Epoch, f.Point))
 				}
@@ -227,8 +234,12 @@ func flowsPagination(e *Env) {
 		"%d flows came over %d pages, each but the last ending in a new cursor (page sizes %v)", n, len(sizes), sizes)
 	e.T.Check(once == n && twice == 0 && dupIDs == 0,
 		"each of bravo's %d held connections was listed exactly once, by its own tuple (once %d, more than once %d, missing %d, ids listed twice %d)", n, once, twice, n-len(matched), dupIDs)
-	e.T.Check(len(wrong) == 0, "every held connection says tcp, bravo, its pid, lane b, line b, revision %d, epoch %d and a point after the revision's (%d didn't: %s)",
+	e.T.Check(len(wrong) == 0, "every held connection has correct identified or unknown ownership, its required lane, revision %d, epoch %d and a point after the revision's (%d didn't: %s)",
 		loaded.N, s.Epoch(), len(wrong), strings.Join(upTo(wrong, 3), "; "))
+	e.T.ReleaseCheck(once-unknown >= n-1, "at least %d rows prove bravo's path, app id and PID (%d identified, %d unknown)", n-1, once-unknown, unknown)
+	stats, err := s.Stats(e.Ctx())
+	e.T.Require(err == nil, "stats while the paginated connections are held (%v)", err)
+	e.T.Check(int(stats.Unknown) == unknown && stats.LookupMisses == uint64(unknown), "unknown snapshot rows exactly match live admission and lookup misses (%d listed, %d live, %d misses)", unknown, stats.Unknown, stats.LookupMisses)
 	e.T.Check(len(stray) == 0, "no flow claims bravo or the hold server besides the held connections (%s)", strings.Join(upTo(stray, 3), "; "))
 	release.Open(e)
 	var r app.HoldResult
@@ -386,11 +397,11 @@ func probePerLine(e *Env) {
 	}
 	e.SetLanes(map[engine.LineID]engine.LineID{"b": "a"})
 	since := time.Now().UnixMilli()
-	okA, err := s.Probe(e.Ctx(), "probe-a", "a", "cloudflare")
+	okA, err := s.Probe(e.Ctx(), "probe-a", "a", "quick:cloudflare")
 	e.T.Check(err == nil && okA.OK, "line a's probe passes (%+v, %v)", okA, err)
-	failB, err := s.Probe(e.Ctx(), "probe-b", "b", "cloudflare")
+	failB, err := s.Probe(e.Ctx(), "probe-b", "b", "quick:cloudflare")
 	e.T.Check(err == nil && !failB.OK && failB.Error != "", "line b's probe fails though b's lane points at a (%+v, %v)", failB, err)
-	again, err := s.Probe(e.Ctx(), "probe-b", "b", "cloudflare")
+	again, err := s.Probe(e.Ctx(), "probe-b", "b", "quick:cloudflare")
 	e.T.Check(err == nil && again == failB, "repeating the operation id returns the recorded result (%+v, %v)", again, err)
 	probes := Select(e.Records(), func(r inet.Record) bool { return r.Kind == "tcp" && r.T >= since && strings.HasSuffix(r.Dst, ":443") })
 	e.T.Check(len(probes) == 1 && topo.LineOfText(probes[0].Src) == "a", "the probe servers saw exactly one probe, line a's (%d, lines %s)", len(probes), Describe(RecordLines(probes)))

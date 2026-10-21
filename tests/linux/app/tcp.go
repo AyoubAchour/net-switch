@@ -41,16 +41,17 @@ type Attempt struct {
 
 // TCPResult is the tcp mode's answer.
 type TCPResult struct {
-	Count     int            `json:"count"`
-	OK        int            `json:"ok"`
-	Errors    map[string]int `json:"errors"`
-	Seen      map[string]int `json:"seen"`
-	Connect   Stats          `json:"connectMs"`
-	Total     Stats          `json:"totalMs"`
-	FailedMS  Stats          `json:"failedMs"`
-	WallMS    float64        `json:"wallMs"`
-	Attempts  []Attempt      `json:"attempts"`
-	StartedAt int64          `json:"startedAt"`
+	Count       int            `json:"count"`
+	OK          int            `json:"ok"`
+	Errors      map[string]int `json:"errors"`
+	Seen        map[string]int `json:"seen"`
+	Connect     Stats          `json:"connectMs"`
+	Total       Stats          `json:"totalMs"`
+	FailedMS    Stats          `json:"failedMs"`
+	WallMS      float64        `json:"wallMs"`
+	Attempts    []Attempt      `json:"attempts"`
+	StartedAt   int64          `json:"startedAt"`
+	CompletedNS int64          `json:"completedNs,omitempty"`
 }
 
 func whoamiOnce(i int, to netip.AddrPort, local netip.AddrPort, dev string, timeout time.Duration) Attempt {
@@ -172,7 +173,10 @@ func runTCP(args []string) (any, error) {
 		}()
 	}
 	wg.Wait()
-	return summariseAttempts(attempts, time.Since(started), started.UnixMilli()), nil
+	completed := time.Now()
+	result := summariseAttempts(attempts, completed.Sub(started), started.UnixMilli())
+	result.CompletedNS = completed.UnixNano()
+	return result, nil
 }
 
 // HoldResult is the tcphold mode's answer.
@@ -194,14 +198,20 @@ type HoldResult struct {
 
 // Held is one held connection as the app sees it.
 type Held struct {
-	Local  string `json:"local"`
-	Remote string `json:"remote"`
+	Local       string `json:"local"`
+	Remote      string `json:"remote"`
+	Seen        string `json:"seen,omitempty"`  // stream server's source observation, with --probe
+	Index       int    `json:"index,omitempty"` // one-based original offer index
+	StartedNS   int64  `json:"startedNs,omitempty"`
+	ConnectedNS int64  `json:"connectedNs,omitempty"`
 }
 
 // HeldList is tcphold's "held {...}" line, with --tuples.
 type HeldList struct {
-	Established int    `json:"established"`
-	Conns       []Held `json:"conns"`
+	Established int            `json:"established"`
+	Conns       []Held         `json:"conns"`
+	Errors      map[string]int `json:"errors,omitempty"`
+	FailedMS    Stats          `json:"failedMs"`
 }
 
 // runTCPHold opens many connections and keeps them open (a connection storm,
@@ -217,6 +227,7 @@ func runTCPHold(args []string) (any, error) {
 	hold := fs.Int("hold", 5000, "ms to keep them open (without --release-file)")
 	release := fs.String("release-file", "", "keep them open until this file exists")
 	tuples := fs.Bool("tuples", false, "print the held connections' addresses")
+	probe := fs.Bool("probe", false, "exchange one stream ping before holding, and report the server-observed source")
 	window := fs.Int("window", 0, "classify attempts by what had happened this many ms after each started")
 	if err := parse(fs, args); err != nil {
 		return nil, err
@@ -228,6 +239,10 @@ func runTCPHold(args []string) (any, error) {
 	r := HoldResult{Count: *count, Errors: map[string]int{}, WindowMS: *window}
 	var mu sync.Mutex
 	var conns []net.Conn
+	var observed map[net.Conn]Held
+	if *probe || *tuples {
+		observed = map[net.Conn]Held{}
+	}
 	var connect, failed []float64
 	var next atomic.Int64
 	var wg sync.WaitGroup
@@ -242,14 +257,38 @@ func runTCPHold(args []string) (any, error) {
 				}
 				start := time.Now()
 				conn, err := net.DialTimeout("tcp", list[i%len(list)].String(), time.Duration(*timeout)*time.Millisecond)
+				connected := time.Now()
 				ms := msSince(start)
+				seen := ""
+				if err == nil && *probe {
+					_ = conn.SetDeadline(start.Add(time.Duration(*timeout) * time.Millisecond))
+					if _, err = io.WriteString(conn, "ping 1\n"); err == nil {
+						var line string
+						line, err = bufio.NewReader(io.LimitReader(conn, 256)).ReadString('\n')
+						fields := strings.Fields(line)
+						if err == nil {
+							if len(fields) != 3 || fields[0] != "pong" || fields[1] != "1" {
+								err = fmt.Errorf("invalid stream probe response %q", line)
+							} else {
+								seen = fields[2]
+							}
+						}
+					}
+					_ = conn.SetDeadline(time.Time{})
+					if err != nil {
+						conn.Close()
+					}
+				}
 				code := Code(err)
 				mu.Lock()
 				if err != nil {
 					r.Errors[code]++
-					failed = append(failed, ms)
+					failed = append(failed, msSince(start))
 				} else {
 					conns = append(conns, conn)
+					if *probe || *tuples {
+						observed[conn] = Held{Local: addrString(conn.LocalAddr()), Remote: addrString(conn.RemoteAddr()), Seen: seen, Index: i + 1, StartedNS: start.UnixNano(), ConnectedNS: connected.UnixNano()}
+					}
 					connect = append(connect, ms)
 				}
 				if *window > 0 {
@@ -269,9 +308,9 @@ func runTCPHold(args []string) (any, error) {
 	r.Connect, r.FailedMS = Summarise(connect), Summarise(failed)
 	fmt.Printf("holding %d\n", r.Established)
 	if *tuples {
-		list := HeldList{Established: len(conns), Conns: make([]Held, 0, len(conns))}
+		list := HeldList{Established: len(conns), Conns: make([]Held, 0, len(conns)), Errors: r.Errors, FailedMS: r.FailedMS}
 		for _, conn := range conns {
-			list.Conns = append(list.Conns, Held{Local: addrString(conn.LocalAddr()), Remote: addrString(conn.RemoteAddr())})
+			list.Conns = append(list.Conns, observed[conn])
 		}
 		line, err := json.Marshal(list)
 		if err != nil {
@@ -302,9 +341,10 @@ func runTCPHold(args []string) (any, error) {
 
 // BulkHoldResult is the bulkhold mode's answer.
 type BulkHoldResult struct {
-	Bytes      int64   `json:"bytes"`      // everything received
-	BurstBytes int64   `json:"burstBytes"` // received during the full-speed part
-	BurstMS    float64 `json:"burstMs"`
+	Local, Remote string  // correlate this download with both TCP legs' diagnostics
+	Bytes         int64   `json:"bytes"`      // everything received
+	BurstBytes    int64   `json:"burstBytes"` // received during the full-speed part
+	BurstMS       float64 `json:"burstMs"`
 	// Bins are the bytes received in each BinMS of the full-speed part, from
 	// the request on: how steady the demand was, not just its average.
 	BinMS  int     `json:"binMs"`
@@ -344,6 +384,7 @@ func runBulkHold(args []string) (any, error) {
 		return r, nil
 	}
 	defer conn.Close()
+	r.Local, r.Remote = addrString(conn.LocalAddr()), addrString(conn.RemoteAddr())
 	start := time.Now()
 	burstEnd := start.Add(time.Duration(*floodMS) * time.Millisecond)
 	if _, err := fmt.Fprintf(conn, "FLOOD %d\n", *floodMS); err != nil {

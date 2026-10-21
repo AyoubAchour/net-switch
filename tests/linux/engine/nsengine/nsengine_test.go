@@ -293,9 +293,9 @@ func TestAttachAdoptsTheNewSession(t *testing.T) {
 	if _, err := r.d.CloseFlows(ctx, engine.Selector{Line: "b"}); err != nil {
 		t.Fatalf("closeFlows after the reattach: %v", err)
 	}
-	// Stop reaches the engine through the new session; only waiting for the
-	// process is still the stub's.
-	if err := r.d.Stop(ctx); !errors.Is(err, engine.ErrNotImplemented) {
+	// Stop reaches the engine through the new session. This injected transport
+	// has no OS process to wait for.
+	if err := r.d.Stop(ctx); err != nil {
 		t.Fatalf("stop: %v", err)
 	}
 	if fresh.renewing() {
@@ -349,9 +349,9 @@ func TestFlowsPageAndConvert(t *testing.T) {
 }
 
 func TestStatsShapes(t *testing.T) {
-	runtimeShape := `{"engine":{"flows":{"Flows":3,"Handshakes":1,"TCPBytes":65536,"Admitted":9,"LookupCount":4,"LookupNanoseconds":8000000,"LookupAmbiguous":1,"EventsDropped":2},"tunDropped":5,"fatal":"x"},"eventsDropped":1}`
+	runtimeShape := `{"engine":{"flows":{"Flows":3,"Handshakes":1,"TCPBytes":65536,"Admitted":9,"AdmittedUnknown":4,"AdmittedUnknownUDP":2,"PeakUnknown":3,"PeakUnknownUDP":2,"LookupCount":4,"LookupNanoseconds":8000000,"LookupAmbiguous":1,"EventsDropped":2},"tunDropped":5,"fatal":"x"},"eventsDropped":1}`
 	s, err := decodeStats([]byte(runtimeShape))
-	if err != nil || s.Flows != 3 || s.Handshakes != 1 || s.TCPBytes != 65536 || s.Admitted != 9 || s.LookupAmbiguous != 1 ||
+	if err != nil || s.Flows != 3 || s.Handshakes != 1 || s.TCPBytes != 65536 || s.Admitted != 9 || s.LookupAmbiguous != 1 || s.AdmittedUnknown != 4 || s.AdmittedUnknownUDP != 2 || s.PeakUnknown != 3 || s.PeakUnknownUDP != 2 ||
 		s.LookupMean().Milliseconds() != 2 || s.EventsDropped != 3 || s.Counters["tunDropped"] != 5 {
 		t.Errorf("the engine runtime's stats: %+v, %v", s, err)
 	}
@@ -359,14 +359,26 @@ func TestStatsShapes(t *testing.T) {
 	if err != nil || bare.Flows != 2 || bare.UDP != 1 {
 		t.Errorf("a bare table's stats: %+v, %v", bare, err)
 	}
+	diagnostic, err := decodeStats([]byte(`{"engine":{"flows":{"Flows":1},"tcpFlows":[{"Source":"198.18.0.2:1234","RTOs":1}],"tcpFlowsOmitted":0}}`))
+	if err != nil || string(diagnostic.TCPFlows) != `[{"Source":"198.18.0.2:1234","RTOs":1}]` {
+		t.Fatalf("per-flow TCP diagnostics were discarded: %s, %v", diagnostic.TCPFlows, err)
+	}
 }
 
-func TestStubSaysNotImplemented(t *testing.T) {
-	d := New("netswitch-engine")
-	if _, err := d.Hello(context.Background()); !errors.Is(err, engine.ErrNotImplemented) {
-		t.Fatalf("without a control socket every operation is not implemented, got %v", err)
+func TestRefusalReasonsSurviveStatsDecoding(t *testing.T) {
+	s, err := decodeStats([]byte(`{"engine":{"flows":{"Rejected":17,"RefusedTCP":{"Total":5,"Unknown":7,"Unexplained":1},"RefusedUDP":{"UDPPerApp":3,"UnknownUDP":1}}}}`))
+	if err != nil || s.RefusedTCP.Total != 5 || s.RefusedTCP.Unknown != 7 || s.RefusedTCP.Unexplained != 1 ||
+		s.RefusedUDP.UDPPerApp != 3 || s.RefusedUDP.UnknownUDP != 1 || s.RefusedTCP.Count()+s.RefusedUDP.Count() != s.Rejected {
+		t.Fatalf("lost refusal evidence: %+v, %v", s, err)
 	}
-	if err := d.Start(context.Background(), engine.Env{}, config()); !errors.Is(err, engine.ErrNotImplemented) {
+}
+
+func TestUnconnectedDriverRefusesCommands(t *testing.T) {
+	d := New("netswitch-engine")
+	if _, err := d.Hello(context.Background()); !errors.Is(err, errNoSession) {
+		t.Fatalf("without a control socket the driver must report not connected, got %v", err)
+	}
+	if err := d.Start(context.Background(), engine.Env{}, config()); err == nil {
 		t.Fatalf("start: %v", err)
 	}
 }

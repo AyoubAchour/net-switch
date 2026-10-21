@@ -28,7 +28,7 @@ if (process.env.GOTOOLCHAIN !== 'local' || run(go, ['env', 'GOVERSION']).trim() 
   throw new Error(`Use pinned Go ${goVersion} with GOTOOLCHAIN=local`);
 }
 const moduleName = 'gvisor.dev/gvisor';
-const version = mod.match(/^require gvisor\.dev\/gvisor (v\S+)$/m)?.[1];
+const version = mod.match(/^\s*(?:require\s+)?gvisor\.dev\/gvisor\s+(v\S+)\s*$/m)?.[1];
 if (!version) throw new Error('Missing exact gVisor module pin');
 const upstream = JSON.parse(run(go, ['mod', 'download', '-json', `${moduleName}@${version}`]));
 const sums = fs.readFileSync(path.join(root, 'go.sum'), 'utf8').split(/\r?\n/);

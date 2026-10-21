@@ -203,10 +203,14 @@ func (s *Session) Stats(ctx context.Context) (engine.Stats, error) {
 	return decodeStats(raw)
 }
 
-// InjectFault implements engine.Controller. The protocol has no test hooks
-// yet (see the package comment).
-func (s *Session) InjectFault(context.Context, engine.Fault) (engine.FaultAck, error) {
-	return engine.FaultAck{}, notYet("test faults")
+// InjectFault requires the live engine's acknowledgement. Production binaries
+// reject these commands; the acceptance workflow builds with -tags acceptance.
+func (s *Session) InjectFault(ctx context.Context, f engine.Fault) (engine.FaultAck, error) {
+	r := s.request("testFault")
+	r.Fault, _ = json.Marshal(f)
+	var ack engine.FaultAck
+	err := s.d.do(ctx, r, &ack)
+	return ack, err
 }
 
 // --- translations between the suite's types and main's -------------------
@@ -250,7 +254,7 @@ func (d *Driver) revision(ctx context.Context, n uint64, cfg engine.Config) (pol
 		if err != nil {
 			return policy.Revision{}, fmt.Errorf("line %s's addresses: %w", l.ID, err)
 		}
-		lines = append(lines, platform.Line{ID: string(l.ID), Addresses: addrs})
+		lines = append(lines, platform.Line{ID: string(l.ID), Interface: l.Interface, Addresses: addrs})
 	}
 	c := wireConfig(cfg, lines)
 	return policy.Revision{N: n, Hash: policy.Hash(c), Config: c}, nil
@@ -322,13 +326,25 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		return engine.Stats{}, fmt.Errorf("stats gauges: %w", err)
 	}
 	return engine.Stats{
+		RefusedTCP: g.RefusedTCP, RefusedUDP: g.RefusedUDP,
+		PeakUnknown: g.PeakUnknown, PeakUnknownUDP: g.PeakUnknownUDP,
+		AdmittedUnknown: g.AdmittedUnknown, AdmittedUnknownUDP: g.AdmittedUnknownUDP,
+		OwnerLookup: nested["ownerLookup"],
+		TunKernel:   nested["tunKernel"],
+		TCPFlows:    nested["tcpFlows"],
+		PeakFlows:   g.PeakFlows, PeakHandshakes: g.PeakHandshakes, PeakUDP: g.PeakUDP, PeakPerApp: g.PeakPerApp, PeakUDPPerApp: g.PeakUDPPerApp,
 		Flows: int64(g.Flows), Handshakes: int64(g.Handshakes), UDP: int64(g.UDP),
 		Unknown: int64(g.Unknown), UnknownUDP: int64(g.UnknownUDP), TimeWait: int64(g.TimeWait),
 		TCPBytes: g.TCPBytes, PendingBytes: g.PendingBytes, SnapshotBytes: g.SnapshotBytes,
-		Admitted: g.Admitted, Rejected: g.Rejected, DroppedNotices: g.DroppedNotices, TimeWaitSkipped: g.TimeWaitSkipped,
+		PendingPeakBytes: g.PendingPeakBytes,
+		UDPReadBytes:     g.UDPReadBytes,
+		UDPReplyBytes:    g.UDPReplyBytes, UDPReplyPeakBytes: g.UDPReplyPeakBytes,
+		UDPAdapterBytes: g.UDPAdapterBytes,
+		Admitted:        g.Admitted, Rejected: g.Rejected, DroppedNotices: g.DroppedNotices, TimeWaitSkipped: g.TimeWaitSkipped,
 		EventsDropped: top.EventsDropped + g.EventsDropped,
 		LookupCount:   g.LookupCount, LookupMisses: g.LookupMisses, LookupAmbiguous: g.LookupAmbiguous,
-		LookupTime: time.Duration(g.LookupNanoseconds),
-		Counters:   counters,
+		LookupTime:      time.Duration(g.LookupNanoseconds),
+		LookupHistogram: g.LookupHistogram,
+		Counters:        counters,
 	}, nil
 }
