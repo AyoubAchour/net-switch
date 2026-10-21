@@ -354,8 +354,6 @@ func TestNativeUDPConcurrentPairedCapacity(t *testing.T) {
 					}
 					a, appSeen := peer.seen[udpPairToken(variant, 'A', n)]
 					e, engineSeen := peer.seen[udpPairToken(variant, 'E', n)]
-					delete(peer.seen, udpPairToken(variant, 'A', n))
-					delete(peer.seen, udpPairToken(variant, 'E', n))
 					if appSeen && engineSeen && a.Port() == p.appPort && e == unmapped(p.engine.local) {
 						verified += 2
 					} else {
@@ -434,9 +432,19 @@ func TestNativeUDPConcurrentPairedCapacity(t *testing.T) {
 			if !limitReached {
 				t.Errorf("concurrent native pair limit was not established: first failure %+v", first)
 			}
-			if verified != 2*heldPairs || peer.duplicates != 0 || peer.malformed != 0 {
+			for _, failure := range failures {
+				if (failure.Call != "app DialUDP" && failure.Call != "engine bind") ||
+					(failure.Code != "ENOBUFS" && failure.Code != "EADDRINUSE") || failure.CloseError != "" {
+					t.Errorf("unrelated failure in the exhausted batch: %+v", failure)
+				}
+			}
+			if verified != 2*heldPairs || peer.echoed != verified || peer.duplicates != 0 || peer.malformed != 0 || peer.readErrors != 0 || peer.writeErrors != 0 {
 				t.Errorf("held pairs disagree with peer records: held=%d verified=%d duplicates=%d malformed=%d",
 					heldPairs, verified, peer.duplicates, peer.malformed)
+			}
+			if ownRowsErr != nil || space.Native["error"] != nil || ownRows != 2*heldPairs+1 || len(ports) != 2*heldPairs || collisions != 0 {
+				t.Errorf("held pairs disagree with native table: own rows=%d expected=%d unique=%d collisions=%d errors=%v/%v",
+					ownRows, 2*heldPairs+1, len(ports), collisions, ownRowsErr, space.Native["error"])
 			}
 			if releaseErr != nil {
 				t.Error(releaseErr)

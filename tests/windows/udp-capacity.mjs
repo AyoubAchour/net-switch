@@ -30,7 +30,22 @@ export async function nativeUDPCapacity(binding) {
     assert(sample.heldPairs > 0 && sample.echoedDatagrams === sample.heldPairs * 2);
   }
   console.log(`WINDOWS MATCHED UDP BASELINE ${JSON.stringify({ legacy: native, pairs })}`);
-  return { ...native, matchedPairs: pairs };
+  const concurrent = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
+    ['-test.v', '-test.run=^TestNativeUDPConcurrentPairedCapacity$', '-test.timeout=3m'],
+    { env: { NETSWITCH_PORT_GATE: '1', NETSWITCH_UDP_BASELINE_SOURCE: binding.address,
+      NETSWITCH_UDP_BASELINE_INDEX: String(binding.index) }, timeout: 180_000 });
+  const concurrentMarker = 'WINDOWS NATIVE UDP CONCURRENT PAIRED CAPACITY ';
+  const concurrentPairs = concurrent.stdout.split(/\r?\n/).filter((value) => value.includes(concurrentMarker))
+    .map((value) => JSON.parse(value.slice(value.indexOf(concurrentMarker) + concurrentMarker.length)));
+  assert.equal(concurrentPairs.length, 2, 'Both concurrent native baselines must run');
+  for (const sample of concurrentPairs) {
+    assert.equal(sample.concurrency, 32);
+    assert.equal(sample.source, binding.address);
+    assert.equal(sample.interfaceIndex, binding.index);
+    assert(sample.limitReached && sample.verifiedPayloads === sample.heldPairs * 2);
+  }
+  console.log(`WINDOWS CONCURRENT UDP BASELINE ${JSON.stringify(concurrentPairs)}`);
+  return { ...native, matchedPairs: pairs, concurrentPairs };
 }
 
 async function udpPortSpaceAtFailure() {

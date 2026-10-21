@@ -208,7 +208,7 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 				"appBind": "wildcard port zero, connected", "engineBind": "specific source port zero, IP_UNICAST_IF",
 				"engineOptions": options,
 				"portSpace":     space.Probe,
-				"error":         limit.Error(), "processMemory": memory, "memoryError": memoryErr})
+				"error":         limit.Error(), "processMemory": memory, "memoryError": errorText(memoryErr)})
 			t.Logf("WINDOWS NATIVE UDP PAIRED CAPACITY %s", evidence)
 		})
 	}
