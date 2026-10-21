@@ -336,6 +336,10 @@ func recoverAfterCrash(config Config) (int, error) {
 		if !errors.Is(err, windows.CR_NO_SUCH_DEVNODE) {
 			return 0, fmt.Errorf("check crashed Wintun device: %w", err)
 		}
+		instance, err := set.DeviceInstanceID(dev)
+		if err != nil {
+			return 0, fmt.Errorf("identify crashed Wintun device: %w", err)
+		}
 		params := windows.RemoveDeviceParams{ClassInstallHeader: *windows.MakeClassInstallHeader(windows.DIF_REMOVE), Scope: windows.DI_REMOVEDEVICE_GLOBAL}
 		if err := set.SetClassInstallParams(dev, &params.ClassInstallHeader, uint32(unsafe.Sizeof(params))); err != nil {
 			return 0, err
@@ -344,23 +348,24 @@ func recoverAfterCrash(config Config) (int, error) {
 			// When the creator died, Windows may remove its software device
 			// between our enumeration and this call (seen on ARM64, run
 			// 39562669574). That is the state we want, but only if a fresh
-			// enumeration confirms no device with this GUID is left.
+			// enumeration shows no device with this exact instance ID.
 			if errors.Is(err, windows.ERROR_NO_SUCH_DEVINST) {
-				if present, checkErr := wintunDeviceExists(guid); checkErr == nil && !present {
+				present, checkErr := wintunInstanceExists(instance)
+				if checkErr == nil && !present {
 					return 0, nil
-				} else if checkErr != nil {
-					err = errors.Join(err, checkErr)
 				}
+				err = errors.Join(err, checkErr)
 			}
-			return 0, fmt.Errorf("remove crashed Wintun device: %w", err)
+			return 0, fmt.Errorf("remove crashed Wintun device %s: %w", instance, err)
 		}
 		return 1, nil
 	}
 }
 
-// wintunDeviceExists reports whether any Wintun device, present or not, is
-// registered with this NetCfgInstanceId.
-func wintunDeviceExists(guid windows.GUID) (bool, error) {
+// wintunInstanceExists reports whether a Wintun network device with this
+// instance ID, present or not, is still enumerated. Any enumeration or
+// identity error is returned, never read as absence.
+func wintunInstanceExists(instance string) (bool, error) {
 	set, err := windows.SetupDiGetClassDevsEx(&netClass, "SWD\\Wintun", 0, 0, 0, "")
 	if err != nil {
 		return false, err
@@ -374,14 +379,11 @@ func wintunDeviceExists(guid windows.GUID) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		h, err := set.OpenDevRegKey(dev, windows.DICS_FLAG_GLOBAL, 0, windows.DIREG_DRV, windows.KEY_QUERY_VALUE)
+		id, err := set.DeviceInstanceID(dev)
 		if err != nil {
-			continue
+			return false, fmt.Errorf("read Wintun device instance ID: %w", err)
 		}
-		key := registry.Key(h)
-		id, _, readErr := key.GetStringValue("NetCfgInstanceId")
-		key.Close()
-		if readErr == nil && strings.EqualFold(id, guid.String()) {
+		if strings.EqualFold(id, instance) {
 			return true, nil
 		}
 	}
