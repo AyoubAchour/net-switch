@@ -33,6 +33,16 @@ export async function nativeUDPCapacity(binding) {
   return { ...native, matchedPairs: pairs };
 }
 
+async function udpPortSpaceAtFailure() {
+  const startedAt = new Date().toISOString();
+  const result = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
+    ['-test.v', '-test.run=^TestUDPPortSpaceDiagnosisReadsHostedSettings$', '-test.timeout=30s']);
+  const marker = 'WINDOWS UDP PORT SPACE ';
+  const line = result.stdout.split(/\r?\n/).find((value) => value.includes(marker));
+  assert(line, result.stdout);
+  return { requestedAt: startedAt, ...JSON.parse(line.slice(line.indexOf(marker) + marker.length)) };
+}
+
 async function client(server, directory, line, app) {
   const exe = path.join(directory, `udp-capacity-app-${app}.exe`);
   await copyFile(path.resolve('dist/windows-test/udpreject.exe'), exe);
@@ -122,7 +132,14 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
           stackBytes: stats.stackBytes, runtimeBytes: stats.runtimeBytes, goroutines: stats.goroutines, gcCPUppm: stats.gcCPUppm })}`);
         evidence.oldRuntimeBudgetWouldPass &&= stats.runtimeBytes <= 512 * 1024 * 1024;
         evidence.runtimePeakBytes = Math.max(evidence.runtimePeakBytes, stats.runtimeBytes);
-        if (failed.length) break;
+        if (failed.length) {
+          // Both halves allocate ports. Preserve the same-runner reservation
+          // evidence even when the app fails before the engine sees a packet.
+          Object.assign(evidence, { held, failed, attempts });
+          evidence.portSpaceAtFailure = await udpPortSpaceAtFailure().catch((error) => ({ error: String(error) }));
+          console.log(`WINDOWS UDP PORT SPACE AT FAILURE ${JSON.stringify(evidence.portSpaceAtFailure)}`);
+          break;
+        }
       }
     }
     Object.assign(evidence, { held, failed, attempts });
@@ -136,6 +153,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     assert(failed.every((item) => ['ENOBUFS', 'EADDRINUSE', 'ECONNRESET', 'ECONNREFUSED'].includes(item.Error)),
       `UDP delivery loss or unrelated failure: ${JSON.stringify(failed)}`);
     assert(held >= evidence.floor, `UDP held ${held}, below the 95% native layout floor ${evidence.floor}`);
+    assert.equal(evidence.portSpaceAtFailure.state, 'complete', 'The failed allocation lacks complete port-space evidence');
     const atLimit = await engineStats();
     if (failed.some((item) => ['ECONNRESET', 'ECONNREFUSED'].includes(item.Error))) {
       assert(atLimit.udpSocketExhaustions > evidence.before.udpSocketExhaustions,

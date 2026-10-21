@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -122,6 +123,9 @@ func capacityProbe() error {
 				Token, Local, Remote, SHA256, Error string
 				MS                                  float64
 				ReplyBytes                          int
+				FailedAt                            time.Time `json:",omitzero"`
+				NativeError, NativeCall             string    `json:",omitempty"`
+				NativeCode                          uint32    `json:",omitempty"`
 			}
 			attempts := make([]attempt, command.Count)
 			sockets := make([]heldDatagram, command.Count)
@@ -156,6 +160,16 @@ func capacityProbe() error {
 							conn.Close()
 						}
 						attempts[i].Error = capacityError(err)
+						attempts[i].FailedAt = time.Now()
+						attempts[i].NativeError = err.Error()
+						var code syscall.Errno
+						if errors.As(err, &code) {
+							attempts[i].NativeCode = uint32(code)
+						}
+						var call *os.SyscallError
+						if errors.As(err, &call) {
+							attempts[i].NativeCall = call.Syscall
+						}
 					})
 				}
 				workers.Wait()
