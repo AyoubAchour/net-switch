@@ -232,6 +232,11 @@ export async function capacity({ server, harness, directory, line }) {
     assert.equal(probeBaseline.code, 'OK', `Fixed-source-port probe precondition failed: ${JSON.stringify(probeBaseline)}`);
     const oldEchoBasedLimitMs = probeBaseline.ms + 500;
     await children[0].call('survival', target);
+    // Wrong-line admissions: a TCP SYN whose owner lookup failed is admitted as
+    // an unknown app and sent to the default line instead of its pinned one
+    // (x64 run 39602903586). Count them over the fill and the refusal tail.
+    const admissionsBefore = await engineStats();
+    const unknownTCP = (stats) => stats.flows.AdmittedUnknown - stats.flows.AdmittedUnknownUDP;
     let held = 1, firstLimit;
     // Both halves allocate from the same unchanged Windows ephemeral pool.
     // Internal engine ceilings remain 65,536 total / 8,192 per app.
@@ -275,6 +280,15 @@ export async function capacity({ server, harness, directory, line }) {
     assert.equal(refusals.length, 128, 'Did not establish the actual native allocation limit');
     Object.assign(progress, { held, firstLimit, refusals, resetTimings, extraAdmissions });
     const refusedStats = await engineStats();
+    const lookup = (stats) => stats.ownerLookup ?? {};
+    progress.wrongLine = { unknownTCPAdmissions: unknownTCP(refusedStats) - unknownTCP(admissionsBefore),
+      lookups: lookup(refusedStats).count - (lookup(admissionsBefore).count ?? 0),
+      misses: lookup(refusedStats).misses - (lookup(admissionsBefore).misses ?? 0),
+      holds: lookup(refusedStats).tcpHolds, heldFound: lookup(refusedStats).tcpHeldFound, maxUS: lookup(refusedStats).maxUS,
+      tcpReadMaxUS: lookup(refusedStats).tcpReadMaxUS, tcpReadBuckets: lookup(refusedStats).tcpReadBuckets,
+      upperUS: lookup(refusedStats).upperUS, peakRows: lookup(refusedStats).tcpPeakRows, failures: lookup(refusedStats).failures };
+    console.log(`WINDOWS CAPACITY WRONG-LINE ${JSON.stringify(progress.wrongLine)}`);
+    assert.equal(progress.wrongLine.unknownTCPAdmissions, 0, 'A capacity SYN lost its owner and left on the default line');
     assert(refusedStats.socketResources.exhaustions >= 128, 'Native bind failures were not counted');
     assert(refusedStats.tcpDialFailed - limitStats.tcpDialFailed >= 128, 'Refused app flows were not counted by the engine');
     const health = await server.api('engine-command', { method: 'probe', fields: {
