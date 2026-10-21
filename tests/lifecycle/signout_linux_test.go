@@ -45,11 +45,13 @@ func ownerSignout(t *testing.T, c *client, owner actor) {
 	last.assertState(t, "active", "online")
 	last.logout(t)
 	last.waitClosing(t)
+	requireOnlineManager(t, a.number)
 	wait(t, "last PAM logout clears routing despite leftover processes", 20*time.Second, func() bool { return getStatus(t, c).Routing == "off" })
 	// These assertions prevent scope cleanup (rather than our state check)
 	// from making the regression pass. Both logged-out scopes must remain.
 	first.assertState(t, "closing")
 	last.assertState(t, "closing")
+	requireOnlineManager(t, a.number)
 	if b, err := exec.Command("loginctl", "enable-linger", a.name).CombinedOutput(); err != nil {
 		t.Fatal(err, string(b))
 	}

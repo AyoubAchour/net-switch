@@ -30,10 +30,12 @@ func TestLogindClosingOwnerIsAbsent(t *testing.T) {
 }
 
 type logindTestSession struct {
-	uid   uint32
-	seat  string
-	state any
-	err   error
+	uid      uint32
+	seat     string
+	state    any
+	err      error
+	class    any
+	classErr error
 }
 
 type logindFixture struct {
@@ -85,6 +87,16 @@ func (f logindFixture) query(t *testing.T) (bool, error) {
 					return &dbus.Call{Err: session.err}
 				}
 				return &dbus.Call{Body: []any{dbus.MakeVariant(session.state)}}
+			case method == "org.freedesktop.DBus.Properties.Get" && reflect.DeepEqual(args, []any{"org.freedesktop.login1.Session", "Class"}):
+				session, ok := states[path]
+				if !ok || session.uid != 1000 {
+					t.Fatalf("queried unknown or non-owner session class: %s", path)
+				}
+				class := session.class
+				if class == nil {
+					class = "user"
+				}
+				return &dbus.Call{Body: []any{dbus.MakeVariant(class)}, Err: session.classErr}
 			default:
 				t.Fatalf("unexpected logind call %s %s %v", path, method, args)
 				return nil
@@ -114,6 +126,13 @@ func TestLogindOwnerPresenceStatesAndErrors(t *testing.T) {
 		{name: "online inactive seat", fixture: logindFixture{sessions: []logindTestSession{online}}, present: true},
 		{name: "opening scope", fixture: logindFixture{sessions: []logindTestSession{opening}}, present: true},
 		{name: "all owner sessions closing", fixture: logindFixture{sessions: []logindTestSession{closing, closing}}},
+		{name: "closing with online manager", fixture: logindFixture{sessions: []logindTestSession{closing, {uid: 1000, state: "online", class: "manager"}}}},
+		{name: "manager early only", fixture: logindFixture{sessions: []logindTestSession{{uid: 1000, state: "online", class: "manager-early"}}}},
+		{name: "manager with real login", fixture: logindFixture{sessions: []logindTestSession{{uid: 1000, state: "online", class: "manager"}, active}}, present: true},
+		{name: "manager with linger", fixture: logindFixture{sessions: []logindTestSession{{uid: 1000, state: "online", class: "manager"}}, linger: true}, present: true},
+		{name: "class lookup failed", fixture: logindFixture{sessions: []logindTestSession{{uid: 1000, state: "online", classErr: context.DeadlineExceeded}}}, errText: "Class"},
+		{name: "class disappeared", fixture: logindFixture{sessions: []logindTestSession{{uid: 1000, state: "online", classErr: missing}}}},
+		{name: "invalid class", fixture: logindFixture{sessions: []logindTestSession{{uid: 1000, state: "online", class: true}}}, errText: "Class"},
 		{name: "another owner session online", fixture: logindFixture{sessions: []logindTestSession{closing, online}}, present: true},
 		{name: "non-owner stays active", fixture: logindFixture{sessions: []logindTestSession{closing, {uid: 1001, state: "active"}}}},
 		{name: "non-owner query would fail", fixture: logindFixture{sessions: []logindTestSession{{uid: 1001, err: context.DeadlineExceeded}, online}}, present: true},

@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   services:
-    name: Lifecycle / ${{ matrix.os }} ${{ matrix.arch }}
+    name: Lifecycle / ${{ matrix.os }} ${{ matrix.arch }}${{ matrix.variant }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     strategy:
@@ -37,11 +37,16 @@ jobs:
           - runner: ubuntu-24.04-arm
             os: Linux
             arch: ARM64
+          - runner: ubuntu-26.04
+            os: Linux
+            arch: x64
+            variant: ' (Ubuntu 26.04)'
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
       GOFLAGS: -mod=vendor -p=2
       NETSWITCH_LIFECYCLE_CI: '1'
+      NETSWITCH_EXPECT_LOGIND_MANAGER: ${{ matrix.runner == 'ubuntu-26.04' && '1' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -93,7 +98,7 @@ jobs:
           go build -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle-other-app" ./tests/lifecycle/trafficclient
           sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"
           cd tests/lifecycle
-          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v -test.timeout=22m
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR,NETSWITCH_EXPECT_LOGIND_MANAGER "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v -test.timeout=22m
       - name: Linux service diagnostics
         if: always() && matrix.os == 'Linux'
         shell: bash

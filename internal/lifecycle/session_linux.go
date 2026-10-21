@@ -58,6 +58,25 @@ func logindOwnerPresent(ctx context.Context, uid uint32, object func(dbus.Object
 		}
 		switch state.Value() {
 		case "active", "online", "opening":
+			var class dbus.Variant
+			err := object(session.Path).CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, "org.freedesktop.login1.Session", "Class").Store(&class)
+			if err != nil {
+				if !logindMissingObject(err, "org.freedesktop.login1.NoSuchSession") {
+					uncertain = errors.Join(uncertain, fmt.Errorf("logind session %s Class: %w", session.ID, err))
+				}
+				continue
+			}
+			kind, valid := class.Value().(string)
+			if !valid || kind == "" {
+				uncertain = errors.Join(uncertain, fmt.Errorf("logind session %s has invalid Class %v", session.ID, class.Value()))
+				continue
+			}
+			// Newer logind versions track user@.service as a session. It
+			// may outlive logout because closing scopes still pin the user;
+			// only explicit Linger can make that manager count as presence.
+			if kind == "manager" || kind == "manager-early" {
+				continue
+			}
 			// Count both seatless SSH and inactive seats. Opening is emitted
 			// by logind while a new session's scope is being created.
 			return true, nil

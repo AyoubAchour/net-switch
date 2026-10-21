@@ -78,6 +78,43 @@ func requireLeftoverSessions(t *testing.T) {
 	}
 }
 
+func requireOnlineManager(t *testing.T, owner uint32) {
+	t.Helper()
+	if os.Getenv("NETSWITCH_EXPECT_LOGIND_MANAGER") != "1" {
+		return
+	}
+	bus, err := dbus.SystemBus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var rows []struct {
+		ID   string
+		UID  uint32
+		User string
+		Seat string
+		Path dbus.ObjectPath
+	}
+	if err := bus.Object("org.freedesktop.login1", "/org/freedesktop/login1").CallWithContext(ctx, "org.freedesktop.login1.Manager.ListSessions", 0).Store(&rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.UID != owner {
+			continue
+		}
+		var properties map[string]dbus.Variant
+		if err := bus.Object("org.freedesktop.login1", row.Path).CallWithContext(ctx, "org.freedesktop.DBus.Properties.GetAll", 0, "org.freedesktop.login1.Session").Store(&properties); err != nil {
+			t.Fatal(err)
+		}
+		if properties["Class"].Value() == "manager" && properties["State"].Value() == "online" {
+			t.Logf("LOGIND_MANAGER session=%s remains online after owner logout", row.ID)
+			return
+		}
+	}
+	t.Fatal("new-systemd regression requires the owner's manager session to remain online")
+}
+
 func openLogindLogin(t *testing.T, a *linuxActor, label string) *logindLogin {
 	t.Helper()
 	if !hosted() {
