@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   handles:
-    if: ${{ !endsWith(github.ref, '-section') && !contains(github.ref, '-udp-latency') && github.ref != 'refs/heads/engine/windows-platform-registrar' }}
+    if: ${{ !endsWith(github.ref, '-section') && !contains(github.ref, '-udp-latency') && !contains(github.ref, 'windows-platform-registrar') }}
     name: Native handle diagnostics / ${{ (inputs.arch != 'x64' && (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64'))) && 'ARM64' || 'x64' }}
     runs-on: ${{ (inputs.arch != 'x64' && (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64'))) && 'windows-11-arm' || 'windows-latest' }}
     timeout-minutes: 15
@@ -200,7 +200,7 @@ jobs:
           }
 
   registrar:
-    if: ${{ github.ref == 'refs/heads/engine/windows-platform-registrar' }}
+    if: ${{ startsWith(github.ref, 'refs/heads/engine/windows-platform-registrar') }}
     name: Wintun registrar / ${{ inputs.arch || 'x64' }}
     runs-on: ${{ inputs.arch == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
     timeout-minutes: 25
@@ -262,7 +262,14 @@ jobs:
           artifact: wintun
       - name: Fetch the unchanged signed Wintun DLL beside the test executable
         run: ./scripts/prepare-wintun-tests.ps1
+      - name: Identify native file objects without changing the guard verdict
+        if: ${{ endsWith(github.ref, '-diagnostics') }}
+        run: |
+          ./bin/wintun-registrar.test.exe '-test.v' '-test.timeout=90s' '-test.run=^TestWintunRegistrarDeviceFileGuardDiagnostics$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'Diagnostic collection only. This does not qualify the unchanged device-file guard or the registrar.'
       - name: Registrar ownership, retirement and production-engine proofs
+        if: ${{ !endsWith(github.ref, '-diagnostics') }}
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
           $selected = @('RegistrarRefusesWithoutInheritedCapabilities', 'RegistrarReplyPreservesReadError',
