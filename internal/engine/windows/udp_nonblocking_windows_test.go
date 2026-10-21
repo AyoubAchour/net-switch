@@ -213,6 +213,7 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 						diagnostic.failure("UDP Arm(read) before detach", err)
 						t.Fatal(err)
 					}
+					diagnostic.assertWatchIdentity()
 					watch.Detach()
 					if err := s.Close(); err != nil {
 						t.Fatal(err)

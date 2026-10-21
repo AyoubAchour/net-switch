@@ -4,6 +4,7 @@ package winengine
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -28,19 +30,21 @@ type socketTraceHandle struct {
 }
 
 type socketEvidence struct {
-	t           *testing.T
-	local, peer netip.AddrPort // cached BEFORE File/Watch closes the Go connection
-	kind        int
-	handles     []socketTraceHandle
-	stages      []string
-	window      []socketTraceEntry
-	before      []socketTraceEntry
-	thread      uintptr
-	marker      windows.Handle
-	failed      bool
-	tcp         *readySocket
-	tcpPeer     *net.TCPConn
-	udp         *udpSocket
+	t               *testing.T
+	local, peer     netip.AddrPort // cached BEFORE File/Watch closes the Go connection
+	kind            int
+	handles         []socketTraceHandle
+	stages          []string
+	window          []socketTraceEntry
+	before          []socketTraceEntry
+	thread          uintptr
+	marker          windows.Handle
+	failed          bool
+	watchMismatch   error
+	capturedHistory int
+	tcp             *readySocket
+	tcpPeer         *net.TCPConn
+	udp             *udpSocket
 }
 
 var socketFirstFailure atomic.Bool
@@ -139,6 +143,8 @@ func (d *socketEvidence) afterWatch(owner winhandle.Owner, watchErr error) {
 	if !traceHas(after, d.marker, d.thread, 1) {
 		d.t.Fatal("Watch trace window lost its live marker OPEN; evidence may have wrapped")
 	}
+	d.t.Logf("HTRACE Watch window before=%d after=%d full=%t; multiset deltas are ambiguous after eviction",
+		len(d.before), len(after), len(d.before) == socketTraceSlots || len(after) == socketTraceSlots)
 	for _, e := range socketTraceDelta(d.before, after) {
 		if e.TID == d.thread && e.Handle != d.marker {
 			d.window = append(d.window, e)
@@ -156,12 +162,30 @@ func (d *socketEvidence) afterWatch(owner winhandle.Owner, watchErr error) {
 		d.failure("Watch returned error", watchErr)
 		return // caller keeps its original failing assertion
 	}
-	d.expect("Watch completed; both Go descriptors closed", owner.Handle("test trace Watch type"))
+	d.watchMismatch = d.observe("Watch completed; both Go descriptors closed", owner.Handle("test trace Watch type"))
+	if d.watchMismatch != nil {
+		// Preserve the first state without sending diagnostic payload before
+		// the original read/EOF/payload assertions have had a chance to run.
+		d.t.Logf("SOCKET WATCH MISMATCH %v; original assertions continue", d.watchMismatch)
+		d.trace("Watch-mismatch-before-original-I/O")
+		d.tables("Watch-mismatch-before-original-I/O")
+	}
 }
 
 func (d *socketEvidence) expect(stage string, h windows.Handle) {
 	if d == nil {
 		return
+	}
+	d.t.Helper()
+	if err := d.observe(stage, h); err != nil {
+		d.failure(stage, err)
+		d.t.Fatal(err)
+	}
+}
+
+func (d *socketEvidence) observe(stage string, h windows.Handle) error {
+	if d == nil {
+		return nil
 	}
 	d.t.Helper()
 	kind, kindErr := windows.GetsockoptInt(h, windows.SOL_SOCKET, 0x1008)
@@ -174,10 +198,16 @@ func (d *socketEvidence) expect(stage string, h windows.Handle) {
 		bad = bad || peerErr != nil || diagnosticAddress(peer) != d.peer
 	}
 	if bad {
-		err := fmt.Errorf("%s: type=%d/%v local=%v/%v peer=%v/%v", stage,
+		return fmt.Errorf("%s: type=%d/%v local=%v/%v peer=%v/%v", stage,
 			kind, kindErr, diagnosticAddress(local), localErr, diagnosticAddress(peer), peerErr)
-		d.failure(stage, err)
-		d.t.Fatal(err)
+	}
+	return nil
+}
+
+func (d *socketEvidence) assertWatchIdentity() {
+	if d != nil && d.watchMismatch != nil {
+		d.failure("Watch identity mismatch after original assertions", d.watchMismatch)
+		d.t.Fatal(d.watchMismatch)
 	}
 }
 
@@ -191,12 +221,15 @@ func diagnosticAddress(sa windows.Sockaddr) netip.AddrPort {
 	return netip.AddrPort{}
 }
 
-func (d *socketEvidence) trace(stage string) {
+func (d *socketEvidence) trace(stage string) int {
 	entries, err := querySocketTrace(0) // freeze history BEFORE table/payload probes
 	if err != nil {
 		d.t.Logf("HTRACE stage=%s query-error=%v", stage, err)
-		return
+		return 0
 	}
+	d.t.Logf("HTRACE SNAPSHOT stage=%s total=%d capacity=%d full=%t; a full ring may have evicted earlier generations",
+		stage, len(entries), socketTraceSlots, len(entries) == socketTraceSlots)
+	captured := 0
 	for _, h := range d.handles {
 		var matches []socketTraceEntry
 		for _, e := range entries {
@@ -205,7 +238,9 @@ func (d *socketEvidence) trace(stage string) {
 			}
 		}
 		logSocketTrace(d.t, stage+"/"+h.stage, matches)
+		captured += len(matches)
 	}
+	return captured
 }
 
 func (d *socketEvidence) failure(stage string, cause error) {
@@ -218,6 +253,20 @@ func (d *socketEvidence) failure(stage string, cause error) {
 		return
 	}
 	d.failed = true
+	// A tripwire can fire before Watch publishes its native number. Its
+	// saved number is useful for history only; it never authorizes socket I/O.
+	const violationPrefix = "WINDOWS HANDLE OWNERSHIP VIOLATION "
+	if cause != nil {
+		message := cause.Error()
+		if index := strings.Index(message, violationPrefix); index >= 0 {
+			var violation struct {
+				Handle uint64 `json:"handle"`
+			}
+			if json.Unmarshal([]byte(message[index+len(violationPrefix):]), &violation) == nil {
+				d.handles = append(d.handles, socketTraceHandle{"tripwire-historical-value", windows.Handle(violation.Handle)})
+			}
+		}
+	}
 	var owner winhandle.Owner
 	closed := false
 	if d.tcp != nil {
@@ -225,19 +274,31 @@ func (d *socketEvidence) failure(stage string, cause error) {
 	} else if d.udp != nil {
 		owner, closed = d.udp.handle, d.udp.closed
 	}
-	if !owner.IsZero() && !closed {
-		d.handles = append(d.handles, socketTraceHandle{"native-at-failure", owner.Handle("test failure identity")})
-	}
 	d.t.Logf("SOCKET FAILURE stage=%s error=%v original-app=%s original-peer=%s expected-type=%d pid=%d already-closed=%t BEFORE FAILURE CLEANUP",
 		stage, cause, d.local, d.peer, d.kind, os.Getpid(), closed)
-	d.trace("first-failure/" + stage)
+	d.capturedHistory = d.trace("first-failure/" + stage)
 	logSocketTrace(d.t, "real-Watch-window/File-candidates", d.window)
 	for _, s := range d.stages {
 		d.t.Logf("SOCKET STAGE %s", s)
 	}
 	d.tables("before-payload")
+	var h windows.Handle
+	nativeLive := false
 	if !owner.IsZero() && !closed {
-		h := owner.Handle("test first-failure socket state")
+		// The tripwire itself may have raised the original panic. Capture
+		// saved numeric histories first, then refuse all I/O on an ended owner.
+		func() {
+			defer func() {
+				if value := recover(); value != nil {
+					d.t.Logf("SOCKET native probe skipped after ownership failure: %v", value)
+				}
+			}()
+			h = owner.Handle("test first-failure socket state")
+			nativeLive = true
+		}()
+		closed = !nativeLive
+	}
+	if nativeLive {
 		local, le := windows.Getsockname(h)
 		peer, pe := windows.Getpeername(h)
 		kind, ke := windows.GetsockoptInt(h, windows.SOL_SOCKET, 0x1008)
@@ -248,7 +309,7 @@ func (d *socketEvidence) failure(stage string, cause error) {
 			h, diagnosticAddress(local), le, diagnosticAddress(peer), pe, kind, ke, se, see)
 	}
 	if closed {
-		d.t.Log("SOCKET POSTERROR unavailable: failure was a final-close control, descriptor already released; no stale I/O attempted")
+		d.t.Log("SOCKET POSTERROR unavailable: the owner is closed or its generation ended; no stale I/O attempted")
 	} else if d.tcp != nil {
 		payload := []byte("socket-diagnostic-after-error")
 		var n int
@@ -318,6 +379,11 @@ func (d *socketEvidence) udpPayloadProbe() {
 func (d *socketEvidence) closeTCP() {
 	if d == nil {
 		return
+	}
+	panicked := recover()
+	if panicked != nil {
+		defer func() { panic(panicked) }()
+		d.failure("panic before deferred TCP close", fmt.Errorf("%v", panicked))
 	}
 	if d.t.Failed() {
 		d.failure("test failed before deferred TCP close", errors.New("see original assertion"))

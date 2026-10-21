@@ -7,23 +7,27 @@ is selected by the command below.
 
 ## One focused job
 
-Use the project's pinned Go 1.27.2 toolchain (`$go` below). Both amd64 and arm64
-are supported by the checked ABI layout. Keep the generation tripwire enabled.
+Use the project's pinned Go 1.27.2 toolchain (`$go` below). The ABI layout is
+asserted for amd64 and arm64; the current debugger fixture targets hosted x64.
+ARM64 debugger availability and runtime control proof remain outstanding.
+Keep the generation tripwire enabled.
 The test binary checks `GITHUB_ACTIONS=true`,
 `RUNNER_ENVIRONMENT=github-hosted`, and the explicit opt-in. Do not spoof those
-values locally. No debugger installation or elevation is required by this code.
+values locally. The fixture requires the runner's installed x64 CDB debugger
+and fails if it is absent; it does not install a debugger or change OS settings.
 
 ```powershell
 $env:GOMAXPROCS = '2'
 $env:NETSWITCH_SOCKET_DIAGNOSTICS = '1'
 $env:NETSWITCH_EXPECT_HANDLECHECK = '1'
-& $go test -c -p 2 -tags=netswitch_handlecheck -o "$env:RUNNER_TEMP/socket-diagnostics.exe" ./internal/engine/windows
+& $go test -c -p 2 -tags=netswitch_handlecheck -o dist/windows-test/socket-diagnostics.exe ./internal/engine/windows
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& "$env:RUNNER_TEMP/socket-diagnostics.exe" '-test.v' '-test.count=1' '-test.failfast' '-test.timeout=10m' '-test.run=^(TestSocketHandleTrace(Control|Churn)|TestReadinessHalfClose(AndCancellation|AfterCollection)|TestReadyUDPDoesNotConsumeDatagrams)$'
+node tests/windows/socket-trace.mjs
 exit $LASTEXITCODE
 ```
 
-Keep the full console output and that exact executable as job artifacts. The
+Keep the full console output in the Actions job log and the exact executable
+as a job artifact. The
 raw PC stacks plus module load addresses can be resolved later against matching
 OS symbols and this executable; no symbol downloads occur in the diagnostic.
 An optional race build uses the same command with `-race` on the build line,
@@ -31,7 +35,8 @@ with the runner's usual supported C compiler. It is a separate process/run, not
 a retry of a failed assertion. Do not use `continue-on-error` or retry to green.
 
 The opt-in suite must print `SOCKET TRACE CONTROL PASS`,
-`SOCKET TABLE CONTROL PASS`, and `SOCKET TRANSFER CONTROL PASS`, and the selected
+`SOCKET TABLE CONTROL PASS`, `SOCKET TRANSFER CONTROL PASS`, and
+`SOCKET PANIC CONTROL PASS`, and the selected
 tests must actually run. Setup or control failure is fatal, not a skip/fallback
 to the application's registry. Without opt-in, the two new tests skip and the
 existing tests retain their ordinary assertions and behavior.
@@ -41,9 +46,14 @@ existing tests retain their ordinary assertions and behavior.
 The first selected fixture enables process-local OS handle tracing **before its
 first socket is created**. The control requires a real event OPEN and CLOSE,
 plus a BADREF record with a nonzero stack and the correct process/thread IDs.
+It also checks the all-handles query and requires a resolvable Go frame in the
+known close's stack.
 The invalid reference is a read-only `NtQueryObject` call on a sentinel. It
 never closes a released handle or sets strict-handle mitigation. If the sentinel
 unexpectedly exists, the control fails without modifying it.
+The panic control deliberately ends a real socket generation, then verifies
+that the tripwire's original panic survives cleanup and its OS history is
+captured before any ended-generation I/O can reach Windows.
 
 `TestSocketHandleTraceChurn` has control, GoTCP and GoUDP variants. Each performs
 32 transfers for each of TCP4/TCP6/UDP4/UDP6 (128 per variant, 384 total). The
@@ -55,8 +65,9 @@ load. The first failing round stops that test; `-test.failfast` stops the suite.
 The staged fixture calls the existing duplication and readiness primitives in
 the production order and records exact original, File and native identities.
 It checks type/binding after File, native duplication, readiness registration,
-each Go close, and churn/GC. Each family's first round verifies the live native
-tuple/PID and actual newly recorded OS closes of all three descriptors. TCP
+each Go close, and churn/GC. Each family's first round verifies the live kernel
+tuple/PID before handoff and actual newly recorded OS closes of all three
+descriptors. A tuple identifies a connection, not which descriptor owns it. TCP
 exercises reverse payload and FIN after peer EOF; UDP verifies 12,000 bytes and
 both source addresses. This adds no socket duplication beyond the existing
 transfer sequence.
@@ -85,9 +96,15 @@ On the first failure, before socket/peer cleanup, logs include:
 
 ## Mechanism and limits
 
-The preferred documented viewer is Microsoft WinDbg/CDB `!htrace`. Neither was
-installed in the implementation environment. This implementation needs no
-debugger and instead uses **undocumented, test-only**
+Microsoft CDB handles and prints the first-chance invalid-handle notification,
+using `!htrace` before resuming. Without a debugger the deliberate BADREF control
+terminated the test process with status 0xc0000008 in run 39520309695, before
+any socket scenario ran. The original NTSTATUS, trace-record and socket
+assertions still run; the controller also rejects any extra invalid-handle
+notification and requires the Go suite's final PASS. Debug heap is disabled,
+no symbol downloads are configured, and this is diagnostic timing only.
+
+The Go fixture reads records through **undocumented, test-only**
 `NtSetInformationProcess/NtQueryInformationProcess(ProcessHandleTracing)` via
 the already pinned x/sys wrappers. Unsupported OS behavior fails the control.
 It is not a stable production API. The enable/query layouts were checked
@@ -102,8 +119,12 @@ check-to-syscall gap. Dumps cap a pathological per-handle history at 512 records
 and explicitly report truncation. Missing entries/stacks, ring eviction or
 unresolved kernel PCs cannot rule out a close. No `DuplicateHandle` or
 `CompareObjectHandles` socket reference is created.
+Every all-handles dump logs its count and whether the ring is full. At capacity,
+an evicted old record and an identical new record can cancel in the multiset
+difference; the Watch marker does not resolve that ambiguity.
 
-Tracing, thread pinning, queries and GC change timing. The trace controls prove
+Tracing, thread pinning, queries and GC change timing; whether handle tracing
+itself changes handle-number reuse is unknown. The trace controls prove
 that this process captures its known operations; they do not prove that every
 possible driver action is observable. Native tables and socket calls are
 separate snapshots, not atomic. SO_ERROR may clear pending error state, so it
@@ -123,6 +144,7 @@ not evidence that a root cause was fixed.
 ## References inspected
 
 - [Microsoft !htrace](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/-htrace)
+- [Microsoft exception commands](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/sx--sxd--sxe--sxi--sxn--sxr--sx---set-exceptions-) and [handled continuation](https://learn.microsoft.com/en-us/windows-hardware/drivers/debuggercmds/gh--go-with-exception-handled-)
 - [Microsoft WSADuplicateSocket](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsaduplicatesocketw)
 - [Microsoft GetExtendedTcpTable](https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedtcptable)
 - [Microsoft GetExtendedUdpTable](https://learn.microsoft.com/en-us/windows/win32/api/iphlpapi/nf-iphlpapi-getextendedudptable)

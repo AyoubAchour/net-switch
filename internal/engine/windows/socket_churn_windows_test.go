@@ -147,6 +147,11 @@ func runSocketTraceRound(t *testing.T, network, variant string, control bool) {
 	installed := false
 	var watch platform.Readiness
 	defer func() {
+		panicked := recover()
+		if panicked != nil {
+			defer func() { panic(panicked) }()
+			d.failure("panic before staged native cleanup", fmt.Errorf("%v", panicked))
+		}
 		if !installed {
 			if watch != nil {
 				watch.Detach()
@@ -344,6 +349,11 @@ func (d *socketEvidence) goChurn(kind string, family byte) func() {
 	}
 	d.handles = append(d.handles, socketTraceHandle{kind + "-churn-live", h})
 	return func() {
+		panicked := recover()
+		if panicked != nil {
+			defer func() { panic(panicked) }()
+			d.failure("panic before Go churn cleanup", fmt.Errorf("%v", panicked))
+		}
 		if d.t.Failed() {
 			d.failure("before Go churn cleanup", errors.New("see original assertion"))
 		}

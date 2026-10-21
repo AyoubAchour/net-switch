@@ -24,7 +24,8 @@ import (
 // ENABLE_EX is two ULONGs. This is an independently written ABI binding.
 // Microsoft documents the OS facility, but not this binding, at:
 // https://learn.microsoft.com/windows-hardware/drivers/debuggercmds/-htrace
-// No debugger, driver, global flags, mitigation policy or registry changes.
+// No driver, global flags, mitigation-policy or registry changes. The hosted
+// controller uses CDB to handle tracing's first-chance bad-reference exception.
 const socketTraceSlots = 16384
 
 type socketTraceEntry struct {
@@ -129,7 +130,25 @@ func enableSocketTrace(t *testing.T) error {
 		return fmt.Errorf("OS trace control lacks BADREF: entries=%+v", entries)
 	}
 	logSocketTrace(t, "control/invalid-reference", entries)
-	t.Logf("SOCKET TRACE CONTROL PASS arch=%s go=%s entry=160 stack-offset=32 query-offset=16 slots=%d; OS OPEN/CLOSE/BADREF with nonzero stacks and matching PID/TID", runtime.GOARCH, runtime.Version(), socketTraceSlots)
+	all, err := querySocketTrace(0)
+	if err != nil || !traceHas(all, h, tid, 1) || !traceHas(all, h, tid, 2) || !traceHas(all, invalid, tid, 3) {
+		return fmt.Errorf("all-handles trace control lost known records: total=%d error=%v", len(all), err)
+	}
+	goFrames := 0
+	for _, entry := range all {
+		if entry.Handle == h && entry.Type == 2 && entry.PID == uintptr(os.Getpid()) && entry.TID == tid {
+			for _, pc := range entry.Stack {
+				if pc != 0 && runtime.FuncForPC(pc-1) != nil {
+					goFrames++
+				}
+			}
+		}
+	}
+	if goFrames == 0 {
+		return errors.New("known close trace contains no resolvable Go frame; cannot attribute Go closers")
+	}
+	t.Logf("SOCKET TRACE CONTROL PASS arch=%s go=%s entry=160 stack-offset=32 query-offset=16 slots=%d all-records=%d resolved-Go-frames=%d; OS OPEN/CLOSE/BADREF with matching PID/TID",
+		runtime.GOARCH, runtime.Version(), socketTraceSlots, len(all), goFrames)
 	return nil
 }
 
