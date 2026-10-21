@@ -280,9 +280,11 @@ jobs:
             'WintunRegistrarDeviceFileGuardNegativeControl', 'WintunRegistrarPostRegisterFailureCleanup',
             'WintunRegistrarNoDeviceFileThroughRecovery', 'WintunRegistrarJobReapsBeforeResume',
             'WintunRegistrarStartupFaults', 'WintunRegistrarStartupCloseErrors',
-            'WintunRegistrarEngineCrash', 'WintunRegistrarProductionEngine') |
+            'WintunRegistrarEngineCrash', 'WintunRegistrarProductionEngine',
+            'WintunRegistrarSurpriseRemovalReleasesCrossProcessRegistration',
+            'WintunRegistrarEngineCrashReleasesRealRegistration') |
             ForEach-Object { "Test$_" }
-          $pattern = '^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|RingRemovalBetweenMarkerCheckAndClose|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine))$'
+          $pattern = '^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|RingRemovalBetweenMarkerCheckAndClose|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine|SurpriseRemovalReleasesCrossProcessRegistration|EngineCrashReleasesRealRegistration))$'
           ./bin/wintun-registrar.test.exe '-test.v' '-test.timeout=12m' "-test.run=$pattern" | Tee-Object -Variable log
           $code = $LASTEXITCODE
           # Top-level results only; subtests are indented.

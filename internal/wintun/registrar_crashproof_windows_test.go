@@ -206,6 +206,7 @@ func startChild(t *testing.T, mode, env string, markers []string, afterJoin func
 		case <-c.done:
 		case <-time.After(10 * time.Second):
 			t.Errorf("child %d did not exit during cleanup", c.cmd.Process.Pid)
+			return // Never run recovery while the creator may still own its device.
 		}
 		if afterJoin != nil {
 			afterJoin()
@@ -280,7 +281,7 @@ func pinProcess(t *testing.T, pid uint32) windows.Handle {
 // without it, all records including non-present phantoms. It returns errors
 // instead of failing, so cleanup can use it without a fatal.
 func devicePresent(instance string, presentOnly bool) (bool, error) {
-	flags := uint32(0)
+	flags := windows.DIGCF(0)
 	if presentOnly {
 		flags = windows.DIGCF_PRESENT
 	}

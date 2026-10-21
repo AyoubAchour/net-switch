@@ -535,7 +535,7 @@ jobs:
       - name: Ring ABI, parser, cancellation, corruption recovery and parallel UDP
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.run=TestPauseClassification|TestPerformanceMedian|TestRing|TestPinnedDLL|TestWintun(PauseMonitor|SessionDelay|ParallelUDP|RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|BatchCost)$'
       - name: Registrar ownership, loss and release-engine footprint
-        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=12m' '-test.run=^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine))$'
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=12m' '-test.run=^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine|SurpriseRemovalReleasesCrossProcessRegistration|EngineCrashReleasesRealRegistration))$'
       - name: Single-packet ping-pong, 200000 round trips per implementation
         if: ${{ !cancelled() }}
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPingPong$'
