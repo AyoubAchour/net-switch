@@ -19,7 +19,8 @@ const capacityTailKey = "kilo-tail"
 // A fixed sequential tail measures the held cap after those reservations
 // settle. It always runs, even when the burst already filled every slot.
 // It never retries an attempt, loops until full, or weakens the exact cap.
-func (e *Env) capacityTail(release Release, apps map[string]*Bg, held map[string]app.HeldList) int {
+// base is what the clients independently hold once the burst settles.
+func (e *Env) capacityTail(release Release, apps map[string]*Bg, held map[string]app.HeldList, base heldBase) int {
 	_, s := e.v1()
 	deadline := time.Now().Add(15 * time.Second)
 	before := stats(e, s)
@@ -46,7 +47,7 @@ func (e *Env) capacityTail(release Release, apps map[string]*Bg, held map[string
 	refused := list.Errors["ECONNREFUSED"] + list.Errors["ECONNRESET"]
 	e.T.Check(list.Established+refused == capacityTailAttempts, "every fixed tail attempt either stays open or is explicitly refused (%d held, %d refused, errors %v)", list.Established, refused, list.Errors)
 	after := e.memorySample(s, "TCP FIXED TAIL")
-	e.capacityAccounting("fixed new-process tail", "tcp", before, after, capacityTailAttempts, list.Established, refused, capacityTotal)
+	e.capacityAccounting("fixed new-process tail", "tcp", before, after, base, capacityTailAttempts, list.Established, refused, capacityTotal)
 	// These sockets arrive while the large held workload still exists.
 	// Only proved unknown-pool failures are covered by its load declaration;
 	// the separate probes after fault/load cleanup remain hard.

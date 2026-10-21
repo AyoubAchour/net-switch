@@ -103,7 +103,8 @@ func mixedCaps(e *Env) {
 		udpRefused += result.refused
 		independentlyHeldUDP += result.gotOut
 	}
-	udpCredit := e.capacityAccounting("mixed UDP", "udp", baseline, udpStats, 20000, independentlyHeldUDP, udpRefused, capacityTotal)
+	// Nothing is held before the flood: no app runs yet.
+	udpCredit := e.capacityAccounting("mixed UDP", "udp", baseline, udpStats, heldBase{}, 20000, independentlyHeldUDP, udpRefused, capacityTotal)
 	e.exactCapacity("mixed UDP", independentlyHeldUDP, udpSessionsTotal, udpCredit)
 	e.T.Require(udpStats.UDP > 0 && udpStats.Flows == udpStats.UDP, "all initial held flows are UDP (%d sessions, %d flows)", udpStats.UDP, udpStats.Flows)
 	e.T.Logf("MIXED UDP COST: heap/session=%.2f managed/session=%.2f stack/session=%.2f",
@@ -138,7 +139,7 @@ func mixedCaps(e *Env) {
 		total += list.Established
 		e.T.Logf("MIXED TCP OFFER %s: held=%d errors=%v failure-ms=%+v", name, list.Established, list.Errors, list.FailedMS)
 	}
-	total += e.capacityTail(release, tcpApps, held)
+	total += e.capacityTail(release, tcpApps, held, heldBase{tcp: total, udp: independentlyHeldUDP})
 	for name, bg := range udpApps {
 		e.T.Require(bg.Running(), "%s still holds its UDP sockets at the mixed cap", name)
 	}
@@ -154,7 +155,8 @@ func mixedCaps(e *Env) {
 			name, tcpOn, udpOn, e.loadLine(name), ok, held[name].Established+udpHeld[name].gotOut == tcpFlowsPerApp)
 		fullCombinedApp = fullCombinedApp || ok
 	}
-	tcpCredit := e.capacityAccounting("mixed TCP", "tcp", withTW, full, 80000+capacityTailAttempts, total, refused, capacityMixed, fullCombinedApp)
+	// Before the TCP wave the servers saw exactly the held UDP sessions.
+	tcpCredit := e.capacityAccounting("mixed TCP", "tcp", withTW, full, heldBase{udp: independentlyHeldUDP}, 80000+capacityTailAttempts, total, refused, capacityMixed, fullCombinedApp)
 	e.T.Check(full.Flows == int64(total)+udpStats.UDP, "mixed accounting matches every held TCP and UDP socket (%d = %d + %d)", full.Flows, total, udpStats.UDP)
 	e.exactCapacity("mixed total", total+independentlyHeldUDP, tcpFlowsTotal, tcpCredit)
 	e.T.Logf("CAP OLD VERDICT full mixed corner: TCP=%d UDP=%d TIME_WAIT=%d old-exact-count=%t",

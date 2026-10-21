@@ -118,6 +118,10 @@ type sessions struct {
 	// serverSrc is, per socket that reached a server, the source the server
 	// saw: the engine's own outbound socket for that session.
 	serverSrc map[int]string
+	// flowID is, per socket the engine listed when the pool was recorded,
+	// that session's engine flow ID. IDs are never reused, so the same ID
+	// later proves the same session, not a replacement with the same source.
+	flowID map[int]string
 }
 
 func (s sessions) admitted() int   { return max(s.gotOut, s.listed) }
@@ -151,7 +155,7 @@ func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) 
 				serverSrc[i] = rec.Src
 			}
 		}
-		s := sessions{opened: r.Opened, answered: r.Answered, refused: r.Refused, gotOut: len(seen), listed: listed[AppPath(name)], serverLines: map[engine.LineID]int{}, serverSrc: serverSrc}
+		s := sessions{opened: r.Opened, answered: r.Answered, refused: r.Refused, gotOut: len(seen), listed: listed[AppPath(name)], serverLines: map[engine.LineID]int{}, serverSrc: serverSrc, flowID: map[int]string{}}
 		for _, line := range serverLine {
 			s.serverLines[line]++
 		}
@@ -162,6 +166,7 @@ func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) 
 			for i, local := range r.Locals {
 				unique[local] = true
 				if f, ok := bySource[local]; ok {
+					s.flowID[i] = f.ID
 					if f.App == "" {
 						s.unknown++
 						if f.AppID != "" || f.PID != 0 || f.Line != "a" || !seen[i] || serverLine[i] != "a" {
@@ -293,7 +298,7 @@ func udpSessionsPerAppCase(e *Env) {
 		}
 		e.T.Check(after.UDP-before.UDP == int64(serverHeld), "UDP per-app count equals client/server-held sessions (%d = %d)", after.UDP-before.UDP, serverHeld)
 		total = int(after.UDP - before.UDP)
-		credit := e.capacityAccounting("UDP per-app", "udp", before, after, perApp*len(names), serverHeld, refused, capacityPerApp)
+		credit := e.capacityAccounting("UDP per-app", "udp", before, after, streamBase, perApp*len(names), serverHeld, refused, capacityPerApp)
 		e.exactCapacity("identified UDP apps together", identified, udpSessionsPerApp*len(names), credit)
 	}
 	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
@@ -340,7 +345,7 @@ func udpSessionsTotalCase(e *Env) {
 	if v1, ok := e.Eng.(engine.V1); ok && v1.Session() != nil {
 		st := e.memorySample(v1.Session(), "UDP TOTAL")
 		listed = max(listed, int(st.UDP))
-		credit := e.capacityAccounting("UDP total", "udp", before, st, perApp*len(names), gotOut, refused, capacityTotal)
+		credit := e.capacityAccounting("UDP total", "udp", before, st, streamBase, perApp*len(names), gotOut, refused, capacityTotal)
 		e.exactCapacity("UDP total", gotOut, udpSessionsTotal, credit)
 	}
 	admitted := max(gotOut, listed)
@@ -407,7 +412,7 @@ func tcpStorm(e *Env) {
 		v1 := e.Eng.(engine.V1)
 		after := e.memorySample(v1.Session(), "TCP PER APP")
 		refused := held.Errors["ECONNREFUSED"] + held.Errors["ECONNRESET"]
-		credit := e.capacityAccounting("TCP per-app", "tcp", before, after, storm, held.Established, refused, capacityPerApp)
+		credit := e.capacityAccounting("TCP per-app", "tcp", before, after, streamBase, storm, held.Established, refused, capacityPerApp)
 		e.exactCapacity("identified bravo TCP", known, tcpFlowsPerApp, credit)
 		e.checkHeldTCP(map[string]app.HeldList{"bravo": held}, map[string]*Bg{"bravo": hold})
 	}
@@ -546,7 +551,9 @@ func tcpFlowsTotalCase(e *Env) {
 	}
 	_, v10 := e.Eng.(engine.V1)
 	if v10 {
-		established += e.capacityTail(release, bgs, held)
+		// The tail's baseline: every burst connection the clients hold, plus
+		// charlie's stream.
+		established += e.capacityTail(release, bgs, held, heldBase{tcp: established + streamBase.tcp})
 	}
 	// The servers' own count of what got out, while everything is held.
 	isHold := func(r inet.Record) bool {
@@ -576,7 +583,7 @@ func tcpFlowsTotalCase(e *Env) {
 		for _, list := range held {
 			refused += list.Errors["ECONNREFUSED"] + list.Errors["ECONNRESET"]
 		}
-		credit := e.capacityAccounting("TCP total", "tcp", offerStart, st, perApp*len(names)+capacityTailAttempts, established, refused, capacityTotal)
+		credit := e.capacityAccounting("TCP total", "tcp", offerStart, st, streamBase, perApp*len(names)+capacityTailAttempts, established, refused, capacityTotal)
 		e.T.Check(st.Flows == int64(established+1), "TCP total count equals independently held clients plus stream (%d = %d + 1)", st.Flows, established)
 		e.exactCapacity("TCP total", established+1, tcpFlowsTotal, credit)
 	}
