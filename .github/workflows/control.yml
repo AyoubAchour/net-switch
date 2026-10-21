@@ -126,3 +126,5 @@ jobs:
           name: control-${{ matrix.arch }}-${{ matrix.control }}
           path: dist/tun-test/
           retention-days: 7
+
+# Validation-only change for PR #54 job gating (workflow case). Do not merge.
