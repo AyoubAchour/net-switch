@@ -222,6 +222,7 @@ func enableCloseTrace() error {
 func handleFailureEvidence(t *testing.T, values map[string]windows.Handle) {
 	t.Helper()
 	if closeTraceOn {
+		socketTraceModules(t) // to attribute the native return addresses
 		for role, h := range values {
 			entries, err := querySocketTrace(h)
 			if err != nil {

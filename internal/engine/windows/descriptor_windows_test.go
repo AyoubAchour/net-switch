@@ -113,6 +113,20 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 							}
 							peerAddr, peerErr := windows.Getpeername(value)
 							handleFailureEvidence(t, map[string]windows.Handle{"native duplicate": value, "source": source})
+							// The close trace (x64 job 119272592603) showed this value
+							// was not closed and reused: its newest OS record is its
+							// own open. Is it the source's kernel object with stale
+							// Winsock state? Read-only comparison, then one refresh of
+							// Winsock's connect context. Evidence only.
+							sameObject, _, compareErr := windows.NewLazySystemDLL("kernelbase.dll").NewProc("CompareObjectHandles").Call(uintptr(source), uintptr(value))
+							t.Logf("SOCKET IDENTITY same-kernel-object=%t compare-error=%v", sameObject != 0, compareErr)
+							if kind == windows.SOCK_STREAM {
+								refreshErr := windows.Setsockopt(value, windows.SOL_SOCKET, 0x7010 /* SO_UPDATE_CONNECT_CONTEXT */, nil, 0)
+								refreshedAddr, refreshedErr := windows.Getsockname(value)
+								refreshedPeer, refreshedPeerErr := windows.Getpeername(value)
+								t.Logf("SOCKET CONTEXT REFRESH error=%v address=%#v address-error=%v peer=%#v peer-error=%v",
+									refreshErr, refreshedAddr, refreshedErr, refreshedPeer, refreshedPeerErr)
+							}
 							t.Fatalf("round=%d stage=%s source=%d native=%d family=%d type=%d/%d type-error=%v address=%#v want-port=%d address-error=%v source-address=%#v source-error=%v native-peer=%#v native-peer-error=%v",
 								round, stage, source, value, family, gotKind, kind, kindErr, addr, wantPort, addrErr, sourceAddr, sourceErr, peerAddr, peerErr)
 						}
