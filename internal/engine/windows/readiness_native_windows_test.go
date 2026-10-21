@@ -405,10 +405,11 @@ func TestTCPReadinessUnexpectedCancelIsFatal(t *testing.T) {
 		cmd := exec.CommandContext(ctx, executable, "-test.run=^TestTCPReadinessUnexpectedCancelIsFatal$", "-test.v", "-test.timeout=10s")
 		cmd.Env = append(os.Environ(), childFlag+"="+child.mode)
 		output, err := cmd.CombinedOutput()
+		expired := ctx.Err() // read before cancel, which sets it unconditionally
 		cancel()
 		var exit *exec.ExitError
-		if ctx.Err() != nil || !errors.As(err, &exit) || !bytes.Contains(output, []byte(retained)) || !bytes.Contains(output, []byte(child.panic)) {
-			t.Fatalf("%s: unexpected cancel did not fail promptly with its live registration retained: err=%v context=%v\n%s", child.mode, err, ctx.Err(), output)
+		if expired != nil || !errors.As(err, &exit) || !bytes.Contains(output, []byte(retained)) || !bytes.Contains(output, []byte(child.panic)) {
+			t.Fatalf("%s: unexpected cancel did not fail promptly with its live registration retained: err=%v context=%v\n%s", child.mode, err, expired, output)
 		}
 	}
 	t.Log("an unexpected CancelIoEx error for a receive or a ConnectEx terminated the child with its pending registration retained; no cleanup/free or indefinite wait")
