@@ -3,24 +3,26 @@ name: Go control service
 on:
   push:
     branches: [main, port/control-service]
-  # Label changes run it again, so adding or removing ci:full takes effect.
+  # The ci:full label is read on the PR's next push. Label changes don't start
+  # a run: they would share the PR's concurrency group and cancel its run.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Label updates and new commits replace only the same PR's older run.
+# A new commit replaces the same PR's older run. Every main run keeps its own
+# group, so each main commit is tested in full.
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('control-pr-{0}', github.event.pull_request.number) || format('control-run-{0}', github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Picks the jobs a pull request needs from its changed files
-  # (.github/ci/changes.mjs); pushes, manual runs and the ci:full label get
-  # every group. A gated job runs unless this job succeeded and answered false
-  # for its group, so a failure here costs runner time, never coverage.
+  # (.github/ci/changes.mjs); pushes, manual runs, stacked PRs and the ci:full
+  # label get every group. A gated job runs unless this job succeeded and
+  # answered false for its group, so a failure here costs runner time, never
+  # coverage. .github/ci/gates.test.mjs checks every gate below.
   changes:
     name: Changed files
     runs-on: ubuntu-24.04
@@ -47,8 +49,8 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
-      - name: Test the changed-file classifier
-        run: node --test .github/ci/changes.test.mjs
+      - name: Test the classifier, its map against test readers, and the job gates
+        run: node --test .github/ci/*.test.mjs
       - name: Choose jobs from the changed files
         id: filter
         run: node .github/ci/changes.mjs
