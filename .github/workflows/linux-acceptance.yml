@@ -8,7 +8,9 @@ name: Acceptance
 on:
   push:
     branches: [main]
+  # Label changes run it again, so adding or removing ci:full takes effect.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
     inputs:
       run:
@@ -24,7 +26,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Picks the jobs a pull request needs from its changed files
+  # (.github/ci/changes.mjs); pushes, manual runs and the ci:full label get
+  # every group. A gated job runs unless this job succeeded and answered false
+  # for its group, so a failure here costs runner time, never coverage.
+  changes:
+    name: Changed files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Every group, so this job is the same in each workflow that has one.
+    outputs:
+      node: ${{ steps.filter.outputs.node }}
+      helper: ${{ steps.filter.outputs.helper }}
+      installer: ${{ steps.filter.outputs.installer }}
+      legacy_windows: ${{ steps.filter.outputs.legacy_windows }}
+      testisp: ${{ steps.filter.outputs.testisp }}
+      wintun: ${{ steps.filter.outputs.wintun }}
+      go_windows: ${{ steps.filter.outputs.go_windows }}
+      go_linux: ${{ steps.filter.outputs.go_linux }}
+      acceptance: ${{ steps.filter.outputs.acceptance }}
+      control: ${{ steps.filter.outputs.control }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The merge base and its file list need the whole history.
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Test the changed-file classifier
+        run: node --test .github/ci/changes.test.mjs
+      - name: Choose jobs from the changed files
+        id: filter
+        run: node .github/ci/changes.mjs
+
   linux:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.acceptance != 'false') }}
     name: Linux acceptance / ${{ matrix.runner }}
     # Pinned labels: ubuntu-latest moves between releases.
     runs-on: ${{ matrix.runner }}
