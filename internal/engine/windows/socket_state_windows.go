@@ -91,6 +91,14 @@ func nativeSocketState() map[string]any {
 // UDP has no TIME_WAIT rows. Count live native bindings by process/source so a
 // failed bind can be compared with the same runner's actual port occupancy.
 func nativeUDPState() map[string]any {
+	state, _, _ := nativeUDPSnapshot()
+	return state
+}
+
+// nativeUDPSnapshot also returns each family's sorted unique local ports from
+// the same table read, so reservation accounting never mixes IPv4 and IPv6.
+func nativeUDPSnapshot() (map[string]any, [2][]uint16, error) {
+	var byFamily [2][]uint16
 	type key struct {
 		source netip.Addr
 		pid    uint32
@@ -106,7 +114,7 @@ func nativeUDPState() map[string]any {
 	for family, af := range []uint32{windows.AF_INET, windows.AF_INET6} {
 		raw, err := readOwnerTable(context.Background(), udpTable, af, 1) // UDP_TABLE_OWNER_PID.
 		if err != nil {
-			return map[string]any{"error": err.Error()}
+			return map[string]any{"error": err.Error()}, [2][]uint16{}, err
 		}
 		stride := 12
 		if family == 1 {
@@ -114,9 +122,10 @@ func nativeUDPState() map[string]any {
 		}
 		rows, err := ownerRows(raw, 4, stride)
 		if err != nil {
-			return map[string]any{"error": err.Error()}
+			return map[string]any{"error": err.Error()}, [2][]uint16{}, err
 		}
 		count[family] = len(rows)
+		familyUsed := map[uint16]bool{}
 		for _, row := range rows {
 			var value key
 			var port uint16
@@ -129,7 +138,12 @@ func nativeUDPState() map[string]any {
 			}
 			grouped[value] = append(grouped[value], port)
 			used[port] = true
+			familyUsed[port] = true
 		}
+		for port := range familyUsed {
+			byFamily[family] = append(byFamily[family], port)
+		}
+		slices.Sort(byFamily[family])
 	}
 	var groups []group
 	for value, ports := range grouped {
@@ -141,5 +155,5 @@ func nativeUDPState() map[string]any {
 		ports = append(ports, port)
 	}
 	slices.Sort(ports)
-	return map[string]any{"rowsByFamily": count, "groups": groups, "usedLocalPorts": ports, "uniquePorts": len(ports)}
+	return map[string]any{"rowsByFamily": count, "groups": groups, "usedLocalPorts": ports, "uniquePorts": len(ports)}, byFamily, nil
 }

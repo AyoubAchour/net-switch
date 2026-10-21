@@ -30,6 +30,7 @@ type Dialer struct {
 	udpLastLog        atomic.Int64
 	udpFailureStarted atomic.Bool
 	udpFailure        atomic.Pointer[udpAllocationFailure]
+	reservations      reservationJobs
 }
 
 func NewDialer(routes *Routes) (*Dialer, error) {
@@ -50,6 +51,7 @@ func NewDialer(routes *Routes) (*Dialer, error) {
 }
 
 func (d *Dialer) Close() error {
+	d.reservations.close()
 	if d.ports != nil {
 		d.ports.close()
 	}
