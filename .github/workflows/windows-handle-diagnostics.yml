@@ -36,6 +36,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: ${{ endsWith(github.ref, '-socket-trace') }}
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
       - name: Prove native poll lifetime and callback collection
         if: ${{ !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-socket-trace') }}
         run: |
@@ -76,7 +81,7 @@ jobs:
         env:
           NETSWITCH_SOCKET_DIAGNOSTICS: '1'
         run: |
-          ./dist/windows-test/socket-diagnostics.exe '-test.v' '-test.count=1' '-test.failfast' '-test.timeout=10m' '-test.run=^(TestSocketHandleTrace(Control|Churn)|TestReadinessHalfClose(AndCancellation|AfterCollection)|TestReadyUDPDoesNotConsumeDatagrams)$'
+          node tests/windows/socket-trace.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep the exact executable for resolving raw trace addresses
         if: ${{ always() && steps.socket-build.outcome == 'success' }}
