@@ -102,8 +102,18 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 							port = addr.Port
 						}
 						if kindErr != nil || gotKind != kind || addrErr != nil || port != wantPort {
-							t.Fatalf("round=%d stage=%s source=%d native=%d family=%d type=%d/%d type-error=%v address=%#v want-port=%d address-error=%v",
-								round, stage, source, value, family, gotKind, kind, kindErr, addr, wantPort, addrErr)
+							// Diagnostics only: does the source handle still have its
+							// state, and does the duplicate still see its peer? This
+							// separates a wrong duplicate from a source that already
+							// lost its binding. The verdict is unchanged.
+							var sourceAddr windows.Sockaddr
+							var sourceErr error
+							if stage == "duplicated" {
+								sourceAddr, sourceErr = windows.Getsockname(source)
+							}
+							peerAddr, peerErr := windows.Getpeername(value)
+							t.Fatalf("round=%d stage=%s source=%d native=%d family=%d type=%d/%d type-error=%v address=%#v want-port=%d address-error=%v source-address=%#v source-error=%v native-peer=%#v native-peer-error=%v",
+								round, stage, source, value, family, gotKind, kind, kindErr, addr, wantPort, addrErr, sourceAddr, sourceErr, peerAddr, peerErr)
 						}
 					}
 					check("duplicated")
