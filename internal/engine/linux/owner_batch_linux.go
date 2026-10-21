@@ -304,9 +304,10 @@ func (b *descriptorBatches) resumed(job *descriptorBatch, waiting time.Time) {
 func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult {
 	k := job.key
 	out := descriptorBatchResult{lastFD: -1, began: time.Now()}
-	expired := func() bool {
-		return o.batches.closed.Load() || !time.Now().Before(job.deadline) || (job.caller != nil && job.caller.Err() != nil)
+	expiredAt := func(now time.Time) bool {
+		return o.batches.closed.Load() || !now.Before(job.deadline) || (job.caller != nil && job.caller.Err() != nil)
 	}
+	expired := func() bool { return expiredAt(time.Now()) }
 	if expired() {
 		out.err = context.DeadlineExceeded
 		return out
@@ -346,7 +347,9 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 	job.stage.Store(3)
 	out.count, out.err = f.Visit(k.limit, func(name []byte) bool {
 		job.visited.Add(1)
-		if expired() {
+		// One clock read serves the deadline and the read's start.
+		started := time.Now()
+		if expiredAt(started) {
 			return false
 		}
 		fd, err := strconv.ParseUint(string(name), 10, 32)
@@ -354,9 +357,9 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 			return true
 		}
 		out.lastFD = max(out.lastFD, int64(fd))
-		read := job.trace.begin(int64(fd))
+		job.trace.reading(int64(fd), started)
 		inode, ok := socketInodeAt(f.fd, string(name))
-		job.trace.end(read)
+		job.trace.read(int64(fd), started)
 		if !ok {
 			return true
 		}

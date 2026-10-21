@@ -79,6 +79,45 @@ func TestDescriptorTraceDistinguishesQueueFromBlockedRead(t *testing.T) {
 	t.Logf("queue=%d inflight=%d; blocked stage recorded before completion; %d read/stage pairs", before.QueueAtEnqueue, before.InFlightAtStart, len(after.Reads.stamps))
 }
 
+// Round 6: stamping every descriptor read was 27% of the engine's allocation
+// at the TCP cap. Fast reads are now only counted; slow reads and the read
+// still running keep their stamps, so a stalled read stays visible.
+func TestDescriptorTraceStampsOnlySlowAndRunningReads(t *testing.T) {
+	job := &descriptorBatch{queued: time.Now(), deadline: time.Now().Add(time.Second)}
+	stage := job.trace.begin(-3)
+	job.trace.end(stage)
+	if allocs := testing.AllocsPerRun(1000, func() {
+		started := time.Now()
+		job.trace.reading(7, started)
+		job.trace.read(7, started)
+	}); allocs != 0 {
+		t.Fatalf("a fast descriptor read allocated %.1f times", allocs)
+	}
+	slowStart := time.Now().Add(-2 * descriptorSlowRead)
+	job.trace.reading(9, slowStart)
+	job.trace.read(9, slowStart)
+	running := time.Now()
+	job.trace.reading(11, running)
+	f := &descriptorFailure{job: job, outcome: "deadline"}
+	s := f.snapshot()
+	reads := s.Reads.stamps
+	if len(reads) != 3 || reads[0].FD != -3 || reads[1].FD != 9 || reads[1].FinishedNS-reads[1].StartedNS < int64(descriptorSlowRead) ||
+		reads[2] != (descriptorReadStamp{FD: 11, StartedNS: running.UnixNano()}) {
+		t.Fatalf("want the stage, the slow read and the running read, got %+v", reads)
+	}
+	// Fast reads from AllocsPerRun (1000 plus its warm-up run) and the slow one.
+	if s.DescriptorReads != 1002 || s.DescriptorReadNS < int64(2*descriptorSlowRead) || s.SlowReadNS != int64(descriptorSlowRead) {
+		t.Fatalf("read counters: %d reads, %d ns, threshold %d", s.DescriptorReads, s.DescriptorReadNS, s.SlowReadNS)
+	}
+	job.trace.read(11, running)
+	if after := f.snapshot().Reads.stamps; len(after) != 2 {
+		t.Fatalf("a finished fast read stayed visible as running: %+v", after)
+	}
+	if len(s.Reads.stamps) != 3 {
+		t.Fatal("a later read changed an earlier snapshot")
+	}
+}
+
 func TestDescriptorTraceAndFailureHistoryAreBounded(t *testing.T) {
 	o := newTestOwners(t)
 	job := &descriptorBatch{queued: time.Now(), deadline: time.Now().Add(time.Second)}
