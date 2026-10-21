@@ -14,11 +14,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -80,6 +82,16 @@ func runDeviceGuardFixture(m *testing.M) (int, bool) {
 	}
 	if os.Getenv(deviceGuardFixtureEnv) == "1" {
 		code := m.Run()
+		// These are our independent reference opens, never borrowed cache
+		// handles. Keep their IDs pinned through every test and cleanup.
+		for h := range guardWindowsResources.owners {
+			if err := windows.CloseHandle(h); err != nil {
+				fmt.Fprintln(os.Stderr, "device-file resource reference close:", err)
+				if code == 0 {
+					code = 1
+				}
+			}
+		}
 		if code == 0 {
 			fmt.Fprintf(os.Stdout, "\n%s %d\n", deviceGuardFixtureDone, os.Getpid())
 		}
@@ -183,6 +195,86 @@ type guardFileID struct {
 	ID     [16]byte
 }
 
+// The serial suite initializes these once before its first guard baseline.
+// Reference handles survive all tests, so file IDs cannot be recycled while
+// they are used. Error formatting and Windows' accumulated cache state stay intact.
+var guardWindowsResources struct {
+	once   sync.Once
+	owners map[windows.Handle]guardFileID
+	ids    map[guardFileID]string
+	err    error
+}
+
+func loadGuardWindowsResources(t *testing.T) {
+	t.Helper()
+	guardWindowsResources.once.Do(func() {
+		beforeReferences := len(handleSnapshot(t))
+		guardWindowsResources.owners = map[windows.Handle]guardFileID{}
+		guardWindowsResources.ids = map[guardFileID]string{}
+		system, err := windows.GetSystemDirectory()
+		if err == nil && !filepath.IsAbs(system) {
+			err = errors.New("Windows system directory is not absolute")
+		}
+		if err != nil {
+			guardWindowsResources.err = err
+			return
+		}
+		// Only these exact system resources were observed in the full native
+		// suite. Neither a .mui suffix nor a basename on another path qualifies.
+		for _, leaf := range []string{"KernelBase.dll.mui", "mswsock.dll.mui"} {
+			path := filepath.Join(system, "en-US", leaf)
+			name, err := windows.UTF16PtrFromString(path)
+			if err != nil {
+				guardWindowsResources.err = err
+				return
+			}
+			var h windows.Handle
+			err = deviceGuardQuery(t, 0, "open trusted resource "+path, func() error {
+				var openErr error
+				h, openErr = windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+				return openErr
+			})
+			if err != nil {
+				guardWindowsResources.err = fmt.Errorf("open trusted resource %q: %w", path, err)
+				return
+			}
+			guardWindowsResources.owners[h] = guardFileID{}
+			fileType, err := guardFileType(t, h)
+			if err == nil && fileType != windows.FILE_TYPE_DISK {
+				err = errors.New("trusted resource is not a disk file")
+			}
+			if err != nil {
+				guardWindowsResources.err = err
+				return
+			}
+			var info windows.ByHandleFileInformation
+			err = deviceGuardQuery(t, h, "trusted resource file attributes", func() error {
+				return windows.GetFileInformationByHandle(h, &info)
+			})
+			if err == nil && info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+				err = errors.New("trusted resource is a directory or reparse point")
+			}
+			if err != nil {
+				guardWindowsResources.err = fmt.Errorf("trusted resource %q: %w", path, err)
+				return
+			}
+			id, err := readGuardFileID(t, h)
+			if err != nil {
+				guardWindowsResources.err = err
+				return
+			}
+			guardWindowsResources.owners[h] = id
+			guardWindowsResources.ids[id] = path
+			t.Logf("device-file trusted resource path=%q owned_handle=%#x volume=%#x fileID=%x", path, h, id.Volume, id.ID)
+		}
+		t.Logf("device-file resource setup before_reference_handles=%d reference_opens=%d warmup=false reason=identify observed Windows message-resource caches", beforeReferences, len(guardWindowsResources.owners))
+	})
+	must(t, guardWindowsResources.err)
+	if len(guardWindowsResources.ids) != 2 {
+		t.Fatal("device-file resource references are incomplete or share an unexpected identity")
+	}
+}
+
 func readGuardFileID(t *testing.T, h windows.Handle) (guardFileID, error) {
 	var id guardFileID
 	err := deviceGuardQuery(t, h, "FileIdInfo", func() error {
@@ -250,17 +342,23 @@ func classifyGuardFile(t *testing.T, h windows.Handle, dllID *guardFileID) (kind
 		if info.Directory != 0 {
 			return "Directory", oldKind, nil
 		}
-		if dllID != nil {
+		if dllID != nil || len(guardWindowsResources.ids) != 0 {
 			id, idErr := readGuardFileID(t, h)
 			if idErr != nil {
 				return kind, oldKind, idErr
 			}
-			t.Logf("device-file disk handle=%#x volume=%#x fileID=%x pinned_volume=%#x pinned_fileID=%x same_file=%t old_pass=false", h, id.Volume, id.ID, dllID.Volume, dllID.ID, id == *dllID)
-			if id == *dllID {
-				return "PinnedDLL", oldKind, nil
+			if dllID != nil {
+				t.Logf("device-file disk handle=%#x volume=%#x fileID=%x pinned_volume=%#x pinned_fileID=%x same_file=%t old_pass=false", h, id.Volume, id.ID, dllID.Volume, dllID.ID, id == *dllID)
+				if id == *dllID {
+					return "PinnedDLL", oldKind, nil
+				}
+			}
+			if resource, ok := guardWindowsResources.ids[id]; ok {
+				t.Logf("device-file disk handle=%#x matches independently owned resource %q old_pass=false", h, resource)
+				return "WindowsResource", oldKind, nil
 			}
 		} else {
-			t.Logf("device-file disk handle=%#x standard=%+v has no cached pinned DLL identity", h, info)
+			t.Logf("device-file disk handle=%#x standard=%+v has no independently owned file identity", h, info)
 		}
 		// Diagnostic only: neither a name nor a name-query failure can excuse
 		// this unmatched disk file or change its already-failing verdict.
@@ -418,8 +516,8 @@ func newHandleKinds(t *testing.T, before, after map[windows.Handle]bool) map[str
 					t.Logf("new file handle %#x remains unclassified: %v", h, classifyErr)
 				}
 				// File remains an inclusive non-pipe count for startup-failure
-				// leak checks. The session check below explicitly discounts only
-				// evidenced Windows providers; directories/DLL opens still count.
+				// leak checks. The session check below discounts only evidenced
+				// Windows providers/resources; directories/DLL opens still count.
 				if classified != "Pipe" {
 					kinds["File"]++
 				}
@@ -464,6 +562,7 @@ func newDeviceFileGuard(t *testing.T) *deviceFileGuard {
 	t.Helper()
 	l, err := loadLibrary()
 	must(t, err)
+	loadGuardWindowsResources(t)
 	g := &deviceFileGuard{files: map[windows.Handle]windows.Handle{}, witnesses: map[windows.Handle]bool{}, dllID: cachedGuardDLLID(t)}
 	t.Cleanup(func() {
 		for _, w := range g.files {
@@ -557,7 +656,11 @@ func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, u
 		}
 		kind, _, err = classifyGuardFile(t, h, g.dllID)
 		classified[kind]++
-		if kind != "Pipe" && kind != "Directory" {
+		_, reference := guardWindowsResources.owners[h]
+		// Our reference opens must pass the same live identity check as every
+		// borrowed file. Exclude them only from the counterfactual old count,
+		// and only after that check succeeds, never from the new verdict.
+		if kind != "Pipe" && kind != "Directory" && !(reference && kind == "WindowsResource") {
 			oldOffenders++
 		}
 		if err != nil {
@@ -828,7 +931,7 @@ func TestWintunRegistrarSession(t *testing.T) {
 	if !exited || code != 0 {
 		t.Fatalf("registrar did not exit cleanly after Close: exited=%v code=%#x", exited, code)
 	}
-	if kinds["File"] != kinds["WindowsDevice"] || kinds["unreadable"] != 0 {
+	if kinds["File"] != kinds["WindowsDevice"]+kinds["WindowsResource"] || kinds["unreadable"] != 0 {
 		t.Fatalf("session added a non-pipe file or unreadable handle to the engine: %v", kinds)
 	}
 	if int64(afterBytes)-int64(beforeBytes) > 16<<20 {
@@ -878,6 +981,49 @@ func TestWintunRegistrarDeviceFileGuardNegativeControl(t *testing.T) {
 		t.Fatalf("separate DLL open was not identified independently: kind=%q err=%v", dllKind, dllErr)
 	}
 	t.Logf("device-file DLL control separately_opened=%#x same_kernel_object=%t same_file_id=true", separateDLL, sameObject(separateDLL, windows.Handle(a.dll.file.Fd())))
+	for reference, id := range guardWindowsResources.owners {
+		path := guardWindowsResources.ids[id]
+		name, err := windows.UTF16PtrFromString(path)
+		must(t, err)
+		separateResource, err := windows.CreateFile(name, windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		must(t, err)
+		defer windows.CloseHandle(separateResource)
+		resourceKind, _, resourceErr := classifyGuardFile(t, separateResource, guard.dllID)
+		if resourceErr != nil || resourceKind != "WindowsResource" || sameObject(separateResource, reference) {
+			t.Fatalf("separate resource open did not prove file-ID classification: path=%q kind=%q err=%v", path, resourceKind, resourceErr)
+		}
+		t.Logf("device-file resource control path=%q separate_handle=%#x reference=%#x same_file_id=true same_kernel_object=false", path, separateResource, reference)
+	}
+	guard.assertNone(t)
+	// A real ordinary disk file must still fail; admitting the two system
+	// resource IDs must not become a general disk-file exclusion.
+	exe, err := os.Executable()
+	must(t, err)
+	exeName, err := windows.UTF16PtrFromString(exe)
+	must(t, err)
+	unrelated, err := windows.CreateFile(exeName, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, 0, 0)
+	must(t, err)
+	defer func() {
+		if unrelated != 0 {
+			windows.CloseHandle(unrelated)
+		}
+	}()
+	if !handleSnapshot(t)[unrelated] {
+		t.Fatal("unrelated disk fixture is absent from the native snapshot")
+	}
+	unrelatedKind, _, unrelatedErr := classifyGuardFile(t, unrelated, guard.dllID)
+	if unrelatedErr != nil || unrelatedKind != "File" {
+		t.Fatalf("unrelated disk fixture did not remain an offender: kind=%q err=%v", unrelatedKind, unrelatedErr)
+	}
+	offenders, unreadable := guard.offenders(t)
+	if unreadable != 0 || len(offenders) != 1 || offenders[0] != unrelated {
+		t.Fatalf("guard missed the independently opened unrelated disk file %#x: offenders=%v unreadable=%d", unrelated, offenders, unreadable)
+	}
+	report(t, map[string]any{"test": "device_file_guard_unrelated_disk", "arch": runtime.GOARCH, "actual_disk_detected": true})
+	closeErr := windows.CloseHandle(unrelated)
+	unrelated = 0 // consume our owner once, even if Close reports an error
+	must(t, closeErr)
+	guard.assertNone(t)
 	s, err := a.startInProcessSession()
 	must(t, err)
 	defer s.Close()
