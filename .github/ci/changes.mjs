@@ -104,13 +104,21 @@ export function areaFor(path, tracked = new Set()) {
   return names.filter(name => !names.some(other => other !== name && covers(other, name) && (!covers(name, other) || other < name))).join('+');
 }
 
-export function classify(paths, knownPaths, { eventName = 'pull_request', labels = [] } = {}) {
+// namedDocs: root Markdown files whose name appears in tracked non-Markdown
+// text. Something may open such a file by a path nobody can follow statically,
+// so a change to it is not documentation-only.
+export function classify(paths, knownPaths, { eventName = 'pull_request', labels = [], namedDocs = new Set() } = {}) {
   const selected = new Set();
   const reasons = [];
   let full = eventName !== 'pull_request' || labels.includes('ci:full') || paths.length === 0;
   if (full) reasons.push(eventName !== 'pull_request' ? `event: ${eventName}` : labels.includes('ci:full') ? 'label: ci:full' : 'empty diff');
   for (const path of paths) {
-    const area = knownPaths.has(path) ? areaFor(path, knownPaths) : null;
+    let area = knownPaths.has(path) ? areaFor(path, knownPaths) : null;
+    if (area === 'docs' && namedDocs.has(path)) {
+      reasons.push(`${JSON.stringify(path)}: named in tracked code or workflows; full run`);
+      full = true;
+      continue;
+    }
     reasons.push(`${JSON.stringify(path)}: ${area ?? 'new or unclassified; full run'}`);
     if (area === null) full = true;
     else for (const group of groupsOfArea(area)) selected.add(group);
@@ -127,7 +135,27 @@ export function changedFiles(base, head, git = args => execFileSync('git', args,
   const split = text => text.split('\0').filter(Boolean);
   const paths = split(git(['diff', '--name-only', '--no-renames', '-z', mergeBase, head, '--']));
   const knownPaths = new Set(split(git(['ls-tree', '-r', '--name-only', '-z', mergeBase, '--'])));
-  return { paths, knownPaths, mergeBase };
+  return { paths, knownPaths, mergeBase, namedDocs: namedRootDocs(paths, head, git) };
+}
+
+// A plain, case-insensitive text search of every tracked non-Markdown file at
+// the PR head. Over-matching only costs a full run. .github/ci is left out: it
+// holds this classifier and its tests, which name documents as data, and any
+// change there already runs everything.
+export function namedRootDocs(paths, head, git) {
+  const named = new Set();
+  for (const path of paths) {
+    if (path.includes('/') || !/\.md$/i.test(path)) continue;
+    let out = '';
+    try {
+      out = git(['grep', '-l', '-i', '-F', '-I', '-e', path, head, '--', '.', ':(exclude,glob)**/*.md', ':(exclude,glob)**/*.MD', ':(exclude).github/ci']);
+    } catch (error) {
+      // git grep exits 1 when nothing matches; any other failure is not a skip.
+      if (error.status !== 1) throw error;
+    }
+    if (out.trim()) named.add(path);
+  }
+  return named;
 }
 
 export function decide(eventName, event, git) {
@@ -142,8 +170,8 @@ export function decide(eventName, event, git) {
     result.reasons = [`base branch ${JSON.stringify(base ?? null)} is not the default branch ${JSON.stringify(defaultBranch ?? null)}`];
     return result;
   }
-  const { paths, knownPaths, mergeBase } = changedFiles(event.pull_request?.base?.sha, event.pull_request?.head?.sha, git);
-  const result = classify(paths, knownPaths);
+  const { paths, knownPaths, mergeBase, namedDocs } = changedFiles(event.pull_request?.base?.sha, event.pull_request?.head?.sha, git);
+  const result = classify(paths, knownPaths, { namedDocs });
   result.reasons.unshift(`merge base: ${mergeBase}`);
   return result;
 }

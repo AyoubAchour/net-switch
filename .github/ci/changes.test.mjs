@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
-import { areaFor, changedFiles, classify, decide, groups, outputLines, run } from './changes.mjs';
+import { areaFor, changedFiles, classify, decide, groups, namedRootDocs, outputLines, run } from './changes.mjs';
 
 // The locality rule reads the tree, so the cases run against the real file
 // list plus the case's own paths.
@@ -133,6 +133,8 @@ test('git diff uses the merge base, no rename detection and NUL delimiters', () 
     ['merge-base', base, head],
     ['diff', '--name-only', '--no-renames', '-z', merge, head, '--'],
     ['ls-tree', '-r', '--name-only', '-z', merge, '--'],
+    // The one root document in the diff is searched for at the head.
+    ['grep', '-l', '-i', '-F', '-I', '-e', 'a name\nwith a tab\t.md', head, '--', '.', ':(exclude,glob)**/*.md', ':(exclude,glob)**/*.MD', ':(exclude).github/ci'],
   ]);
   assert.deepEqual(diff.paths, ['lib/old.mjs', 'docs/new.md', 'a name\nwith a tab\t.md']);
   assert.deepEqual([...diff.knownPaths], ['lib/old.mjs', 'README.md']);
@@ -143,7 +145,52 @@ const prEvent = (base, defaultBranch = 'main') => ({
   pull_request: { base: { ref: base, sha: 'a'.repeat(40) }, head: { sha: 'b'.repeat(40) }, labels: [] },
   repository: { default_branch: defaultBranch },
 });
-const docsOnlyGit = args => args[0] === 'merge-base' ? `${'c'.repeat(40)}\n` : 'README.md\0';
+const docsOnlyGit = args => args[0] === 'merge-base' ? `${'c'.repeat(40)}\n` : args[0] === 'grep' ? '' : 'README.md\0';
+
+// A git that answers a diff of one root document and greps an in-memory set of
+// files the way namedRootDocs asks: non-Markdown files outside .github/ci.
+function gitWith(changed, files) {
+  return args => {
+    if (args[0] === 'merge-base') return `${'c'.repeat(40)}\n`;
+    if (args[0] === 'diff') return `${changed}\0`;
+    if (args[0] === 'ls-tree') return `${changed}\0`;
+    assert.equal(args[0], 'grep');
+    const name = args[args.indexOf('-e') + 1].toLowerCase();
+    const hits = Object.entries(files).filter(([file, text]) => !/\.md$/i.test(file) && !file.startsWith('.github/ci/') && text.toLowerCase().includes(name));
+    if (!hits.length) throw Object.assign(new Error('no match'), { status: 1 });
+    return hits.map(([file]) => `${args[args.indexOf('--') - 1]}:${file}\0`).join('');
+  };
+}
+
+test('a root document named by any tracked code or workflow runs everything', () => {
+  // The reviewer's bypass: a helper reads "../.." joined with a parameter, and
+  // a test calls it with README.md. Nothing static follows that path.
+  const reads = {
+    'tests/zz/helper_test.go': 'func readFrom(dir string) []byte { b, _ := os.ReadFile(filepath.Join(dir, "README.md")); return b }\nfunc TestX(t *testing.T) { readFrom("../..") }',
+  };
+  const bypass = decide('pull_request', prEvent('main'), gitWith('README.md', reads));
+  assert.equal(bypass.full, true);
+  assert.deepEqual(enabled(bypass), [...groups].sort());
+  assert.match(bypass.reasons.join('\n'), /named in tracked code or workflows/);
+  // The match is a case-insensitive text search, in any code or config file.
+  for (const [file, text] of [['scripts/x.ps1', 'Get-Content readme.md'], ['.github/workflows/ci.yml', 'paths: [README.md]'], ['internal/x/data.json', '{"a":"README.md"}']]) {
+    assert.equal(decide('pull_request', prEvent('main'), gitWith('README.md', { [file]: text })).full, true, file);
+  }
+  // Nothing names it: still documentation-only. Markdown and the classifier's own folder do not count.
+  const unnamed = decide('pull_request', prEvent('main'), gitWith('README.md', { 'docs/a.md': 'README.md', '.github/ci/changes.test.mjs': 'README.md', 'lib/x.mjs': 'nothing' }));
+  assert.equal(unnamed.full, false);
+  assert.deepEqual(enabled(unnamed), []);
+  // A search that fails for any other reason cannot produce a skip.
+  const broken = args => { if (args[0] === 'grep') throw Object.assign(new Error('fatal'), { status: 128 }); return gitWith('README.md', {})(args); };
+  assert.equal(run('pull_request', () => JSON.stringify(prEvent('main')), broken).full, true);
+});
+
+test('on the real tree, a root document named by code is not documentation-only', () => {
+  const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: new URL('../..', import.meta.url), encoding: 'utf8' }).trim();
+  const git = args => execFileSync('git', args, { cwd: new URL('../..', import.meta.url), encoding: 'utf8', maxBuffer: 256 << 20 });
+  const named = namedRootDocs(['CHANGELOG.md', 'CONTRIBUTING.md', 'README.md', 'SECURITY.md', 'THIRD_PARTY_NOTICES.md', 'lib/README.md'], head, git);
+  assert.deepEqual([...named].sort(), ['CHANGELOG.md', 'README.md', 'SECURITY.md', 'THIRD_PARTY_NOTICES.md']);
+});
 
 test('a pull request into the default branch is classified from its diff', () => {
   const result = decide('pull_request', prEvent('main'), docsOnlyGit);
