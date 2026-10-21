@@ -4,6 +4,7 @@ package winengine
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -39,6 +40,12 @@ type readiness struct {
 	closes      [1024]nativeSocketClose
 	closedCount uint64
 	poll        func([]pollFD) int32
+	policy      tcpCompletionPolicy
+	cancel      func(windows.Handle, *windows.Overlapped) error
+	queryModes  func(winhandle.Owner) (uint32, error)
+	immediate   atomic.Uint64
+	submitted   atomic.Uint64
+	completed   atomic.Uint64
 }
 
 type nativeSocketClose struct {
@@ -60,14 +67,27 @@ type socketWatch struct {
 	pin                      runtime.Pinner
 	pending, detached, write bool
 	drained                  chan struct{}
+	detachDone               chan struct{}
+	detachErr                error
+	skipSuccess              bool
+	inheritedSkip            bool
 }
 
 func newReadiness() (*readiness, error) {
+	return newReadinessWithPolicy(queryTCPCompletionPolicy(windows.WSAEnumProtocols))
+}
+
+func newReadinessWithPolicy(policy tcpCompletionPolicy) (*readiness, error) {
 	port, err := windows.CreateIoCompletionPort(windows.InvalidHandle, 0, 0, 1)
 	if err != nil {
 		return nil, err
 	}
-	p := &readiness{port: winhandle.Open(port, "TCP completion port open"), watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{}, stop: make(chan struct{}), capture: hostedTraceEnabled(), poll: pollWritable}
+	p := &readiness{
+		port:    winhandle.Open(port, "TCP completion port open"),
+		watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{},
+		stop: make(chan struct{}), capture: hostedTraceEnabled(), poll: pollWritable,
+		policy: policy, cancel: windows.CancelIoEx, queryModes: socketCompletionModes,
+	}
 	p.wg.Go(p.completions)
 	p.wg.Go(p.pollWrites)
 	return p, nil
@@ -102,6 +122,7 @@ func (p *readiness) completions() {
 			panic("unexpected socket completion")
 		}
 		w.pending = false
+		p.completed.Add(1)
 		detached := w.detached
 		if w.drained != nil {
 			close(w.drained)
@@ -122,14 +143,36 @@ func (p *readiness) stats() map[string]any {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ports := make([]uint16, 0, len(p.watches))
+	normal, skipped, inherited := 0, 0, 0
 	for _, watch := range p.watches {
 		ports = append(ports, watch.localPort)
+		if watch.skipSuccess {
+			skipped++
+		} else {
+			normal++
+		}
+		if watch.inheritedSkip {
+			inherited++
+		}
 	}
 	closes := make([]nativeSocketClose, 0, min(p.closedCount, uint64(len(p.closes))))
 	for i := p.closedCount - uint64(cap(closes)); i < p.closedCount; i++ {
 		closes = append(closes, p.closes[i%uint64(len(p.closes))])
 	}
-	return map[string]any{"sockets": len(p.watches), "ports": ports, "blockedWriters": len(p.writers), "completionThread": p.thread.Load(), "closes": closes, "closedCount": p.closedCount}
+	queryError := ""
+	if p.policy.err != nil {
+		queryError = p.policy.err.Error()
+	}
+	return map[string]any{
+		"sockets": len(p.watches), "ports": ports, "blockedWriters": len(p.writers),
+		"completionThread": p.thread.Load(), "closes": closes, "closedCount": p.closedCount,
+		"completionPolicy": p.policy.reason, "allowSkipCompletionOnSuccess": p.policy.allowSkip,
+		"protocolCatalogEntries": p.policy.entries, "nonIFSProvider": p.policy.nonIFS,
+		"providerQueryError": queryError, "normalCompletionSockets": normal,
+		"skipSuccessSockets": skipped, "inheritedSkipSuccessSockets": inherited,
+		"immediateReceiveSuccesses": p.immediate.Load(), "asyncReceiveSubmissions": p.submitted.Load(),
+		"completionPackets": p.completed.Load(),
+	}
 }
 
 func (p *readiness) recordClose(local netip.AddrPort, handle windows.Handle, err error) {
@@ -209,17 +252,27 @@ func (p *readiness) pollWrites() {
 }
 
 func (p *readiness) watch(socket winhandle.Owner, localPort uint16, wake func()) (*socketWatch, error) {
+	// Query before association or submission: a duplicate can retain a mode
+	// set by Go, and setting only the event flag would not clear skip-success.
+	modes, err := p.queryModes(socket)
+	if err != nil {
+		return nil, err
+	}
+	inherited := modes&windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS != 0
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.next++
-	w := &socketWatch{pool: p, socket: socket, key: p.next, localPort: localPort, wake: wake}
+	w := &socketWatch{pool: p, socket: socket, key: p.next, localPort: localPort, wake: wake,
+		skipSuccess: inherited, inheritedSkip: inherited}
 	if _, err := windows.CreateIoCompletionPort(socket.Handle("TCP completion attach socket"), p.port.Handle("TCP completion attach port"), w.key, 0); err != nil {
 		return nil, err
 	}
-	// Go's socket may already have these modes. Setting them explicitly gives
-	// inline success one unambiguous owner; no completion is then expected.
-	if err := windows.SetFileCompletionNotificationModes(socket.Handle("TCP completion modes"), 1|2); err != nil {
-		return nil, err
+	if p.policy.allowSkip && !inherited {
+		if err := windows.SetFileCompletionNotificationModes(socket.Handle("TCP completion modes"),
+			windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS|windows.FILE_SKIP_SET_EVENT_ON_HANDLE); err != nil {
+			return nil, fmt.Errorf("TCP set completion modes: %w", err)
+		}
+		w.skipSuccess = true
 	}
 	w.pin.Pin(&w.op)
 	p.watches[w.key] = w
@@ -250,8 +303,18 @@ func (w *socketWatch) Arm(read, write bool) error {
 	buf := windows.WSABuf{}
 	err := windows.WSARecv(w.socket.Handle("TCP receive readiness arm"), &buf, 1, nil, &w.flags, &w.op, nil)
 	if errors.Is(err, windows.ERROR_IO_PENDING) {
+		w.pool.submitted.Add(1)
 		w.mu.Unlock()
 		return nil
+	}
+	if err == nil {
+		w.pool.immediate.Add(1)
+		if !w.skipSuccess {
+			// Ordinary notifications include synchronous success. The packet
+			// still owns op: only completions may clear pending and wake it.
+			w.mu.Unlock()
+			return nil
+		}
 	}
 	w.pending = false
 	wake := w.wake
@@ -265,10 +328,18 @@ func (w *socketWatch) Arm(read, write bool) error {
 func (w *socketWatch) Detach() {
 	w.mu.Lock()
 	if w.detached {
+		done, err := w.detachDone, w.detachErr
 		w.mu.Unlock()
+		if err != nil {
+			panic(err)
+		}
+		// A concurrent Detach must not let Close recycle the handle while
+		// the first caller is still waiting for its cancellation packet.
+		<-done
 		return
 	}
 	w.detached = true
+	w.detachDone = make(chan struct{})
 	w.pool.mu.Lock()
 	delete(w.pool.writers, w.key)
 	w.pool.mu.Unlock()
@@ -276,7 +347,19 @@ func (w *socketWatch) Detach() {
 	if w.pending {
 		drained = make(chan struct{})
 		w.drained = drained
-		windows.CancelIoEx(w.socket.Handle("TCP readiness cancel"), &w.op)
+		h := w.socket.Handle("TCP readiness cancel")
+		if err := w.pool.cancel(h, &w.op); err != nil && !errors.Is(err, windows.ERROR_NOT_FOUND) {
+			// No safe recovery exists in Detach's void API: returning would
+			// permit Close/reuse while the kernel owns op; waiting could hang
+			// forever after a failed cancel. Treat this as process-fatal, with
+			// the registration and pin intact until exit. Do not recover it.
+			w.detachErr = fmt.Errorf("TCP readiness CancelIoEx handle=%#x key=%d skipSuccess=%t: %w", h, w.key, w.skipSuccess, err)
+			err := w.detachErr
+			w.mu.Unlock()
+			panic(err)
+		}
+		// ERROR_NOT_FOUND means completion won the race. Its queued packet
+		// still has to drain before op is unpinned or the socket is closed.
 	}
 	w.mu.Unlock()
 	if drained != nil {
@@ -286,6 +369,7 @@ func (w *socketWatch) Detach() {
 	delete(w.pool.watches, w.key)
 	w.pool.mu.Unlock()
 	w.pin.Unpin()
+	close(w.detachDone)
 }
 
 func (p *readiness) close() error {
