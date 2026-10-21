@@ -490,6 +490,7 @@ func TestReadinessHalfCloseAfterCollection(t *testing.T) {
 
 func testReadinessHalfClose(t *testing.T, collect bool) {
 	hosted(t)
+	startSocketDiagnostics(t)
 	pool, err := newReadiness()
 	if err != nil {
 		t.Fatal(err)
@@ -516,13 +517,17 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 		c := &readySocket{blocking: client.(*net.TCPConn), pool: pool, local: client.LocalAddr(), remote: client.RemoteAddr()}
 		defer c.Close()
 		defer server.Close()
+		diagnostic := tcpSocketEvidence(t, c, server.(*net.TCPConn))
+		defer diagnostic.closeTCP()
 		wake := make(chan struct{}, 1)
+		diagnostic.beforeWatch()
 		w, err := c.Watch(func() {
 			select {
 			case wake <- struct{}{}:
 			default:
 			}
 		})
+		diagnostic.afterWatch(c.handle, err)
 		if err != nil {
 			client.Close()
 			server.Close()
@@ -532,6 +537,7 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 			runtime.GC()
 		}
 		if _, err := c.TryRead(make([]byte, 10)); !errors.Is(err, platform.ErrWouldBlock) {
+			diagnostic.failure("initial TryRead after Watch", err)
 			h := c.handle.Handle("TCP initial-read failure diagnostic")
 			local, localErr := windows.Getsockname(h)
 			kind, kindErr := windows.GetsockoptInt(h, windows.SOL_SOCKET, 0x1008)
@@ -539,6 +545,7 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 				round, collect, err, h, local, localErr, kind, kindErr)
 		}
 		if err := w.Arm(true, false); err != nil {
+			diagnostic.failure("initial TCP Arm(read)", err)
 			t.Fatal(err)
 		}
 		if round%2 == 0 {
@@ -561,9 +568,11 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 					break
 				}
 				if err != nil && !errors.Is(err, platform.ErrWouldBlock) {
+					diagnostic.failure("TryRead before peer EOF", err)
 					t.Fatal(err)
 				}
 				if err := w.Arm(true, false); err != nil {
+					diagnostic.failure("TCP Arm(read) before EOF", err)
 					t.Fatal(err)
 				}
 			}
@@ -575,10 +584,12 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 				n, err := c.TryWrite(remaining)
 				remaining = remaining[n:]
 				if err != nil && !errors.Is(err, platform.ErrWouldBlock) {
+					diagnostic.failure("TryWrite after peer EOF", err)
 					t.Fatalf("round %d: reverse write: %v", round, err)
 				}
 				if len(remaining) != 0 {
 					if err := w.Arm(false, true); err != nil {
+						diagnostic.failure("TCP Arm(write) after peer EOF", err)
 						t.Fatal(err)
 					}
 					select {
@@ -592,6 +603,10 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 				runtime.GC()
 			}
 			if err := c.CloseWrite(); err != nil {
+				if diagnostic != nil {
+					diagnostic.failure("CloseWrite after peer EOF and reverse payload", err)
+					t.Fatalf("round %d: native half-close: %v (OS trace/table/post-error payload above)", round, err)
+				}
 				// Keep the original failure, but observe the actual peer before
 				// deferred close can turn a missing FIN into an apparent EOF.
 				h := c.handle.Handle("TCP half-close failure diagnostic")
@@ -608,6 +623,7 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 			}
 			reply, err := io.ReadAll(server)
 			if err != nil || string(reply) != "still writable" {
+				diagnostic.failure("peer payload/FIN after successful CloseWrite", err)
 				t.Fatalf("round %d: native half-close returned success, peer received %q: %v", round, reply, err)
 			}
 		}
