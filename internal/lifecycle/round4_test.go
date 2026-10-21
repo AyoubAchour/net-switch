@@ -159,6 +159,47 @@ func TestHTTPAdmissionResolvesQueuedConnectionsInOneBatch(t *testing.T) {
 	}
 }
 
+// A fast churn must not fill the queue while the resolver sits out the
+// interval: once a full batch waits, the lookup starts at once.
+func TestHTTPAdmissionLooksUpEarlyWhenABatchWaits(t *testing.T) {
+	raw, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var batches []int
+	resolve := func(tuples []localipc.TCPTuple) []localipc.TCPIdentity {
+		mu.Lock()
+		batches = append(batches, len(tuples))
+		mu.Unlock()
+		out := make([]localipc.TCPIdentity, len(tuples))
+		for i := range out {
+			out[i].User = "owner"
+		}
+		return out
+	}
+	limits := &connectionLimits{owner: "owner", users: map[string]int{}}
+	l := newHTTPListenerEvery(raw, limits, func(string) {}, resolve, time.Hour)
+	defer l.Close()
+	dialAll(t, raw.Addr().String(), 1)
+	if _, err := l.Accept(); err != nil {
+		t.Fatal(err)
+	}
+	// The owner pool admits 32; the rest are refused, which is fine here:
+	// only the timing of the second lookup matters.
+	dialAll(t, raw.Addr().String(), httpLookupBatch)
+	waitFor(t, "a full batch is looked up without waiting out the interval", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(batches) >= 2
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if batches[1] < httpLookupBatch {
+		t.Fatal("early lookup ran before a full batch waited", batches)
+	}
+}
+
 // Churn must not buy one machine-wide snapshot per connection: lookups are
 // at least httpLookupInterval apart, and connections wait in one batch.
 func TestHTTPAdmissionSpacesLookupsUnderChurn(t *testing.T) {

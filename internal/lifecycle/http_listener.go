@@ -26,14 +26,19 @@ func (c *admittedHTTPConn) Close() error {
 }
 
 // Connections accepted but not yet resolved or handed to the HTTP server.
-const httpAdmissionQueue = 256
+const httpAdmissionQueue = 1024
 
-// httpLookupInterval is the shortest gap between identity lookups. Under
+// httpLookupInterval is the usual gap between identity lookups. Under
 // connection churn, connections gather into larger batches instead of each
-// costing a machine-wide table snapshot, so another user's churn costs
-// Control at most twenty snapshots a second and the owner at most this
-// much extra wait.
-const httpLookupInterval = 50 * time.Millisecond
+// costing a machine-wide table snapshot. The gap is cut short once
+// httpLookupBatch connections wait, so a fast churn cannot fill the queue
+// and push the owner out: lookups then run back to back, each serving at
+// least that many connections. Either way another user's churn costs at
+// most twenty snapshots a second or one per httpLookupBatch connections.
+const (
+	httpLookupInterval = 50 * time.Millisecond
+	httpLookupBatch    = 128
+)
 
 // httpListener admits loopback HTTP connections by their OS identity. The
 // raw accept loop never waits for that identity. A separate resolver takes
@@ -55,6 +60,7 @@ type httpListener struct {
 	queue     []net.Conn
 	drained   bool
 	wake      chan struct{}
+	full      chan struct{}
 	ready     chan *admittedHTTPConn
 	done      chan struct{}
 	failed    chan struct{}
@@ -64,12 +70,17 @@ type httpListener struct {
 }
 
 func newHTTPListener(l net.Listener, limits *connectionLimits, log func(string), resolve func([]localipc.TCPTuple) []localipc.TCPIdentity) *httpListener {
+	return newHTTPListenerEvery(l, limits, log, resolve, httpLookupInterval)
+}
+
+func newHTTPListenerEvery(l net.Listener, limits *connectionLimits, log func(string), resolve func([]localipc.TCPTuple) []localipc.TCPIdentity, interval time.Duration) *httpListener {
 	if resolve == nil {
 		resolve = localipc.TCPOwners
 	}
 	h := &httpListener{
-		Listener: l, limits: limits, log: log, resolve: resolve, interval: httpLookupInterval,
+		Listener: l, limits: limits, log: log, resolve: resolve, interval: interval,
 		wake:   make(chan struct{}, 1),
+		full:   make(chan struct{}, 1),
 		ready:  make(chan *admittedHTTPConn, httpAdmissionQueue),
 		done:   make(chan struct{}),
 		failed: make(chan struct{}),
@@ -143,10 +154,17 @@ func (l *httpListener) acceptRaw() {
 			continue
 		}
 		l.queue = append(l.queue, conn)
+		batch := len(l.queue) >= httpLookupBatch
 		l.mu.Unlock()
 		select {
 		case l.wake <- struct{}{}:
 		default:
+		}
+		if batch {
+			select {
+			case l.full <- struct{}{}:
+			default:
+			}
 		}
 	}
 }
@@ -161,11 +179,15 @@ func (l *httpListener) admit() {
 			return
 		}
 		if wait := l.interval - time.Since(last); wait > 0 {
+			timer := time.NewTimer(wait)
 			select {
-			case <-time.After(wait):
+			case <-timer.C:
+			case <-l.full:
 			case <-l.done:
+				timer.Stop()
 				return
 			}
+			timer.Stop()
 		}
 		last = time.Now()
 		l.mu.Lock()
