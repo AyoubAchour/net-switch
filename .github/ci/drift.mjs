@@ -57,6 +57,10 @@ export const declared = [{
 }, {
   from: 'tray.ps1', call: "(Join-Path $dataPath 'tray.log')", outside: 'tray.log in the data folder above',
   why: 'the log the tray writes, in the folder -DataDir names',
+}, {
+  from: 'tests/lifecycle/lifecycle_test.go', call: 'os.ReadFile(path)', sites: 2,
+  outside: 'executables lifecycle.yml builds into NETSWITCH_LIFECYCLE_DIR (under Program Files or /usr/lib), and a sing-box binary extracted into a temporary folder',
+  why: 'the real-service test hashes the binaries it runs; it fails unless NETSWITCH_LIFECYCLE_DIR is an absolute path, and the other site reads the download it just extracted',
 }];
 
 // What a declaration may say: a reason, one call, and either repository
