@@ -201,6 +201,13 @@ func (r *rings) released() bool {
 	return r.send.load(4) == ^uint32(0) && r.receive.load(0) == ^uint32(0)
 }
 
+// disconnected reports either marker, as write and read do. In 0.14.1 the
+// receive thread writes Receive.Head as it ends (on unregistration, or after
+// rejecting a damaged Receive ring), and unregistration then writes Send.Tail.
+func (r *rings) disconnected() bool {
+	return r.receive.load(0) == ^uint32(0) || r.send.load(4) == ^uint32(0)
+}
+
 func (r *rings) exited() windows.Handle {
 	if r.owner == nil {
 		return 0

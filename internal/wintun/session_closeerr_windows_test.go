@@ -26,31 +26,41 @@ func (o *faultyOwner) end(r *rings, _ func(windows.Handle) error) (bool, error) 
 	return false, errTestRetire
 }
 
-// newFaultySession builds a session whose ring owner reports a teardown error
-// (and optionally that it had already exited). The returned counter records any
-// call to the ring opener, which a lost session must never make.
-func newFaultySession(t *testing.T, lost bool) (*Session, *atomic.Int64) {
+// newTestSession builds a session over real section-backed rings with a
+// synthetic owner and no adapter. open is the recovery ring opener. Cleanup
+// closes the session even after t.Fatal; tests that check Close's result call
+// it themselves first, and a repeated Close returns the same result.
+func newTestSession(t *testing.T, owner ringOwner, open func() (*rings, error)) *Session {
 	t.Helper()
 	r, err := allocateRings(MinCapacity)
 	must(t, err)
 	if err := r.createEvents(); err != nil {
 		t.Fatal(errors.Join(err, r.close()))
 	}
-	r.owner = &faultyOwner{lost: lost}
+	r.owner = owner
 	wake, err := windows.CreateEvent(nil, 1, 0, nil)
 	must(t, err)
 	cancel, err := windows.CreateEvent(nil, 1, 0, nil)
 	must(t, err)
-	opened := &atomic.Int64{}
 	s := &Session{adapter: &Adapter{config: Config{Name: "closeerr-test"}}, rings: r, wake: wake, cancelEvent: cancel,
 		wakeOwner: winhandle.Open(wake, "test wake"), cancelOwner: winhandle.Open(cancel, "test cancel"),
 		changed: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}),
-		repair: make(chan error, 1), events: make(chan Event, 8),
-		open: func() (*rings, error) {
-			opened.Add(1)
-			return nil, errors.New("ring opener must not be called for a lost session")
-		}}
+		repair: make(chan error, 1), events: make(chan Event, 8), open: open}
 	go s.maintain()
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// newFaultySession builds a session whose ring owner reports a teardown error
+// (and optionally that it had already exited). The returned counter records any
+// call to the ring opener, which a lost session must never make.
+func newFaultySession(t *testing.T, lost bool) (*Session, *atomic.Int64) {
+	t.Helper()
+	opened := &atomic.Int64{}
+	s := newTestSession(t, &faultyOwner{lost: lost}, func() (*rings, error) {
+		opened.Add(1)
+		return nil, errors.New("ring opener must not be called for a lost session")
+	})
 	return s, opened
 }
 
@@ -124,5 +134,38 @@ func TestSessionCorruptionYieldsToConfirmedOwnerLoss(t *testing.T) {
 	}
 	if err := s.Close(); !errors.Is(err, errTestRetire) {
 		t.Fatalf("Session.Close dropped the retirement error after corruption yielded to loss: %v", err)
+	}
+}
+
+// The clean-retirement variant. faultyOwner's retirement always fails, and a
+// failed retirement never reopens, so the test above cannot show that the loss
+// itself prevents the rebuild. Here retirement succeeds and only the completed-
+// exit classification differs. The control, an owner still running at our stop,
+// must reopen, which proves the opener count can observe a rebuild.
+func TestSessionCorruptionYieldsToConfirmedOwnerLossCleanRetire(t *testing.T) {
+	for _, lost := range []bool{true, false} {
+		name := "owner-exited-first"
+		if !lost {
+			name = "control-owner-alive-reopens"
+		}
+		t.Run(name, func(t *testing.T) {
+			// The markers appear only during retirement, as every registrar exit
+			// makes the driver publish them, so the pre-stop sample finds none.
+			s, opened := newLossSession(t, &lossOwner{lost: lost, publish: true})
+			s.fail(fmt.Errorf("injected ring corruption: %w", ErrCorrupt))
+			e := waitOutcome(t, s)
+			if lost {
+				if e.Kind != "removed" || opened.Load() != 0 {
+					t.Fatalf("a confirmed owner loss gave %q (%v) and called the opener %d times", e.Kind, e.Err, opened.Load())
+				}
+				assertLoss(t, "terminal reason", e.Err, true)
+			} else if e.Kind != "recovered" || opened.Load() != 1 {
+				t.Fatalf("control: corruption with a live owner gave %q (%v), opener called %d times", e.Kind, e.Err, opened.Load())
+			}
+			must(t, s.Close())
+			if stats := s.Stats(); stats.RecoveryFailures != 0 || stats.Recoveries != uint64(opened.Load()) {
+				t.Fatalf("wrong recovery accounting with %d opener calls: %+v", opened.Load(), stats)
+			}
+		})
 	}
 }

@@ -121,60 +121,121 @@ func newHandleKinds(t *testing.T, before, after map[windows.Handle]bool) map[str
 			kinds["unreadable"]++
 			continue
 		}
-		if kind == "File" && isPipe(h) {
-			kind = "Pipe"
+		if kind == "File" {
+			fileType, err := windows.GetFileType(h)
+			if err != nil {
+				kinds["unreadable"]++
+				continue
+			}
+			if fileType == windows.FILE_TYPE_PIPE {
+				kind = "Pipe"
+			}
 		}
 		kinds[kind]++
 	}
 	return kinds
 }
 
-// deviceFileGuard is the meaningful old-race proof: the engine process holds no
-// registering device file. It is identity-aware — it witnesses every non-pipe
-// file handle present at baseline, so a device handle that reuses a baseline
-// number (same value, different object) is still caught, which a number-only
-// diff would miss. Unrelated guard events pass even the old in-process owner;
-// a device file handle does not (see the negative control).
+// deviceFileGuard checks that the engine holds no registering device file.
+// Only explicitly owned, lifetime-stable files get identity witnesses. Never
+// duplicate a handle discovered in a snapshot: a concurrent close/reuse could
+// turn even a successfully classified file into a socket before duplication.
+// Native directory handles (including the OS's current-directory handle) are
+// classified afresh without duplicating them. The independent native snapshot
+// must be clean at construction and on every check; unknown baseline files are
+// not silently grandfathered in.
 type deviceFileGuard struct {
-	files map[windows.Handle]windows.Handle // handle -> witness of the object at baseline
+	files     map[windows.Handle]windows.Handle // known owned file -> identity witness
+	witnesses map[windows.Handle]bool
 }
 
 func newDeviceFileGuard(t *testing.T) *deviceFileGuard {
 	t.Helper()
-	g := &deviceFileGuard{files: map[windows.Handle]windows.Handle{}}
-	for h := range handleSnapshot(t) {
-		if kind, err := objectType(h); err == nil && kind == "File" && !isPipe(h) {
-			var w windows.Handle
-			if windows.DuplicateHandle(windows.CurrentProcess(), h, windows.CurrentProcess(), &w, 0, false, windows.DUPLICATE_SAME_ACCESS) == nil {
-				g.files[h] = w
-			}
-		}
-	}
+	l, err := loadLibrary()
+	must(t, err)
+	g := &deviceFileGuard{files: map[windows.Handle]windows.Handle{}, witnesses: map[windows.Handle]bool{}}
 	t.Cleanup(func() {
 		for _, w := range g.files {
-			windows.CloseHandle(w)
+			if err := windows.CloseHandle(w); err != nil {
+				t.Errorf("close device-file guard witness: %v", err)
+			}
 		}
 	})
+	// The library cache retains its file for process life. The serial test suite
+	// also leaves the process's three os.File standard streams open. These are
+	// known owners, not values borrowed from the snapshot. Pipes (including AFD
+	// sockets) and unknown file types never get duplicated.
+	for _, h := range []windows.Handle{windows.Handle(l.file.Fd()), windows.Handle(os.Stdin.Fd()), windows.Handle(os.Stdout.Fd()), windows.Handle(os.Stderr.Fd())} {
+		if h == 0 || h == windows.InvalidHandle || g.files[h] != 0 {
+			continue
+		}
+		fileType, err := windows.GetFileType(h)
+		must(t, err)
+		if fileType == windows.FILE_TYPE_PIPE {
+			continue
+		}
+		if fileType != windows.FILE_TYPE_DISK && fileType != windows.FILE_TYPE_CHAR {
+			t.Fatalf("device-file guard cannot witness unknown owned file type %#x (handle %#x)", fileType, h)
+		}
+		kind, err := objectType(h)
+		must(t, err)
+		if kind != "File" {
+			t.Fatalf("device-file guard expected an owned File, found %q for %#x", kind, h)
+		}
+		w := witness(t, h)
+		g.files[h], g.witnesses[w] = w, true
+		if !sameObject(h, w) {
+			t.Fatalf("device-file guard witness %#x does not identify owned file %#x", w, h)
+		}
+	}
+	g.assertNone(t) // includes our witnesses; the baseline must actually be clean
 	return g
 }
 
-// offenders returns every non-pipe file handle that is new since baseline, or
-// whose object identity at a baseline number has changed. unreadable is the
-// count of handles whose type query failed (reported, never silently ignored).
+// nativeDirectory queries FileStandardInfo, whose directory flag requires no
+// particular file access rights (unlike FileBasicInfo/FILE_READ_ATTRIBUTES).
+// This also works for the OS-owned current-directory handle. It reads no name
+// and retains no handle value: a reused number must be classified again.
+func nativeDirectory(h windows.Handle) bool {
+	var info struct {
+		AllocationSize, EndOfFile int64
+		Links                     uint32
+		DeletePending, Directory  uint8
+		_                         [2]byte
+	}
+	return windows.GetFileInformationByHandleEx(h, windows.FileStandardInfo, (*byte)(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))) == nil && info.Directory != 0
+}
+
+// offenders returns every unowned/changed File except positively classified
+// pipes and disk directories. A failed subtype/directory query is conservatively
+// an offender, never an exclusion. unreadable counts failed object-type queries;
+// either result makes the guard fail. Nothing here duplicates handles.
 func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, unreadable int) {
 	t.Helper()
 	for h := range handleSnapshot(t) {
+		if g.witnesses[h] {
+			continue // retained by this guard until t.Cleanup, never a session file
+		}
 		kind, err := objectType(h)
 		if err != nil {
 			unreadable++
+			t.Logf("device-file guard cannot classify handle %#x: %v", h, err)
 			continue
 		}
-		if kind != "File" || isPipe(h) {
+		if kind != "File" {
 			continue
 		}
-		if w, ok := g.files[h]; !ok || !sameObject(h, w) {
-			offenders = append(offenders, h)
+		if w, ok := g.files[h]; ok && sameObject(h, w) {
+			continue
 		}
+		fileType, err := windows.GetFileType(h)
+		if err == nil && fileType == windows.FILE_TYPE_PIPE {
+			continue
+		}
+		if err == nil && fileType == windows.FILE_TYPE_DISK && nativeDirectory(h) {
+			continue
+		}
+		offenders = append(offenders, h)
 	}
 	return offenders, unreadable
 }
@@ -182,8 +243,16 @@ func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, u
 func (g *deviceFileGuard) assertNone(t *testing.T) {
 	t.Helper()
 	offenders, unreadable := g.offenders(t)
-	if len(offenders) != 0 {
-		t.Fatalf("engine holds %d new/changed non-pipe file handle(s) %v (%d unreadable) while a registrar session is live", len(offenders), offenders, unreadable)
+	if len(offenders) != 0 || unreadable != 0 {
+		// Keep unknown baseline files rejected, but make a hosted failure useful
+		// without unsafe duplication or file-name queries. Windows/runtime-owned
+		// files beyond the known owners must be evidenced before any exclusion.
+		for _, h := range offenders {
+			kind, kindErr := objectType(h)
+			fileType, fileErr := windows.GetFileType(h)
+			t.Logf("device-file guard offender %#x: object=%q objectError=%v fileType=%#x fileTypeError=%v", h, kind, kindErr, fileType, fileErr)
+		}
+		t.Fatalf("device-file guard is not clean: %d unowned/changed non-pipe or unclassified file handle(s) %v, %d unreadable handles", len(offenders), offenders, unreadable)
 	}
 }
 
@@ -244,8 +313,8 @@ func TestWintunRegistrarSession(t *testing.T) {
 	must(t, err)
 	warmRuntimeThreads()
 	debug.FreeOSMemory()
-	before := handleSnapshot(t)
 	guard := newDeviceFileGuard(t)
+	before := handleSnapshot(t) // guard witnesses are baseline handles, not session additions
 	_, beforeBytes := processUsage(t)
 	a := newAdapter(t, 0)
 	f := fixtureOnAdapter(t, "ours", a)
@@ -289,8 +358,8 @@ func TestWintunRegistrarSession(t *testing.T) {
 	if !exited || code != 0 {
 		t.Fatalf("registrar did not exit cleanly after Close: exited=%v code=%#x", exited, code)
 	}
-	if kinds["File"] != 0 {
-		t.Fatalf("session added a non-pipe file handle to the engine: %v", kinds)
+	if kinds["File"] != 0 || kinds["unreadable"] != 0 {
+		t.Fatalf("session added a non-pipe file or unreadable handle to the engine: %v", kinds)
 	}
 	if int64(afterBytes)-int64(beforeBytes) > 16<<20 {
 		t.Fatalf("engine retained %d bytes across a registrar session", int64(afterBytes)-int64(beforeBytes))
@@ -302,21 +371,64 @@ func TestWintunRegistrarSession(t *testing.T) {
 func TestWintunRegistrarDeviceFileGuardNegativeControl(t *testing.T) {
 	requireRunner(t)
 	a := newAdapter(t, MinCapacity)
+	// Windows holds a directory File for the current working directory. Model
+	// its limited access with another owned directory: it must be recognized by
+	// native metadata, not copied into the guard's identity allowlist. The path
+	// attributes independently establish that this fixture really is a directory.
+	cwd, err := os.Getwd()
+	must(t, err)
+	name, err := windows.UTF16PtrFromString(cwd)
+	must(t, err)
+	attributes, err := windows.GetFileAttributes(name)
+	must(t, err)
+	if attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		t.Fatal("guard directory fixture is not a directory")
+	}
+	directory, err := windows.CreateFile(name, windows.FILE_TRAVERSE|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	must(t, err)
+	defer windows.CloseHandle(directory)
+	if !handleSnapshot(t)[directory] || !nativeDirectory(directory) {
+		t.Fatal("limited-access directory fixture is absent from the native handle table or cannot be classified")
+	}
 	guard := newDeviceFileGuard(t)
 	s, err := a.startInProcessSession()
 	must(t, err)
 	defer s.Close()
-	offenders, unreadable := guard.offenders(t)
-	report(t, map[string]any{"test": "device_file_guard_negative_control", "arch": runtime.GOARCH,
-		"device_handles": len(offenders), "unreadable": unreadable})
-	if len(offenders) == 0 {
-		t.Fatal("device-file guard did not detect the in-process owner's device handle; the no-device check is vacuous")
-	}
+	// Hold the actual owner stable while the independent native snapshot checks
+	// it. A stray baseline file or one of the guard's witnesses cannot satisfy
+	// this negative control. No removal runs here and no device is duplicated.
+	func() {
+		s.mu.RLock()
+		defer s.mu.RUnlock() // native snapshot failure must not strand Close
+		o, ok := s.rings.owner.(*inProcessOwner)
+		if !ok || !o.registered {
+			t.Fatal("negative control never registered the in-process device")
+		}
+		device := o.deviceOwner.Handle("test negative-control device identity")
+		kind, typeErr := objectType(device)
+		offenders, unreadable := guard.offenders(t)
+		found, directoryFound := false, false
+		for _, h := range offenders {
+			found = found || h == device
+			directoryFound = directoryFound || h == directory
+		}
+		report(t, map[string]any{"test": "device_file_guard_negative_control", "arch": runtime.GOARCH,
+			"baseline_clean": true, "owned_file_witnesses": len(guard.files), "device_handles": len(offenders),
+			"native_directory": uint64(directory), "directory_excluded": !directoryFound, "unreadable": unreadable,
+			"registered_device": uint64(device), "actual_device_detected": found})
+		if typeErr != nil || kind != "File" || unreadable != 0 || !found || directoryFound {
+			t.Fatalf("guard did not distinguish the registered device %#x from directory %#x: kind=%q error=%v offenders=%v unreadable=%d", device, directory, kind, typeErr, offenders, unreadable)
+		}
+	}()
+	must(t, s.Close())
+	guard.assertNone(t)
 }
 
 // ---- session loss: distinct identity, clean teardown, no rebuild ----
 
 type sessionLoss struct {
+	session *Session
 	reader  chan error
 	guards  [][2]windows.Handle
 	process windows.Handle
@@ -327,7 +439,7 @@ func watchLoss(t *testing.T, s *Session, devices *deviceFileGuard) *sessionLoss 
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)
-	l := &sessionLoss{reader: make(chan error, 1), devices: devices}
+	l := &sessionLoss{session: s, reader: make(chan error, 1), devices: devices}
 	_, l.process = sessionRegistrar(t, s)
 	t.Cleanup(func() { windows.CloseHandle(l.process) })
 	waits := s.Stats().ReadWaits
@@ -374,6 +486,12 @@ func (l *sessionLoss) wait(t *testing.T, ownerExit bool) error {
 	}
 	if !errors.Is(err, ErrAdapterRemoved) || errors.Is(err, ErrRegistrarExited) != ownerExit {
 		t.Fatalf("reader error %v: want ErrAdapterRemoved, owner-exit identity %v", err, ownerExit)
+	}
+	// The reader returns the settled reason only after maintenance has unlocked
+	// the session. There is no concurrent writer in this fixture, so the native
+	// loss must now have the same identity through WriteBatch as well.
+	if n, writeErr := l.session.WriteBatch([][]byte{testPacket()}); n != 0 || !errors.Is(writeErr, ErrAdapterRemoved) || errors.Is(writeErr, ErrRegistrarExited) != ownerExit {
+		t.Fatalf("writer after native loss: %d %v; want ErrAdapterRemoved, owner-exit identity %v", n, writeErr, ownerExit)
 	}
 	for i, g := range l.guards {
 		if !sameObject(g[0], g[1]) || windows.SetEvent(g[0]) != nil {
@@ -716,6 +834,9 @@ func TestWintunRegistrarStartupFaults(t *testing.T) {
 			if !childExited {
 				t.Fatalf("startup fault %q left the child process alive", tc.fault)
 			}
+			childCloseErr := windows.CloseHandle(child)
+			child = 0 // consume the independent witness before the leak snapshot
+			must(t, childCloseErr)
 			must(t, r.close())
 			// The engine's mapped view must be reclaimed on a startup failure too.
 			var memory windows.MemoryBasicInformation
@@ -725,7 +846,7 @@ func TestWintunRegistrarStartupFaults(t *testing.T) {
 			}
 			debug.FreeOSMemory()
 			kinds := newHandleKinds(t, before, handleSnapshot(t))
-			for _, leaked := range []string{"Section", "Job", "File", "Pipe", "Process", "Event"} {
+			for _, leaked := range []string{"Section", "Job", "File", "Pipe", "Process", "Event", "unreadable"} {
 				if kinds[leaked] != 0 {
 					t.Fatalf("startup fault %q leaked %s handles: %v", tc.fault, leaked, kinds)
 				}
@@ -748,15 +869,38 @@ func TestWintunRegistrarPostRegisterFailureCleanup(t *testing.T) {
 	requireRunner(t)
 	a := newAdapter(t, MinCapacity)
 	guard := newDeviceFileGuard(t)
-	restoreCmd, restoreEnv := registrarCommand, registrarExtraEnv
+	restoreCmd, restoreEnv, restoreResume := registrarCommand, registrarExtraEnv, registrarBeforeResume
+	var child windows.Handle
+	var witnessErr error
+	defer func() {
+		registrarCommand, registrarExtraEnv, registrarBeforeResume = restoreCmd, restoreEnv, restoreResume
+		if child != 0 {
+			windows.CloseHandle(child)
+		}
+	}()
 	registrarCommand = registrarFixtureMode
 	registrarExtraEnv = []string{"NETSWITCH_WINTUN_FIXTURE_FAULT=post-register-exit"}
+	registrarBeforeResume = func(pid uint32) {
+		child, witnessErr = windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	}
 	s, startErr := a.StartSession()
-	registrarCommand, registrarExtraEnv = restoreCmd, restoreEnv
+	registrarCommand, registrarExtraEnv, registrarBeforeResume = restoreCmd, restoreEnv, restoreResume
 	if startErr == nil {
 		s.Close()
 		t.Fatal("a registrar that died after registering must fail StartSession")
 	}
+	if witnessErr != nil || child == 0 {
+		t.Fatalf("post-register fixture process was not independently witnessed: %v", witnessErr)
+	}
+	exited, code := exitState(child, time.Second)
+	// Exit 6 is reachable only after registerDevice succeeded. A validation or
+	// registration failure exits 1 and must not masquerade as cleanup proof.
+	if !exited || code != 6 {
+		t.Fatalf("fixture did not reach post-registration exit 6: exited=%v code=%#x startup=%v", exited, code, startErr)
+	}
+	childCloseErr := windows.CloseHandle(child)
+	child = 0
+	must(t, childCloseErr)
 	guard.assertNone(t)
 	// The orphaned registration must be gone: a fresh real session now succeeds
 	// on the same adapter and carries traffic.
@@ -767,7 +911,7 @@ func TestWintunRegistrarPostRegisterFailureCleanup(t *testing.T) {
 		t.Fatalf("recovered session failed: %v", f.fault())
 	}
 	report(t, map[string]any{"test": "registrar_post_register_failure", "arch": runtime.GOARCH,
-		"startup_error": startErr.Error(), "recovered": true})
+		"startup_error": startErr.Error(), "registered_child_exit_code": code, "recovered": true})
 }
 
 // ---- engine crash proves kill-on-close, with a helper that ignores EOF ----

@@ -80,13 +80,23 @@ owning adapter also calls the DLL's adapter removal.
 A lost registration — real adapter removal **or** the registrar exiting on its
 own — stops the session with `ErrAdapterRemoved` and never triggers an
 automatic rebuild. A confirmed owner loss takes precedence even over a queued
-ring-corruption cause, so a dead owner is never rebuilt in place. Owner death
+ring-corruption cause, so a dead owner is never rebuilt in place. Maintenance
+also samples the driver's loss markers **before** stopping the registrar:
+either marker already present prevents reopening even if the helper then exits
+zero. Markers first published by our own stop do not prevent corruption recovery.
+Receive.Head alone can also mean the driver rejected a damaged receive ring;
+it remains a session loss, matching the existing writer's disconnected result.
+Owner death
 is classified from the registrar's **completed** exit during teardown, not a
 pre-close sample: it is owner death if the process was already gone before our
 stop, or ended non-zero without our own escalation; a clean EOF stop exits
 zero. That exit is then joined with `ErrRegistrarExited`, while real removal
 carries `ErrAdapterRemoved` alone. The distinction is a diagnostic — both are
 adapter-lost — and is best-effort, not a hard guarantee under every race.
+On a disconnected write, a zero-time process wait adds `ErrRegistrarExited` if
+the owner is already signalled. If its markers precede that signal, the first
+write reports only `ErrAdapterRemoved`; reads and later writes use maintenance's
+completed-exit classification. Healthy writes gain no native process poll.
 Reporting the distinct "adapter lost" reason to the controller, and any restart
 budget, belong to the engine/controller, not this package. Only ring
 **corruption** reopens the rings (and thereby starts a fresh registrar).

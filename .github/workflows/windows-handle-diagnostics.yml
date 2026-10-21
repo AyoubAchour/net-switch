@@ -250,12 +250,17 @@ jobs:
       - name: Registrar ownership, retirement and production-engine proofs
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
-          $selected = @('RegistrarRefusesWithoutInheritedCapabilities', 'RingRemovalBetweenMarkerCheckAndClose',
-            'SessionCloseReportsRetirementError', 'WintunRegistrarSession', 'WintunRegistrarLoss',
+          $selected = @('RegistrarRefusesWithoutInheritedCapabilities', 'RegistrarReplyPreservesReadError',
+            'RingRemovalBetweenMarkerCheckAndClose', 'SessionCloseReportsRetirementError',
+            'SessionCorruptionYieldsToConfirmedOwnerLoss', 'SessionCorruptionYieldsToConfirmedOwnerLossCleanRetire',
+            'SessionCorruptionYieldsToPreStopDriverRelease', 'SessionLossSentinels',
+            'WintunRegistrarSession', 'WintunRegistrarLoss',
+            'WintunRegistrarDeviceFileGuardNegativeControl', 'WintunRegistrarPostRegisterFailureCleanup',
             'WintunRegistrarNoDeviceFileThroughRecovery', 'WintunRegistrarJobReapsBeforeResume',
-            'WintunRegistrarStartupFaults', 'WintunRegistrarEngineCrash', 'WintunRegistrarProductionEngine') |
+            'WintunRegistrarStartupFaults', 'WintunRegistrarStartupCloseErrors',
+            'WintunRegistrarEngineCrash', 'WintunRegistrarProductionEngine') |
             ForEach-Object { "Test$_" }
-          $pattern = '^Test(RegistrarRefusesWithoutInheritedCapabilities|RingRemovalBetweenMarkerCheckAndClose|SessionCloseReportsRetirementError|WintunRegistrar(Session|Loss|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|EngineCrash|ProductionEngine))$'
+          $pattern = '^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|RingRemovalBetweenMarkerCheckAndClose|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine))$'
           ./bin/wintun-registrar.test.exe '-test.v' '-test.timeout=12m' "-test.run=$pattern" | Tee-Object -Variable log
           $code = $LASTEXITCODE
           # Top-level results only; subtests are indented.

@@ -48,16 +48,21 @@ const RegistrarMode = "__netswitch-wintun-registrar"
 const procThreadAttributeJobList = 0x0002000D
 
 // Test seams. Production always uses its own executable, RegistrarMode, no
-// extra environment and no before-resume hook. registrarExecutable lets a test
-// binary start the built netswitch-engine.exe as the registrar, so the measured
-// helper is the production image rather than the test binary.
+// extra environment and no before-resume hook; registrarClose consumes each
+// owner through its real native close. Tests can inject a close-result error
+// after consuming the owner to verify failure cleanup. registrarExecutable lets
+// a test binary start the built netswitch-engine.exe as the registrar, so the
+// measured helper is the production image rather than the test binary.
 var (
 	registrarExecutable   = os.Executable
 	registrarCommand      = RegistrarMode
 	registrarExtraEnv     []string
 	registrarBeforeResume func(pid uint32)
 	registrarStartTimeout = 15 * time.Second
+	registrarClose        = func(o winhandle.Owner, site string) error { return o.HandleClose(site) }
 )
+
+var setRegistrarJobInformation = windows.NewLazySystemDLL("kernel32.dll").NewProc("SetInformationJobObject")
 
 const (
 	registrarVersion      = 1
@@ -245,7 +250,7 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	closeOwned := func() error {
 		var err error
 		for i := len(owned) - 1; i >= 0; i-- {
-			err = errors.Join(err, owned[i].HandleClose("Wintun registrar setup close"))
+			err = errors.Join(err, registrarClose(owned[i], "Wintun registrar setup close"))
 		}
 		owned = nil
 		return err
@@ -286,18 +291,21 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 			ActiveProcessLimit: 1,
 		},
 	}
-	if _, err = windows.SetInformationJobObject(job.Handle("Wintun registrar job limits"), windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
-		return nil, fmt.Errorf("limit Wintun registrar job: %w", err)
+	// Keep each pointer conversion at the annotated LazyProc.Call boundary.
+	// x/sys's uintptr-taking SetInformationJobObject wrapper is not annotated;
+	// new/KeepAlive alone would not prevent a stack move during lazy resolution.
+	if ok, _, callErr := setRegistrarJobInformation.Call(uintptr(job.Handle("Wintun registrar job limits")), windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&limits)), unsafe.Sizeof(limits)); ok == 0 {
+		return nil, fmt.Errorf("limit Wintun registrar job: %w", callErr)
 	}
 	ui := windows.JOBOBJECT_BASIC_UI_RESTRICTIONS{UIRestrictionsClass: windows.JOB_OBJECT_UILIMIT_DESKTOP |
 		windows.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS | windows.JOB_OBJECT_UILIMIT_EXITWINDOWS |
 		windows.JOB_OBJECT_UILIMIT_GLOBALATOMS | windows.JOB_OBJECT_UILIMIT_HANDLES |
 		windows.JOB_OBJECT_UILIMIT_READCLIPBOARD | windows.JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS |
 		windows.JOB_OBJECT_UILIMIT_WRITECLIPBOARD}
-	if _, err = windows.SetInformationJobObject(job.Handle("Wintun registrar UI limits"), windows.JobObjectBasicUIRestrictions,
-		uintptr(unsafe.Pointer(&ui)), uint32(unsafe.Sizeof(ui))); err != nil {
-		return nil, fmt.Errorf("limit Wintun registrar UI access: %w", err)
+	if ok, _, callErr := setRegistrarJobInformation.Call(uintptr(job.Handle("Wintun registrar UI limits")), windows.JobObjectBasicUIRestrictions,
+		uintptr(unsafe.Pointer(&ui)), unsafe.Sizeof(ui)); ok == 0 {
+		return nil, fmt.Errorf("limit Wintun registrar UI access: %w", callErr)
 	}
 	// Inheritable duplicates exist only until CreateProcess returns, and only
 	// the explicit handle list below can pass them. Their open and close are
@@ -308,7 +316,7 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	closeInherited := func() error {
 		var e error
 		for _, o := range inheritedOwners {
-			e = errors.Join(e, o.HandleClose("Wintun registrar inherited duplicate close"))
+			e = errors.Join(e, registrarClose(o, "Wintun registrar inherited duplicate close"))
 		}
 		inheritedOwners = nil
 		return e
@@ -384,29 +392,27 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 		if !g.wait(registrarKillTimeout) {
 			err = errRegistrarAlive
 		}
-		return errors.Join(cause, err, process.HandleClose("Wintun registrar setup process close"))
+		return errors.Join(cause, err, registrarClose(process, "Wintun registrar setup process close"))
 	}
 	if err = closeInherited(); err != nil {
-		thread.HandleClose("Wintun registrar thread close")
-		return nil, abandon(err)
+		return nil, abandon(errors.Join(err, registrarClose(thread, "Wintun registrar thread close")))
 	}
 	// Close the parent's own ends of the child's pipes so the child holds the
 	// only control-read and reply-write ends. Its exit then ends the reply read.
 	// A close consumes its owner even on failure, so drop each from cleanup
 	// responsibility regardless of result; never close a consumed owner twice.
-	controlReadErr := controlRead.HandleClose("Wintun registrar control read close")
+	controlReadErr := registrarClose(controlRead, "Wintun registrar control read close")
 	remove(controlRead)
-	replyWriteErr := replyWrite.HandleClose("Wintun registrar reply write close")
+	replyWriteErr := registrarClose(replyWrite, "Wintun registrar reply write close")
 	remove(replyWrite)
 	if err = errors.Join(controlReadErr, replyWriteErr); err != nil {
-		thread.HandleClose("Wintun registrar thread close")
-		return nil, abandon(err)
+		return nil, abandon(errors.Join(err, registrarClose(thread, "Wintun registrar thread close")))
 	}
 	if registrarBeforeResume != nil {
 		registrarBeforeResume(pi.ProcessId) // crash-before-resume fixture exits here
 	}
 	_, resumeErr := windows.ResumeThread(thread.Handle("Wintun registrar resume"))
-	if err = errors.Join(resumeErr, thread.HandleClose("Wintun registrar thread close")); err != nil {
+	if err = errors.Join(resumeErr, registrarClose(thread, "Wintun registrar thread close")); err != nil {
 		return nil, abandon(err)
 	}
 	var written uint32
@@ -423,7 +429,7 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	replyDone := make(chan replyResult, 1)
 	go func() {
 		output, rerr := readLine(replyRead.Handle("Wintun registrar reply"), registrarMessageLimit)
-		replyDone <- replyResult{output, errors.Join(rerr, replyRead.HandleClose("Wintun registrar reply read close"))}
+		replyDone <- replyResult{output, errors.Join(rerr, registrarClose(replyRead, "Wintun registrar reply read close"))}
 	}()
 	timer := time.NewTimer(registrarStartTimeout)
 	var reply replyResult
@@ -433,8 +439,11 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	case <-timer.C:
 		cause := abandon(fmt.Errorf("Wintun registrar did not report within %v", registrarStartTimeout))
 		select { // the killed child closes its write end, ending readLine promptly
-		case <-replyDone:
+		case reply = <-replyDone:
+			_, replyErr := parseReply(reply.output, reply.err)
+			cause = errors.Join(cause, replyErr)
 		case <-time.After(registrarKillTimeout):
+			cause = errors.Join(cause, errors.New("Wintun registrar reply reader did not finish after termination"))
 		}
 		return nil, cause
 	}
@@ -472,11 +481,13 @@ func readLine(h windows.Handle, limit int) ([]byte, error) {
 	return output, fmt.Errorf("Wintun registrar message exceeds %d bytes", limit)
 }
 
-func parseReply(output []byte, readErr error) (registrarReply, error) {
-	var reply registrarReply
+func parseReply(output []byte, readErr error) (reply registrarReply, err error) {
+	// A valid ready message does not excuse a failed read-owner close. Preserve
+	// the underlying read/close error on malformed and failure replies too.
+	defer func() { err = errors.Join(err, readErr) }()
 	text := string(output)
 	if !strings.HasPrefix(text, registrarReplyPrefix) {
-		return reply, fmt.Errorf("Wintun registrar gave no reply (%v): %q", readErr, text)
+		return reply, fmt.Errorf("Wintun registrar gave no reply: %q", text)
 	}
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(text, registrarReplyPrefix)), &reply); err != nil {
 		return reply, fmt.Errorf("invalid Wintun registrar reply %q: %w", text, err)

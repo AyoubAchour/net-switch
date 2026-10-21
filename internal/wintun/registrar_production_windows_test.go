@@ -36,7 +36,10 @@ const (
 	objInherit                = 0x2       // HandleAttributes bit for an inheritable handle
 )
 
-var isProcessInJob = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+var (
+	isProcessInJob               = windows.NewLazySystemDLL("kernel32.dll").NewProc("IsProcessInJob")
+	queryRegistrarJobInformation = windows.NewLazySystemDLL("kernel32.dll").NewProc("QueryInformationJobObject")
+)
 
 type engineProvenance struct {
 	Path      string            `json:"path"`
@@ -322,7 +325,7 @@ func TestWintunRegistrarProductionEngine(t *testing.T) {
 	must(t, err)
 	warmRuntimeThreads()
 	debug.FreeOSMemory()
-	before := handleSnapshot(t)
+	guard := newDeviceFileGuard(t)
 	a := newAdapter(t, 0)
 	instance := a.InstanceID()
 	called := time.Now()
@@ -365,13 +368,17 @@ func TestWintunRegistrarProductionEngine(t *testing.T) {
 		t.Fatalf("IsProcessInJob: %v", err)
 	}
 	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-	must(t, windows.QueryInformationJobObject(g.job.Handle("test registrar job limits"), windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits)), nil))
+	// As in the launcher, keep the conversion at the annotated Call boundary;
+	// the uintptr-taking x/sys QueryInformationJobObject wrapper cannot pin it.
+	if ok, _, err := queryRegistrarJobInformation.Call(uintptr(g.job.Handle("test registrar job limits")), windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&limits)), unsafe.Sizeof(limits), 0); ok == 0 {
+		t.Fatalf("QueryInformationJobObject: %v", err)
+	}
 	killOnClose := limits.BasicLimitInformation.LimitFlags&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0
 	if inJob == 0 || !killOnClose || limits.BasicLimitInformation.ActiveProcessLimit != 1 {
 		t.Fatalf("registrar job: member=%v kill-on-close=%v active limit=%d", inJob != 0, killOnClose, limits.BasicLimitInformation.ActiveProcessLimit)
 	}
-	assertNoDeviceFile(t, before)
+	guard.assertNone(t)
 
 	ringView, wantView := uintptr(g.reply.Address), sessionViewBytes(t, s)
 	afterStart := sampleHelper(t, process, stats.PID, ringView)
@@ -386,7 +393,7 @@ func TestWintunRegistrarProductionEngine(t *testing.T) {
 			"privateBytes": stats.PrivateBytes, "goHeapAllocBytes": stats.HeapBytes, "goStackInuseBytes": stats.StackBytes},
 		"independent_after_start": afterStart, "independent_after_traffic": afterTraffic,
 		"private_delta_over_traffic_bytes": int64(afterTraffic.PrivateBytes) - int64(afterStart.PrivateBytes),
-		"handle_kinds": kinds, "inheritable_handles": inheritable, "ring_view_bytes": wantView, "exchanges": 64,
+		"handle_kinds":                     kinds, "inheritable_handles": inheritable, "ring_view_bytes": wantView, "exchanges": 64,
 		"job_kill_on_close": killOnClose, "job_active_process_limit": limits.BasicLimitInformation.ActiveProcessLimit})
 	if !stats.FootprintMeasured || stats.PrivateBytes == 0 || stats.Handles == 0 {
 		t.Fatalf("registrar self-report is unmeasured: %+v", stats)

@@ -13,7 +13,7 @@ import (
 )
 
 // Child modes of the same test binary. registrarFixtureMode exercises the real
-// registration validation, reply and lifecycle with no device, driven by the
+// registration validation, reply and lifecycle, driven by the
 // NETSWITCH_WINTUN_FIXTURE_FAULT environment variable the parent sets through
 // the registrarExtraEnv seam. registrarCrasherMode spawns a registrar and then
 // "crashes" before resuming it, to prove atomic job membership.
@@ -38,7 +38,7 @@ func TestMain(m *testing.M) {
 
 // runRegistrarFixture mirrors the production registrar (prepareRegistration,
 // the reply and the EOF wait) but injects the fault named by the environment.
-// It registers no real device, so it needs no adapter.
+// Only post-register-exit registers a real device and requires an adapter.
 func runRegistrarFixture() int {
 	stdin, stdout, err := registrarStdHandles()
 	if err != nil {

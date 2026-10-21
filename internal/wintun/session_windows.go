@@ -243,6 +243,14 @@ func (s *Session) maintain() {
 				s.mu.Unlock()
 				continue
 			}
+			// Sample the driver's markers before retiring the owner, because its
+			// stop makes the driver publish them as well. A marker already present
+			// is a loss the driver published before our stop, which read and write
+			// already treat as ErrDisconnected (removal, the owner's own exit that
+			// end() classifies, or a receive-thread rejection). So the session is
+			// lost even if ErrCorrupt queued this repair and the owner then exits
+			// cleanly on our stop request.
+			releasedFirst := s.rings.disconnected()
 			err := s.rings.close()
 			// The teardown/retirement error is a real cleanup failure, distinct
 			// from the expected removal/owner-exit cause. Session.Close must still
@@ -255,7 +263,7 @@ func (s *Session) maintain() {
 			// must never be rebuilt in place, even if ErrCorrupt triggered this.
 			lostToExit := s.rings.ownerExitedFirst
 			s.rings = nil
-			removed := errors.Is(cause, ErrDisconnected) || lostToExit
+			removed := errors.Is(cause, ErrDisconnected) || releasedFirst || lostToExit
 			if !removed && err == nil {
 				s.event("recovering", cause)
 				s.rings, err = reopenRings(s.stop, s.open)
@@ -271,11 +279,11 @@ func (s *Session) maintain() {
 				// part of this terminal reason.
 				s.err = errors.Join(ErrAdapterRemoved, ErrRegistrarExited, cause)
 				s.event("removed", s.err)
-				slog.Warn("Wintun registration owner exited; session lost", "adapter", s.adapter.config.Name, "error", errors.Join(s.err, err))
+				slog.Warn("Wintun registration owner exited; session lost", "adapter", s.adapter.config.Name, "markersBeforeStop", releasedFirst, "error", errors.Join(s.err, err))
 			} else if removed {
 				s.err = errors.Join(ErrAdapterRemoved, cause)
 				s.event("removed", s.err)
-				slog.Info("Wintun adapter removed", "adapter", s.adapter.config.Name, "error", errors.Join(s.err, err))
+				slog.Info("Wintun adapter removed", "adapter", s.adapter.config.Name, "markersBeforeStop", releasedFirst, "error", errors.Join(s.err, err))
 			} else if err != nil {
 				s.failures.Add(1)
 				s.err = fmt.Errorf("Wintun session recovery after %v: %w", cause, err)
@@ -357,9 +365,24 @@ func (s *Session) WriteBatch(packets [][]byte) (int, error) {
 		s.fail(err)
 	}
 	if errors.Is(err, ErrDisconnected) {
-		err = ErrAdapterRemoved
+		err = s.writeLoss()
 	}
 	return n, err
+}
+
+// writeLoss is the writer's own adapter-lost error, decided without waiting
+// and only on this loss path. The writer holds mu, so maintenance cannot be
+// retiring the owner: an exit handle already signalled means it ended on its
+// own. The driver publishes its markers from the owner's exit callback before
+// the process is signalled, so a writer can see them first and report removal
+// only; ReadBatch and later writes return maintenance's completed-exit reason.
+func (s *Session) writeLoss() error {
+	if h := s.rings.exited(); h != 0 {
+		if event, err := windows.WaitForSingleObject(h, 0); err == nil && event == windows.WAIT_OBJECT_0 {
+			return errors.Join(ErrAdapterRemoved, ErrRegistrarExited)
+		}
+	}
+	return ErrAdapterRemoved
 }
 
 // ReadBatch has one ordered reader. A blocking read is interrupted by Close,
