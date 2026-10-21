@@ -17,10 +17,21 @@ export async function nativeUDPCapacity(binding) {
   assert(line, result.stdout);
   const native = JSON.parse(line.slice(line.indexOf(marker) + marker.length));
   assert(native.held > 0 && native.uniquePorts === native.held && Object.keys(native.failures).length);
+  // The Go pair variant also runs the native control for UDP recovery: the
+  // engine run's release/reopen cycle with the engine out of the path.
   const paired = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
-    ['-test.v', '-test.run=^TestNativeUDPPairedCapacity$', '-test.timeout=3m'],
+    ['-test.v', '-test.run=^TestNativeUDPPairedCapacity$', '-test.timeout=6m'],
     { env: { NETSWITCH_PORT_GATE: '1', NETSWITCH_UDP_BASELINE_SOURCE: binding.address,
-      NETSWITCH_UDP_BASELINE_INDEX: String(binding.index) }, timeout: 180_000 });
+      NETSWITCH_UDP_BASELINE_INDEX: String(binding.index), NETSWITCH_UDP_RECOVERY_CYCLES: String(udpRecoveryCycles) },
+    timeout: 360_000 });
+  const cyclesMarker = 'WINDOWS NATIVE UDP RECOVERY CYCLES ';
+  const nativeRecovery = paired.stdout.split(/\r?\n/).filter((value) => value.includes(cyclesMarker))
+    .map((value) => JSON.parse(value.slice(value.indexOf(cyclesMarker) + cyclesMarker.length)))[0];
+  assert(udpRecoveryCycles === 0 || nativeRecovery?.cycles?.length === udpRecoveryCycles, `Native UDP recovery control did not run: ${paired.stdout.slice(-2000)}`);
+  if (nativeRecovery) console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path: 'native', cycles: nativeRecovery.cycles.length,
+    attempts: nativeRecovery.reopenAttempts, refused: nativeRecovery.reopenRefused,
+    restoreRefused: nativeRecovery.cycles.reduce((n, cycle) => n + cycle.restoreRefused, 0),
+    refusals: nativeRecovery.cycles.flatMap((cycle) => cycle.refusals ?? []) })}`);
   const pairMarker = 'WINDOWS NATIVE UDP PAIRED CAPACITY ';
   const pairs = paired.stdout.split(/\r?\n/).filter((value) => value.includes(pairMarker))
     .map((value) => JSON.parse(value.slice(value.indexOf(pairMarker) + pairMarker.length)));
@@ -46,8 +57,12 @@ export async function nativeUDPCapacity(binding) {
     assert(sample.limitReached && sample.verifiedPayloads === sample.heldPairs * 2);
   }
   console.log(`WINDOWS CONCURRENT UDP BASELINE ${JSON.stringify(concurrentPairs)}`);
-  return { ...native, matchedPairs: pairs, concurrentPairs };
+  return { ...native, matchedPairs: pairs, concurrentPairs, nativeRecovery };
 }
+
+// Release/reopen cycles for the UDP recovery rates (SYSTEM-DESIGN 5.9 open
+// question): the same count natively and through the engine, in one job.
+export const udpRecoveryCycles = Number(process.env.NETSWITCH_UDP_RECOVERY_CYCLES ?? 10);
 
 async function udpPortSpaceAtFailure() {
   const startedAt = new Date().toISOString();
@@ -475,18 +490,63 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
           console.log(`WINDOWS UDP RECOVERY FAILURE ${JSON.stringify(evidence.recoveryFailure)}`);
           if (verdict.newVerdict === 'reported') {
             console.log(`WINDOWS UDP RECOVERY CONTENTION REPORTED ${JSON.stringify({ failures: failures.length, ...verdict })}`);
-          } else {
-            // Evidence only (x64 run 39621326637: ENOBUFS with about 519 ports
-            // free and no other process grown): is the refusal transient?
-            await delay(200);
-            const retry = await clients[0].call('open', { ...target, count: failures.length }).catch((error) => ({ error: String(error) }));
-            console.log(`WINDOWS UDP RECOVERY RETRY AFTER 200 MS ${JSON.stringify({ opened: retry.opened, errors: retry.attempts?.map((item) => item.Error), error: retry.error })}`);
-            assert.equal(failures.length, 0, `UDP capacity did not recover on first attempts: ${JSON.stringify(failures)}`);
           }
         }
+        held += reopen - failures.length;
+        // The rate evidence (SYSTEM-DESIGN 5.9 open question): this gated
+        // cycle plus evidence-only cycles of the same shape, beside the native
+        // control in nativeUDPCapacity. Retries are separate attempts and never
+        // change the gated verdict below.
+        const freeFrom = (stats) => {
+          const pool = poolBefore.families?.find((item) => item.family === family);
+          if (!pool?.dynamicRange || !stats.nativeUDPState?.groups) return null;
+          const used = new Set(stats.nativeUDPState.groups.filter((group) => group.source === '0.0.0.0' || !group.source.includes(':'))
+            .flatMap((group) => group.ports));
+          let free = 0;
+          for (let port = pool.dynamicRange.start; port <= pool.dynamicRange.end; port++) {
+            if (!used.has(port) && !(pool.excludedRanges ?? []).some((range) => port >= range.start && port <= range.end)) free++;
+          }
+          return free;
+        };
+        const refusalsOf = async (phase, attempts) => {
+          const refused = attempts.filter((item) => item.Error);
+          if (!refused.length) return [];
+          const free = freeFrom(await engineStats().catch(() => ({})));
+          await delay(200);
+          const retry = await clients[0].call('open', { ...target, count: refused.length }).catch((error) => ({ error: String(error), attempts: [] }));
+          const retried = retry.attempts ?? [];
+          held += retried.filter((item) => !item.Error).length;
+          return refused.map((item, i) => ({ phase, code: item.Error, errno: item.NativeCode, call: item.NativeCall,
+            freeAfterBatch: free, retryAfter200msOK: retried[i] ? !retried[i].Error : false, retryCode: retried[i]?.Error || retry.error }));
+        };
+        const cycles = [{ gated: true, freeBeforeReopen: availableBefore, reopenAttempts: reopen, reopenRefused: failures.length,
+          refusals: await refusalsOf('reopen', returned.attempts) }];
+        for (let n = 1; n < udpRecoveryCycles; n++) {
+          const cycleBefore = await engineStats();
+          const freed = await clients[0].call('release', { count: 512 });
+          held -= freed.released;
+          await until(async () => (await engineStats()).flows.UDP <= cycleBefore.flows.UDP - freed.released,
+            'UDP sessions released before an evidence cycle', 3000);
+          const freeBeforeReopen = freeFrom(await engineStats());
+          const reopened = await clients[0].call('open', { ...target, count: reopen });
+          held += reopened.attempts.filter((item) => !item.Error).length;
+          const reopenRefusals = await refusalsOf('reopen', reopened.attempts);
+          const restored = await clients[0].call('open', { ...target, count: reopen });
+          held += restored.attempts.filter((item) => !item.Error).length;
+          const restoreRefusals = await refusalsOf('restore', restored.attempts);
+          cycles.push({ releasedPairs: freed.released, freeBeforeReopen, reopenAttempts: reopen, reopenRefused: reopenRefusals.length,
+            restoreAttempts: reopen, restoreRefused: restoreRefusals.length, refusals: [...reopenRefusals, ...restoreRefusals] });
+        }
+        evidence.recoveryCycles = cycles;
+        console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path: 'engine', cycles: cycles.length,
+          attempts: cycles.reduce((n, cycle) => n + cycle.reopenAttempts, 0), refused: cycles.reduce((n, cycle) => n + cycle.reopenRefused, 0),
+          restoreRefused: cycles.reduce((n, cycle) => n + (cycle.restoreRefused ?? 0), 0), refusals: cycles.flatMap((cycle) => cycle.refusals) })}`);
         console.log(`WINDOWS UDP RECOVERY VERDICT ${JSON.stringify({ reopened: reopen - failures.length, failed: failures.length,
           oldVerdict: failures.length ? 'fail' : 'pass', newVerdict: failures.length ? evidence.recoveryFailure.newVerdict : 'pass' })}`);
-        held += reopen - failures.length;
+        // The gate, unchanged: the first cycle's reopens, before any retry.
+        if (failures.length && evidence.recoveryFailure.newVerdict !== 'reported') {
+          assert.equal(failures.length, 0, `UDP capacity did not recover on first attempts: ${JSON.stringify(failures)}`);
+        }
         evidence.recovery = { released, reconciled, returned, reopen, availableBefore, ms: performance.now() - started, verified: await verify('after-recovery') };
       },
     };
