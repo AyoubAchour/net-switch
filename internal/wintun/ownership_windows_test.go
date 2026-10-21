@@ -29,10 +29,10 @@ var (
 
 // pinToCurrentProcessor keeps this locked OS thread on the processor it is
 // running on, and returns a function that restores its previous affinity.
-// A freed handle value goes back to a free list that Windows keeps per
-// processor, so a thread that migrates between the close and the next
-// allocation may never be offered that value again. ARM64 run 39559181981
-// showed exactly that: 4,096 allocations without the freed value.
+// ARM64 run 39559181981 missed the freed value in 4,096 allocations. One
+// suspected cause was per-processor handle free lists; pinning alone did not
+// prevent a repeat (run 39564185852), so legacyCloseWindow also starts the
+// runtime's threads beforehand and names the value's occupant on a miss.
 func pinToCurrentProcessor(t *testing.T) (processor uint32, restore func()) {
 	t.Helper()
 	n, _, _ := getCurrentProcessorNumber.Call()
@@ -198,6 +198,12 @@ func TestRingRemovalBetweenMarkerCheckAndClose(t *testing.T) {
 }
 
 func legacyCloseWindow(t *testing.T, tracked bool) {
+	// Each new Go OS thread opens native handles of its own, and the runtime
+	// may start one while this test sits in a syscall. Run 39564185852 still
+	// missed the freed value 4,096 times with the thread pinned, which fits a
+	// new thread taking it. Start the threads first; a miss below reports
+	// what object now holds the value.
+	warmRuntimeThreads()
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	processor, restore := pinToCurrentProcessor(t)
@@ -264,7 +270,9 @@ func legacyCloseWindow(t *testing.T, tracked bool) {
 		panic(violation)
 	}
 	if replacement == 0 {
-		t.Fatalf("the injected removal never had its handle number reused (driver close: %v); the race was not exercised", driverErr)
+		occupant, typeErr := objectType(device)
+		t.Fatalf("the injected removal never had its handle number reused (driver close: %v; value %#x now holds %q, %v); the race was not exercised",
+			driverErr, device, occupant, typeErr)
 	}
 	if sameObject(device, deviceWitness) {
 		t.Fatal("the device handle was never closed")
