@@ -62,10 +62,10 @@ func TestWintunSectionProbeChild(t *testing.T) {
 	must(t, json.Unmarshal([]byte(raw), &config))
 	guid, err := windows.GUIDFromString(config.GUID)
 	must(t, err)
-	path, instance, err := deviceForGUID(guid)
+	instance, path, err := deviceForGUID(guid)
 	must(t, err)
 	if !strings.EqualFold(instance, config.Instance) {
-		t.Fatal("helper found a different device instance")
+		t.Fatalf("helper found a different device instance: expected %q, got %q", config.Instance, instance)
 	}
 	// Occupy the parent's address if available; an occupied address is already
 	// sufficient. The mapped view must actually end up at a different address.
