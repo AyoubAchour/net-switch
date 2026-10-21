@@ -24,9 +24,13 @@ import (
 // active excluded port ranges with the native UDP table captured at the
 // refusal. netsh is only asked to show settings; nothing is ever changed and
 // the refused flow never waits for these commands.
+//
+// The timeouts bound evidence collection only. A cold netsh start on a busy
+// hosted runner took over 5 s twice (runs 39576436110 and 39587194026), which
+// lost the evidence; 15 s per command and 60 s in total keep it.
 const (
-	reservationCommandTimeout = 5 * time.Second
-	reservationProbeTimeout   = 15 * time.Second
+	reservationCommandTimeout = 15 * time.Second
+	reservationProbeTimeout   = 60 * time.Second
 	reservationOutputLimit    = 64 << 10
 )
 

@@ -51,7 +51,7 @@ export async function nativeUDPCapacity(binding) {
 async function udpPortSpaceAtFailure() {
   const startedAt = new Date().toISOString();
   const result = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
-    ['-test.v', '-test.run=^TestUDPPortSpaceDiagnosisReadsHostedSettings$', '-test.timeout=30s']);
+    ['-test.v', '-test.run=^TestUDPPortSpaceDiagnosisReadsHostedSettings$', '-test.timeout=90s']);
   const marker = 'WINDOWS UDP PORT SPACE ';
   const line = result.stdout.split(/\r?\n/).find((value) => value.includes(marker));
   assert(line, result.stdout);
