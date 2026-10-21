@@ -21,6 +21,15 @@ func runCapacityCheck(t *testing.T, run func(*Env)) *harness.Report {
 	c.Run = func(check *harness.T) { run(&Env{T: check, deferAttribution: true}) }
 	return harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
 }
+// runHardCheck runs checks in a case with no declared release blocker, so a
+// fixture that makes no release assertion is not an incomplete declaration.
+func runHardCheck(t *testing.T, run func(*Env)) *harness.Report {
+	t.Helper()
+	c := &harness.Case{ID: "capacity.hard-checks", Title: "hard checks", Label: harness.Requires10}
+	c.Run = func(check *harness.T) { run(&Env{T: check}) }
+	return harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
+}
+
 func requireFailure(t *testing.T, report *harness.Report, message string) {
 	t.Helper()
 	if !report.JobFailed {
@@ -113,7 +122,7 @@ func TestCapacityShortfallNeedsCompleteRefusalEvidence(t *testing.T) {
 						s.RefusedTCP = r
 					}
 					report := runCapacityCheck(t, func(e *Env) {
-						credit := e.capacityAccounting("test", protocol, engine.Stats{}, s, 150, 90, refused, scope)
+						credit := e.capacityAccounting("test", protocol, engine.Stats{}, s, heldBase{}, 150, 90, refused, scope)
 						e.exactCapacity("test", 90, 100, credit)
 					})
 					if test.failure != "" {
@@ -138,7 +147,7 @@ func TestUDPAccountingRequiresExactDecisionCountAndRealSessions(t *testing.T) {
 			s.UDP++
 		}
 		report := runCapacityCheck(t, func(e *Env) {
-			e.capacityAccounting("udp", "udp", engine.Stats{}, s, 150, 90, 60, capacityTotal)
+			e.capacityAccounting("udp", "udp", engine.Stats{}, s, heldBase{}, 150, 90, 60, capacityTotal)
 			e.exactCapacity("udp", 90, 90, 0)
 		})
 		switch variant {
@@ -209,7 +218,7 @@ func TestMixedCapacityCountsOnlyServerObservedIdentifiedSockets(t *testing.T) {
 			// The verdict is the only thing that lets a mixed per-app refusal pass.
 			s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{PerApp: 50, Unknown: 10}, PeakPerApp: 8192, PeakUnknown: 2048, Counters: map[string]uint64{"tcpRejected": 60, "forcedGCHeapBytes": 400 << 20}}
 			report := runCapacityCheck(t, func(e *Env) {
-				credit := e.capacityAccounting("mixed", "tcp", engine.Stats{}, s, 150, 90, 60, capacityMixed, full)
+				credit := e.capacityAccounting("mixed", "tcp", engine.Stats{}, s, heldBase{}, 150, 90, 60, capacityMixed, full)
 				e.exactCapacity("mixed", 90, 100, credit)
 			})
 			if !test.full {
@@ -224,8 +233,68 @@ func TestMixedCapacityCountsOnlyServerObservedIdentifiedSockets(t *testing.T) {
 func TestTCPRepeatedCapDecisionsCannotHideShortfall(t *testing.T) {
 	s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{Total: 70, Unknown: 10}, PeakFlows: 65536, PeakUnknown: 2048, Counters: map[string]uint64{"tcpRejected": 80, "forcedGCHeapBytes": 400 << 20}}
 	report := runCapacityCheck(t, func(e *Env) {
-		credit := e.capacityAccounting("tcp", "tcp", engine.Stats{}, s, 150, 90, 60, capacityTotal)
+		credit := e.capacityAccounting("tcp", "tcp", engine.Stats{}, s, heldBase{}, 150, 90, 60, capacityTotal)
 		e.exactCapacity("tcp", 90, 100, credit)
 	})
 	requireFailure(t, report, "whole exact-cap shortfall")
+}
+
+// The review's false pass: one real stream, a leaked engine count of 2 at the
+// first sample, then 8,192 held and an engine count of 8,194. The delta is
+// right, so only absolute equality with the independent holders catches the
+// phantom. Every scope and transport carries the same offset through both
+// samples; the honest counts pass.
+func TestCapacityPhantomOffsetThroughBothSamplesFails(t *testing.T) {
+	const held = 8192
+	// Every capacityAccounting call shape in the suite, with its real baseline.
+	for _, shape := range []struct {
+		name     string
+		protocol string
+		scope    capacityScope
+		base     heldBase
+	}{
+		{"UDP per-app", "udp", capacityPerApp, streamBase},
+		{"UDP total", "udp", capacityTotal, streamBase},
+		{"TCP per-app", "tcp", capacityPerApp, streamBase},
+		{"TCP total", "tcp", capacityTotal, streamBase},
+		{"TCP total tail", "tcp", capacityTotal, heldBase{tcp: 58642 + 1}},
+		{"mixed UDP", "udp", capacityTotal, heldBase{}},
+		{"mixed TCP", "tcp", capacityMixed, heldBase{udp: 16384}},
+		{"mixed tail", "tcp", capacityTotal, heldBase{tcp: 49148, udp: 16384}},
+	} {
+		for _, phantom := range []struct {
+			name       string
+			flows, udp int64
+		}{
+			{"honest", 0, 0},
+			{"phantom TCP flow in both samples", 2, 0},
+			{"phantom UDP session in both samples", 1, 1},
+		} {
+			t.Run(shape.name+"/"+phantom.name, func(t *testing.T) {
+				baseFlows, baseUDP := int64(shape.base.tcp+shape.base.udp), int64(shape.base.udp)
+				before := engine.Stats{Flows: baseFlows + phantom.flows, UDP: baseUDP + phantom.udp, Counters: map[string]uint64{}}
+				after := engine.Stats{Flows: before.Flows + held, UDP: before.UDP, Admitted: held, PeakFlows: tcpFlowsTotal, PeakUDP: udpSessionsTotal, PeakPerApp: tcpFlowsPerApp, PeakUDPPerApp: udpSessionsPerApp,
+					Counters: map[string]uint64{"forcedGCHeapBytes": 400 << 20}}
+				if shape.protocol == "udp" {
+					after.UDP += held
+				}
+				report := runHardCheck(t, func(e *Env) {
+					e.capacityAccounting("phantom", shape.protocol, before, after, shape.base, held, held, 0, shape.scope, true)
+				})
+				for _, check := range report.Cases[0].Checks {
+					if strings.Contains(check.Message, "delta equals") && !check.OK {
+						t.Fatalf("the offset must keep the delta right, so only absolute equality can catch it: %+v", check)
+					}
+				}
+				if phantom.flows == 0 {
+					if report.JobFailed {
+						t.Fatalf("honest counts failed: %+v", report.Cases[0])
+					}
+					return
+				}
+				requireFailure(t, report, "engine baseline equals independently observed holders")
+				requireFailure(t, report, "engine absolute count equals independently held clients plus baseline holders")
+			})
+		}
+	}
 }

@@ -31,10 +31,21 @@ func unknownRefusalFloor(clientRefused int, r flows.Refusals, capDecisions uint6
 	return uint64(clientRefused) - capDecisions, true
 }
 
+// heldBase is what clients and servers independently held when the first
+// sample was taken: live TCP connections and UDP sessions, never the engine's
+// own count. A delta alone can't catch a phantom flow carried through both
+// samples, so both samples must equal what is held, absolutely.
+type heldBase struct{ tcp, udp int }
+
+// streamBase is charlie's survival stream, the one flow open before the
+// offered traffic. Its client's own record (keptOpen: connected, never
+// closed, every answer on its line) proves it was held across both samples.
+var streamBase = heldBase{tcp: 1}
+
 // Every caller takes the two samples around exactly its offered traffic,
 // before releasing any holder. A different reason, lost attempt, failed dial
 // or admitted-then-lost flow fails hard even inside a declared load case.
-func (e *Env) capacityAccounting(label, protocol string, before, after engine.Stats, offered, held, refused int, scope capacityScope, fullCombinedApp ...bool) uint64 {
+func (e *Env) capacityAccounting(label, protocol string, before, after engine.Stats, base heldBase, offered, held, refused int, scope capacityScope, fullCombinedApp ...bool) uint64 {
 	r := after.RefusedTCP.Sub(before.RefusedTCP)
 	forward := after.Counters["tcpRejected"] - before.Counters["tcpRejected"]
 	capDecisions := r.Total
@@ -94,9 +105,21 @@ func (e *Env) capacityAccounting(label, protocol string, before, after engine.St
 	if protocol == "udp" {
 		e.T.Check(after.UDP-before.UDP == int64(held), "%s: engine UDP delta equals independently held clients (%d = %d)", label, after.UDP-before.UDP, held)
 	}
-	e.T.Logf("CAP ACCOUNTING %s: offered=%d held=%d client-refused=%d decisions=%+v unknown-refusal-floor=%d lookup-misses=%d unknown-admitted=%d owner-details=%s",
-		label, offered, held, refused, r, floor, misses, unknownAdmitted, after.OwnerLookup)
-	if !classified || !occupied || !independentApp || after.Flows-before.Flows != int64(held) || (protocol == "udp" && after.UDP-before.UDP != int64(held)) || forward != r.Count() || offered != held+refused || after.Admitted-before.Admitted != uint64(held) ||
+	baseFlows, baseUDP := int64(base.tcp+base.udp), int64(base.udp)
+	wantFlows, wantUDP := baseFlows+int64(held), baseUDP
+	if protocol == "udp" {
+		wantUDP += int64(held)
+	}
+	baseline := before.Flows == baseFlows && before.UDP == baseUDP
+	absolute := after.Flows == wantFlows && after.UDP == wantUDP
+	e.T.Check(baseline, "%s: engine baseline equals independently observed holders (flows %d = %d TCP + %d UDP; UDP %d = %d)",
+		label, before.Flows, base.tcp, base.udp, before.UDP, baseUDP)
+	e.T.Check(absolute, "%s: engine absolute count equals independently held clients plus baseline holders (flows %d = %d + %d; UDP %d = %d)",
+		label, after.Flows, baseFlows, held, after.UDP, wantUDP)
+	delta := after.Flows-before.Flows == int64(held) && (protocol != "udp" || after.UDP-before.UDP == int64(held))
+	e.T.Logf("CAP ACCOUNTING %s: offered=%d held=%d client-refused=%d decisions=%+v unknown-refusal-floor=%d lookup-misses=%d unknown-admitted=%d base-TCP=%d base-UDP=%d old-delta-verdict=%t baseline-verdict=%t absolute-verdict=%t owner-details=%s",
+		label, offered, held, refused, r, floor, misses, unknownAdmitted, base.tcp, base.udp, delta, baseline, absolute, after.OwnerLookup)
+	if !classified || !occupied || !independentApp || !delta || !baseline || !absolute || forward != r.Count() || offered != held+refused || after.Admitted-before.Admitted != uint64(held) ||
 		misses != unknownAdmitted+r.Unknown+r.UnknownUDP {
 		return 0
 	}
