@@ -16,8 +16,9 @@ when a sample meets its threshold. No retry or excluded natural miss changes it.
 
 The measurements below are from PR head `fb74394` (Go 1.27.3), Acceptance run
 [39565641409](https://github.com/AyoubAchour/net-switch/actions/runs/39565641409),
-on all four runners. Later commits changed only a scanner test fixture, the
-report's CPU-model line and this document. Each cell is natural misses /
+on all four runners. Since then the branch was rebased onto main `9579039`;
+on its own side only a scanner test fixture, the report's CPU-model line, the
+workflow's failure-evidence step and this document changed. Each cell is natural misses /
 lookups in the case's own non-injected window (pagination: identified rows of
 300, 299 required). A threshold that a sample meets is still declared; a lucky
 run clears nothing.
@@ -49,13 +50,6 @@ UDP, UDP per app and the TCP storm's identified 8,192 were exact on every
 runner. Each runner ran 85 cases: 70 passed and 15 declared release blockers,
 with no hard failures.
 
-The x64 TCP total misses are a known open problem. Round 6 removed a measured
-regression (per-read scan stamps were 27% of the engine's allocation in that
-case), but on one hosted x64 CPU model (AMD EPYC 7763) the fixed head still
-falls short where the round-3 code held 65,536. The CPU profiles show no new
-hot path; the gap is not explained yet. Each acceptance report now records the
-runner's CPU model so it can be tied to hardware.
-
 These checks stayed hard on every runner and passed:
 - **TIME_WAIT probes:** all 50 alpha and 10 bravo post-burst probes were
   identified, with no misses in 5,060 lookups.
@@ -71,6 +65,58 @@ flow recorded with the held pool (same flow ID for the same app source, so a
 session recreated with the same outbound address and port fails), and the
 sweep must make no new admission or UDP refusal.
 The held-session check isn't an attribution check and isn't in the catalogue.
+
+## Known fallback-scanner regression on slow x64 hosts (follow-up: eBPF task)
+
+This is a regression in the `/proc` fallback scanner, tracked here on its own
+so the attribution blocker can't hide it. **The eBPF attribution task owns
+it:** it must settle it with a back-to-back A/B of the round-3 build
+(`7c6692a`) and the current build on the same machine, before the scanner
+becomes the fallback.
+
+- **What:** in `overload.tcp-flows-total`, alone, on Ubuntu 26 x64, the
+  round-3 code held 65,536 flows in 3 of 3 runs (15.6–17.2% misses on the slow
+  host type, 12.9% on a fast one). The current code holds 65,536 only on fast
+  hosts; on the slow host type it misses 26–29% of lookups and holds about
+  58,700–61,200.
+- **Where:** hosted x64 runners of one label land on different AMD CPUs. Scan
+  cost splits into two clusters, about 8.5–9 µs and 12–13.5 µs per
+  descriptor. The slow cluster is the AMD EPYC 7763. ARM64 runners are not
+  affected.
+- **Fixed in round 6:** per-read scan stamps allocated 438 MB in that case,
+  27% of everything the engine allocated. Stamping only slow and running reads
+  cut scan cost on the slow hosts from 14.4 to about 13 µs per descriptor and
+  misses from 32.8% to 24–29%.
+- **Ruled out:** restoring round 3's raw `/proc` opens on top of that made no
+  difference (59,427 / 57,969 / 65,536 held). The descriptor-table
+  reservation means those opens never grow the table.
+- **Not explained:** CPU profiles of both builds show the same kernel
+  readlink/getdents work in the scan, through a byte-identical syscall path,
+  and less GC in the current build. No code path accounts for the remaining
+  ~10% scan cost on the EPYC 7763. Because each miss leads to more lookups,
+  that small difference flips the held count there.
+- **Now logged:** each acceptance report records the runner's CPU model
+  (`cpu:` in the environment line), so every sample can be tied to hardware.
+
+**Evidence** (GitHub Actions; the numbers above come from these):
+
+- **438 MB / 27%:** [run 39552484899](https://github.com/AyoubAchour/net-switch/actions/runs/39552484899),
+  artifact 12324389232, file
+  `release/cases/overload.tcp-flows-total/engine/profiles-3733791922/heap.pprof`.
+  This is the first TCP-total heap profile: 437,886,654 of 1,632,757,435
+  allocated bytes are under `descriptorTrace.begin` (26.8%).
+- **About 401 MB:** the focused baseline run 39561941930 shows the same
+  allocation at about 401 MB. It is a different sample, not the same figure, so
+  don't compare the two as if they were one measurement.
+- **Comparison jobs (job ids):**
+  - round 3: 119099278106, 119110362995, 119110378244;
+  - baseline: 119095038905;
+  - trace-out: 119095075114;
+  - fixed: 119106885411, 119106899233;
+  - raw-open: 119099228722, 119099246573, 119099265076;
+  - rebased EPYC 9V74: 119193991061.
+
+## Catalogue rules and hard checks
 
 Deliberately injected misses remain separately reported: 132/132 in pending
 bytes, 3,000/3,000 in unknown-owner limits and 131/131 in memory pressure.
