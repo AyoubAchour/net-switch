@@ -19,7 +19,9 @@ var ErrShutdownInProgress = errors.New("explicit stop or lease cleanup already s
 
 // Terminal is a service-initiated stop, sent only after normal runtime cleanup.
 // The controller acknowledges receipt with terminalAck, using this instance,
-// epoch and opId. An absent cleanupError means cleanup completed successfully.
+// epoch and opId. cleanupError covers route cleanup, probe joining and early
+// finalization only. Later transport/ownership closes or failures can still
+// fail the shutdown: the process exit status, not this record, is authoritative.
 // This is independent of the lossy Event stream and carries no restart policy.
 // terminalAck is the final receipt; its ordinary reply need not reach the peer
 // before shutdown. Controllers must keep reading while sending the receipt.

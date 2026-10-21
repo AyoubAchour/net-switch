@@ -10,7 +10,9 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/wintun"
 )
 
-const AdapterLostExitCode = 2
+// Go uses exit status 2 for unrecovered panics and fatal runtime errors. Keep
+// successful adapter-loss cleanup distinct from those crashes and failure 1.
+const AdapterLostExitCode = 3
 const AdapterLostReason = "adapter lost"
 
 // AdapterLostError is returned only after successful cleanup and resource

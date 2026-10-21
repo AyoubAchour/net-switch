@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -74,17 +75,6 @@ func newTerminalServer() (*Server, *runtimeFake) {
 
 type terminalResult struct{ cleanup, delivery error }
 
-type terminalStopObserver struct {
-	*runtimeFake
-	stopped chan struct{}
-}
-
-func (r *terminalStopObserver) Stop(ctx context.Context) error {
-	err := r.runtimeFake.Stop(ctx)
-	close(r.stopped)
-	return err
-}
-
 func stopTerminal(s *Server) <-chan terminalResult {
 	done := make(chan terminalResult, 1)
 	go func() {
@@ -107,27 +97,55 @@ func waitTerminalServe(t *testing.T, c *terminalController) {
 	}
 }
 
+type heldTerminalProbes struct {
+	started        chan struct{}
+	release        <-chan struct{}
+	live, returned atomic.Int32
+}
+
+func (p *heldTerminalProbes) Probe(ctx context.Context, _, _ string) (platform.ProbeResult, error) {
+	p.live.Add(1)
+	p.started <- struct{}{}
+	<-p.release // deliberately ignore cancellation until the test releases us
+	p.live.Add(-1)
+	p.returned.Add(1)
+	return platform.ProbeResult{}, ctx.Err()
+}
+
 func TestTerminalBypassesFullEventsAndOutstandingReplies(t *testing.T) {
 	s, runtime := newTerminalServer()
-	stopped := make(chan struct{})
-	s.runtime = &terminalStopObserver{runtime, stopped}
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	probes := &heldTerminalProbes{started: make(chan struct{}, Outstanding), release: release}
+	s.prober = probes
 	c := connectTerminalController(t, s, true)
-	// Keep transport cancellation after ACK observable while checking the
-	// outstanding reply count. No writer can complete without client reads.
 	s.mu.Lock()
 	peer := s.controller
-	ackObserved := make(chan struct{})
-	releaseAck := sync.OnceFunc(func() { close(ackObserved) })
-	originalCancel := peer.cancel
-	peer.cancel = func() { <-ackObserved; originalCancel() }
 	s.mu.Unlock()
-	defer releaseAck()
-	// Stop reading: fill every ordinary reply slot and the droppable queue.
-	for range Outstanding {
-		if err := c.enc.Encode(Request{ID: "pending", Method: "hello"}); err != nil {
+	for i := range Outstanding {
+		id := fmt.Sprintf("held-%d", i)
+		if err := c.enc.Encode(Request{ID: id, Method: "probe", Instance: s.Instance, Epoch: c.epoch, OpID: id}); err != nil {
 			t.Fatal(err)
 		}
 	}
+	for range Outstanding {
+		select {
+		case <-probes.started:
+		case <-time.After(time.Second):
+			t.Fatal("all 16 probes must actually be running")
+		}
+	}
+	assertHeld := func() {
+		t.Helper()
+		if live, returned := probes.live.Load(), probes.returned.Load(); live != Outstanding || returned != 0 {
+			t.Fatalf("probe ownership changed before explicit release: live=%d returned=%d", live, returned)
+		}
+		if slots, replies := len(peer.slots), len(peer.replies); slots != Outstanding || replies != 0 {
+			t.Fatalf("receipt did not use the slot-less path: held=%d queuedReplies=%d", slots, replies)
+		}
+	}
+	assertHeld()
 	for range 1000 {
 		s.Emit(Event{Type: "log", Message: "busy"})
 	}
@@ -135,51 +153,17 @@ func TestTerminalBypassesFullEventsAndOutstandingReplies(t *testing.T) {
 		t.Fatal("queue-pressure precondition missing")
 	}
 	done := stopTerminal(s)
-	select {
-	case <-stopped:
-	case <-time.After(time.Second):
-		t.Fatal("terminal cleanup stalled on controller back-pressure")
-	}
-	s.mu.Lock()
-	slots := len(s.controller.slots)
-	s.mu.Unlock()
-	if slots != Outstanding {
-		t.Fatalf("full reply-slot precondition missing: %d", slots)
-	}
-	// No reads have freed a reply slot. A bogus receipt must still be read
-	// (and fenced) now; otherwise a valid receipt could deadlock behind the
-	// same admission limit. It cannot acknowledge an unseen server nonce.
-	if err := c.enc.Encode(Request{ID: "early", Method: "terminalAck", Instance: s.Instance, Epoch: c.epoch, OpID: "unseen"}); err != nil {
-		t.Fatalf("terminal receipt admission blocked behind reply slots: %v", err)
-	}
-	// Ensure the terminal is reserved before allowing the blocked first reply
-	// to complete. Otherwise the test itself could free several reply slots
-	// while the shutdown goroutine is still publishing the terminal record.
-	queuedDeadline := time.After(time.Second)
-	for len(peer.terminal) == 0 {
-		select {
-		case <-queuedDeadline:
-			t.Fatal("terminal was not queued behind the blocked writer")
-		case <-time.After(time.Millisecond):
-		}
-	}
 	v := c.terminal(t)
-	if v.Reason != "adapter lost" || v.Instance != s.Instance || v.Epoch != c.epoch || v.OpID == "" || v.CleanupError != "" || runtime.stops.Load() != 1 {
-		t.Fatalf("terminal preceded successful cleanup or lost identity: %+v", v)
+	// Probes outlive the join bound. Log and terminal writes cannot free any
+	// request slot: all 16 slots still belong to blocked probe calls.
+	if v.Reason != "adapter lost" || v.Instance != s.Instance || v.Epoch != c.epoch || v.OpID == "" || !strings.Contains(v.CleanupError, "probe did not stop before finalization") || runtime.stops.Load() != 1 {
+		t.Fatalf("wrong terminal under held probes: %+v", v)
 	}
+	assertHeld()
 	select {
 	case <-s.Done():
 		t.Fatal("finished before controller receipt acknowledgement")
 	default:
-	}
-	// Receiving the first ordinary reply may have admitted one normal read.
-	// Spend that reservation while the next reply is blocked, so the VALID
-	// receipt below must use the slot-less reader, not a reserved worker.
-	if err := c.enc.Encode(Request{ID: "fill-last-read", Method: "hello"}); err != nil {
-		t.Fatal(err)
-	}
-	if count := len(peer.slots); count != Outstanding {
-		t.Fatalf("receipt not sent at full slots: %d", count)
 	}
 	if err := c.enc.Encode(terminalAck(s, v)); err != nil {
 		t.Fatal(err)
@@ -192,15 +176,17 @@ func TestTerminalBypassesFullEventsAndOutstandingReplies(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("valid receipt blocked behind full slots")
 	}
-	if count := len(peer.slots); count != Outstanding {
-		t.Fatalf("receipt consumed/freed an ordinary reply slot: %d", count)
-	}
-	releaseAck()
+	assertHeld() // no ACK reply was queued, and not one probe has returned
 	result := <-done
-	if result.cleanup != nil || result.delivery != nil {
+	if !errors.Is(result.cleanup, context.DeadlineExceeded) || result.delivery != nil {
 		t.Fatal(result)
 	}
+	assertHeld()
+	unblock()
 	waitTerminalServe(t, c)
+	if probes.live.Load() != 0 || probes.returned.Load() != Outstanding {
+		t.Fatal("probe workers did not all release and join")
+	}
 }
 
 func TestTerminalAckFencesConnectionEpochInstanceAndNonce(t *testing.T) {

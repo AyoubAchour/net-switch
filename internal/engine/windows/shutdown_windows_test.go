@@ -140,23 +140,24 @@ func tailResult(t *testing.T, done <-chan error) error {
 }
 
 func TestServeTailTerminalDecisionAndLateFailures(t *testing.T) {
-	for _, name := range []string{"clean", "queued fatal", "forced fatal wake", "finalizer error", "late exclusion error", "fatal during join"} {
+	for _, name := range []string{"clean", "queued fatal", "forced fatal wake", "finalizer error", "late exclusion error", "fatal during join", "combined failures"} {
 		t.Run(name, func(t *testing.T) {
 			f := newTailFixture(t)
 			f.loss.handle(wintun.ErrAdapterRemoved)
-			if name == "queued fatal" || name == "forced fatal wake" {
+			priorFailure := name == "queued fatal" || name == "forced fatal wake" || name == "combined failures"
+			if priorFailure {
 				f.fatal <- errors.New("generic failure alongside loss")
 			}
 			if name == "forced fatal wake" {
 				<-f.loss.ready
 			} // select MUST take fatal, latch still records loss
-			if name == "finalizer error" {
+			if name == "finalizer error" || name == "combined failures" {
 				f.finalizeErr = errors.New("dialer close failed")
 			}
-			if name == "late exclusion error" {
+			if name == "late exclusion error" || name == "combined failures" {
 				f.releaseErr = errors.New("ownership close failed")
 			}
-			if name == "fatal during join" {
+			if name == "fatal during join" || name == "combined failures" {
 				f.joinFatal = errors.New("late generic failure")
 			}
 			done := f.run()
@@ -167,11 +168,11 @@ func TestServeTailTerminalDecisionAndLateFailures(t *testing.T) {
 			if v.Type != "stopped" || v.Reason != AdapterLostReason {
 				t.Fatalf("Serve lost terminal reason: %+v", v)
 			}
-			earlyFailure := name == "queued fatal" || name == "forced fatal wake" || name == "finalizer error"
+			earlyFailure := priorFailure || name == "finalizer error"
 			if (v.CleanupError != "") != earlyFailure {
 				t.Fatalf("wrong terminal failure: %+v", v)
 			}
-			if strings.Contains(name, "fatal") && name != "fatal during join" && !strings.Contains(v.CleanupError, "generic failure alongside loss") {
+			if priorFailure && !strings.Contains(v.CleanupError, "generic failure alongside loss") {
 				t.Fatal(v)
 			}
 			if !f.finalized.Load() || f.released.Load() || f.pipeClosed.Load() {
@@ -189,6 +190,12 @@ func TestServeTailTerminalDecisionAndLateFailures(t *testing.T) {
 				if want != nil && !errors.Is(err, want) {
 					t.Fatalf("Serve dropped shutdown error %v: %v", want, err)
 				}
+				if want != nil && strings.Count(err.Error(), want.Error()) != 1 {
+					t.Fatalf("Serve repeated shutdown error %v: %v", want, err)
+				}
+			}
+			if priorFailure && strings.Count(err.Error(), "generic failure alongside loss") != 1 {
+				t.Fatalf("Serve repeated prior failure: %v", err)
 			}
 			if !f.released.Load() || !f.joined.Load() || f.runtime.badContext.Load() {
 				t.Fatal("Serve tail failed ordering or context contract")

@@ -61,10 +61,12 @@ func serveUntilStopped(parent context.Context, s shutdownTail) (err error) {
 	}
 	stop, cancelStop := context.WithTimeout(context.Background(), 15*time.Second)
 	terminalOwned := false
+	finalized := false
 	if lost != nil {
 		log.Printf("%s; restoring normal routes: %v", AdapterLostReason, lost.Cause)
 		prior := err
 		cleanup, delivery := s.server.StopWithReason(stop, AdapterLostReason, func() error {
+			finalized = true
 			return errors.Join(prior, s.finalize(), s.takeFatal())
 		})
 		if errors.Is(delivery, protocol.ErrShutdownInProgress) {
@@ -81,7 +83,12 @@ func serveUntilStopped(parent context.Context, s shutdownTail) (err error) {
 			cancelDelivery()
 		} else {
 			terminalOwned = true
-			err = joinShutdownError(err, cleanup)
+			if finalized {
+				// The callback already included prior failures and finalization.
+				err = cleanup
+			} else {
+				err = joinShutdownError(err, cleanup)
+			}
 			if delivery != nil {
 				log.Printf("adapter lost terminal delivery: %v", delivery)
 			}
@@ -95,7 +102,9 @@ func serveUntilStopped(parent context.Context, s shutdownTail) (err error) {
 	s.join()
 	// If a probe exceeded the terminal join bound, it prevented early
 	// finalization. Joining transports above makes this final attempt safe.
-	err = joinShutdownError(err, s.finalize())
+	if !finalized {
+		err = joinShutdownError(err, s.finalize())
+	}
 	err = joinShutdownError(err, s.release())
 	err = joinShutdownError(err, s.takeFatal())
 	if terminalOwned {

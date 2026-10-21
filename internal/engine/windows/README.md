@@ -130,12 +130,15 @@ old epoch/instance cannot acknowledge. A full ordinary reply budget still admits
 the terminal receipt without queuing another reply. Lease checks and stop requests cannot
 finish a pending terminal delivery early.
 
-Clean loss returns `AdapterLostError` and process exit status **2**, even with no
+Clean loss returns `AdapterLostError` and process exit status **3**, even with no
 controller or an unread/unacknowledged terminal record. Delivery failures are
 logged separately. Cleanup errors and simultaneous generic failures retain exit
 status **1**; they never qualify as a clean adapter loss. A joined late-close
 error cannot inherit the special status. Control's restart budget/latch and
 production service integration are outside this contract.
+Status **2** is reserved for Go's unrecovered panics and fatal runtime failures;
+it must never be interpreted as clean adapter loss. The process-exit regression
+compares a real panic with ordinary failure, direct loss and joined cleanup errors.
 Control must wait for process exit and inspect its final status before restarting;
 the terminal record precedes the final ownership-lock close. A queued generic
 failure together with latched loss always keeps the distinct reason and reports
@@ -147,7 +150,10 @@ real anonymous event: an independent duplicate verifies the native object's
 handle count falls from two to one before the controller receives the terminal.
 This proves closure without relying on GC or the ownership counter. It does not
 replace the helper's production adapter-removal/handle-reuse acceptance tests.
-Protocol tests cover a valid receipt while all 16 reply slots remain occupied,
+Protocol tests hold all 16 reply slots with independently counted probes that
+ignore cancellation until released. They accept a valid receipt while all 16
+remain blocked, with no ordinary replies or receipt reply queued, then release
+and join the probes. They also cover
 the complete delivery timeout after delayed cleanup, stubborn probes, disconnects,
 fencing, stop/lease precedence and cleanup errors. Windows tests execute the actual
 Serve decision/tail with injected resource boundaries; main's actual direct exit

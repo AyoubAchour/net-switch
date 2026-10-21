@@ -99,6 +99,10 @@ func Recover(dir string) error {
 }
 
 func Serve(parent context.Context, dir string, standalone bool) (err error) {
+	// Setup failures/panics still need the deferred closers. Once the tail has
+	// completed, it owns both closure and error reporting; do not re-add each
+	// cached close error to its final result.
+	shutdownComplete := false
 	initStarted := winclock.Now()
 	if !Elevated() {
 		return errors.New("engine requires SYSTEM or an elevated administrator")
@@ -110,13 +114,21 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 		return err
 	}
 	closeState := sync.OnceValue(state.Close)
-	defer func() { err = joinShutdownError(err, closeState()) }()
+	defer func() {
+		if !shutdownComplete {
+			err = joinShutdownError(err, closeState())
+		}
+	}()
 	routes, err := recoverRoutes(dir)
 	if err != nil {
 		return err
 	}
 	closeRoutes := sync.OnceValue(routes.Close)
-	defer func() { err = joinShutdownError(err, closeRoutes()) }()
+	defer func() {
+		if !shutdownComplete {
+			err = joinShutdownError(err, closeRoutes())
+		}
+	}()
 	routes.timings.record("state.directory", stateElapsed)
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
@@ -128,7 +140,11 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 		return fmt.Errorf("initialize Windows socket readiness: %w", err)
 	}
 	closeDialer := sync.OnceValue(dialer.Close)
-	defer func() { err = joinShutdownError(err, closeDialer()) }()
+	defer func() {
+		if !shutdownComplete {
+			err = joinShutdownError(err, closeDialer())
+		}
+	}()
 	e := engine.New(ctx, engine.Dependencies{OpenTun: routes.OpenTun, Routes: routes, Dialer: dialer, Owners: owners, Identities: owners},
 		flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncParent})
 	loss := newAdapterLoss()
@@ -152,13 +168,21 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 		return err
 	}
 	stopProfile = sync.OnceValue(stopProfile)
-	defer func() { err = joinShutdownError(err, stopProfile()) }()
+	defer func() {
+		if !shutdownComplete {
+			err = joinShutdownError(err, stopProfile())
+		}
+	}()
 	pipe, err := ListenPipe(EnginePipe, standalone)
 	if err != nil {
 		return err
 	}
 	closePipe := sync.OnceValue(pipe.Close)
-	defer func() { err = joinShutdownError(err, closePipe()) }()
+	defer func() {
+		if !shutdownComplete {
+			err = joinShutdownError(err, closePipe())
+		}
+	}()
 	stopListen := context.AfterFunc(ctx, func() { closePipe() })
 	defer stopListen()
 	routes.timings.record("engine.init.total", winclock.Since(initStarted))
@@ -188,11 +212,13 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 		}
 	}()
 	log.Printf("engine %s ready; pid control uses authenticated pipe %s", server.Instance, EnginePipe)
-	return serveUntilStopped(parent, shutdownTail{
+	err = serveUntilStopped(parent, shutdownTail{
 		runtime: runtime, server: server, loss: loss, fatal: fatal,
 		cancel: cancel, closePipe: closePipe,
 		join:     func() { <-acceptDone; clients.Wait(); <-leaseDone },
 		finalize: sync.OnceValue(func() error { return errors.Join(stopProfile(), closeDialer()) }),
 		release:  func() error { return errors.Join(closeRoutes(), closeState()) },
 	})
+	shutdownComplete = true
+	return err
 }

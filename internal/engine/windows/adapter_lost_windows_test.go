@@ -258,7 +258,7 @@ func TestAdapterLossHandoffIsIdempotentAndLeavesOtherErrorsFatal(t *testing.T) {
 	if len(loss.ready) != 1 || loss.cause.Load() == nil {
 		t.Fatal("loss handoff was not exactly once")
 	}
-	if (&AdapterLostError{Cause: wintun.ErrAdapterRemoved}).EngineExitCode() != 2 {
+	if AdapterLostExitCode != 3 || (&AdapterLostError{Cause: wintun.ErrAdapterRemoved}).EngineExitCode() != AdapterLostExitCode {
 		t.Fatal("wrong fallback exit status")
 	}
 }
