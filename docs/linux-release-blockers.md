@@ -75,13 +75,16 @@ it:** it must settle it with a back-to-back A/B of the round-3 build
 becomes the fallback.
 
 - **What:** in `overload.tcp-flows-total`, alone, on Ubuntu 26 x64, the
-  round-3 code held 65,536 flows in 3 of 3 runs (15.6–17.2% misses on the slow
-  host type, 12.9% on a fast one). The current code holds 65,536 only on fast
-  hosts; on the slow host type it misses 26–29% of lookups and holds about
-  58,700–61,200.
-- **Where:** hosted x64 runners of one label land on different AMD CPUs. Scan
-  cost splits into two clusters, about 8.5–9 µs and 12–13.5 µs per
-  descriptor. The slow cluster is the AMD EPYC 7763. ARM64 runners are not
+  round-3 code held 65,536 flows in 3 of 3 runs (15.6–17.2% misses on
+  slow-cluster hosts, 12.9% on a fast one). The current code holds 65,536 on
+  fast hosts; on slow-cluster hosts it misses 26–32% of lookups and holds
+  about 56,200–61,200.
+- **Where:** hosted x64 runners of one label land on different AMD CPUs, and
+  scan cost splits into two clusters, about 8.5–10 µs and 12–14.6 µs per
+  descriptor. The slow cluster was always seen on the EPYC 7763, and once on
+  an EPYC 9V74 (the rebased head's Ubuntu 24 x64 run: 14.6 µs, 32.3% misses,
+  56,185 TCP and 61,115 mixed held, all classified as unknown overflow), so
+  it is a host condition, not only one CPU model. ARM64 runners are not
   affected.
 - **Fixed in round 6:** per-read scan stamps allocated 438 MB in that case,
   27% of everything the engine allocated. Stamping only slow and running reads
@@ -93,7 +96,7 @@ becomes the fallback.
 - **Not explained:** CPU profiles of both builds show the same kernel
   readlink/getdents work in the scan, through a byte-identical syscall path,
   and less GC in the current build. No code path accounts for the remaining
-  ~10% scan cost on the EPYC 7763. Because each miss leads to more lookups,
+  ~10% scan cost on slow-cluster hosts. Because each miss leads to more lookups,
   that small difference flips the held count there.
 - **Now logged:** each acceptance report records the runner's CPU model
   (`cpu:` in the environment line), so every sample can be tied to hardware.
