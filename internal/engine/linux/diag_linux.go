@@ -180,9 +180,22 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 		defer diagDumpBuffers.Put(pooled)
 		buf = *pooled
 	}
+	lateReply := false
 	for {
+		if lateReply {
+			// One ready packet is the complete salvage budget. An unrelated
+			// control message cannot keep an expired query reading forever.
+			return nil, context.DeadlineExceeded
+		}
 		trace.Stage, trace.ReadStartedNS = "receive", time.Now().UnixNano()
-		n, err := readNetlink(f, buf)
+		var n int
+		var readErr error
+		if dump {
+			n, readErr = readNetlink(f, buf)
+		} else {
+			n, lateReply, readErr = readExactNetlink(ctx, f, buf)
+		}
+		err := readErr
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -223,6 +236,9 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 				r.protocol = protocol
 				rows = append(rows, r)
 				if !dump {
+					if lateReply && pool != nil {
+						pool.lateReplies.Add(1)
+					}
 					return rows, nil
 				}
 			case unix.NLMSG_OVERRUN:
@@ -233,6 +249,36 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 }
 
 func readNetlink(f *os.File, b []byte) (int, error) {
+	return receiveNetlink(f, b, true)
+}
+
+// RawRead checks its deadline before recvmsg, even when the exact response
+// is already queued by Sendto. Retrieve that one ready response without a
+// new request, wait or deadline reset. Owner resolution still uses the same
+// expired context, so this preserves a cookie, never an overdue identity.
+// Dumps must not use this: a ready multipart stream could bypass its deadline.
+func readExactNetlink(ctx context.Context, f *os.File, b []byte) (int, bool, error) {
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return 0, false, context.Canceled
+	}
+	n, err := readNetlink(f, b)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return 0, false, context.Canceled
+	}
+	if !errors.Is(err, os.ErrDeadlineExceeded) && !errors.Is(err, context.DeadlineExceeded) {
+		return n, false, err
+	}
+	n, readyErr := receiveNetlink(f, b, false)
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return 0, true, context.Canceled
+	}
+	if errors.Is(readyErr, unix.EAGAIN) || errors.Is(readyErr, unix.EWOULDBLOCK) {
+		return 0, true, err
+	}
+	return n, true, readyErr
+}
+
+func receiveNetlink(f *os.File, b []byte, wait bool) (int, error) {
 	raw, err := f.SyscallConn()
 	if err != nil {
 		return 0, err
@@ -240,10 +286,15 @@ func readNetlink(f *os.File, b []byte) (int, error) {
 	var n, flags int
 	var from unix.Sockaddr
 	var readErr error
-	err = raw.Read(func(fd uintptr) bool {
+	receive := func(fd uintptr) bool {
 		n, _, flags, from, readErr = unix.Recvmsg(int(fd), b, nil, unix.MSG_DONTWAIT)
 		return !errors.Is(readErr, unix.EAGAIN) && !errors.Is(readErr, unix.EWOULDBLOCK)
-	})
+	}
+	if wait {
+		err = raw.Read(receive)
+	} else {
+		err = raw.Control(func(fd uintptr) { receive(fd) })
+	}
 	if err != nil {
 		return 0, err
 	}

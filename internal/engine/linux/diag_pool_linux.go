@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
@@ -20,9 +21,10 @@ type diagSocket struct {
 // sockets stay there, have no multicast subscriptions and serve one request
 // at a time. The pool never shares a socket between concurrent lookups.
 type diagPool struct {
-	mu     sync.Mutex
-	idle   []*diagSocket
-	closed bool
+	lateReplies atomic.Uint64
+	mu          sync.Mutex
+	idle        []*diagSocket
+	closed      bool
 }
 
 func (p *diagPool) get() (*diagSocket, error) {

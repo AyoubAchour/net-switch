@@ -17,7 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestExpiredNetlinkDeadlineLeavesReadyReplyUnconsumed(t *testing.T) {
+func TestExpiredNetlinkDeadlinePreservesReadyExactReply(t *testing.T) {
 	// The isolated kernel-test namespace can begin with loopback down.
 	// A wildcard socket needs no configured interface or outbound traffic.
 	app, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
@@ -71,13 +71,16 @@ func TestExpiredNetlinkDeadlineLeavesReadyReplyUnconsumed(t *testing.T) {
 		}
 		peekCookie = trace.ReplyCookie
 	}
-	// Clearing the deadline is an oracle control only, never production.
-	if err := socket.file.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
+	canceled, stop := context.WithCancel(t.Context())
+	stop()
+	if n, late, err := readExactNetlink(canceled, socket.file, data[:]); n != 0 || late || !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation must win without reading the packet: n=%d late=%t err=%v", n, late, err)
 	}
-	n, err := readNetlink(socket.file, data[:])
-	if err != nil {
-		t.Fatal(err)
+	expired, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	n, late, err := readExactNetlink(expired, socket.file, data[:])
+	if err != nil || !late || !errors.Is(expired.Err(), context.DeadlineExceeded) {
+		t.Fatalf("one ready response was lost or its deadline was changed: n=%d late=%t err=%v ctx=%v", n, late, err, expired.Err())
 	}
 	messages, err := syscall.ParseNetlinkMessage(data[:n])
 	if err != nil || len(messages) != 1 || messages[0].Header.Seq != sequence || messages[0].Header.Type != 20 {
@@ -87,7 +90,26 @@ func TestExpiredNetlinkDeadlineLeavesReadyReplyUnconsumed(t *testing.T) {
 	if err != nil || row.local != source || row.cookie == 0 || row.generation() != peekCookie {
 		t.Fatalf("queued answer had no independently live socket cookie: %+v %v", row, err)
 	}
-	t.Logf("expired RawRead hid ready kernel response for %s cookie=%s; repeated diagnostic peeks left it intact", source, row.generation())
+	o := NewOwners()
+	defer o.Close()
+	owner, err := o.resolveUDP(expired, row, false)
+	if !errors.Is(err, context.DeadlineExceeded) || owner.Generation != row.generation() || owner.PID != 0 || owner.AppID != "" || owner.Path != "" {
+		t.Fatalf("late cookie must retain the timeout and never supply identity: %+v %v", owner, err)
+	}
+	if n, err := readNetlink(socket.file, data[:]); n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("ready receive reset the native deadline: n=%d err=%v", n, err)
+	}
+	if n, _, err := readExactNetlink(expired, socket.file, data[:]); n != 0 || !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("empty queue did not preserve the timeout: n=%d err=%v", n, err)
+	}
+	// The ready path must retain the ordinary receiver's truncation check.
+	if err := unix.Sendto(socket.fd, request[:], 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := readExactNetlink(expired, socket.file, data[:16]); n != 0 || !errors.Is(err, unix.ENOBUFS) {
+		t.Fatalf("truncated ready response was accepted: n=%d err=%v", n, err)
+	}
+	t.Logf("expired RawRead hid ready kernel response for %s cookie=%s; one nonblocking receive preserved the cookie with unknown identity and unchanged deadline", source, row.generation())
 }
 
 func TestUDPGenerationFailureHistoryIsBounded(t *testing.T) {

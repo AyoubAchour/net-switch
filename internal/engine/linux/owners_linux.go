@@ -86,6 +86,7 @@ type Owners struct {
 }
 
 type lookupStats struct {
+	ExactRepliesAfterDeadline uint64
 	// This remains explicit while the eBPF initiator/sender backend is pending.
 	Backend                                                                              string
 	Timeout, Missing, Ambiguous, Other                                                   uint64
@@ -118,6 +119,7 @@ type lookupStats struct {
 
 func (o *Owners) Stats() any {
 	s := lookupStats{Backend: "proc-fallback", Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
+	s.ExactRepliesAfterDeadline = o.queries.lateReplies.Load()
 	if size, err := descriptorTableSize(); err == nil {
 		s.FDTableSize = size
 	} else {
