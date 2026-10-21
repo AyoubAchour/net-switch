@@ -59,6 +59,11 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
     g.destination === target.host && target.ports.includes(g.remotePort));
   assert.equal(new Set(egressGroups.map((g) => g.source)).size, 1, 'Capacity egress escaped its one pinned line');
   const egress = new Set(egressGroups.flatMap((g) => g.ports));
+  // Each released connection's peer, so a retained watch is matched by the
+  // whole connection, not by a local port number Windows may give a new
+  // connection to another peer while the old one is in TIME_WAIT.
+  const remoteByPort = new Map(egressGroups.flatMap((g) => g.ports.map((port) =>
+    [port, `${g.destination.includes(':') ? `[${g.destination}]` : g.destination}:${g.remotePort}`])));
   assert(egress.size >= released.released, 'Native established socket precondition missing');
   const ranges = before.socketResources.configuration.filter((s) => s.DynamicPortRangeNumberOfPorts > 0);
   const closedPorts = new Set();
@@ -84,7 +89,12 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
       return states;
     };
     const appStates = stateCounts(appPorts, '198.18.0.1'), engineStates = stateCounts(releasedEgress);
-    const retainedWatches = stats.nativeReadiness.ports.filter((port) => releasedEgress.has(port)).length;
+    const oldRetainedWatches = stats.nativeReadiness.ports.filter((port) => releasedEgress.has(port)).length;
+    const endpoints = stats.nativeReadiness.endpoints;
+    const retainedWatches = Array.isArray(endpoints) ? endpoints.filter((endpoint) => {
+      const at = endpoint.indexOf('->'), port = Number(endpoint.slice(0, at));
+      return releasedEgress.has(port) && endpoint.slice(at + 2) === remoteByPort.get(port);
+    }).length : oldRetainedWatches;
     for (const record of stats.nativeReadiness.closes) {
       if (record.sequence > before.nativeReadiness.closedCount && !record.error &&
           record.local.startsWith(`${egressGroups[0].source}:`)) {
@@ -95,7 +105,7 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
     const used = new Set(native.usedLocalPorts.filter((port) => port >= start && port < start + size));
     const elapsedMs = performance.now() - started;
     const observation = { elapsedMs, appStates, engineStates, releasedEgress: releasedEgress.size,
-      retainedWatches, confirmedCloses, handles: native.handles, handlesReleased: before.nativeSocketState.handles - native.handles,
+      retainedWatches, oldRetainedWatches, confirmedCloses, handles: native.handles, handlesReleased: before.nativeSocketState.handles - native.handles,
       flows: stats.flows.Flows, tableFreePortUpperBound: size - used.size,
       heapBytes: stats.heapBytes, stackBytes: stats.stackBytes, runtimeBytes: stats.runtimeBytes, gcCPUppm: stats.gcCPUppm };
     evidence.observations.push(observation);

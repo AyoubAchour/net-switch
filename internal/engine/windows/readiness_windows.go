@@ -61,6 +61,7 @@ type socketWatch struct {
 	socket                   winhandle.Owner
 	key                      uintptr
 	localPort                uint16
+	remote                   string // diagnostics: the peer, set once under pool.mu
 	wake                     func()
 	op                       windows.Overlapped
 	flags                    uint32
@@ -143,9 +144,13 @@ func (p *readiness) stats() map[string]any {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	ports := make([]uint16, 0, len(p.watches))
+	// A local port number alone can name a new connection to another peer
+	// while the released one is in TIME_WAIT; endpoints carry the peer too.
+	endpoints := make([]string, 0, len(p.watches))
 	normal, skipped, inherited := 0, 0, 0
 	for _, watch := range p.watches {
 		ports = append(ports, watch.localPort)
+		endpoints = append(endpoints, fmt.Sprintf("%d->%s", watch.localPort, watch.remote))
 		if watch.skipSuccess {
 			skipped++
 		} else {
@@ -164,7 +169,7 @@ func (p *readiness) stats() map[string]any {
 		queryError = p.policy.err.Error()
 	}
 	return map[string]any{
-		"sockets": len(p.watches), "ports": ports, "blockedWriters": len(p.writers),
+		"sockets": len(p.watches), "ports": ports, "endpoints": endpoints, "blockedWriters": len(p.writers),
 		"completionThread": p.thread.Load(), "closes": closes, "closedCount": p.closedCount,
 		"completionPolicy": p.policy.reason, "allowSkipCompletionOnSuccess": p.policy.allowSkip,
 		"protocolCatalogEntries": p.policy.entries, "nonIFSProvider": p.policy.nonIFS,
@@ -429,6 +434,11 @@ func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
 	if err != nil {
 		h.SocketClose("TCP failed readiness registration")
 		return nil, err
+	}
+	if c.remote != nil {
+		c.pool.mu.Lock()
+		w.remote = c.remote.String()
+		c.pool.mu.Unlock()
 	}
 	c.handle, c.watch = h, w
 	c.goOwner.CloseGo("TCP source Go connection close", c.blocking.Close)
