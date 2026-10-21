@@ -159,6 +159,8 @@ jobs:
       GOTOOLCHAIN: local
       CGO_ENABLED: '0'
     steps:
+      - name: Record the job's start for failure evidence
+        run: echo "NSACCEPT_JOB_START=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -310,6 +312,34 @@ jobs:
               done
             done
           fi
+      # Read-only. An unexplained kill (exit 137) then explains itself: the
+      # kernel log since the job began, and the OOM counters and memory peaks
+      # of this step's cgroup, its parents and any acceptance scope still left.
+      - name: Capture kernel and cgroup memory evidence after a failure
+        if: ${{ failure() }}
+        run: |
+          set +e
+          echo "::group::Kernel log since $NSACCEPT_JOB_START"
+          sudo journalctl -k --since "$NSACCEPT_JOB_START" --no-pager 2>&1 | tail -n 300
+          echo "::endgroup::"
+          echo "::group::dmesg tail"
+          sudo dmesg -T 2>&1 | tail -n 100
+          echo "::endgroup::"
+          echo "::group::cgroup memory.events, memory.peak and OOM kills"
+          own=$(sed -n 's/^0:://p' /proc/self/cgroup)
+          dirs=""
+          d="$own"
+          while [ -n "$d" ] && [ "$d" != "/" ]; do dirs="$dirs /sys/fs/cgroup$d"; d=$(dirname "$d"); done
+          for c in $dirs /sys/fs/cgroup/system.slice/nsaccept-*.scope /sys/fs/cgroup; do
+            [ -d "$c" ] || continue
+            echo "== $c"
+            for f in memory.events memory.peak memory.max memory.current; do
+              if [ -r "$c/$f" ]; then echo "$f: $(tr '\n' ' ' < "$c/$f")"; fi
+            done
+          done
+          grep '^oom_kill' /proc/vmstat
+          free -m
+          echo "::endgroup::"
       - name: Make root-produced evidence readable by the artifact uploader
         if: ${{ always() }}
         run: |
