@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
@@ -38,6 +39,34 @@ func TestRegistrarReplyPreservesReadError(t *testing.T) {
 	if _, err := parseReply([]byte(registrarReplyPrefix+`{"ready":true,"memoryType":262144}`), nil); err != nil {
 		t.Fatalf("valid ready reply failed without a reader error: %v", err)
 	}
+}
+
+var (
+	getProcessIDOfThread = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetProcessIdOfThread")
+	getExitCodeThread    = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetExitCodeThread")
+)
+
+// newLiveThreads counts handles in after but not before that are threads of
+// this process which are still running.
+func newLiveThreads(t *testing.T, before, after map[windows.Handle]bool) int {
+	t.Helper()
+	const stillActive = 259
+	live := 0
+	for h := range after {
+		if before[h] {
+			continue
+		}
+		if kind, err := objectType(h); err != nil || kind != "Thread" {
+			continue
+		}
+		pid, _, _ := getProcessIDOfThread.Call(uintptr(h))
+		var code uint32
+		ok, _, _ := getExitCodeThread.Call(uintptr(h), uintptr(unsafe.Pointer(&code)))
+		if uint32(pid) == windows.GetCurrentProcessId() && ok != 0 && code == stillActive {
+			live++
+		}
+	}
+	return live
 }
 
 // Exercise real suspended/running children and pipe reads. Each injected close
@@ -149,7 +178,20 @@ func TestWintunRegistrarStartupCloseErrors(t *testing.T) {
 			child = 0
 			must(t, childCloseErr)
 			must(t, r.close())
-			kinds := newHandleKinds(t, before, handleSnapshot(t))
+			after := handleSnapshot(t)
+			kinds := newHandleKinds(t, before, after)
+			// A new OS thread in this process (Go runtime or Windows thread
+			// pool) brings its own handles: run 39587194026 saw exactly one
+			// thread, two events, two high-resolution timers and one wait
+			// completion packet. Attribute at most two new events to each
+			// new handle that is a live thread of this process; any other
+			// event, and every other kind, is still a leak.
+			threads := newLiveThreads(t, before, after)
+			events := kinds["Event"]
+			if threadEvents := min(events, 2*threads); threadEvents != 0 {
+				t.Logf("new events attributed to %d new live thread(s) of this process: %d of %d old_pass=false", threads, threadEvents, events)
+				kinds["Event"] -= threadEvents
+			}
 			for _, kind := range []string{"Section", "Job", "File", "Pipe", "Process", "Event", "unreadable"} {
 				if kinds[kind] != 0 {
 					if !enforce {
