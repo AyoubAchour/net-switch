@@ -80,8 +80,12 @@ func floodTargets(i int, port uint16) string {
 func (e *Env) udpFlood(names []string, n int, release Release) (map[string]*Bg, map[string]app.FloodResult) {
 	bgs := map[string]*Bg{}
 	for i, name := range names {
-		bgs[name] = e.Start(Run{App: name, Args: append([]string{"udpflood", "--to", floodTargets(i, wire.PortUDPEcho),
-			"--sockets", strconv.Itoa(n), "--rate", "800", "--timeout", "4000"}, release.Arg()...)})
+		args := append([]string{"udpflood", "--to", floodTargets(i, wire.PortUDPEcho),
+			"--sockets", strconv.Itoa(n), "--rate", "800", "--timeout", "4000"}, release.Arg()...)
+		if _, ok := e.Eng.(engine.V1); ok {
+			args = append(args, "--sweep-file", sweepFile(release, name))
+		}
+		bgs[name] = e.Start(Run{App: name, Args: args})
 	}
 	results := map[string]app.FloodResult{}
 	for _, name := range names {
@@ -111,6 +115,9 @@ type sessions struct {
 	// serverLines counts the sockets that reached a server by the line the
 	// server saw them arrive from: the servers' own view, never the engine's.
 	serverLines map[engine.LineID]int
+	// serverSrc is, per socket that reached a server, the source the server
+	// saw: the engine's own outbound socket for that session.
+	serverSrc map[int]string
 }
 
 func (s sessions) admitted() int   { return max(s.gotOut, s.listed) }
@@ -134,15 +141,17 @@ func (e *Env) floodSessions(names []string, results map[string]app.FloodResult) 
 		r := results[name]
 		seen := map[int]bool{}
 		serverLine := map[int]engine.LineID{}
+		serverSrc := map[int]string{}
 		for _, rec := range Select(recs, Tagged("udp", r.Token)) {
 			// "T:<token>:0:<socket> "
 			fields := strings.Split(strings.TrimSpace(rec.Data), ":")
 			if i, err := strconv.Atoi(fields[len(fields)-1]); err == nil {
 				seen[i] = true
 				serverLine[i] = topo.LineOfText(rec.Src)
+				serverSrc[i] = rec.Src
 			}
 		}
-		s := sessions{opened: r.Opened, answered: r.Answered, refused: r.Refused, gotOut: len(seen), listed: listed[AppPath(name)], serverLines: map[engine.LineID]int{}}
+		s := sessions{opened: r.Opened, answered: r.Answered, refused: r.Refused, gotOut: len(seen), listed: listed[AppPath(name)], serverLines: map[engine.LineID]int{}, serverSrc: serverSrc}
 		for _, line := range serverLine {
 			s.serverLines[line]++
 		}
@@ -291,6 +300,9 @@ func udpSessionsPerAppCase(e *Env) {
 	e.T.Check(totalUnknown <= 512, "unknown UDP sessions remain in their separate 512-session pool (%d)", totalUnknown)
 	e.T.Check(total < udpSessionsTotal*3/4, "the two apps together stay far from the total limit (%d admitted)", total)
 	e.checkLoadIdentity(least >= udpSessionsPerApp*95/100, "each app still got at least 95%% of its allowed %d identified sessions out to the servers (least %d; %s)", udpSessionsPerApp, least, describeSessions(names, all))
+	if v1, ok := e.Eng.(engine.V1); ok {
+		e.heldSweep("UDP PER APP", names, bgs, release, results, all, v1.Session())
+	}
 	e.holding(bgs, release)
 	var s Stream
 	stream.WaitJSON(e, 30*time.Second, &s)
@@ -334,6 +346,9 @@ func udpSessionsTotalCase(e *Env) {
 	admitted := max(gotOut, listed)
 	e.checkLoadIdentity(gotOut >= udpSessionsTotal*95/100, "original 95%% UDP total check would pass=%t (%d of %d; %s)", gotOut >= udpSessionsTotal*95/100, gotOut, udpSessionsTotal, describeSessions(names, all))
 	e.ExpectTCP("foxtrot during the flood", "foxtrot", AsUser, "a", topo.Server4, 3)
+	if v1, ok := e.Eng.(engine.V1); ok && v1.Session() != nil {
+		e.heldSweep("UDP TOTAL", names, bgs, release, results, all, v1.Session())
+	}
 	e.holding(bgs, release)
 	var s Stream
 	stream.WaitJSON(e, 30*time.Second, &s)

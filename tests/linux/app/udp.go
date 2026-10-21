@@ -574,7 +574,8 @@ type FloodResult struct {
 // runUDPFlood opens many UDP sockets (each a new session to the engine), sends
 // one datagram on each, then sees which are answered, refused (ICMP
 // unreachable) or ignored. All sockets stay open until the end, or with
-// --release-file until the case releases them.
+// --release-file until the case releases them; --sweep-file lets the case
+// time an echo through each held session first (udp_sweep.go).
 func runUDPFlood(args []string) (any, error) {
 	fs := flag.NewFlagSet("udpflood", flag.ContinueOnError)
 	to := fs.String("to", "", "echo servers ip:port,...; socket i uses server i mod n")
@@ -583,6 +584,7 @@ func runUDPFlood(args []string) (any, error) {
 	timeout := fs.Int("timeout", 3000, "ms to wait for answers after the last datagram")
 	times := fs.Bool("times", false, "record when each refusal arrived")
 	release := fs.String("release-file", "", "print the result, then keep every socket open until this file exists")
+	sweepFile := fs.String("sweep-file", "", "while holding, when this file appears, echo once through each socket it lists (a SweepRequest) and print \"sweep {json}\"")
 	if err := parse(fs, args); err != nil {
 		return nil, err
 	}
@@ -653,5 +655,8 @@ func runUDPFlood(args []string) (any, error) {
 		}()
 	}
 	wg.Wait()
+	if *sweepFile != "" {
+		return sweepThenHold(conns, tok, *sweepFile, *release, r)
+	}
 	return holdUntil(*release, r)
 }

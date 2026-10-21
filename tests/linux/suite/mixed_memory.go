@@ -94,6 +94,7 @@ func mixedCaps(e *Env) {
 	udpNames := AppNames[:5]
 	e.T.Logf("MIXED OFFER: 20,000 UDP sockets; native ephemeral range %s", e.SysctlDUT("net.ipv4.ip_local_port_range"))
 	udpApps, udpResults := e.udpFlood(udpNames, 4000, release)
+	udpHeldAt := time.Now()
 	udpStats := e.memorySample(s, "MIXED UDP HELD")
 	udpHeld := e.floodSessions(udpNames, udpResults)
 	e.checkSessions(udpNames, udpHeld)
@@ -173,6 +174,10 @@ func mixedCaps(e *Env) {
 		float64(int64(full.Counters["stackBytes"])-int64(withTW.Counters["stackBytes"]))/float64(total),
 		float64(int64(withTW.Counters["heapBytes"])-int64(udpStats.Counters["heapBytes"]))/4096,
 		full.Counters["gcCPUNanos"]-baseline.Counters["gcCPUNanos"], full.Counters["totalCPUNanos"]-baseline.Counters["totalCPUNanos"], full.TunKernel, full.Counters["tunDropped"])
+	// After the plateau samples, so the sweep's traffic doesn't touch them;
+	// the UDP sessions have been held, untouched, since the flood.
+	e.T.Logf("MIXED SWEEP START: UDP sessions held for %.1f s of the 300 s idle timeout", time.Since(udpHeldAt).Seconds())
+	e.heldSweep("MIXED", udpNames, udpApps, release, udpResults, udpHeld, s)
 	e.checkHeldTCP(held, tcpApps)
 	release.Open(e)
 	for name, bg := range tcpApps {
