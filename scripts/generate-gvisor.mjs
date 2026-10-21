@@ -21,12 +21,13 @@ function run(exe, args, cwd = root) {
   if (result.error || result.status !== 0) throw new Error(`${exe} ${args.join(' ')}: ${result.error || result.stderr || result.stdout}`);
   return result.stdout;
 }
-const pins = JSON.parse(fs.readFileSync(path.join(root, 'packaging/versions.json'), 'utf8'));
-if (process.env.GOTOOLCHAIN !== 'local' || run(go, ['env', 'GOVERSION']).trim() !== `go${pins.go.version}`) {
-  throw new Error(`Use pinned Go ${pins.go.version} with GOTOOLCHAIN=local`);
+const mod = fs.readFileSync(path.join(root, 'go.mod'), 'utf8');
+const goVersion = mod.match(/^go (\d+\.\d+\.\d+)$/m)?.[1];
+if (!goVersion) throw new Error('Missing exact Go toolchain pin in go.mod');
+if (process.env.GOTOOLCHAIN !== 'local' || run(go, ['env', 'GOVERSION']).trim() !== `go${goVersion}`) {
+  throw new Error(`Use pinned Go ${goVersion} with GOTOOLCHAIN=local`);
 }
 const moduleName = 'gvisor.dev/gvisor';
-const mod = fs.readFileSync(path.join(root, 'go.mod'), 'utf8');
 const version = mod.match(/^require gvisor\.dev\/gvisor (v\S+)$/m)?.[1];
 if (!version) throw new Error('Missing exact gVisor module pin');
 const upstream = JSON.parse(run(go, ['mod', 'download', '-json', `${moduleName}@${version}`]));

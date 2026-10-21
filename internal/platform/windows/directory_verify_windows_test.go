@@ -1,9 +1,11 @@
 package winplatform
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -12,7 +14,17 @@ func TestVerifyMachineStoreWithLiveEngineDirectory(t *testing.T) {
 	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 		t.Skip("native store protection is hosted-only")
 	}
-	path := filepath.Join(t.TempDir(), "machine")
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Fatal("machine-store verification test requires elevation")
+	}
+	// A machine store's ancestors must have installation-grade ACLs. The
+	// runner's per-user Temp tree deliberately does not meet that condition.
+	path := filepath.Join(os.Getenv("ProgramData"), fmt.Sprintf("NetSwitch-live-store-%d", time.Now().UnixNano()))
+	t.Cleanup(func() {
+		if err := os.RemoveAll(path); err != nil {
+			t.Error(err)
+		}
+	})
 	if err := ProtectDirectory(path); err != nil {
 		t.Fatal(err)
 	}

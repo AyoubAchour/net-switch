@@ -67,14 +67,13 @@ jobs:
           mode=verify
           if [[ "$CACHE_HIT" != true ]]; then mode=fetch; fi
           bash tests/linux/snap-inputs.sh "$mode" "$RUNNER_TEMP/snap-inputs"
-      - name: Read the pinned Go and Node versions
+      - name: Read the pinned Node version
         id: pins
         run: |
-          echo "go_version=$(jq -r .go.version packaging/versions.json)" >> "$GITHUB_OUTPUT"
           echo "node_version=$(jq -r .node.version packaging/versions.json)" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ steps.pins.outputs.go_version }}
+          go-version-file: go.mod
           cache: false
       # The baseline is configured by the app's own generator (lib/engine.mjs).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
