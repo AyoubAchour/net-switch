@@ -20,6 +20,35 @@ type failedSetupControl struct {
 	observed chan bool
 }
 
+func TestDestroyFinishesAcrossFailedSetupCachePublication(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		c := &testfake.Controller{}
+		n := &NAT{control: c, now: time.Now}
+		ticket, _ := c.Begin("udp", platform.Tuple{})
+		defer ticket.Close()
+		s := &session{n: n, source: local, owner: owner, ticket: ticket, done: make(chan struct{})}
+		b := n.bucket(local)
+		b.m = map[netip.AddrPort]*session{local: s}
+		// Destroy has obtained s under the shard lock. Before it acquires
+		// s.mu, setup fails, publishes the cache entry and finishes cleanup.
+		s.rejectPending(owner.AppID)
+		s.close()
+		if len(b.m) != 0 || len(b.negative) != 1 {
+			t.Fatal("fixture did not publish the failed setup cache")
+		}
+		if replacement {
+			entry := b.negative[local]
+			entry.owner.Generation = "new socket"
+			b.negative[local] = entry
+		}
+		s.destroyGeneration(owner.Generation)
+		_, retained := b.negative[local]
+		if retained != replacement {
+			t.Fatal("destroy retained an old generation or removed its replacement")
+		}
+	}
+}
+
 func (c *failedSetupControl) AllowReject(string) bool {
 	st := c.Stats()
 	page, err := c.Page("")
@@ -57,6 +86,12 @@ func TestFailedUDPSetupRetiresBeforeRefusalAndBoundsNegativeCache(t *testing.T) 
 	}
 	if count == 0 || count > RejectCacheEntries {
 		t.Fatalf("cache fixture/bound: %d", count)
+	}
+	if n.OpenFailed.Load() != RejectCacheEntries*2 {
+		t.Fatal("fixture did not execute every native open failure")
+	}
+	if c.Stats().RefusedUDP.Unexplained != RejectCacheEntries*2 || n.Rejected.Load() != RejectCacheEntries*2 {
+		t.Fatal("native setup refusals were missing or mislabeled as cap refusals")
 	}
 	if got := runtime.NumGoroutine(); got > baseline+8 {
 		t.Fatalf("parked failure goroutines: baseline=%d now=%d", baseline, got)
