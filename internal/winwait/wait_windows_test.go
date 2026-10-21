@@ -89,6 +89,12 @@ type stackMoveReport struct {
 // then passes the kernel an address in the decommitted stack; this helper
 // converts the address only inside the non-splitting syscall.
 func TestWaitArrayStackMove(t *testing.T) {
+	if raceEnabled {
+		// efence decommits stacks the race runtime's shadow memory still
+		// covers; the race child faults inside the race runtime itself (run
+		// 39559172829). The non-race jobs on both architectures run this.
+		t.Skip("GODEBUG=efence cannot run under the race detector")
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
