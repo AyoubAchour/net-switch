@@ -38,8 +38,12 @@ function refusalPackets(stats, refusals) {
   assert(packets, 'The OS-limit gate needs the hosted Wintun boundary capture');
   return refusals.map(({ localPort }) => {
     const syn = packets.find((p) => p.direction === 'from-app' && p.source === localPort && p.flags === 2);
+    // Retried SYNs reuse the sequence number, and the capture is a ring: the
+    // first SYN still in it can be a retry whose original's reset is still
+    // there. Match the first reset at or after this SYN (x64 run 39591853359
+    // paired a retry with the earlier reset and reported -501 ms).
     const reset = syn && packets.find((p) => p.direction === 'to-app' && p.target === localPort &&
-      p.flags === 20 && p.ack === ((syn.seq + 1) >>> 0));
+      p.flags === 20 && p.ack === ((syn.seq + 1) >>> 0) && p.at >= syn.at);
     assert(reset && !reset.error && reset.batchWritten === reset.batchPackets,
       `Missing successfully written refusal for app port ${localPort}`);
     const ms = reset.at - syn.at;
