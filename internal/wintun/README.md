@@ -79,11 +79,16 @@ owning adapter also calls the DLL's adapter removal.
 
 A lost registration — real adapter removal **or** the registrar exiting on its
 own — stops the session with `ErrAdapterRemoved` and never triggers an
-automatic rebuild. Owner death is distinguished deterministically during
-teardown (the joined process had already exited before the stop request) and
-joined with `ErrRegistrarExited`; real removal carries `ErrAdapterRemoved`
-alone. Reporting the distinct "adapter lost" reason to the controller, and any
-restart budget, belong to the engine/controller, not this package. Only ring
+automatic rebuild. A confirmed owner loss takes precedence even over a queued
+ring-corruption cause, so a dead owner is never rebuilt in place. Owner death
+is classified from the registrar's **completed** exit during teardown, not a
+pre-close sample: it is owner death if the process was already gone before our
+stop, or ended non-zero without our own escalation; a clean EOF stop exits
+zero. That exit is then joined with `ErrRegistrarExited`, while real removal
+carries `ErrAdapterRemoved` alone. The distinction is a diagnostic — both are
+adapter-lost — and is best-effort, not a hard guarantee under every race.
+Reporting the distinct "adapter lost" reason to the controller, and any restart
+budget, belong to the engine/controller, not this package. Only ring
 **corruption** reopens the rings (and thereby starts a fresh registrar).
 Process death makes the driver unregister its rings;
 the service manager calls `RecoverAfterCrash` with the journaled name and GUID

@@ -249,13 +249,13 @@ func (s *Session) maintain() {
 			// surface it even though these rings are gone before the stop handler
 			// runs; the cause itself is never treated as a cleanup failure.
 			s.closeErr = errors.Join(s.closeErr, err)
-			// end() recorded deterministically, from the joined registrar,
-			// whether its process had already exited before the stop request.
-			// Ring corruption (not disconnect) still reopens; a lost owner never
-			// triggers an automatic rebuild here.
+			// end() recorded, from the joined registrar, whether its process had
+			// already ended other than by our stop. A confirmed owner loss takes
+			// precedence over a queued corruption cause: the session is lost and
+			// must never be rebuilt in place, even if ErrCorrupt triggered this.
 			lostToExit := s.rings.ownerExitedFirst
 			s.rings = nil
-			removed := errors.Is(cause, ErrDisconnected)
+			removed := errors.Is(cause, ErrDisconnected) || lostToExit
 			if !removed && err == nil {
 				s.event("recovering", cause)
 				s.rings, err = reopenRings(s.stop, s.open)

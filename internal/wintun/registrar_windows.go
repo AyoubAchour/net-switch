@@ -144,17 +144,27 @@ func (g *registrar) exitCode() uint32 {
 }
 
 // retire requests exit by closing the control pipe's only writer, then
-// terminates the job if the registrar does not exit. It reports whether the
-// registrar had already exited before the stop request (owner death) and
-// whether it is now gone.
+// terminates the job if the registrar does not exit. It classifies the loss
+// from the *completed* exit, not a pre-close sample: the registrar exited on
+// its own (owner death) if it was already gone before our stop, or if it ended
+// with a non-zero code without our escalation. A clean EOF stop exits zero, and
+// our own escalation kill is engine-initiated, so neither counts as owner death.
+// Both reasons are still an adapter-lost session; this only sets the diagnostic.
 func (g *registrar) retire(closeHandle func(windows.Handle) error) (exited, lostBeforeStop bool, err error) {
-	lostBeforeStop = g.alreadyExited()
+	preStop := g.alreadyExited()
 	err = g.control.Close("Wintun registrar control close", closeHandle)
 	exited = g.wait(registrarStopTimeout)
+	escalated := false
 	if !exited {
+		escalated = true
 		err = errors.Join(err, windows.TerminateJobObject(g.job.Handle("Wintun registrar termination"), 1))
 		exited = g.wait(registrarKillTimeout)
 	}
+	var code uint32 = ^uint32(0)
+	if exited {
+		code = g.exitCode()
+	}
+	lostBeforeStop = preStop || (exited && !escalated && code != 0)
 	err = errors.Join(err, g.job.Close("Wintun registrar job close", closeHandle),
 		g.process.Close("Wintun registrar process close", closeHandle))
 	if !exited {
@@ -292,15 +302,17 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	sources := []winhandle.Owner{controlRead, replyWrite, r.section, r.readOwner, r.writeOwner}
 	var inheritedOwners []winhandle.Owner
 	inherited := make([]windows.Handle, 0, len(sources))
-	closeInherited := func() {
+	closeInherited := func() error {
+		var e error
 		for _, o := range inheritedOwners {
-			o.HandleClose("Wintun registrar inherited duplicate close")
+			e = errors.Join(e, o.HandleClose("Wintun registrar inherited duplicate close"))
 		}
 		inheritedOwners = nil
+		return e
 	}
 	defer func() {
 		if len(inheritedOwners) != 0 {
-			closeInherited()
+			err = errors.Join(err, closeInherited())
 		}
 	}()
 	for _, source := range sources {
@@ -322,6 +334,9 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 		return nil, err
 	}
 	defer attrs.Delete()
+	// Update retains each value pointer in attrs.pointers, so the inherited and
+	// jobList backing arrays stay reachable (and, being heap, unmoved) until the
+	// deferred attrs.Delete, which runs after CreateProcess has consumed them.
 	if err = attrs.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&inherited[0]), uintptr(len(inherited))*unsafe.Sizeof(inherited[0])); err != nil {
 		return nil, err
 	}
@@ -353,7 +368,6 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 		environment, nil, &si.StartupInfo, &pi); err != nil {
 		return nil, fmt.Errorf("start Wintun registrar: %w", err)
 	}
-	closeInherited()
 	process := winhandle.Open(pi.Process, "Wintun registrar process open")
 	thread := winhandle.Open(pi.Thread, "Wintun registrar thread open")
 	g := &registrar{process: process, job: job, control: controlWrite}
@@ -369,14 +383,22 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 		}
 		return errors.Join(cause, err, process.HandleClose("Wintun registrar setup process close"))
 	}
-	// Close the parent's own ends of the child's pipes so the child holds the
-	// only control-read and reply-write ends. Its exit then ends the reply read.
-	if err = errors.Join(controlRead.HandleClose("Wintun registrar control read close"), replyWrite.HandleClose("Wintun registrar reply write close")); err != nil {
+	if err = closeInherited(); err != nil {
 		thread.HandleClose("Wintun registrar thread close")
 		return nil, abandon(err)
 	}
+	// Close the parent's own ends of the child's pipes so the child holds the
+	// only control-read and reply-write ends. Its exit then ends the reply read.
+	// A close consumes its owner even on failure, so drop each from cleanup
+	// responsibility regardless of result; never close a consumed owner twice.
+	controlReadErr := controlRead.HandleClose("Wintun registrar control read close")
 	remove(controlRead)
+	replyWriteErr := replyWrite.HandleClose("Wintun registrar reply write close")
 	remove(replyWrite)
+	if err = errors.Join(controlReadErr, replyWriteErr); err != nil {
+		thread.HandleClose("Wintun registrar thread close")
+		return nil, abandon(err)
+	}
 	if registrarBeforeResume != nil {
 		registrarBeforeResume(pi.ProcessId) // crash-before-resume fixture exits here
 	}

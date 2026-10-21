@@ -58,7 +58,7 @@ func runRegistrarFixture() int {
 	if err := json.Unmarshal(line, &config); err != nil {
 		return fail("configuration", err)
 	}
-	view, _, memoryType, stage, err := prepareRegistration(config)
+	view, desc, memoryType, stage, err := prepareRegistration(config)
 	if err != nil {
 		return fail(stage, err)
 	}
@@ -66,11 +66,14 @@ func runRegistrarFixture() int {
 	case "pre-reply-exit":
 		os.Exit(5) // validated and mapped, dies before replying
 	case "hang":
-		select {} // never reply: drives the parent's start timeout
-	}
-	// No real device registration in the fixture.
-	if fault == "post-register-exit" {
-		os.Exit(6) // registered, dies before replying
+		blockForever() // never reply: drives the parent's start timeout
+	case "post-register-exit":
+		// Actually register the real device (this fault runs with an adapter), so
+		// the parent's failure cleanup is proven against a live registration.
+		if err := registerDevice(config.Path, &desc); err != nil {
+			return fail("register", err)
+		}
+		os.Exit(6)
 	}
 	pid := windows.GetCurrentProcessId()
 	if fault == "wrong-pid" {
@@ -82,9 +85,17 @@ func runRegistrarFixture() int {
 	sendRegistrarReply(stdout, registrarReply{PID: pid, Ready: true, Address: uint64(view), MemoryType: memoryType,
 		FootprintMeasured: measured, Handles: handles, PrivateBytes: private, HeapBytes: stats.HeapAlloc, StackBytes: stats.StackInuse})
 	if fault == "block" {
-		select {} // ignore the control pipe entirely: only kill-on-close can reap this
+		blockForever() // ignore the control pipe entirely: only kill-on-close can reap this
 	}
 	return registrarWaitForStop(stdin)
+}
+
+// blockForever blocks the thread in a native wait that never completes while
+// the process lives, so (unlike select{}) Go's deadlock detector cannot abort
+// the fixture and only external termination ends it.
+func blockForever() {
+	windows.WaitForSingleObject(windows.CurrentProcess(), windows.INFINITE)
+	os.Exit(1) // unreachable while the process is alive
 }
 
 // runRegistrarCrasher creates a registrar through the production launcher, then
