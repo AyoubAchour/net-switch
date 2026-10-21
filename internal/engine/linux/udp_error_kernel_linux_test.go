@@ -418,4 +418,34 @@ func TestKernelUDPStalePacketTooBigAndLocalMTU(t *testing.T) {
 	if left := queuedErrors(s); left != 0 {
 		t.Fatalf("%d errors left after local too big", left)
 	}
+
+	for _, readerDrains := range []bool{false, true} {
+		// Prove a LOCAL report was generated under DF=true, then leave it
+		// queued or let the reader consume it. Neither may become MTU proof
+		// for the next send, which permits fragmentation.
+		s.raw.Control(func(fd uintptr) {
+			if err := unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MTU_DISCOVER, unix.IP_PMTUDISC_DO); err != nil {
+				t.Fatal(err)
+			}
+		})
+		if err := plainSend(s, make([]byte, 1400), c); err != unix.EMSGSIZE {
+			t.Fatalf("stale LOCAL starting condition: %v", err)
+		}
+		waitQueuedError(t, s)
+		if readerDrains {
+			s.drainErrors()
+		}
+		forgePacketTooBig(t, local, a, 1100, "A")
+		waitQueuedError(t, s)
+		if n, err := s.TryWriteTo(make([]byte, 1400), c, false); err != nil || n != 1400 {
+			t.Fatalf("old LOCAL report fabricated TooBig after DF was disabled (reader drained=%t): %d %v", readerDrains, n, err)
+		}
+		if e := takeNotification(t, notes); e.Destination != a || e.MTU != 1100 {
+			t.Fatalf("stale test lost A's real report: %+v", e)
+		}
+		expectNoNotification(t, notes)
+		if left := queuedErrors(s); left != 0 {
+			t.Fatalf("stale test left %d reports", left)
+		}
+	}
 }

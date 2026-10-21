@@ -120,14 +120,6 @@ func (p *Platform) OpenUDPTo(ctx context.Context, id string, dst netip.AddrPort)
 	return &udpSocket{conn: c, raw: raw, v6: v6, errors: make(chan platform.DatagramError, 1), done: make(chan struct{})}, nil
 }
 
-type mtuEntry struct {
-	destination netip.Addr
-	mtu         uint32
-	// local marks a local EMSGSIZE report that a reader drained before the
-	// failed send could inspect the queue. That send consumes it as proof.
-	local bool
-}
-
 type udpSocket struct {
 	conn             *net.UDPConn
 	raw              syscall.RawConn
@@ -136,8 +128,6 @@ type udpSocket struct {
 	once             sync.Once
 	errors           chan platform.DatagramError
 	done             chan struct{}
-	mtus             [8]mtuEntry
-	mtuCursor        int
 	handler          func(platform.DatagramError)
 	errorReady       atomic.Bool
 }
@@ -225,20 +215,6 @@ func (s *udpSocket) sendAttributed(dst netip.AddrPort, size int, send func() err
 // queued and keep EPOLLERR level-ready for the reader.
 func (s *udpSocket) clearSocketError() {
 	s.raw.Control(func(fd uintptr) { unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_ERROR) })
-}
-
-func (s *udpSocket) tooBig(dst netip.AddrPort) *platform.TooBig {
-	s.drainErrors()
-	s.errorMu.Lock()
-	var mtu uint32
-	for _, entry := range s.mtus {
-		if entry.destination == dst.Addr() {
-			mtu = entry.mtu
-			break
-		}
-	}
-	s.errorMu.Unlock()
-	return &platform.TooBig{MTU: s.pathMTU(mtu)}
 }
 
 // pathMTU replaces a missing MTU with the family's minimum.
@@ -355,7 +331,6 @@ func (s *udpSocket) drainLocked(d *errorDrain, errno unix.Errno, dst netip.AddrP
 				if covers {
 					evidence.local, evidence.mtu = true, s.pathMTU(info)
 				}
-				s.rememberMTU(named.Addr(), info, !covers)
 			case unix.SO_EE_ORIGIN_ICMP, unix.SO_EE_ORIGIN_ICMP6:
 				if reported == 0 {
 					continue
@@ -366,7 +341,6 @@ func (s *udpSocket) drainLocked(d *errorDrain, errno unix.Errno, dst netip.AddrP
 				message := platform.DatagramError{Destination: named}
 				if reported == unix.EMSGSIZE {
 					message.MTU = s.pathMTU(info)
-					s.rememberMTU(named.Addr(), info, false)
 				} else {
 					// Unreachable, prohibited, parameter problem or time
 					// exceeded: the shared contract has one unreachable form.
@@ -387,31 +361,7 @@ func (s *udpSocket) drainLocked(d *errorDrain, errno unix.Errno, dst netip.AddrP
 			}
 		}
 	}
-	if errno == unix.EMSGSIZE && !evidence.local && dst.IsValid() {
-		for i := range s.mtus {
-			entry := &s.mtus[i]
-			if entry.local && entry.destination == dst.Addr() && s.exceeds(size, entry.mtu) {
-				entry.local = false
-				evidence.local, evidence.mtu = true, entry.mtu
-				break
-			}
-		}
-	}
 	return evidence
-}
-
-func (s *udpSocket) rememberMTU(destination netip.Addr, mtu uint32, local bool) {
-	if mtu == 0 {
-		return
-	}
-	for i, entry := range s.mtus {
-		if entry.destination == destination {
-			s.mtus[i] = mtuEntry{destination, mtu, local}
-			return
-		}
-	}
-	s.mtus[s.mtuCursor%len(s.mtus)] = mtuEntry{destination, mtu, local}
-	s.mtuCursor++
 }
 
 type errorScratch struct {
@@ -436,32 +386,24 @@ func sendDatagram(send func() error, explain func(unix.Errno) errorEvidence, cle
 		return localSendError(err)
 	}
 	first := explain(errno)
-	// Linux checks the local path MTU before it reads the latch, and queues a
-	// LOCAL report naming this destination when that check fails.
-	if errno == unix.EMSGSIZE && first.local {
-		return &platform.TooBig{MTU: first.mtu}
-	}
+	// Even LOCAL reports may belong to an older send, left behind a bounded
+	// drain. Ignore all first-pass MTU evidence. Only an empty queue followed
+	// by a new send under errorMu establishes a fresh LOCAL report.
 	clear()
 	err = send()
 	if errno, ok = latchedErrno(err); !ok {
 		return localSendError(err)
 	}
-	// A new report may have latched between clear and the retry. Only a
-	// queue drained dry by the first pass lets the second pass see it, and
-	// errnos only ICMP produces never describe this send.
-	if !first.empty || !maybeSynchronous(errno) {
+	// A new ICMP may set sk_err even when its error-queue allocation fails.
+	// Absence of a quotation is not evidence of a local route failure.
+	if !first.empty || errno != unix.EMSGSIZE {
 		return platform.ErrDatagramDropped
 	}
 	second := explain(errno)
-	switch {
-	case errno == unix.EMSGSIZE && second.local:
+	if second.local {
 		return &platform.TooBig{MTU: second.mtu}
-	case errno == unix.EMSGSIZE || second.remote:
-		return platform.ErrDatagramDropped
 	}
-	// A route or permission failure for this destination. Linux reports
-	// these before it reads the latch, and no new matching report arrived.
-	return err
+	return platform.ErrDatagramDropped
 }
 
 // latchedErrno returns errnos the Linux UDPv4/v6 ICMP handlers store in
@@ -477,17 +419,6 @@ func latchedErrno(err error) (unix.Errno, bool) {
 		return errno, true
 	}
 	return 0, false
-}
-
-// maybeSynchronous reports latched errnos udp_sendmsg can also return for
-// the current destination: a local path MTU, a failed route lookup, or a
-// prohibited destination. The others only ever come from ICMP.
-func maybeSynchronous(errno unix.Errno) bool {
-	switch errno {
-	case unix.EMSGSIZE, unix.EHOSTUNREACH, unix.ENETUNREACH, unix.EACCES:
-		return true
-	}
-	return false
 }
 
 func localSendError(err error) error {

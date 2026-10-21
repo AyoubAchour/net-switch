@@ -243,13 +243,10 @@ func TestKernelPlatform(t *testing.T) {
 		if !errors.As(err, &big) || big.MTU != 1280 {
 			t.Fatalf("real EMSGSIZE must carry path MTU 1280: %v", err)
 		}
-		// The receive goroutine may drain the queue before WriteTo handles
-		// EMSGSIZE. The path MTU must survive that ordering, per destination.
+		// A reader may consume earlier reports. The next send must obtain
+		// its own fresh LOCAL proof rather than trust a cached path MTU.
 		u := sock.(*udpSocket)
 		u.drainErrors()
-		if big := u.tooBig(netip.MustParseAddrPort("198.51.100.1:30000")); big.MTU != 1280 {
-			t.Fatalf("drained error queue lost the path MTU: %+v", big)
-		}
 		var delivered []platform.DatagramError
 		u.SetErrorHandler(func(e platform.DatagramError) {
 			if !u.errorMu.TryLock() {

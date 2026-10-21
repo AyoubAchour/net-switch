@@ -78,12 +78,12 @@ func TestUDPSendRecoversEveryLatchedICMPErrno(t *testing.T) {
 }
 
 func TestUDPSendSeparatesLocalAndRemoteTooBig(t *testing.T) {
-	// A synchronous local EMSGSIZE queues a LOCAL report naming this
-	// destination. It is this send's own result, so it is not retried.
-	s := sendScript{sends: []error{unix.EMSGSIZE}, passes: []errorEvidence{{empty: true, local: true, mtu: 1280}}}
+	// The first LOCAL report could be stale. A retry after the queue is
+	// empty gives a fresh report under the send/error lock.
+	s := sendScript{sends: []error{unix.EMSGSIZE, unix.EMSGSIZE}, passes: []errorEvidence{{empty: true, local: true, mtu: 1100}, {empty: true, local: true, mtu: 1280}}}
 	err := s.run(t)
 	var big *platform.TooBig
-	if !errors.As(err, &big) || big.MTU != 1280 || s.calls != 1 || s.clears != 0 {
+	if !errors.As(err, &big) || big.MTU != 1280 || s.calls != 2 || s.clears != 1 {
 		t.Fatalf("local too big was not reported for its own destination: calls=%d err=%v", s.calls, err)
 	}
 	// A remote Packet Too Big for A only latched EMSGSIZE. B's datagram fits
@@ -131,19 +131,19 @@ func TestUDPSendSecondAsyncErrorIsCountedDrop(t *testing.T) {
 	}
 }
 
-func TestUDPSendKeepsSynchronousRouteFailures(t *testing.T) {
-	// No queued report and no new one: Linux's route lookup failed for this
-	// destination, so the NAT should answer it.
+func TestUDPSendDoesNotTreatMissingReportsAsRouteProof(t *testing.T) {
+	// Linux may latch an ICMP errno even if allocating its queued report
+	// fails. Empty queues cannot prove this destination's route failed.
 	for _, errno := range []unix.Errno{unix.EHOSTUNREACH, unix.ENETUNREACH, unix.EACCES} {
 		s := sendScript{sends: []error{errno, errno}, passes: []errorEvidence{{empty: true}, {empty: true}}}
-		if err := s.run(t); !errors.Is(err, errno) || s.calls != 2 || len(s.explains) != 2 {
-			t.Fatalf("synchronous %v was hidden: calls=%d err=%v", errno, s.calls, err)
+		if err := s.run(t); !errors.Is(err, platform.ErrDatagramDropped) || s.calls != 2 || len(s.explains) != 1 {
+			t.Fatalf("unproven %v was attributed to the current destination: calls=%d err=%v", errno, s.calls, err)
 		}
 	}
-	// A different matching report in the queue does not hide it either.
+	// A first-pass report says nothing about the retry's missing report.
 	s := sendScript{sends: []error{unix.EHOSTUNREACH, unix.EHOSTUNREACH}, passes: []errorEvidence{{empty: true, remote: true}, {empty: true}}}
-	if err := s.run(t); !errors.Is(err, unix.EHOSTUNREACH) {
-		t.Fatalf("drained report hid B's synchronous route failure: %v", err)
+	if err := s.run(t); !errors.Is(err, platform.ErrDatagramDropped) {
+		t.Fatalf("first report became proof for the retry: %v", err)
 	}
 	// Errors Linux never latches from ICMP are returned untouched.
 	s = sendScript{sends: []error{unix.EPERM}}
@@ -153,5 +153,18 @@ func TestUDPSendKeepsSynchronousRouteFailures(t *testing.T) {
 	s = sendScript{sends: []error{unix.ECONNREFUSED, unix.EAGAIN}, passes: []errorEvidence{{empty: true, remote: true}}}
 	if err := s.run(t); !errors.Is(err, unix.EAGAIN) {
 		t.Fatalf("full send buffer on the retry was not would-block: %v", err)
+	}
+}
+
+func TestUDPSendIgnoresStaleLocalEvidence(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		s := sendScript{sends: []error{unix.EMSGSIZE, nil}, passes: []errorEvidence{{empty: empty, local: true, mtu: 1280}}}
+		if err := s.run(t); err != nil || s.calls != 2 {
+			t.Fatalf("stale LOCAL report blocked a datagram after its route MTU grew (empty=%t): %v", empty, err)
+		}
+	}
+	s := sendScript{sends: []error{unix.EMSGSIZE, unix.EMSGSIZE}, passes: []errorEvidence{{local: true, mtu: 1280}}}
+	if err := s.run(t); !errors.Is(err, platform.ErrDatagramDropped) || len(s.explains) != 1 {
+		t.Fatalf("a full queue supplied fresh MTU proof: %v", err)
 	}
 }
