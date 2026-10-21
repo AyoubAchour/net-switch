@@ -102,3 +102,5 @@ func ParseBulkRequest(line string) (verb string, n int64, err error) {
 	}
 	return fields[0], n, nil
 }
+
+// Validation-only change for PR #54 job gating (Linux harness case). Do not merge.
