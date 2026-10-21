@@ -94,6 +94,7 @@ type gateway struct {
 	udpCapacity  udpCapacityResponder
 	targetMu     sync.RWMutex
 	targets      map[string]string
+	probePorts   atomic.Pointer[probePorts] // capacity case only
 	done         chan struct{}
 	stop         sync.Once
 }

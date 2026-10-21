@@ -396,7 +396,10 @@ export async function capacity({ server, harness, directory, line }) {
     for (const { child, call } of children) {
       if (child.connected) { await call('close').catch(() => {}); child.disconnect(); }
     }
-    await harness.control('capacity-close', {});
+    // Health probes through TestISP used its reserved upstream ports, not the
+    // PC's exhausted pool (a real router's own port space); say so.
+    const closed = await harness.control('capacity-close', {});
+    console.log(`WINDOWS TESTISP PROBE RELAY ${JSON.stringify(closed.probeRelay ?? { mode: 'not active' })}`);
     if (udpCloseError) throw udpCloseError;
   }
 }

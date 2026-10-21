@@ -105,6 +105,15 @@ func (g *gateway) installCapacity(mux *http.ServeMux) {
 			http.Error(w, err.Error(), 500)
 			return
 		}
+		// Reserved before any capacity fill, so the native baselines and the
+		// engine run see the same pool without these ports.
+		ports, err := reserveProbePorts(g.index, g.uplinkIP)
+		if err != nil {
+			c.close()
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		g.probePorts.Store(ports)
 		responder = c
 		json.NewEncoder(w).Encode(map[string]any{"host": "198.19.128.2", "ports": []int{25000, 25001, 25002, 25003, 25004, 25005, 25006, 25007}})
 	})
@@ -117,21 +126,33 @@ func (g *gateway) installCapacity(mux *http.ServeMux) {
 		}
 		responder.mu.Lock()
 		defer responder.mu.Unlock()
-		json.NewEncoder(w).Encode(map[string]int{"accepted": responder.accepted, "echoed": responder.echoed})
+		reply := map[string]any{"accepted": responder.accepted, "echoed": responder.echoed}
+		if ports := g.probePorts.Load(); ports != nil {
+			reply["probeRelay"] = ports.stats()
+		}
+		json.NewEncoder(w).Encode(reply)
 	})
 	mux.HandleFunc("POST /capacity-close", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
+		reply := map[string]any{}
+		if ports := g.probePorts.Swap(nil); ports != nil {
+			reply["probeRelay"] = ports.stats()
+			ports.close()
+		}
 		if responder != nil {
 			responder.close()
 			responder = nil
 		}
-		io.WriteString(w, "{}")
+		json.NewEncoder(w).Encode(reply)
 	})
 	go func() {
 		<-g.done
 		mu.Lock()
 		defer mu.Unlock()
+		if ports := g.probePorts.Swap(nil); ports != nil {
+			ports.close()
+		}
 		if responder != nil {
 			responder.close()
 			responder = nil
