@@ -71,6 +71,17 @@ func TestMatchedHolderDoesNotWaitForBatchCompletion(t *testing.T) {
 	if err := o.Warm(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// Sockets already open below ours, as earlier tests can leave them until
+	// the collector closes them, come first in the directory. Hold 96 so that
+	// layout is always present: the target must be chosen by visit order, not
+	// assumed to lie in the first 64 sockets.
+	for range 72 {
+		earlier, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer earlier.Close()
+	}
 	var rows []socketRow
 	var descriptors []int
 	for range 256 {
@@ -106,34 +117,55 @@ func TestMatchedHolderDoesNotWaitForBatchCompletion(t *testing.T) {
 	}
 	o.windows[pid] = fdWindow{start: start, directory: directory.Ino, lastFD: -1, extent: int64(descriptors[255])}
 	o.rememberPID(rows[0].uid, pid)
-	// Block publication in a later batch, on a shard absent from the first
-	// 64 sockets. The first match must finish while that later work is stuck.
+	// Block publication after the target, on a shard that no socket at or
+	// before the target uses: the scanner publishes every socket it passes,
+	// so only then can the match finish while the later work is stuck. The
+	// target is our first socket in directory order, wherever it falls.
+	own := map[uint32]int{}
+	for i, row := range rows {
+		own[row.inode] = i
+	}
 	dir, err := openProcDescriptors("/proc/self/fd")
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstShards := map[*ownerIndex]bool{}
-	var blocked *ownerIndex
+	upToTarget := map[*ownerIndex]bool{}
+	oldFirst := map[*ownerIndex]bool{}
+	var blocked, oldBlocked *ownerIndex
 	var blockedInode uint32
-	count := 0
+	target, targetAt, blockedAt, oldBlockedAt, blockedFD, count := -1, -1, -1, -1, -1, 0
 	_, visitErr := dir.Visit(4096, func(name []byte) bool {
 		inode, ok := socketInodeAt(dir.fd, string(name))
 		if !ok {
 			return true
 		}
 		shard := o.indexFor(inode)
+		// The fixture this replaces took the first 64 sockets as the ones
+		// before the target; keep its choice for the log.
 		if count < 64 {
-			firstShards[shard] = true
-		} else if !firstShards[shard] {
-			blocked, blockedInode = shard, inode
-			return false
+			oldFirst[shard] = true
+		} else if oldBlocked == nil && !oldFirst[shard] {
+			oldBlocked, oldBlockedAt = shard, count
+		}
+		if i, mine := own[inode]; mine && target < 0 {
+			target, targetAt = i, count
+		}
+		if target < 0 || targetAt == count {
+			upToTarget[shard] = true
+		} else if blocked == nil && !upToTarget[shard] {
+			blocked, blockedInode, blockedAt = shard, inode, count
+			blockedFD, _ = strconv.Atoi(string(name))
 		}
 		count++
-		return true
+		return blocked == nil || oldBlocked == nil
 	})
 	dir.Close()
-	if visitErr != nil || blocked == nil || firstShards[o.indexFor(rows[0].inode)] == false {
-		t.Fatalf("fixture did not find an independent later shard: %v", visitErr)
+	t.Logf("socket order: target row %d at %d, blocked at %d (fd %d); the old first-64 fixture blocked at %d, before the target=%t, would pass=%t",
+		target, targetAt, blockedAt, blockedFD, oldBlockedAt, oldBlockedAt >= 0 && oldBlockedAt < targetAt, oldBlocked != nil && oldFirst[o.indexFor(rows[0].inode)] && oldBlockedAt > targetAt)
+	// The scan below reads new descriptors in one 512-entry window, so the
+	// blocked socket must fall inside it for its batch to stay pending.
+	if (visitErr != nil && !errors.Is(visitErr, io.EOF)) || target < 0 || blocked == nil || targetAt < 64 || blockedFD < 0 || blockedFD >= 512 {
+		t.Fatalf("fixture did not find an independent shard after a target past the first 64 sockets, inside the first window: %v", visitErr)
 	}
 	blocked.mu.Lock()
 	locked := true
@@ -148,7 +180,7 @@ func TestMatchedHolderDoesNotWaitForBatchCompletion(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		owner, err := o.holders(ctx, rows[0])
+		owner, err := o.holders(ctx, rows[target])
 		done <- result{owner, err}
 	}()
 	select {
