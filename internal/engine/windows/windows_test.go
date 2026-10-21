@@ -140,18 +140,23 @@ func TestUDPModuleABIAndAmbiguity(t *testing.T) {
 			binary.LittleEndian.PutUint32(row[pidOffset:], 100+uint32(i))
 			binary.LittleEndian.PutUint64(row[timeOffset:], 1000+uint64(i))
 		}
-		rows := map[netip.AddrPort][]socketOwner{}
-		if err := parseUDP(raw, v6, rows); err != nil {
+		rows := newUDPRows(0, 0)
+		if err := parseUDP(raw, v6, &rows); err != nil {
 			t.Fatal(err)
 		}
 		key := netip.AddrPortFrom(ip, 12345)
-		if len(rows[key]) != 2 || rows[key][1].created != 1001 {
-			t.Fatal(rows)
+		if row := rows.find(key); row.count != 2 || row.owner != (socketOwner{100, 1000}) {
+			t.Fatal(row)
 		}
 		if _, err := NewOwners().udpOwner(key, rows); !errors.Is(err, platform.ErrAmbiguous) {
 			t.Fatal(err)
 		}
-		if err := parseUDP(raw[:len(raw)-1], v6, rows); err == nil {
+		single := newUDPRows(0, 0)
+		single.add(key, socketOwner{100, 1000})
+		if owner, err := udpCandidate(key, single); err != nil || owner != (socketOwner{100, 1000}) {
+			t.Fatal(owner, err)
+		}
+		if err := parseUDP(raw[:len(raw)-1], v6, &rows); err == nil {
 			t.Fatal("accepted partial UDP table")
 		}
 	}

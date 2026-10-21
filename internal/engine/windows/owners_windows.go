@@ -129,11 +129,13 @@ type LookupHistogram struct {
 	UDPRefreshes       uint64          `json:"udpRefreshes"`
 	UDPReadNanos       uint64          `json:"udpReadNanos"`
 	UDPIndexNanos      uint64          `json:"udpIndexNanos"`
-	UDPReadBuckets     []uint64        `json:"udpReadBuckets"`  // native reads alone, not lookups
-	UDPReadMaxUS       uint64          `json:"udpReadMaxUS"`    // slowest native read
-	UDPPeakRows        uint64          `json:"udpPeakRows"`     // largest table read
-	UDPParallelPeak    int             `json:"udpParallelPeak"` // most reads in flight for one family
-	TCPParallelPeak    int             `json:"tcpParallelPeak"` // most reads in flight for one family
+	UDPReadBuckets     []uint64        `json:"udpReadBuckets"`    // native reads alone, not lookups
+	UDPRefreshBuckets  []uint64        `json:"udpRefreshBuckets"` // slot start to published snapshot
+	UDPWaitBuckets     []uint64        `json:"udpWaitBuckets"`    // a lookup's wait for one read
+	UDPReadMaxUS       uint64          `json:"udpReadMaxUS"`      // slowest native read
+	UDPPeakRows        uint64          `json:"udpPeakRows"`       // largest table read
+	UDPParallelPeak    int             `json:"udpParallelPeak"`   // most reads in flight for one family
+	TCPParallelPeak    int             `json:"tcpParallelPeak"`   // most reads in flight for one family
 	Failures           []lookupFailure `json:"failures,omitempty"`
 }
 
@@ -149,7 +151,7 @@ type Owners struct {
 	udpReads                                                      [2]tableReads[*udpOwnerSnapshot]
 	udpBuffers                                                    [2][ownerParallelReads][]uint64
 	udpDumps, udpReadNanos, udpIndexNanos                         atomic.Uint64
-	udpReadHist                                                   [len(lookupBounds)]atomic.Uint64
+	udpReadHist, udpRefreshHist, udpWaitHist                      [len(lookupBounds)]atomic.Uint64
 	udpReadMaxUS, udpPeakRows                                     atomic.Uint64
 	hist                                                          [len(lookupBounds)]atomic.Uint64
 	snapshotHist, processHist                                     [len(lookupBounds)]atomic.Uint64
@@ -204,8 +206,12 @@ func (o *Owners) Stats() LookupHistogram {
 	h.TCPPeakRows = o.tcpPeakRows.Load()
 	h.UDPRefreshes, h.UDPReadNanos, h.UDPIndexNanos = o.udpDumps.Load(), o.udpReadNanos.Load(), o.udpIndexNanos.Load()
 	h.UDPReadBuckets = make([]uint64, len(lookupBounds))
+	h.UDPRefreshBuckets = make([]uint64, len(lookupBounds))
+	h.UDPWaitBuckets = make([]uint64, len(lookupBounds))
 	for i := range h.UDPReadBuckets {
 		h.UDPReadBuckets[i] = o.udpReadHist[i].Load()
+		h.UDPRefreshBuckets[i] = o.udpRefreshHist[i].Load()
+		h.UDPWaitBuckets[i] = o.udpWaitHist[i].Load()
 	}
 	h.UDPReadMaxUS, h.UDPPeakRows = o.udpReadMaxUS.Load(), o.udpPeakRows.Load()
 	for family := range 2 {
@@ -510,7 +516,7 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 	return owner, errOwnerMissing
 }
 
-func parseUDP(b []byte, v6 bool, rows map[netip.AddrPort][]socketOwner) error {
+func parseUDP(b []byte, v6 bool, rows *udpRows) error {
 	stride := 160
 	if v6 {
 		stride = 176
@@ -535,31 +541,30 @@ func parseUDP(b []byte, v6 bool, rows map[netip.AddrPort][]socketOwner) error {
 			pid = binary.LittleEndian.Uint32(r[8:])
 			created = binary.LittleEndian.Uint64(r[16:])
 		}
-		key := netip.AddrPortFrom(addr, port)
-		rows[key] = append(rows[key], socketOwner{pid, created})
+		rows.add(netip.AddrPortFrom(addr, port), socketOwner{pid, created})
 	}
 	return nil
 }
 
-func udpCandidate(key netip.AddrPort, rows map[netip.AddrPort][]socketOwner) (socketOwner, error) {
-	candidates := rows[key]
-	if len(candidates) == 0 {
+func udpCandidate(key netip.AddrPort, rows udpRows) (socketOwner, error) {
+	row := rows.find(key)
+	if row.count == 0 {
 		any := netip.IPv4Unspecified()
 		if key.Addr().Is6() {
 			any = netip.IPv6Unspecified()
 		}
-		candidates = rows[netip.AddrPortFrom(any, key.Port())]
+		row = rows.find(netip.AddrPortFrom(any, key.Port()))
 	}
-	if len(candidates) > 1 {
+	if row.count > 1 {
 		return socketOwner{}, platform.ErrAmbiguous
 	}
-	if len(candidates) == 0 || candidates[0].created == 0 {
+	if row.count == 0 || row.owner.created == 0 {
 		return socketOwner{}, errOwnerMissing
 	}
-	return candidates[0], nil
+	return row.owner, nil
 }
 
-func (o *Owners) udpOwner(key netip.AddrPort, rows map[netip.AddrPort][]socketOwner) (platform.Owner, error) {
+func (o *Owners) udpOwner(key netip.AddrPort, rows udpRows) (platform.Owner, error) {
 	r, err := udpCandidate(key, rows)
 	if err != nil {
 		return platform.Owner{}, err
@@ -607,7 +612,7 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (result ma
 			o.noteFailure("udp-reconcile", stage, source, "", err)
 		}
 	}()
-	rows := make(map[netip.AddrPort][]socketOwner)
+	rows := newUDPRows(len(keys), 0)
 	families := map[uint32]bool{}
 	for _, key := range keys {
 		family := uint32(windows.AF_INET)
@@ -621,7 +626,7 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (result ma
 		if err != nil {
 			return nil, err
 		}
-		if err := parseUDP(b, family == windows.AF_INET6, rows); err != nil {
+		if err := parseUDP(b, family == windows.AF_INET6, &rows); err != nil {
 			return nil, err
 		}
 	}
