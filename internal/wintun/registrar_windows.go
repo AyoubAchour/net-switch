@@ -47,9 +47,12 @@ const RegistrarMode = "__netswitch-wintun-registrar"
 // before its first instruction, closing the create-then-assign orphan window.
 const procThreadAttributeJobList = 0x0002000D
 
-// Test seams. Production always uses RegistrarMode, no extra environment and no
-// before-resume hook.
+// Test seams. Production always uses its own executable, RegistrarMode, no
+// extra environment and no before-resume hook. registrarExecutable lets a test
+// binary start the built netswitch-engine.exe as the registrar, so the measured
+// helper is the production image rather than the test binary.
 var (
+	registrarExecutable   = os.Executable
 	registrarCommand      = RegistrarMode
 	registrarExtraEnv     []string
 	registrarBeforeResume func(pid uint32)
@@ -227,7 +230,7 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	if r.section.IsZero() || r.readOwner.IsZero() || r.writeOwner.IsZero() {
 		return nil, errors.New("Wintun registrar requires a ring section and both ring events")
 	}
-	exe, err := os.Executable()
+	exe, err := registrarExecutable()
 	if err != nil {
 		return nil, err
 	}
