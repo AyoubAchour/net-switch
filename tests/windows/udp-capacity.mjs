@@ -29,10 +29,11 @@ export async function nativeUDPCapacity(binding) {
   // engine's readiness path (native duplicate and event registration).
   const nativeRecovery = paired.stdout.split(/\r?\n/).filter((value) => value.includes(cyclesMarker))
     .map((value) => JSON.parse(value.slice(value.indexOf(cyclesMarker) + cyclesMarker.length)));
-  assert(udpRecoveryCycles === 0 || (nativeRecovery.length === 2 && nativeRecovery.every((item) => item.cycles?.length === udpRecoveryCycles)),
+  assert(udpRecoveryCycles === 0 || (nativeRecovery.length === 3 && nativeRecovery.every((item) => item.cycles?.length === udpRecoveryCycles)),
     `Native UDP recovery controls did not run: ${paired.stdout.slice(-2000)}`);
   for (const item of nativeRecovery) {
-    console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path: item.readyUDP ? 'native, readiness path' : 'native', cycles: item.cycles.length,
+    const path = item.readyUDP ? 'native, readiness path' : item.tcpLoad ? `native, TCP corner held (${item.tcpLoad} TCP clients)` : 'native';
+    console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path, cycles: item.cycles.length,
       attempts: item.reopenAttempts, refused: item.reopenRefused,
       restoreRefused: item.cycles.reduce((n, cycle) => n + cycle.restoreRefused, 0),
       refusals: item.cycles.flatMap((cycle) => cycle.refusals ?? []) })}`);

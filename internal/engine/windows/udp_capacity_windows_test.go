@@ -203,6 +203,13 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 			space := diagnoseUDPPortSpace(context.Background())
 			if cycles := udpRecoveryCycleCount(); cycles > 0 {
 				nativeUDPRecoveryCycles(t, cycles, native, &apps, &engines, peer, config, source, space, pool)
+				if !native {
+					// The engine's gated cycle runs with the TCP corner held; this
+					// is the native control for that condition.
+					held, release := holdNativeTCPLoad(t)
+					nativeUDPRecoveryCyclesWith(t, cycles, false, held, &apps, &engines, peer, config, source, space, pool)
+					release()
+				}
 			}
 			memory, memoryErr := processMemory()
 			evidence, _ := json.Marshal(map[string]any{"readyUDP": native, "heldPairs": len(apps),
