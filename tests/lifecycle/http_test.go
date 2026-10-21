@@ -97,14 +97,19 @@ func httpChurn(rawURL string) error {
 	halt := func() { once.Do(func() { close(stop) }) }
 	limit := time.AfterFunc(60*time.Second, func() { expired.Store(true); halt() })
 	defer limit.Stop()
+	// Paced at about 1,000 connections a second in total. An unpaced flood
+	// saturates a hosted Windows runner's CPU and overflows the loopback
+	// listen backlog, which measures the OS rather than Control's admission.
 	var workers sync.WaitGroup
 	for range 4 {
 		workers.Go(func() {
+			tick := time.NewTicker(4 * time.Millisecond)
+			defer tick.Stop()
 			for {
 				select {
 				case <-stop:
 					return
-				default:
+				case <-tick.C:
 				}
 				if c, err := net.DialTimeout("tcp4", u.Host, time.Second); err == nil {
 					c.(*net.TCPConn).SetLinger(0)
@@ -165,8 +170,9 @@ func ownerLatency(t *testing.T, owner actor, url, token string) (maxMS, medianMS
 }
 
 // httpChurnLatency measures the owner's HTTP latency while another user
-// churns connections through admission, which on Windows means a TCP table
-// lookup each; batches keep the owner from waiting behind every one.
+// pushes about 1,000 connections a second through admission, which on
+// Windows means a TCP table lookup for each batch; batches keep the owner
+// from waiting behind every one.
 func httpChurnLatency(t *testing.T, c *client, owner, other actor) {
 	var session struct{ Token, URL string }
 	c.must(t, "session", nil, &session)
