@@ -82,17 +82,20 @@ func closedBy(conns []net.Conn, deadline time.Time) (open, closed []net.Conn) {
 // httpChurn opens and immediately resets HTTP connections from several
 // workers, so every one of them goes through identity admission. An abortive
 // close leaves no TIME_WAIT behind, so the churn cannot exhaust the runner's
-// loopback ports for later cases, and it stops by itself after 20 seconds.
+// loopback ports for later cases, and it stops by itself after 60 seconds.
+// The final line says whether that safety stop fired, so a parent cannot
+// mistake samples taken after the churn ended for samples under load.
 func httpChurn(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return err
 	}
 	var opened atomic.Uint64
+	var expired atomic.Bool
 	stop := make(chan struct{})
 	var once sync.Once
 	halt := func() { once.Do(func() { close(stop) }) }
-	limit := time.AfterFunc(20*time.Second, halt)
+	limit := time.AfterFunc(60*time.Second, func() { expired.Store(true); halt() })
 	defer limit.Stop()
 	var workers sync.WaitGroup
 	for range 4 {
@@ -116,7 +119,7 @@ func httpChurn(rawURL string) error {
 	go func() { _, _ = io.Copy(io.Discard, os.Stdin); halt() }()
 	<-stop
 	workers.Wait()
-	fmt.Printf("HTTP churn total=%d\n", opened.Load())
+	fmt.Printf("HTTP churn total=%d expired=%t\n", opened.Load(), expired.Load())
 	return nil
 }
 
@@ -212,8 +215,9 @@ func httpChurnLatency(t *testing.T, c *client, owner, other actor) {
 		t.Fatal(err)
 	}
 	var connections int
-	if _, err := fmt.Sscanf(strings.TrimSpace(total), "HTTP churn total=%d", &connections); err != nil || connections < 500 {
-		t.Fatal("churn did not load admission", total, err)
+	var expired bool
+	if _, err := fmt.Sscanf(strings.TrimSpace(total), "HTTP churn total=%d expired=%t", &connections, &expired); err != nil || connections < 500 || expired {
+		t.Fatal("churn did not load admission throughout the owner samples", total, err)
 	}
 	t.Logf("HTTP_CHURN connections=%d owner_latency_idle max=%dms median=%dms under_churn max=%dms median=%dms", connections, baseMax, baseMedian, loadMax, loadMedian)
 	if loadMax > 2000 || loadMedian > 500 {

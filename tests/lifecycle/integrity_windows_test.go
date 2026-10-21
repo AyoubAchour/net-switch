@@ -227,18 +227,33 @@ func lowIntegrityCapacity(t *testing.T, owner actor) {
 	if err := attack.Start(); err != nil {
 		t.Fatal(err)
 	}
+	// Any failure below must still stop the attacker's workers before the
+	// next case starts.
+	var waitOnce sync.Once
+	var waitErr error
+	finish := func() error {
+		in.Close()
+		waitOnce.Do(func() {
+			done := make(chan error, 1)
+			go func() { done <- attack.Wait() }()
+			select {
+			case waitErr = <-done:
+			case <-time.After(15 * time.Second):
+				_ = attack.Process.Kill()
+				waitErr = errors.Join(errors.New("low-integrity attacker did not stop"), <-done)
+			}
+		})
+		return waitErr
+	}
+	t.Cleanup(func() { _ = finish() })
 	reader := bufio.NewReader(out)
 	line, err := reader.ReadString('\n')
 	if err != nil || !strings.HasPrefix(line, "low integrity access checked:") {
-		in.Close()
-		_ = attack.Wait()
 		t.Fatal("low integrity attack precondition", line, err)
 	}
 	var before uint64
 	_, rest, _ := strings.Cut(line, "sustained_before=")
 	if _, err := fmt.Sscanf(rest, "%d", &before); err != nil || before == 0 {
-		in.Close()
-		_ = attack.Wait()
 		t.Fatal("load barrier", line, err)
 	}
 	started := time.Now()
@@ -248,7 +263,7 @@ func lowIntegrityCapacity(t *testing.T, owner actor) {
 	fresh.input.Close()
 	in.Close()
 	final, _ := reader.ReadString('\n')
-	if err := attack.Wait(); err != nil {
+	if err := finish(); err != nil {
 		t.Fatal(err)
 	}
 	var total, opened uint64
