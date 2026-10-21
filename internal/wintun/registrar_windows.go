@@ -21,20 +21,21 @@ import (
 
 // The Wintun 0.14.1 driver can itself close the registering handle to its
 // device during removal, by numeric value in the holding process. A process
-// that also opens and closes other handles cannot prove
-// that a value it later closes, or that the driver closes, still names the
-// object it opened. So the registration's device handle lives only in a
-// registrar: a hidden mode of the same signed executable that opens the
-// device once, registers rings in a shared section, and then only waits.
-// It never closes, reuses or touches that value again; process teardown owns
-// it, and the driver's handle-close cleanup then releases the rings.
+// that also opens and closes other handles cannot prove that a value it later
+// closes, or that the driver closes, still names the object it opened. So the
+// registration's device handle lives only in a registrar: a hidden mode of the
+// same signed executable that opens the device once, registers rings in a
+// shared section, and then only waits. It never closes, reuses or touches that
+// value again; process teardown owns it, and the driver's handle-close cleanup
+// then releases the rings.
 //
 // The registrar receives exactly five inherited handles through an explicit
 // list: its control pipe (stdin), its reply pipe (stdout and stderr), the
-// unnamed ring section and the two unnamed ring events. It is created
-// suspended and assigned to its own unnamed kill-on-close job before it runs.
-// Only the engine holds that job handle, so an engine crash ends the job and
-// the registrar with it. No kernel object is named.
+// unnamed ring section and the two unnamed ring events. It is created in its
+// own unnamed kill-on-close job atomically at CreateProcess (JOB_LIST), still
+// suspended, then resumed. Only the engine holds that job handle, so an engine
+// crash ends the job and the registrar with it, even if the crash happens
+// before the registrar is resumed. No kernel object is named.
 
 // RegistrarMode is the hidden argument for the registrar. Every program that
 // starts sessions (the engine, TestISP and test binaries) dispatches it before
@@ -42,15 +43,23 @@ import (
 // it calls os.Exit(wintun.RunRegistrar()).
 const RegistrarMode = "__netswitch-wintun-registrar"
 
-// registrarCommand is a test seam: the package's own tests substitute a
-// fixture mode of the same test binary. Production always uses RegistrarMode.
-var registrarCommand = RegistrarMode
+// procThreadAttributeJobList assigns the new process to a job at creation,
+// before its first instruction, closing the create-then-assign orphan window.
+const procThreadAttributeJobList = 0x0002000D
+
+// Test seams. Production always uses RegistrarMode, no extra environment and no
+// before-resume hook.
+var (
+	registrarCommand      = RegistrarMode
+	registrarExtraEnv     []string
+	registrarBeforeResume func(pid uint32)
+	registrarStartTimeout = 15 * time.Second
+)
 
 const (
 	registrarVersion      = 1
 	registrarReplyPrefix  = "WINTUN_REGISTRAR "
 	registrarMessageLimit = 8 << 10
-	registrarStartTimeout = 15 * time.Second
 	registrarStopTimeout  = 2 * time.Second
 	registrarKillTimeout  = 5 * time.Second
 	wintunInterfacePrefix = `\\?\SWD#WINTUN#`
@@ -58,6 +67,12 @@ const (
 )
 
 var errRegistrarAlive = errors.New("Wintun registrar did not exit")
+
+// errOwnerLost drives the removal path when the reader observes the registrar
+// process exit. It wraps ErrDisconnected so maintain treats it as a lost
+// session; the distinct ErrRegistrarExited reason is decided deterministically
+// during teardown, never from a timed guess.
+var errOwnerLost = fmt.Errorf("Wintun registration owner exited: %w", ErrDisconnected)
 
 // registrarConfig carries the child-side values of the inherited handles and
 // the device interface path the engine already verified against the adapter
@@ -73,29 +88,32 @@ type registrarConfig struct {
 }
 
 type registrarReply struct {
-	PID          uint32 `json:"pid"`
-	Ready        bool   `json:"ready"`
-	Stage        string `json:"stage,omitempty"`
-	Errno        uint32 `json:"errno,omitempty"`
-	Error        string `json:"error,omitempty"`
-	Address      uint64 `json:"address,omitempty"`
-	MemoryType   uint32 `json:"memoryType,omitempty"`
-	Handles      uint32 `json:"handles,omitempty"`
-	PrivateBytes uint64 `json:"privateBytes,omitempty"`
-	HeapBytes    uint64 `json:"heapBytes,omitempty"`
-	StackBytes   uint64 `json:"stackBytes,omitempty"`
+	PID               uint32 `json:"pid"`
+	Ready             bool   `json:"ready"`
+	Stage             string `json:"stage,omitempty"`
+	Errno             uint32 `json:"errno,omitempty"`
+	Error             string `json:"error,omitempty"`
+	Address           uint64 `json:"address,omitempty"`
+	MemoryType        uint32 `json:"memoryType,omitempty"`
+	FootprintMeasured bool   `json:"footprintMeasured"`
+	Handles           uint32 `json:"handles,omitempty"`
+	PrivateBytes      uint64 `json:"privateBytes,omitempty"`
+	HeapBytes         uint64 `json:"heapBytes,omitempty"`
+	StackBytes        uint64 `json:"stackBytes,omitempty"`
 }
 
-// RegistrarStats describes the latest registrar of a session. The process
-// figures are its own measurements at registration time.
+// RegistrarStats describes the latest registrar of a session. FootprintMeasured
+// is false when the registrar could not read its own process counters; the
+// byte fields are then not a real measurement and must not be trusted.
 type RegistrarStats struct {
-	Starts       uint64 // registrars started by this session, including recoveries
-	PID          uint32
-	StartNanos   uint64 // CreateProcess through the ready reply
-	Handles      uint32
-	PrivateBytes uint64
-	HeapBytes    uint64
-	StackBytes   uint64
+	Starts            uint64 // registrars started by this session, including corruption recoveries
+	PID               uint32
+	StartNanos        uint64 // CreateProcess through the ready reply
+	FootprintMeasured bool
+	Handles           uint32
+	PrivateBytes      uint64
+	HeapBytes         uint64
+	StackBytes        uint64
 }
 
 type registrar struct {
@@ -113,6 +131,10 @@ func (g *registrar) wait(timeout time.Duration) bool {
 	return err == nil && result == windows.WAIT_OBJECT_0
 }
 
+// alreadyExited polls the process without blocking. True means the registrar
+// ended on its own, before we requested a stop.
+func (g *registrar) alreadyExited() bool { return g.wait(0) }
+
 func (g *registrar) exitCode() uint32 {
 	var code uint32
 	if windows.GetExitCodeProcess(g.process.Handle("Wintun registrar exit code"), &code) != nil {
@@ -122,11 +144,13 @@ func (g *registrar) exitCode() uint32 {
 }
 
 // retire requests exit by closing the control pipe's only writer, then
-// terminates the job if the registrar does not exit. Closing the job handle
-// would also terminate it, through kill-on-close.
-func (g *registrar) retire(closeHandle func(windows.Handle) error) (bool, error) {
-	err := g.control.Close("Wintun registrar control close", closeHandle)
-	exited := g.wait(registrarStopTimeout)
+// terminates the job if the registrar does not exit. It reports whether the
+// registrar had already exited before the stop request (owner death) and
+// whether it is now gone.
+func (g *registrar) retire(closeHandle func(windows.Handle) error) (exited, lostBeforeStop bool, err error) {
+	lostBeforeStop = g.alreadyExited()
+	err = g.control.Close("Wintun registrar control close", closeHandle)
+	exited = g.wait(registrarStopTimeout)
 	if !exited {
 		err = errors.Join(err, windows.TerminateJobObject(g.job.Handle("Wintun registrar termination"), 1))
 		exited = g.wait(registrarKillTimeout)
@@ -136,28 +160,32 @@ func (g *registrar) retire(closeHandle func(windows.Handle) error) (bool, error)
 	if !exited {
 		err = errors.Join(err, errRegistrarAlive)
 	}
-	return exited, err
+	return exited, lostBeforeStop, err
 }
 
 func (g *registrar) end(r *rings, closeHandle func(windows.Handle) error) (bool, error) {
 	started := winclock.Now()
-	exited, err := g.retire(closeHandle)
+	exited, lostBeforeStop, err := g.retire(closeHandle)
+	r.ownerExitedFirst = lostBeforeStop
 	r.closeProfile.DeviceNanos = uint64(winclock.Since(started))
 	if exited {
 		// Handle-table rundown precedes the process signal, so the driver's
-		// cleanup has normally published both markers already.
+		// cleanup has normally published both markers already. This is a logged
+		// confirmation, not a precondition for freeing the engine's own view.
 		started = winclock.Now()
 		if !r.awaitRelease() {
 			err = errors.Join(err, errRegistrationHeld)
 		}
 		r.closeProfile.DriverWaitNanos = uint64(winclock.Since(started))
 	}
+	// The engine never retains its view: the driver only ever locked the
+	// registrar's separate reference, which is gone with the registrar process.
 	return false, err
 }
 
 func (g *registrar) stats(starts uint64) RegistrarStats {
-	return RegistrarStats{Starts: starts, PID: g.reply.PID, StartNanos: g.startNanos, Handles: g.reply.Handles,
-		PrivateBytes: g.reply.PrivateBytes, HeapBytes: g.reply.HeapBytes, StackBytes: g.reply.StackBytes}
+	return RegistrarStats{Starts: starts, PID: g.reply.PID, StartNanos: g.startNanos, FootprintMeasured: g.reply.FootprintMeasured,
+		Handles: g.reply.Handles, PrivateBytes: g.reply.PrivateBytes, HeapBytes: g.reply.HeapBytes, StackBytes: g.reply.StackBytes}
 }
 
 // registrarEnvironment keeps the helper's runtime small and deterministic. It
@@ -167,6 +195,7 @@ func registrarEnvironment() (*uint16, error) {
 	if root := os.Getenv("SystemRoot"); root != "" {
 		entries = append(entries, "SystemRoot="+root)
 	}
+	entries = append(entries, registrarExtraEnv...)
 	var block []uint16
 	for _, entry := range entries {
 		encoded, err := windows.UTF16FromString(entry)
@@ -177,6 +206,11 @@ func registrarEnvironment() (*uint16, error) {
 	}
 	block = append(block, 0)
 	return &block[0], nil
+}
+
+type replyResult struct {
+	output []byte
+	err    error
 }
 
 func startRegistrar(path string, r *rings) (_ *registrar, err error) {
@@ -208,6 +242,14 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 			err = errors.Join(err, closeOwned())
 		}
 	}()
+	remove := func(o winhandle.Owner) {
+		for i := range owned {
+			if owned[i] == o {
+				owned = append(owned[:i], owned[i+1:]...)
+				return
+			}
+		}
+	}
 	controlRead, controlWrite, err := pipe("Wintun registrar control pipe")
 	if err != nil {
 		return nil, err
@@ -245,35 +287,47 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 		return nil, fmt.Errorf("limit Wintun registrar UI access: %w", err)
 	}
 	// Inheritable duplicates exist only until CreateProcess returns, and only
-	// the explicit handle list below can pass them. The job, the process and
-	// the engine's pipe ends are never inheritable.
+	// the explicit handle list below can pass them. Their open and close are
+	// tracked so the generation tripwire catches any stale reuse.
 	sources := []winhandle.Owner{controlRead, replyWrite, r.section, r.readOwner, r.writeOwner}
+	var inheritedOwners []winhandle.Owner
 	inherited := make([]windows.Handle, 0, len(sources))
+	closeInherited := func() {
+		for _, o := range inheritedOwners {
+			o.HandleClose("Wintun registrar inherited duplicate close")
+		}
+		inheritedOwners = nil
+	}
 	defer func() {
-		for _, h := range inherited {
-			windows.CloseHandle(h)
+		if len(inheritedOwners) != 0 {
+			closeInherited()
 		}
 	}()
 	for _, source := range sources {
-		var h windows.Handle
+		var dup windows.Handle
 		if err = windows.DuplicateHandle(windows.CurrentProcess(), source.Handle("Wintun registrar inheritance source"),
-			windows.CurrentProcess(), &h, 0, true, windows.DUPLICATE_SAME_ACCESS); err != nil {
+			windows.CurrentProcess(), &dup, 0, true, windows.DUPLICATE_SAME_ACCESS); err != nil {
 			return nil, err
 		}
-		inherited = append(inherited, h)
+		inheritedOwners = append(inheritedOwners, winhandle.Open(dup, "Wintun registrar inherited duplicate"))
+		inherited = append(inherited, dup)
 	}
 	config, err := json.Marshal(registrarConfig{Version: registrarVersion, Path: path, Capacity: r.send.capacity,
 		ViewBytes: uint64(viewBytes(r.send.capacity)), Section: uint64(inherited[2]), Read: uint64(inherited[3]), Write: uint64(inherited[4])})
 	if err != nil {
 		return nil, err
 	}
-	attrs, err := windows.NewProcThreadAttributeList(1)
+	attrs, err := windows.NewProcThreadAttributeList(2)
 	if err != nil {
 		return nil, err
 	}
 	defer attrs.Delete()
 	if err = attrs.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&inherited[0]), uintptr(len(inherited))*unsafe.Sizeof(inherited[0])); err != nil {
 		return nil, err
+	}
+	jobList := []windows.Handle{job.Handle("Wintun registrar job list")}
+	if err = attrs.Update(procThreadAttributeJobList, unsafe.Pointer(&jobList[0]), unsafe.Sizeof(jobList[0])); err != nil {
+		return nil, fmt.Errorf("prepare Wintun registrar job membership: %w", err)
 	}
 	si := windows.StartupInfoEx{StartupInfo: windows.StartupInfo{Cb: uint32(unsafe.Sizeof(windows.StartupInfoEx{})),
 		Flags: windows.STARTF_USESTDHANDLES, StdInput: inherited[0], StdOutput: inherited[1], StdErr: inherited[1]},
@@ -292,24 +346,21 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	}
 	started := winclock.Now()
 	var pi windows.ProcessInformation
-	// DETACHED_PROCESS: the registrar needs no console; its I/O is the two pipes.
+	// Created suspended and already in the kill-on-close job: DETACHED_PROCESS
+	// because the registrar needs no console; its I/O is the two pipes.
 	if err = windows.CreateProcess(app, commandLine, nil, nil, true,
 		windows.CREATE_SUSPENDED|windows.DETACHED_PROCESS|windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT,
 		environment, nil, &si.StartupInfo, &pi); err != nil {
 		return nil, fmt.Errorf("start Wintun registrar: %w", err)
 	}
-	for _, h := range inherited {
-		windows.CloseHandle(h)
-	}
-	inherited = inherited[:0]
+	closeInherited()
 	process := winhandle.Open(pi.Process, "Wintun registrar process open")
 	thread := winhandle.Open(pi.Thread, "Wintun registrar thread open")
 	g := &registrar{process: process, job: job, control: controlWrite}
-	// From here a failure must end the suspended or running registrar before
-	// any of its handles close: it may already hold a registration.
+	// From here a failure must end the suspended or running registrar before any
+	// of its handles close: it may already hold a registration. The process is
+	// already in the job, so terminating either reaches it.
 	abandon := func(cause error) error {
-		// Before job assignment only TerminateProcess reaches it; afterwards
-		// either does. An already-exited process makes these calls no-ops.
 		windows.TerminateJobObject(job.Handle("Wintun registrar setup termination"), 1)
 		windows.TerminateProcess(process.Handle("Wintun registrar setup process termination"), 1)
 		var err error
@@ -318,20 +369,19 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 		}
 		return errors.Join(cause, err, process.HandleClose("Wintun registrar setup process close"))
 	}
-	if err = windows.AssignProcessToJobObject(job.Handle("Wintun registrar job assignment"), process.Handle("Wintun registrar job assignment")); err != nil {
+	// Close the parent's own ends of the child's pipes so the child holds the
+	// only control-read and reply-write ends. Its exit then ends the reply read.
+	if err = errors.Join(controlRead.HandleClose("Wintun registrar control read close"), replyWrite.HandleClose("Wintun registrar reply write close")); err != nil {
 		thread.HandleClose("Wintun registrar thread close")
-		return nil, abandon(fmt.Errorf("assign Wintun registrar job: %w", err))
-	}
-	_, err = windows.ResumeThread(thread.Handle("Wintun registrar resume"))
-	err = errors.Join(err, thread.HandleClose("Wintun registrar thread close"))
-	if err != nil {
 		return nil, abandon(err)
 	}
-	// The registrar now holds the only other ends of both pipes. Its exit
-	// therefore ends the reply read below.
-	err = errors.Join(controlRead.HandleClose("Wintun registrar control read close"), replyWrite.HandleClose("Wintun registrar reply write close"))
-	owned = []winhandle.Owner{replyRead, controlWrite, job}
-	if err != nil {
+	remove(controlRead)
+	remove(replyWrite)
+	if registrarBeforeResume != nil {
+		registrarBeforeResume(pi.ProcessId) // crash-before-resume fixture exits here
+	}
+	_, resumeErr := windows.ResumeThread(thread.Handle("Wintun registrar resume"))
+	if err = errors.Join(resumeErr, thread.HandleClose("Wintun registrar thread close")); err != nil {
 		return nil, abandon(err)
 	}
 	var written uint32
@@ -342,28 +392,24 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	if err != nil {
 		return nil, abandon(fmt.Errorf("configure Wintun registrar: %w", err))
 	}
-	type result struct {
-		output []byte
-		err    error
-	}
-	read := make(chan result, 1)
+	// The reply goroutine owns replyRead for its whole lifetime and closes it,
+	// so no close can race an in-flight ReadFile.
+	remove(replyRead)
+	replyDone := make(chan replyResult, 1)
 	go func() {
-		output, err := readLine(replyRead.Handle("Wintun registrar reply"), registrarMessageLimit)
-		read <- result{output, err}
+		output, rerr := readLine(replyRead.Handle("Wintun registrar reply"), registrarMessageLimit)
+		replyDone <- replyResult{output, errors.Join(rerr, replyRead.HandleClose("Wintun registrar reply read close"))}
 	}()
 	timer := time.NewTimer(registrarStartTimeout)
-	var reply result
+	var reply replyResult
 	select {
-	case reply = <-read:
+	case reply = <-replyDone:
 		timer.Stop()
 	case <-timer.C:
-		// Ending the registrar ends the pending pipe read before its handle closes.
 		cause := abandon(fmt.Errorf("Wintun registrar did not report within %v", registrarStartTimeout))
-		select {
-		case <-read:
+		select { // the killed child closes its write end, ending readLine promptly
+		case <-replyDone:
 		case <-time.After(registrarKillTimeout):
-			// The reader may still issue ReadFile on this value: never close it.
-			owned = []winhandle.Owner{controlWrite, job}
 		}
 		return nil, cause
 	}
@@ -372,19 +418,14 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 		err = fmt.Errorf("Wintun registrar reported process %d, started %d", g.reply.PID, pi.ProcessId)
 	}
 	if err != nil {
-		exited := g.wait(registrarStopTimeout)
 		cause := err
-		if exited {
+		if g.wait(registrarStopTimeout) {
 			cause = fmt.Errorf("%w (registrar exit code %#x)", err, g.exitCode())
 		}
 		return nil, abandon(cause)
 	}
 	g.startNanos = uint64(winclock.Since(started))
-	if err = replyRead.HandleClose("Wintun registrar reply read close"); err != nil {
-		owned = []winhandle.Owner{controlWrite, job}
-		return nil, abandon(err)
-	}
-	owned = nil
+	owned = nil // controlWrite and job are now owned by g
 	return g, nil
 }
 
@@ -410,7 +451,6 @@ func parseReply(output []byte, readErr error) (registrarReply, error) {
 	var reply registrarReply
 	text := string(output)
 	if !strings.HasPrefix(text, registrarReplyPrefix) {
-		// A runtime failure writes plain text to the same pipe; keep it.
 		return reply, fmt.Errorf("Wintun registrar gave no reply (%v): %q", readErr, text)
 	}
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(text, registrarReplyPrefix)), &reply); err != nil {
@@ -430,13 +470,11 @@ func parseReply(output []byte, readErr error) (registrarReply, error) {
 }
 
 // RunRegistrar is the hidden registrar mode. It returns the process exit code.
-// It refuses to run unless both standard handles are pipes and the expected
-// inherited section and events are present, of the right object types.
 func RunRegistrar() int { return runRegistrar(registerDevice) }
 
-// registerDevice opens the device once and registers the rings. It has no
-// close path: process teardown closes the handle, and the driver may close it
-// earlier during removal. The value is never used again after this call.
+// registerDevice opens the device once and registers the rings. It has no close
+// path: process teardown closes the handle, and the driver may close it earlier
+// during removal. The value is never used again after this call.
 func registerDevice(path string, desc *registration) error {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
@@ -459,28 +497,100 @@ func isPipe(h windows.Handle) bool {
 	return err == nil && kind == windows.FILE_TYPE_PIPE
 }
 
+// registrarStdHandles requires both standard handles to be the engine's pipes.
+func registrarStdHandles() (stdin, stdout windows.Handle, err error) {
+	if stdin, err = windows.GetStdHandle(windows.STD_INPUT_HANDLE); err != nil {
+		return 0, 0, err
+	}
+	if stdout, err = windows.GetStdHandle(windows.STD_OUTPUT_HANDLE); err != nil {
+		return 0, 0, err
+	}
+	if !isPipe(stdin) || !isPipe(stdout) {
+		return 0, 0, errors.New("internal Wintun registrar mode requires the engine's inherited pipes")
+	}
+	return stdin, stdout, nil
+}
+
+func sendRegistrarReply(stdout windows.Handle, reply registrarReply) {
+	encoded, _ := json.Marshal(reply)
+	message := append([]byte(registrarReplyPrefix), encoded...)
+	message = append(message, '\n')
+	var written uint32
+	windows.WriteFile(stdout, message, &written, nil)
+}
+
+// prepareRegistration validates the configuration and inherited handles and
+// maps the ring section. Both the production registrar and the test fixtures
+// use it, so validation has a single source.
+func prepareRegistration(config registrarConfig) (view uintptr, desc registration, memoryType uint32, stage string, err error) {
+	if config.Version != registrarVersion || !validCapacity(config.Capacity) || config.ViewBytes != uint64(viewBytes(config.Capacity)) {
+		return 0, desc, 0, "configuration", errors.New("unsupported registrar configuration")
+	}
+	if !strings.HasPrefix(strings.ToUpper(config.Path), wintunInterfacePrefix) || strings.ContainsRune(config.Path, 0) {
+		return 0, desc, 0, "configuration", errors.New("not a Wintun device interface path")
+	}
+	section, read, write := windows.Handle(config.Section), windows.Handle(config.Read), windows.Handle(config.Write)
+	if section == read || section == write || read == write {
+		return 0, desc, 0, "inheritance", errors.New("registrar handles are not distinct")
+	}
+	for _, want := range []struct {
+		h    windows.Handle
+		kind string
+	}{{section, "Section"}, {read, "Event"}, {write, "Event"}} {
+		kind, err := objectType(want.h)
+		if err != nil {
+			return 0, desc, 0, "inheritance", fmt.Errorf("inherited handle %#x: %w", want.h, err)
+		}
+		if kind != want.kind {
+			return 0, desc, 0, "inheritance", fmt.Errorf("inherited handle %#x is %q, not %q", want.h, kind, want.kind)
+		}
+	}
+	size := uintptr(config.ViewBytes)
+	view, err = windows.MapViewOfFile(section, windows.FILE_MAP_READ|windows.FILE_MAP_WRITE, 0, 0, size)
+	if err != nil {
+		return 0, desc, 0, "map", err
+	}
+	var memory windows.MemoryBasicInformation
+	if err := windows.VirtualQuery(view, &memory, unsafe.Sizeof(memory)); err != nil {
+		return view, desc, 0, "map", err
+	}
+	if memory.Type != memMapped || memory.RegionSize < size {
+		return view, desc, memory.Type, "map", fmt.Errorf("inherited section view type %#x, %d bytes", memory.Type, memory.RegionSize)
+	}
+	data := mappedSlice(view, int(size))
+	rb := ringBytes(config.Capacity)
+	desc = registration{
+		Send:    ringRegistration{uint32(rb), &data[0], read},
+		Receive: ringRegistration{uint32(rb), &data[rb], write},
+	}
+	return view, desc, memory.Type, "", nil
+}
+
+// registrarWaitForStop blocks until the control pipe reaches EOF: the engine's
+// stop request, or its exit.
+func registrarWaitForStop(stdin windows.Handle) int {
+	var chunk [64]byte
+	for {
+		var n uint32
+		if err := windows.ReadFile(stdin, chunk[:], &n, nil); err != nil || n == 0 {
+			return 0
+		}
+	}
+}
+
 func runRegistrar(register func(string, *registration) error) int {
-	stdin, inErr := windows.GetStdHandle(windows.STD_INPUT_HANDLE)
-	stdout, outErr := windows.GetStdHandle(windows.STD_OUTPUT_HANDLE)
-	if inErr != nil || outErr != nil || !isPipe(stdin) || !isPipe(stdout) {
-		fmt.Fprintln(os.Stderr, "netswitch: internal Wintun registrar mode requires the engine's inherited pipes")
+	stdin, stdout, err := registrarStdHandles()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "netswitch: "+err.Error())
 		return 2
 	}
-	send := func(reply registrarReply) {
-		reply.PID = windows.GetCurrentProcessId()
-		encoded, _ := json.Marshal(reply)
-		message := append([]byte(registrarReplyPrefix), encoded...)
-		message = append(message, '\n')
-		var written uint32
-		windows.WriteFile(stdout, message, &written, nil)
-	}
 	fail := func(stage string, err error) int {
-		reply := registrarReply{Stage: stage, Error: err.Error()}
+		reply := registrarReply{PID: windows.GetCurrentProcessId(), Stage: stage, Error: err.Error()}
 		var errno windows.Errno
 		if errors.As(err, &errno) {
 			reply.Errno = uint32(errno)
 		}
-		send(reply)
+		sendRegistrarReply(stdout, reply)
 		return 1
 	}
 	line, err := readLine(stdin, registrarMessageLimit)
@@ -491,62 +601,19 @@ func runRegistrar(register func(string, *registration) error) int {
 	if err := json.Unmarshal(line, &config); err != nil {
 		return fail("configuration", err)
 	}
-	if config.Version != registrarVersion || !validCapacity(config.Capacity) || config.ViewBytes != uint64(viewBytes(config.Capacity)) {
-		return fail("configuration", errors.New("unsupported registrar configuration"))
-	}
-	if !strings.HasPrefix(strings.ToUpper(config.Path), wintunInterfacePrefix) || strings.ContainsRune(config.Path, 0) {
-		return fail("configuration", errors.New("not a Wintun device interface path"))
-	}
-	section, read, write := windows.Handle(config.Section), windows.Handle(config.Read), windows.Handle(config.Write)
-	if section == read || section == write || read == write {
-		return fail("inheritance", errors.New("registrar handles are not distinct"))
-	}
-	for _, want := range []struct {
-		h    windows.Handle
-		kind string
-	}{{section, "Section"}, {read, "Event"}, {write, "Event"}} {
-		kind, err := objectType(want.h)
-		if err != nil {
-			return fail("inheritance", fmt.Errorf("inherited handle %#x: %w", want.h, err))
-		}
-		if kind != want.kind {
-			return fail("inheritance", fmt.Errorf("inherited handle %#x is %q, not %q", want.h, kind, want.kind))
-		}
-	}
-	size := uintptr(config.ViewBytes)
-	view, err := windows.MapViewOfFile(section, windows.FILE_MAP_READ|windows.FILE_MAP_WRITE, 0, 0, size)
+	view, desc, memoryType, stage, err := prepareRegistration(config)
 	if err != nil {
-		return fail("map", err)
-	}
-	var memory windows.MemoryBasicInformation
-	if err := windows.VirtualQuery(view, &memory, unsafe.Sizeof(memory)); err != nil {
-		return fail("map", err)
-	}
-	if memory.Type != memMapped || memory.RegionSize < size {
-		return fail("map", fmt.Errorf("inherited section view type %#x, %d bytes", memory.Type, memory.RegionSize))
-	}
-	data := mappedSlice(view, int(size))
-	rb := ringBytes(config.Capacity)
-	desc := registration{
-		Send:    ringRegistration{uint32(rb), &data[0], read},
-		Receive: ringRegistration{uint32(rb), &data[rb], write},
+		return fail(stage, err)
 	}
 	if err := register(config.Path, &desc); err != nil {
 		return fail("register", err)
 	}
+	handles, private, measured := registrarUsage()
 	var stats runtime.MemStats
 	runtime.ReadMemStats(&stats)
-	handles, private := registrarUsage()
-	send(registrarReply{Ready: true, Address: uint64(view), MemoryType: memory.Type, Handles: handles,
-		PrivateBytes: private, HeapBytes: stats.HeapAlloc, StackBytes: stats.StackInuse})
-	// Wait for the control pipe's EOF: the engine's stop request, or its exit.
-	var chunk [64]byte
-	for {
-		var n uint32
-		if err := windows.ReadFile(stdin, chunk[:], &n, nil); err != nil || n == 0 {
-			return 0
-		}
-	}
+	sendRegistrarReply(stdout, registrarReply{PID: windows.GetCurrentProcessId(), Ready: true, Address: uint64(view), MemoryType: memoryType,
+		FootprintMeasured: measured, Handles: handles, PrivateBytes: private, HeapBytes: stats.HeapAlloc, StackBytes: stats.StackInuse})
+	return registrarWaitForStop(stdin)
 }
 
 var (
@@ -583,9 +650,12 @@ func objectType(h windows.Handle) (string, error) {
 	return windows.UTF16ToString(name), nil
 }
 
-func registrarUsage() (uint32, uint64) {
+// registrarUsage returns the handle count, private bytes, and whether both
+// measurements succeeded. A failed query is reported as unmeasured, never as a
+// fabricated zero footprint.
+func registrarUsage() (uint32, uint64, bool) {
 	var count uint32
-	getProcessHandleCount.Call(uintptr(windows.CurrentProcess()), uintptr(unsafe.Pointer(&count)))
+	ok1, _, _ := getProcessHandleCount.Call(uintptr(windows.CurrentProcess()), uintptr(unsafe.Pointer(&count)))
 	// PROCESS_MEMORY_COUNTERS_EX: PrivateUsage follows the ten base counters.
 	type counters struct {
 		Size, PageFaults                                                                                                          uint32
@@ -593,8 +663,6 @@ func registrarUsage() (uint32, uint64) {
 	}
 	m := counters{}
 	m.Size = uint32(unsafe.Sizeof(m))
-	if ok, _, _ := getProcessMemoryInfo.Call(uintptr(windows.CurrentProcess()), uintptr(unsafe.Pointer(&m)), uintptr(m.Size)); ok == 0 {
-		return count, 0
-	}
-	return count, uint64(m.Private)
+	ok2, _, _ := getProcessMemoryInfo.Call(uintptr(windows.CurrentProcess()), uintptr(unsafe.Pointer(&m)), uintptr(m.Size))
+	return count, uint64(m.Private), ok1 != 0 && ok2 != 0
 }

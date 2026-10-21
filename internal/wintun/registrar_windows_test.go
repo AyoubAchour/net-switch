@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,8 +24,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// These tests need no adapter: the registrar must refuse to run as a stray
-// process, and must refuse inherited handles of the wrong kind.
+// ---- refusal and fault fixtures (no adapter required) ----
+
 func runRegistrarChild(t *testing.T, config *registrarConfig, inherit []syscall.Handle) (int, string) {
 	t.Helper()
 	exe, err := os.Executable()
@@ -89,6 +90,8 @@ func TestRegistrarRefusesWithoutInheritedCapabilities(t *testing.T) {
 	}
 }
 
+// ---- handle accounting ----
+
 func handleSnapshot(t *testing.T) map[windows.Handle]bool {
 	t.Helper()
 	data := make([]uint64, 1<<17) // 1 MiB, pointer-aligned
@@ -106,9 +109,7 @@ func handleSnapshot(t *testing.T) map[windows.Handle]bool {
 	return values
 }
 
-// assertNoDeviceHandle classifies every handle the session added to this
-// process. The only file-type handle a session may own is its control pipe.
-func assertNoDeviceHandle(t *testing.T, before, after map[windows.Handle]bool) map[string]int {
+func newHandleKinds(t *testing.T, before, after map[windows.Handle]bool) map[string]int {
 	t.Helper()
 	kinds := map[string]int{}
 	for h := range after {
@@ -117,16 +118,32 @@ func assertNoDeviceHandle(t *testing.T, before, after map[windows.Handle]bool) m
 		}
 		kind, err := objectType(h)
 		if err != nil {
-			kinds["closed during snapshot"]++
+			kinds["unreadable"]++
 			continue
 		}
-		kinds[kind]++
-		if kind == "File" && !isPipe(h) {
-			fileType, _ := windows.GetFileType(h)
-			t.Fatalf("session left a non-pipe file handle %#x (file type %d) in the engine process", h, fileType)
+		if kind == "File" && isPipe(h) {
+			kind = "Pipe"
 		}
+		kinds[kind]++
 	}
 	return kinds
+}
+
+// assertNoDeviceFile is the meaningful old-race proof: the engine process holds
+// no registering device file at all. Unrelated guard events pass even the old
+// in-process code, but a device file handle would not.
+func assertNoDeviceFile(t *testing.T, before map[windows.Handle]bool) {
+	t.Helper()
+	after := handleSnapshot(t)
+	for h := range after {
+		if before[h] {
+			continue
+		}
+		if kind, err := objectType(h); err == nil && kind == "File" && !isPipe(h) {
+			ft, _ := windows.GetFileType(h)
+			t.Fatalf("engine holds a non-pipe file handle %#x (file type %d) while a registrar session is live", h, ft)
+		}
+	}
 }
 
 func sessionRegistrar(t *testing.T, s *Session) (*registrar, windows.Handle) {
@@ -141,6 +158,16 @@ func sessionRegistrar(t *testing.T, s *Session) (*registrar, windows.Handle) {
 		t.Fatalf("session rings are owned by %T, not a registrar", s.rings.owner)
 	}
 	return g, witness(t, g.process.Handle("test registrar witness"))
+}
+
+func sessionView(t *testing.T, s *Session) uintptr {
+	t.Helper()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.rings == nil {
+		t.Fatal("session has no rings")
+	}
+	return s.rings.view
 }
 
 func exitState(process windows.Handle, wait time.Duration) (bool, uint32) {
@@ -168,32 +195,41 @@ func exchange(t *testing.T, rounds int) {
 	}
 }
 
-// Production capacity (8 MiB rings), unchanged packet path. The engine process
-// must hold no device handle; the registrar reports its own footprint.
+// ---- production-size session, no device handle in the engine, mapping reclaim ----
+
 func TestWintunRegistrarSession(t *testing.T) {
 	requireRunner(t)
-	// The baseline excludes the DLL's guarded image file, but includes the
-	// adapter's creation: any handle the DLL keeps to the device counts too.
-	_, err := loadLibrary()
+	_, err := loadLibrary() // the DLL's guarded image file is not a session handle
 	must(t, err)
 	warmRuntimeThreads()
+	debug.FreeOSMemory()
 	before := handleSnapshot(t)
+	_, beforeBytes := processUsage(t)
 	a := newAdapter(t, 0)
 	f := fixtureOnAdapter(t, "ours", a)
-	after := handleSnapshot(t)
-	kinds := assertNoDeviceHandle(t, before, after)
+	kinds := newHandleKinds(t, before, handleSnapshot(t))
 	s := f.io.(*Session)
 	_, process := sessionRegistrar(t, s)
 	defer windows.CloseHandle(process)
+	assertNoDeviceFile(t, before)
 	exchange(t, 64)
 	f.stopEcho()
 	if f.faults.Load() != 0 {
 		t.Fatalf("registrar session packet path failed: %v", f.fault())
 	}
 	stats := s.Stats()
+	view := sessionView(t, s)
 	must(t, s.Close())
 	exited, code := exitState(process, 0)
 	closed := s.Stats().CloseDetails
+	// The engine view must be reclaimed: unmapped, no longer section memory.
+	var memory windows.MemoryBasicInformation
+	must(t, windows.VirtualQuery(view, &memory, unsafe.Sizeof(memory)))
+	if memory.State == windows.MEM_COMMIT || memory.Type == memMapped {
+		t.Fatalf("engine ring view not reclaimed after close: state %#x type %#x", memory.State, memory.Type)
+	}
+	debug.FreeOSMemory()
+	_, afterBytes := processUsage(t)
 	// Re-registration on the same adapter proves the driver released it.
 	again, err := a.StartSession()
 	must(t, err)
@@ -201,27 +237,38 @@ func TestWintunRegistrarSession(t *testing.T) {
 	report(t, map[string]any{"test": "registrar_session", "arch": runtime.GOARCH, "capacity": a.config.Capacity,
 		"new_engine_handles": kinds, "registrar": stats.Registrar, "registrar_start_ms": float64(stats.Registrar.StartNanos) / 1e6,
 		"read_waits": stats.ReadWaits, "read_wakes": stats.ReadWakes, "exchanges": 64,
-		"registrar_exited": exited, "registrar_exit_code": code,
+		"view_state_after_close": memory.State, "view_type_after_close": memory.Type,
+		"engine_private_delta_bytes": int64(afterBytes) - int64(beforeBytes),
+		"registrar_exited":           exited, "registrar_exit_code": code,
 		"retire_ms": float64(closed.DeviceNanos) / 1e6, "driver_wait_ms": float64(closed.DriverWaitNanos) / 1e6})
-	if stats.Registrar.Starts != 1 || stats.Registrar.PID == 0 || stats.Registrar.PrivateBytes == 0 {
-		t.Fatalf("registrar statistics missing: %+v", stats.Registrar)
+	if !stats.Registrar.FootprintMeasured || stats.Registrar.Starts != 1 || stats.Registrar.PID == 0 || stats.Registrar.PrivateBytes == 0 {
+		t.Fatalf("registrar footprint not measured: %+v", stats.Registrar)
 	}
 	if !exited || code != 0 {
 		t.Fatalf("registrar did not exit cleanly after Close: exited=%v code=%#x", exited, code)
 	}
+	if kinds["File"] != 0 {
+		t.Fatalf("session added a non-pipe file handle to the engine: %v", kinds)
+	}
+	if int64(afterBytes)-int64(beforeBytes) > 16<<20 {
+		t.Fatalf("engine retained %d bytes across a registrar session", int64(afterBytes)-int64(beforeBytes))
+	}
 }
+
+// ---- session loss: distinct identity, clean teardown, no rebuild ----
 
 type sessionLoss struct {
 	reader  chan error
 	guards  [][2]windows.Handle
 	process windows.Handle
+	base    map[windows.Handle]bool
 }
 
-func watchLoss(t *testing.T, s *Session) *sessionLoss {
+func watchLoss(t *testing.T, s *Session, base map[windows.Handle]bool) *sessionLoss {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)
-	l := &sessionLoss{reader: make(chan error, 1)}
+	l := &sessionLoss{reader: make(chan error, 1), base: base}
 	_, l.process = sessionRegistrar(t, s)
 	t.Cleanup(func() { windows.CloseHandle(l.process) })
 	waits := s.Stats().ReadWaits
@@ -253,10 +300,12 @@ func watchLoss(t *testing.T, s *Session) *sessionLoss {
 			windows.CloseHandle(g[1])
 		}
 	})
+	// Before triggering the loss the engine must already hold no device file.
+	assertNoDeviceFile(t, l.base)
 	return l
 }
 
-func (l *sessionLoss) wait(t *testing.T, registrarExit bool) error {
+func (l *sessionLoss) wait(t *testing.T, ownerExit bool) error {
 	t.Helper()
 	var err error
 	select {
@@ -264,8 +313,8 @@ func (l *sessionLoss) wait(t *testing.T, registrarExit bool) error {
 	case <-time.After(10 * time.Second):
 		t.Fatal("session loss left the reader parked")
 	}
-	if !errors.Is(err, ErrAdapterRemoved) || errors.Is(err, ErrRegistrarExited) != registrarExit {
-		t.Fatalf("reader error %v: want ErrAdapterRemoved, registrar exit %v", err, registrarExit)
+	if !errors.Is(err, ErrAdapterRemoved) || errors.Is(err, ErrRegistrarExited) != ownerExit {
+		t.Fatalf("reader error %v: want ErrAdapterRemoved, owner-exit identity %v", err, ownerExit)
 	}
 	for i, g := range l.guards {
 		if !sameObject(g[0], g[1]) || windows.SetEvent(g[0]) != nil {
@@ -342,17 +391,26 @@ func readyLine(t *testing.T, cmd *exec.Cmd, prefix string) string {
 	return ""
 }
 
+func mustGUID(t *testing.T, text string) windows.GUID {
+	t.Helper()
+	guid, err := windows.GUIDFromString(text)
+	must(t, err)
+	return guid
+}
+
 // Each loss ends the session through ErrAdapterRemoved without a recovery
-// failure. Registrar death leaves the adapter usable; removal does not.
+// failure and without an automatic rebuild. Owner death carries the distinct
+// ErrRegistrarExited and leaves the adapter usable; removal does not.
 func TestWintunRegistrarLoss(t *testing.T) {
 	requireRunner(t)
 	for _, kind := range []string{"registrar-terminate", "job-terminate"} {
 		t.Run(kind, func(t *testing.T) {
 			a := newAdapter(t, MinCapacity)
+			base := handleSnapshot(t)
 			s, err := a.StartSession()
 			must(t, err)
 			defer s.Close()
-			l := watchLoss(t, s)
+			l := watchLoss(t, s, base)
 			g, w := sessionRegistrar(t, s)
 			windows.CloseHandle(w)
 			started := ticks()
@@ -369,7 +427,7 @@ func TestWintunRegistrarLoss(t *testing.T) {
 			}
 			must(t, s.Close())
 			if stats := s.Stats(); stats.RecoveryFailures != 0 || stats.Recoveries != 0 {
-				t.Fatalf("registrar loss counted as recovery: %+v", stats)
+				t.Fatalf("owner loss counted as recovery: %+v", stats)
 			}
 			if _, _, err := deviceForGUID(mustGUID(t, a.config.GUID)); err != nil {
 				t.Fatalf("adapter disappeared with its registrar: %v", err)
@@ -383,13 +441,14 @@ func TestWintunRegistrarLoss(t *testing.T) {
 	}
 	t.Run("query-remove", func(t *testing.T) {
 		a := newAdapter(t, MinCapacity)
+		base := handleSnapshot(t)
 		s, err := a.StartSession()
 		must(t, err)
 		defer s.Close()
-		l := watchLoss(t, s)
+		l := watchLoss(t, s, base)
 		started := ticks()
 		queryRemove(t, a.InstanceID())
-		err = l.wait(t, false)
+		err = l.wait(t, false) // real removal: adapter lost, but not owner death
 		lost := elapsed(started)
 		must(t, s.Close())
 		exited, code := exitState(l.process, 0)
@@ -414,13 +473,14 @@ func TestWintunRegistrarLoss(t *testing.T) {
 		borrowed, err := Open(config)
 		must(t, err)
 		defer borrowed.Close()
+		base := handleSnapshot(t)
 		s, err := borrowed.StartSession()
 		must(t, err)
 		defer s.Close()
-		l := watchLoss(t, s)
+		l := watchLoss(t, s, base)
 		started := ticks()
-		// The DLL ties the software device to its creator's handle; the
-		// creator's death removes a started device without a query.
+		// The DLL ties the software device to its creator; the creator's death is
+		// a surprise removal of a started device, not a query-remove.
 		must(t, owner.Process.Kill())
 		err = l.wait(t, false)
 		lost := elapsed(started)
@@ -439,41 +499,184 @@ func TestWintunRegistrarLoss(t *testing.T) {
 	})
 }
 
-func mustGUID(t *testing.T, text string) windows.GUID {
-	t.Helper()
-	guid, err := windows.GUIDFromString(text)
-	must(t, err)
-	return guid
-}
-
-func TestWintunRegistrarEngineChild(t *testing.T) {
-	guid := os.Getenv("NETSWITCH_WINTUN_ENGINE_GUID")
-	if guid == "" {
-		t.Skip("engine child only")
-	}
+// After a ring-corruption recovery (which does spawn a fresh registrar), the
+// engine must still hold no registering device file.
+func TestWintunRegistrarNoDeviceFileThroughRecovery(t *testing.T) {
 	requireRunner(t)
-	a, err := Open(Config{Name: "NsRingCI", GUID: guid, Capacity: MinCapacity})
-	must(t, err)
+	a := newAdapter(t, MinCapacity)
+	base := handleSnapshot(t)
 	s, err := a.StartSession()
 	must(t, err)
-	fmt.Printf("ENGINE_READY %d\n", s.Stats().Registrar.PID)
+	defer s.Close()
+	assertNoDeviceFile(t, base)
+	first := s.Stats().Registrar.PID
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, MaxPacketSize)
+		for ctx.Err() == nil {
+			if _, err := s.ReadPacket(ctx, buf); err != nil {
+				return
+			}
+		}
+	}()
+	defer func() { cancel(); <-done }()
+	before := s.Stats().Recoveries
+	windows.SetEvent(s.wake)
+	s.mu.Lock()
+	injectRecoveryFault(s.rings)
+	windows.SetEvent(s.rings.readEvent)
+	windows.ResetEvent(s.wake)
+	s.mu.Unlock()
+	deadline := time.Now().Add(5 * time.Second)
+	for s.Stats().Recoveries == before {
+		if time.Now().After(deadline) {
+			t.Fatalf("corruption recovery did not complete: %+v", s.Stats())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	assertNoDeviceFile(t, base)
+	second := s.Stats().Registrar.PID
+	if s.Stats().Registrar.Starts < 2 || second == 0 {
+		t.Fatalf("recovery did not start a fresh registrar: %+v", s.Stats().Registrar)
+	}
+	report(t, map[string]any{"test": "registrar_recovery_no_device_file", "arch": runtime.GOARCH,
+		"first_registrar_pid": first, "second_registrar_pid": second, "registrar_starts": s.Stats().Registrar.Starts})
+}
+
+// ---- atomic job membership: parent crash before resume reaps the registrar ----
+
+func TestWintunRegistrarJobReapsBeforeResume(t *testing.T) {
+	exe, err := os.Executable()
+	must(t, err)
+	cmd := exec.Command(exe, registrarCrasherMode)
+	cmd.Stderr = os.Stderr
+	stdin, err := cmd.StdinPipe()
+	must(t, err)
+	stdout, err := cmd.StdoutPipe()
+	must(t, err)
+	must(t, cmd.Start())
+	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+	var pid uint64
+	scan := bufio.NewScanner(stdout)
+	for scan.Scan() {
+		if rest, ok := strings.CutPrefix(scan.Text(), "GRANDCHILD "); ok {
+			pid, err = strconv.ParseUint(strings.TrimSpace(rest), 10, 32)
+			must(t, err)
+			break
+		}
+	}
+	if pid == 0 {
+		t.Fatal("crasher did not create a suspended registrar")
+	}
+	// Pin the grandchild PID so it cannot be recycled under the check.
+	h, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	must(t, err)
+	defer windows.CloseHandle(h)
+	if alive, _ := exitState(h, 0); alive {
+		t.Fatal("suspended registrar already exited before the crash")
+	}
+	// Release the crasher, which exits without resuming and without closing the
+	// job handle explicitly: process teardown closes it.
+	stdin.Write([]byte("go\n"))
+	stdin.Close()
+	must(t, cmd.Wait())
+	exited, code := exitState(h, 5*time.Second)
+	if !exited {
+		t.Fatal("suspended registrar outlived its crashed parent; job membership was not atomic")
+	}
+	report(t, map[string]any{"test": "registrar_job_reaps_before_resume", "arch": runtime.GOARCH,
+		"grandchild_pid": pid, "grandchild_exit_code": code})
+}
+
+// ---- startup faults: resources released, no slow lock ----
+
+func TestWintunRegistrarStartupFaults(t *testing.T) {
+	path := `\\?\SWD#Wintun#{00000000-0000-0000-0000-000000000000}#{cac88484-7515-4c03-82e6-71a87aba61c3}`
+	for _, tc := range []struct {
+		name, fault, text string
+		shortTimeout      bool
+	}{
+		{"pre-reply exit", "pre-reply-exit", "gave no reply", false},
+		{"post-register exit", "post-register-exit", "gave no reply", false},
+		{"wrong pid", "wrong-pid", "reported process", false},
+		{"hang to timeout", "hang", "did not report", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restoreCmd, restoreEnv := registrarCommand, registrarExtraEnv
+			restoreTimeout := registrarStartTimeout
+			registrarCommand = registrarFixtureMode
+			registrarExtraEnv = []string{"NETSWITCH_WINTUN_FIXTURE_FAULT=" + tc.fault}
+			if tc.shortTimeout {
+				registrarStartTimeout = time.Second
+			}
+			defer func() {
+				registrarCommand, registrarExtraEnv, registrarStartTimeout = restoreCmd, restoreEnv, restoreTimeout
+			}()
+			warmRuntimeThreads()
+			debug.FreeOSMemory()
+			before := handleSnapshot(t)
+			r, err := allocateRings(MinCapacity)
+			must(t, err)
+			if err := r.createEvents(); err != nil {
+				t.Fatal(errors.Join(err, r.close()))
+			}
+			start := time.Now()
+			g, err := startRegistrar(path, r)
+			elapsedStart := time.Since(start)
+			if g != nil {
+				t.Fatal("a faulty registrar must not yield a session owner")
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.text) {
+				t.Fatalf("fault %q gave error %v", tc.fault, err)
+			}
+			must(t, r.close())
+			debug.FreeOSMemory()
+			kinds := newHandleKinds(t, before, handleSnapshot(t))
+			for _, leaked := range []string{"Section", "Job", "File"} {
+				if kinds[leaked] != 0 {
+					t.Fatalf("startup fault %q leaked %s handles: %v", tc.fault, leaked, kinds)
+				}
+			}
+			if elapsedStart > registrarStartTimeout+registrarKillTimeout+5*time.Second {
+				t.Fatalf("startup fault %q took %v; no fast failure", tc.fault, elapsedStart)
+			}
+			report(t, map[string]any{"test": "registrar_startup_fault", "arch": runtime.GOARCH, "fault": tc.fault,
+				"error": err.Error(), "elapsed_ms": elapsedStart.Milliseconds(), "leaked_handles": kinds})
+		})
+	}
+}
+
+// ---- engine crash proves kill-on-close, with a helper that ignores EOF ----
+
+func TestWintunRegistrarEngineHolderChild(t *testing.T) {
+	if os.Getenv("NETSWITCH_WINTUN_ENGINE_HOLDER") == "" {
+		t.Skip("engine holder child only")
+	}
+	registrarCommand = registrarFixtureMode
+	registrarExtraEnv = []string{"NETSWITCH_WINTUN_FIXTURE_FAULT=block"} // the registrar never reads its control pipe
+	r, err := allocateRings(MinCapacity)
+	must(t, err)
+	must(t, r.createEvents())
+	g, err := startRegistrar(`\\?\SWD#Wintun#{00000000-0000-0000-0000-000000000000}#{cac88484-7515-4c03-82e6-71a87aba61c3}`, r)
+	must(t, err)
+	fmt.Printf("HOLDER_READY %d\n", g.reply.PID)
 	for {
 		time.Sleep(time.Hour)
 	}
 }
 
-// An engine crash closes the only handle to the registrar's kill-on-close job,
-// so the registrar dies with it and the driver releases the registration.
+// Killing the engine closes the only job handle. Because the registrar ignores
+// its control pipe, pipe EOF cannot reap it: only kill-on-close can, which is
+// exactly what this proves.
 func TestWintunRegistrarEngineCrash(t *testing.T) {
-	requireRunner(t)
-	a := newAdapter(t, MinCapacity)
 	exe, err := os.Executable()
 	must(t, err)
-	engine := exec.Command(exe, "-test.run=^TestWintunRegistrarEngineChild$", "-test.v")
-	engine.Env = append(os.Environ(), "NETSWITCH_WINTUN_ENGINE_GUID="+a.config.GUID)
-	pid, err := strconv.ParseUint(readyLine(t, engine, "ENGINE_READY "), 10, 32)
+	engine := exec.Command(exe, "-test.run=^TestWintunRegistrarEngineHolderChild$", "-test.v")
+	engine.Env = append(os.Environ(), "NETSWITCH_WINTUN_ENGINE_HOLDER=1")
+	pid, err := strconv.ParseUint(readyLine(t, engine, "HOLDER_READY "), 10, 32)
 	must(t, err)
-	// The engine is alive, so this PID still names its registrar.
 	h, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
 	must(t, err)
 	defer windows.CloseHandle(h)
@@ -491,12 +694,8 @@ func TestWintunRegistrarEngineCrash(t *testing.T) {
 	exited, code := exitState(h, 5*time.Second)
 	died := elapsed(started)
 	if !exited {
-		t.Fatal("registrar outlived the crashed engine")
+		t.Fatal("registrar that ignores EOF outlived the crashed engine; kill-on-close did not fire")
 	}
-	// The adapter's registration slot is free again.
-	f := fixtureOnAdapter(t, "ours", a)
-	exchange(t, 16)
-	f.stopEcho()
 	report(t, map[string]any{"test": "registrar_engine_crash", "arch": runtime.GOARCH, "registrar_pid": pid,
-		"registrar_exit_code": code, "registrar_exit_after_engine_kill_ms": float64(died) / float64(time.Millisecond), "reregistered": true})
+		"registrar_exit_code": code, "registrar_exit_after_engine_kill_ms": float64(died) / float64(time.Millisecond)})
 }

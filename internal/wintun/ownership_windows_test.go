@@ -248,6 +248,7 @@ func productionCloseWindow(t *testing.T, markers string) {
 		g.process.Handle("test process witness"), g.job.Handle("test job witness"), g.control.Handle("test control witness")} {
 		owned[h] = witness(t, h)
 	}
+	total := len(owned)
 	process := witness(t, g.process.Handle("test exit witness"))
 	defer windows.CloseHandle(process)
 	defer func() {
@@ -280,6 +281,11 @@ func productionCloseWindow(t *testing.T, markers string) {
 			foreign = append(foreign, h)
 			return windows.ERROR_INVALID_HANDLE // refuse: never close another owner's object
 		}
+		// Done verifying identity: release our witness BEFORE closing the real
+		// handle, so closing the control writer actually reaches the helper as
+		// EOF (a lingering duplicate writer would hide it) and no witness leaks.
+		windows.CloseHandle(w)
+		delete(owned, h)
 		closes++
 		if closes == 1 && markers == "during" {
 			publish()
@@ -302,14 +308,14 @@ func productionCloseWindow(t *testing.T, markers string) {
 	}
 	report(t, map[string]any{"test": "removal_between_marker_check_and_close", "arch": runtime.GOARCH,
 		"owner": "production_registrar", "markers": markers, "handlecheck": winhandle.Enabled,
-		"owned": len(owned), "closes": closes, "foreign_closes": len(foreign), "replacements": len(replacements),
+		"owned": total, "closes": closes, "foreign_closes": len(foreign), "replacements": len(replacements),
 		"replacements_survived": survivors, "registrar_exited": exit == windows.WAIT_OBJECT_0, "registrar_exit_code": code,
 		"close_error": errText(err)})
 	if len(foreign) != 0 {
 		t.Fatalf("teardown tried to close %d values it did not own: %v", len(foreign), foreign)
 	}
-	if closes != len(owned) {
-		t.Fatalf("teardown closed %d of its %d owned objects", closes, len(owned))
+	if closes != total {
+		t.Fatalf("teardown closed %d of its %d owned objects", closes, total)
 	}
 	if len(replacements) == 0 {
 		t.Fatal("no closed number was reused; the race was not exercised")

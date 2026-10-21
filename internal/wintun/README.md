@@ -51,24 +51,40 @@ is a Wintun interface, and the inherited handles are a `Section` and two
 replies with its PID and footprint. It then waits for the control pipe's EOF.
 It never closes, reuses or touches the device value: process teardown owns it.
 
-Only the engine holds the job handle, so an engine crash kills the registrar,
-and the driver's handle-close cleanup releases the rings. A registrar that ends
-for any reason wakes the reader through its process handle; the session is
-then lost through the same `ErrAdapterRemoved` path as removal (joined with
-`ErrRegistrarExited`), never a recovery failure. Corruption recovery retires the
-registrar and starts a new one. Every engine program that starts sessions
-dispatches `RegistrarMode` first: the engine, TestISP and this package's tests.
+It is created in its own unnamed kill-on-close job **atomically at
+CreateProcess** (the `PROC_THREAD_ATTRIBUTE_JOB_LIST` attribute), while still
+suspended, before it runs any instruction. So even a parent crash in the old
+create-then-assign window cannot orphan it: only the engine holds the job
+handle, and closing it (or the engine dying) kills the registrar, suspended or
+running. A registrar that ends for any reason wakes a parked reader through its
+process handle. Every engine program that starts sessions dispatches
+`RegistrarMode` first: the engine, TestISP and this package's tests.
 The registrar runs with `GOMAXPROCS=1`, `GOGC=50` and `GOMEMLIMIT=8MiB`.
-`Stats.Registrar` reports its start time, private bytes, heap, stacks and handles.
+`Stats.Registrar` reports its start time, private bytes, heap, stacks and
+handles, with `FootprintMeasured` false when the registrar could not read its
+own counters (never a fabricated zero).
 
 Close wakes readers, closes the control pipe and waits up to 2 s for the
-registrar to exit (then terminates its job and waits up to 5 s), then requires
-both release markers within 250 ms. Only then are its events closed and this
-process's view unmapped. The driver locked the registrar's view, never the
-engine's, so unmapping the engine view cannot free memory the driver may still
-write. Every value the engine closes is one it alone owns. Every close attempt
-consumes our ownership, even on failure. Closing the owning adapter also calls
-the DLL's adapter removal.
+registrar to exit (then terminates its job and waits up to 5 s). The engine and
+the registrar hold **separate** mapped references to the same section, and the
+driver only ever locked the registrar's reference. Once the registrar process
+has exited, that reference is gone, so the engine always unmaps its own view
+and closes its section handle unconditionally — it never needs to retain memory
+and does not wait for the ring markers to protect its own view. The markers
+(Receive.Head then Send.Tail) are awaited only as a logged confirmation that
+the driver released the registration; a missing marker is reported, not fatal
+to the engine's teardown. Every value the engine closes is one it alone owns,
+and every close attempt consumes that ownership even on failure. Closing the
+owning adapter also calls the DLL's adapter removal.
+
+A lost registration — real adapter removal **or** the registrar exiting on its
+own — stops the session with `ErrAdapterRemoved` and never triggers an
+automatic rebuild. Owner death is distinguished deterministically during
+teardown (the joined process had already exited before the stop request) and
+joined with `ErrRegistrarExited`; real removal carries `ErrAdapterRemoved`
+alone. Reporting the distinct "adapter lost" reason to the controller, and any
+restart budget, belong to the engine/controller, not this package. Only ring
+**corruption** reopens the rings (and thereby starts a fresh registrar).
 Process death makes the driver unregister its rings;
 the service manager calls `RecoverAfterCrash` with the journaled name and GUID
 under its ownership lock, as in system design section 2. Hosted tests confirmed

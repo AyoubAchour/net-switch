@@ -213,7 +213,7 @@ func (s *Session) maintain() {
 			stateLock := uint64(winclock.Since(started))
 			var profile CloseDetails
 			if s.rings != nil {
-				s.closeErr = s.rings.close()
+				s.closeErr = errors.Join(s.closeErr, s.rings.close())
 				profile = s.rings.closeProfile
 				s.rings = nil
 			}
@@ -243,13 +243,17 @@ func (s *Session) maintain() {
 				s.mu.Unlock()
 				continue
 			}
-			// The driver publishes the markers during handle rundown, shortly
-			// before the registrar's process is signalled. Classify a marker the
-			// reader saw first by that exit; during removal the registrar lives.
-			if errors.Is(cause, ErrDisconnected) && !errors.Is(cause, ErrRegistrarExited) && s.rings.ownerExited(100*time.Millisecond) {
-				cause = errors.Join(ErrRegistrarExited, cause)
-			}
 			err := s.rings.close()
+			// The teardown/retirement error is a real cleanup failure, distinct
+			// from the expected removal/owner-exit cause. Session.Close must still
+			// surface it even though these rings are gone before the stop handler
+			// runs; the cause itself is never treated as a cleanup failure.
+			s.closeErr = errors.Join(s.closeErr, err)
+			// end() recorded deterministically, from the joined registrar,
+			// whether its process had already exited before the stop request.
+			// Ring corruption (not disconnect) still reopens; a lost owner never
+			// triggers an automatic rebuild here.
+			lostToExit := s.rings.ownerExitedFirst
 			s.rings = nil
 			removed := errors.Is(cause, ErrDisconnected)
 			if !removed && err == nil {
@@ -260,15 +264,18 @@ func (s *Session) maintain() {
 					s.noteRings(s.rings)
 				}
 			}
-			if removed && errors.Is(cause, ErrRegistrarExited) {
-				// Same session loss as removal; the adapter itself may remain.
-				s.err = errors.Join(ErrAdapterRemoved, cause, err)
+			if removed && lostToExit {
+				// The registration owner exited on its own: a distinct reason from
+				// adapter removal, the same session loss, and never a rebuild. The
+				// teardown error (if any) is a cleanup failure kept in closeErr, not
+				// part of this terminal reason.
+				s.err = errors.Join(ErrAdapterRemoved, ErrRegistrarExited, cause)
 				s.event("removed", s.err)
-				slog.Warn("Wintun registrar exited; session lost", "adapter", s.adapter.config.Name, "error", s.err)
+				slog.Warn("Wintun registration owner exited; session lost", "adapter", s.adapter.config.Name, "error", errors.Join(s.err, err))
 			} else if removed {
-				s.err = errors.Join(ErrAdapterRemoved, err)
+				s.err = errors.Join(ErrAdapterRemoved, cause)
 				s.event("removed", s.err)
-				slog.Info("Wintun adapter removed", "adapter", s.adapter.config.Name, "error", err)
+				slog.Info("Wintun adapter removed", "adapter", s.adapter.config.Name, "error", errors.Join(s.err, err))
 			} else if err != nil {
 				s.failures.Add(1)
 				s.err = fmt.Errorf("Wintun session recovery after %v: %w", cause, err)
@@ -446,11 +453,12 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 			}()
 		}
 		handles := []windows.Handle{s.wakeOwner.Handle("Wintun read wake"), s.rings.readHandle()}
-		// A registrar that ends for any reason (crash, job termination) loses
-		// the registration; wake now instead of waiting for later traffic.
-		exited := -1
+		// A registrar that ends for any reason (crash, job termination) loses the
+		// registration; wake a parked reader now instead of waiting for traffic.
+		// The reason (owner exit vs adapter removal) is settled during teardown.
+		exitIdx := -1
 		if h := s.rings.exited(); h != 0 {
-			exited = len(handles)
+			exitIdx = len(handles)
 			handles = append(handles, h)
 		}
 		if cancelEvent != 0 {
@@ -461,11 +469,8 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		if err == nil {
 			s.readWakes.Add(1)
 		}
-		if err == nil && exited >= 0 && event == windows.WAIT_OBJECT_0+uint32(exited) {
-			var code uint32
-			windows.GetExitCodeProcess(handles[exited], &code)
-			// Its process handle stays signalled; recovery state stops this loop.
-			s.fail(fmt.Errorf("%w with code %#x", ErrRegistrarExited, code))
+		if err == nil && exitIdx >= 0 && event == windows.WAIT_OBJECT_0+uint32(exitIdx) {
+			s.fail(errOwnerLost)
 		}
 		s.mu.RUnlock()
 		if err != nil {

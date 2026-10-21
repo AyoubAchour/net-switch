@@ -187,7 +187,9 @@ func serve(args []string) error {
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
 		log.Printf("control request peer=%s method=%s path=%s", r.RemoteAddr, r.Method, r.URL.Path)
-		defer func() { log.Printf("control response peer=%s path=%s elapsed=%s", r.RemoteAddr, r.URL.Path, time.Since(started)) }()
+		defer func() {
+			log.Printf("control response peer=%s path=%s elapsed=%s", r.RemoteAddr, r.URL.Path, time.Since(started))
+		}()
 		if r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "unauthorized", 401)
 			return

@@ -92,6 +92,7 @@ type rings struct {
 	readOwner, writeOwner   winhandle.Owner
 	owner                   ringOwner // nil for synthetic fixtures without a driver
 	closed                  bool
+	ownerExitedFirst        bool // set by end(): the owner ended before we requested a stop
 	head, tail              uint32
 	placeholders, oversized uint64 // protected by the session's read lock
 	closeProfile            CloseDetails
@@ -205,15 +206,6 @@ func (r *rings) exited() windows.Handle {
 		return 0
 	}
 	return r.owner.exited()
-}
-
-func (r *rings) ownerExited(timeout time.Duration) bool {
-	h := r.exited()
-	if h == 0 {
-		return false
-	}
-	result, err := windows.WaitForSingleObject(h, uint32(timeout/time.Millisecond))
-	return err == nil && result == windows.WAIT_OBJECT_0
 }
 
 func (r *rings) readHandle() windows.Handle {
