@@ -46,26 +46,21 @@ func kernelLookupPath(path string) bool {
 	return kernelScopePath(path)
 }
 
-// Only fixed kernel metadata in the engine's own proc/cgroup mounts uses
-// these calls. They keep the lookup's Go processor across short operations.
-// Never extend this to /proc/PID/root or other process-controlled filesystems.
-// Environ opens wait on the target's exec_update_lock, and its contents can
-// fault in user memory. Both its opens and reads remain scheduling syscalls.
+// Only fixed kernel metadata in the engine's own proc/cgroup mounts is marked
+// direct: its stat, seek and close keep the lookup's Go processor across short
+// operations. Every open, including these, is a scheduling syscall. Opening
+// allocates a descriptor before resolving the path, and that allocation can
+// grow the shared descriptor table (an RCU grace period, or waiting for a
+// concurrent resize) or wait for memory reclaim. Never extend direct to
+// /proc/PID/root or other process-controlled filesystems. Environ opens wait
+// on the target's exec_update_lock, and its contents can fault in user
+// memory, so it is never direct.
 func openKernelFile(path string, flags int) (fd int, direct bool, err error) {
-	if !kernelLookupPath(path) {
-		fd, err = unix.Open(path, flags, 0)
-		return fd, false, err
-	}
-	name, err := unix.BytePtrFromString(path)
+	fd, err = unix.Open(path, flags, 0)
 	if err != nil {
 		return -1, false, err
 	}
-	dir := unix.AT_FDCWD
-	value, _, errno := syscall.RawSyscall6(unix.SYS_OPENAT, uintptr(dir), uintptr(unsafe.Pointer(name)), uintptr(flags), 0, 0, 0)
-	if errno != 0 {
-		return -1, false, errno
-	}
-	return int(value), true, nil
+	return fd, kernelLookupPath(path), nil
 }
 
 func closeKernelFile(fd int, direct bool) error {

@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/apppath"
+	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"golang.org/x/sys/unix"
 )
@@ -55,6 +56,8 @@ type Owners struct {
 	queries         diagPool
 	batches         descriptorBatches
 	warmed          bool
+	budget          flows.Limits // the limits service_linux.go gives the engine
+	descriptors     *descriptorReservation
 	lookupErrors    [4]atomic.Uint64
 	cgroupStats     [3]atomic.Uint64
 	sharedScans     atomic.Uint64
@@ -90,6 +93,9 @@ type lookupStats struct {
 	SlowScans                                                                            []descriptorScanSnapshot
 	FDTableSize                                                                          int
 	FDTableSizeError                                                                     string
+	FDReserveTarget, FDReserveBefore, FDReserveAfter                                     int
+	FDReserveLimit                                                                       uint64
+	FDReserveError                                                                       string
 	MetadataRejected                                                                     uint64
 	LastMetadataError                                                                    string
 	SharedScans                                                                          uint64
@@ -113,6 +119,14 @@ func (o *Owners) Stats() any {
 	} else {
 		s.FDTableSizeError = err.Error()
 	}
+	o.mu.Lock()
+	if r := o.descriptors; r != nil {
+		s.FDReserveTarget, s.FDReserveBefore, s.FDReserveAfter, s.FDReserveLimit = r.Target, r.Before, r.After, r.Limit
+		if r.Err != nil {
+			s.FDReserveError = r.Err.Error()
+		}
+	}
+	o.mu.Unlock()
 	s.CgroupHints, s.CgroupResolved, s.CgroupPopulated = o.cgroupStats[0].Load(), o.cgroupStats[1].Load(), o.cgroupStats[2].Load()
 	s.MetadataRejected = rejectedMetadata.Load()
 	s.SharedScans = o.sharedScans.Load()
@@ -181,14 +195,25 @@ func (o *Owners) recordError(err error) {
 	o.lastLookupError.Store(&text)
 }
 
-// Load the kernel's diagnostic handlers and the cgroup directory index before
-// capture. No socket owner is cached here: every admitted socket is still cold.
+// Size the descriptor table, then load the kernel's diagnostic handlers and
+// the cgroup directory index before capture. No socket owner is cached here:
+// every admitted socket is still cold. A failed table reservation is reported
+// in Stats; lookups then still work, with growth back on the lookup path.
 func (o *Owners) Warm(ctx context.Context) error {
 	o.mu.Lock()
-	ready := o.warmed
+	ready, reserved := o.warmed, o.descriptors != nil && o.descriptors.Err == nil
 	o.mu.Unlock()
 	if ready {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !reserved {
+		r := prepareDescriptorTable(o.budget)
+		o.mu.Lock()
+		o.descriptors = &r
+		o.mu.Unlock()
 	}
 	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 		for _, protocol := range []int{unix.IPPROTO_TCP, unix.IPPROTO_UDP} {
@@ -216,7 +241,7 @@ func NewOwners() *Owners {
 	// Inode hints and their subscribers share a shard, not the process-state
 	// lock. Small workloads need not retain and scan tens of MiB of empty
 	// index space, and a growing shard cannot stall every other lookup.
-	o := &Owners{cgroups: make(map[uint64]string, 256), recent: make(map[uint32]*recentOwners, 64), windows: make(map[uint32]fdWindow, 256), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
+	o := &Owners{budget: flows.Defaults(), cgroups: make(map[uint64]string, 256), recent: make(map[uint32]*recentOwners, 64), windows: make(map[uint32]fdWindow, 256), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
 	for i := range o.index {
 		o.index[i].inodes = make(map[uint32]inodeHolders, 16)
 		o.index[i].waiters = make(map[uint32]*inodeWaiter, 16)
