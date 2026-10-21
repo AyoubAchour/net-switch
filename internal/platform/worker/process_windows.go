@@ -9,7 +9,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/winjob"
+	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
 	"golang.org/x/sys/windows"
 )
 
@@ -95,11 +95,11 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 		},
 		ProcessMemoryLimit: 256 * 1024 * 1024,
 	}
-	if err = winjob.Set(job, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
+	if err = winapi.SetJobInformation(job, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
 		return nil, err
 	}
 	ui := windows.JOBOBJECT_BASIC_UI_RESTRICTIONS{UIRestrictionsClass: uiLimits}
-	if err := winjob.Set(job, windows.JobObjectBasicUIRestrictions, &ui); err != nil {
+	if err := winapi.SetJobInformation(job, windows.JobObjectBasicUIRestrictions, &ui); err != nil {
 		return nil, fmt.Errorf("limit worker UI access: %w", err)
 	}
 	var token windows.Token

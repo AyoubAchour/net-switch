@@ -5,7 +5,7 @@ import (
 	"os/exec"
 	"syscall"
 
-	"github.com/AyoubAchour/net-switch/internal/winjob"
+	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
 	"golang.org/x/sys/windows"
 )
 
@@ -15,7 +15,7 @@ func guardedStart(cmd *exec.Cmd) (func(), error) {
 		return nil, err
 	}
 	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{LimitFlags: windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE}}
-	if err = winjob.Set(job, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
+	if err = winapi.SetJobInformation(job, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
 		windows.CloseHandle(job)
 		return nil, err
 	}

@@ -14,7 +14,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/winjob"
+	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
@@ -164,12 +164,12 @@ func isolationProbe(input isolationRequest) (isolationResult, error) {
 	result.TCPDenied = code == uintptr(windows.ERROR_ACCESS_DENIED) || code == 317
 	result.TCPCode = strconv.FormatUint(uint64(code), 10)
 	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-	if err := winjob.Query(0, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
+	if err := winapi.QueryJobInformation(0, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
 		return result, err
 	}
 	result.Memory = limits.ProcessMemoryLimit
 	var ui windows.JOBOBJECT_BASIC_UI_RESTRICTIONS
-	if err := winjob.Query(0, windows.JobObjectBasicUIRestrictions, &ui); err != nil {
+	if err := winapi.QueryJobInformation(0, windows.JobObjectBasicUIRestrictions, &ui); err != nil {
 		return result, err
 	}
 	result.UI = ui.UIRestrictionsClass
