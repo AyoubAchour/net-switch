@@ -577,7 +577,9 @@ jobs:
         run: |
           go test -race -tags=netswitch_handlecheck -c -o ./bin/wintun-race.test.exe ./internal/wintun
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./bin/wintun-race.test.exe '-test.v' '-test.timeout=5m' '-test.run=TestRing|TestWintun(RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|Lifetime)$'
+          # Each lifetime cycle now starts a registrar process and has its own
+          # hang bound. Under race, 1000 cycles ran past the old 5m total.
+          ./bin/wintun-race.test.exe '-test.v' '-test.timeout=10m' '-test.run=TestRing|TestWintun(RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|Lifetime)$'
 
   linux:
     if: github.event_name != 'workflow_dispatch'

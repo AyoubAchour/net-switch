@@ -654,8 +654,18 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 	// Send memory, then exercise the same detection/unregister/reopen path used
 	// for driver corruption. These are deterministic fault injections, reported
 	// separately from naturally occurring driver faults in the stress test.
+	recoveryMS := map[string]float64{}
+	oldWindowPass := true
 	for _, kind := range []string{"size", "tail", "alignment", "body"} {
 		before := s.Stats().Recoveries
+		for drained := false; !drained; {
+			select {
+			case <-s.Events():
+			default:
+				drained = true
+			}
+		}
+		injected := time.Now()
 		s.mu.Lock()
 		r := s.rings
 		head := r.head
@@ -690,10 +700,38 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 			// Windows may emit DNS/IPv6 discovery after a media reconnect.
 		}
 		cancel()
+		// The old check required recovery inside that 500 ms read window. A
+		// recovery now starts a registrar process, which under the race
+		// detector finished just after it (run 39559172829). Wait for the
+		// session's own outcome, bounded by the registrar's start, stop and
+		// kill timeouts, and keep the old verdict and the time in the report.
+		if s.Stats().Recoveries != before+1 {
+			oldWindowPass = false
+			bound := time.NewTimer(registrarStartTimeout + registrarStopTimeout + registrarKillTimeout)
+		wait:
+			for {
+				select {
+				case e := <-s.Events():
+					if e.Kind == "recovering" {
+						continue
+					}
+					if e.Kind != "recovered" {
+						bound.Stop()
+						t.Fatalf("%s recovery ended as %q: %v (%+v)", kind, e.Kind, e.Err, s.Stats())
+					}
+					break wait
+				case <-bound.C:
+					t.Fatalf("%s did not recover within the registrar's own bounds: %+v", kind, s.Stats())
+				}
+			}
+			bound.Stop()
+		}
+		recoveryMS[kind] = float64(time.Since(injected).Microseconds()) / 1000
 		if s.Stats().Recoveries != before+1 {
 			t.Fatalf("%s did not recover: %+v", kind, s.Stats())
 		}
 	}
+	t.Logf("injected recovery times (ms, including the 500 ms no-escape read window): %v old_500ms_window_pass=%t", recoveryMS, oldWindowPass)
 	f.startEcho(t)
 	c := udpSocket(t)
 	defer c.Close()
@@ -727,7 +765,8 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("close left a blocked reader")
 	}
-	report(t, map[string]any{"test": "injected_recovery", "arch": runtime.GOARCH, "stats": s.Stats()})
+	report(t, map[string]any{"test": "injected_recovery", "arch": runtime.GOARCH, "stats": s.Stats(),
+		"recovery_ms": recoveryMS, "old_500ms_window_pass": oldWindowPass})
 }
 
 func processUsage(t *testing.T) (uint32, uint64) {
@@ -818,18 +857,40 @@ func TestWintunLifetime(t *testing.T) {
 	beforeHandles, beforeBytes := processUsage(t)
 	beforeTypes := handleTypes(t)
 	start := time.Now()
+	// Each cycle starts and retires a registrar process. A stuck cycle fails
+	// at the registrar's own start, stop and kill bounds, naming the cycle,
+	// instead of at the binary's overall timeout (run 39559172829 hit 5 m
+	// under the race detector with no way to tell slow from stuck).
+	cycleBound := registrarStartTimeout + registrarStopTimeout + registrarKillTimeout
+	var slowest time.Duration
 	for i := 0; i < 1000; i++ {
-		s, err := a.StartSession()
-		must(t, err)
-		must(t, s.Close())
+		began := time.Now()
+		cycle := make(chan error, 1)
+		go func() {
+			s, err := a.StartSession()
+			if err == nil {
+				err = s.Close()
+			}
+			cycle <- err
+		}()
+		select {
+		case err := <-cycle:
+			must(t, err)
+		case <-time.After(cycleBound):
+			t.Fatalf("session cycle %d did not finish within %s", i, cycleBound)
+		}
+		slowest = max(slowest, time.Since(began))
 		if i%50 == 0 {
 			runtime.GC()
+		}
+		if (i+1)%100 == 0 {
+			t.Logf("lifetime progress: %d sessions in %s, slowest cycle %s", i+1, time.Since(start).Round(time.Millisecond), slowest.Round(time.Millisecond))
 		}
 	}
 	debug.FreeOSMemory()
 	afterHandles, afterBytes := processUsage(t)
 	afterTypes := handleTypes(t)
-	report(t, map[string]any{"test": "lifetime", "arch": runtime.GOARCH, "sessions": 1000, "seconds": time.Since(start).Seconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "types_before": beforeTypes, "types_after": afterTypes, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes})
+	report(t, map[string]any{"test": "lifetime", "arch": runtime.GOARCH, "sessions": 1000, "seconds": time.Since(start).Seconds(), "slowest_cycle_ms": slowest.Milliseconds(), "handles_before": beforeHandles, "handles_after": afterHandles, "types_before": beforeTypes, "types_after": afterTypes, "private_bytes_before": beforeBytes, "private_bytes_after": afterBytes})
 	if afterHandles > beforeHandles+2 {
 		t.Fatal("session handle leak")
 	}
@@ -914,7 +975,9 @@ func TestWintunAdapterRemoval(t *testing.T) {
 	if s.Stats().RecoveryFailures != 0 || s.Stats().Recoveries != 0 {
 		t.Fatalf("removal counted as recovery: %+v", s.Stats())
 	}
-	if strings.Count(logs.String(), "Wintun adapter removed") != 1 || strings.Contains(logs.String(), "level=ERROR") {
+	// Count log records, not substrings: the one removal record's joined error
+	// text also contains "Wintun adapter removed" (ErrAdapterRemoved).
+	if strings.Count(logs.String(), `msg="Wintun adapter removed"`) != 1 || strings.Contains(logs.String(), "level=ERROR") {
 		t.Fatalf("wrong removal logging: %s", logs.String())
 	}
 	assertPnPAbsent(t, owner.InstanceID())
