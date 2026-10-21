@@ -55,12 +55,22 @@ func kernelLookupPath(path string) bool {
 // /proc/PID/root or other process-controlled filesystems. Environ opens wait
 // on the target's exec_update_lock, and its contents can fault in user
 // memory, so it is never direct.
+// Round-6 experiment only: the round-3 raw opens for direct kernel paths.
 func openKernelFile(path string, flags int) (fd int, direct bool, err error) {
-	fd, err = unix.Open(path, flags, 0)
+	if !kernelLookupPath(path) {
+		fd, err = unix.Open(path, flags, 0)
+		return fd, false, err
+	}
+	name, err := unix.BytePtrFromString(path)
 	if err != nil {
 		return -1, false, err
 	}
-	return fd, kernelLookupPath(path), nil
+	dir := unix.AT_FDCWD
+	value, _, errno := syscall.RawSyscall6(unix.SYS_OPENAT, uintptr(dir), uintptr(unsafe.Pointer(name)), uintptr(flags), 0, 0, 0)
+	if errno != 0 {
+		return -1, false, errno
+	}
+	return int(value), true, nil
 }
 
 func closeKernelFile(fd int, direct bool) error {
