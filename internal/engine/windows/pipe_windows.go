@@ -259,11 +259,14 @@ func (c *pipeConn) transfer(op *pipeOp, event winhandle.Owner, b []byte, write b
 	windows.ResetEvent(ev)
 	op.o = windows.Overlapped{HEvent: ev}
 	h := c.h.Handle("engine pipe operation")
+	// The count is taken from GetOverlappedResult below. This one is only
+	// written during the call, and x/sys's race build dereferences it.
+	var inline uint32
 	var err error
 	if write {
-		err = windows.WriteFile(h, b, nil, &op.o)
+		err = windows.WriteFile(h, b, &inline, &op.o)
 	} else {
-		err = windows.ReadFile(h, b, nil, &op.o)
+		err = windows.ReadFile(h, b, &inline, &op.o)
 	}
 	c.mu.Unlock()
 	if err != nil && !errors.Is(err, windows.ERROR_IO_PENDING) {
