@@ -43,7 +43,9 @@ func fakeRemote(t *testing.T, version string) (*Remote, *atomic.Int32) {
 	attachments := &atomic.Int32{}
 	r.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
 		server, client := net.Pipe()
-		t.Cleanup(func() { server.Close(); client.Close() })
+		// Stop Remote first. Closing the pipe while it still runs would make
+		// it see a dropped transport and start a recovery after the test ended.
+		t.Cleanup(func() { cancel(); server.Close(); client.Close() })
 		go func() {
 			defer server.Close()
 			scan := bufio.NewScanner(server)
@@ -79,15 +81,69 @@ func TestTransportFailureReattachesWithoutEngineFailure(t *testing.T) {
 	rpc := r.rpc
 	r.mu.Unlock()
 	rpc.Close()
-	deadline := time.Now().Add(time.Second)
-	for attaches.Load() < 2 && time.Now().Before(deadline) {
+	// The fake engine counts an attach when it answers, which is before Remote
+	// has stored the new connection. Wait for Remote itself to say it is
+	// attached again, and check on every look that no failure was recorded.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		s := r.Snapshot()
+		if s.Status == "error" || s.FailureID != "" || s.Error != nil {
+			t.Fatal("live engine counted as failed", s)
+		}
+		if s.Status == "on" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("transport did not reattach", s)
+		}
 		time.Sleep(time.Millisecond)
 	}
-	if attaches.Load() != 2 {
-		t.Fatal("transport did not reattach")
+	if s := r.Snapshot(); s.Instance != "same-instance" || attaches.Load() != 2 {
+		t.Fatal("reattached to the wrong engine instance or attached more than once", s, attaches.Load())
 	}
-	if s := r.Snapshot(); s.Status != "on" || s.Instance != "same-instance" || s.FailureID != "" {
-		t.Fatal("live engine counted as failed", s)
+}
+
+// While the connection is down and the new attach has not finished, the engine
+// is "starting": not failed, and still the same instance. The test above only
+// passes through this state by timing, so hold it open here.
+func TestTransportInterruptionIsStartingUntilReattached(t *testing.T) {
+	r, attaches := fakeRemote(t, buildinfo.String())
+	if err := r.Attach(r.ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	original := r.dial
+	entered, release := make(chan struct{}), make(chan struct{})
+	r.dial = func(ctx context.Context, e localipc.Endpoint) (*localipc.Conn, error) {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return original(ctx, e)
+	}
+	r.mu.Lock()
+	rpc := r.rpc
+	r.mu.Unlock()
+	rpc.Close()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("recovery did not try to reattach")
+	}
+	if s := r.Snapshot(); s.Status != "starting" || s.Instance != "same-instance" || s.FailureID != "" || s.Error != nil {
+		t.Fatal("interrupted transport was not reported as starting", s)
+	}
+	close(release)
+	deadline := time.Now().Add(10 * time.Second)
+	for r.Snapshot().Status != "on" {
+		if time.Now().After(deadline) {
+			t.Fatal("transport did not reattach", r.Snapshot())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if s := r.Snapshot(); s.FailureID != "" || s.Error != nil || attaches.Load() != 2 {
+		t.Fatal("reattach left a failure behind", s, attaches.Load())
 	}
 }
 
