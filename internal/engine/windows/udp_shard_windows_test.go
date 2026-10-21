@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"net"
+	"net/netip"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -17,16 +18,10 @@ import (
 
 func socketInUDPTestPool(t *testing.T, pool *udpReadiness) *udpSocket {
 	t.Helper()
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2)})
+	socket, err := openUDP(loopbackLine(t), netip.MustParseAddrPort("127.0.0.2:0"), pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		conn.Close()
-		t.Fatal(err)
-	}
-	socket := &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535}
 	t.Cleanup(func() {
 		if err := socket.Close(); err != nil {
 			t.Error(err)

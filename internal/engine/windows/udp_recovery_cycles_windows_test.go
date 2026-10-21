@@ -5,6 +5,7 @@ package winengine
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -162,16 +163,18 @@ func holdNativeTCPLoad(t *testing.T) (int, func()) {
 	return clients, release
 }
 
-// ready also puts each engine half through the engine's readiness path
-// (native duplicate plus event registration), as production sessions are.
-func nativeUDPRecoveryCycles(t *testing.T, cycles int, ready bool, apps *[]*net.UDPConn, engines *[]*udpSocket, peer *net.UDPConn,
-	config net.ListenConfig, source string, space *udpPortSpace, pool *udpReadiness) {
-	nativeUDPRecoveryCyclesWith(t, cycles, ready, 0, apps, engines, peer, config, source, space, pool)
+// With halves.ready, each engine half is the engine's own native socket put
+// through its readiness registration, as production sessions are; otherwise
+// it is a plain Go socket with the same bind options.
+func nativeUDPRecoveryCycles(t *testing.T, cycles int, halves udpEngineHalves, apps *[]*net.UDPConn, engines *[]io.Closer, peer *net.UDPConn,
+	source string, space *udpPortSpace) {
+	nativeUDPRecoveryCyclesWith(t, cycles, halves, 0, apps, engines, peer, source, space)
 }
 
-func nativeUDPRecoveryCyclesWith(t *testing.T, cycles int, ready bool, tcpLoad int, apps *[]*net.UDPConn, engines *[]*udpSocket, peer *net.UDPConn,
-	config net.ListenConfig, source string, space *udpPortSpace, pool *udpReadiness) {
+func nativeUDPRecoveryCyclesWith(t *testing.T, cycles int, halves udpEngineHalves, tcpLoad int, apps *[]*net.UDPConn, engines *[]io.Closer, peer *net.UDPConn,
+	source string, space *udpPortSpace) {
 	t.Helper()
+	ready := halves.ready
 	destination := peer.LocalAddr().(*net.UDPAddr)
 	var results []udpRecoveryCycle
 	openPair := func(cycle *udpRecoveryCycle, phase string) {
@@ -183,22 +186,9 @@ func nativeUDPRecoveryCyclesWith(t *testing.T, cycles int, ready bool, tcpLoad i
 				}
 				return func() { *apps = append(*apps, app) }, nil
 			}
-			packet, err := config.ListenPacket(context.Background(), "udp4", net.JoinHostPort(source, "0"))
+			engine, err := halves.open()
 			if err != nil {
 				return nil, err
-			}
-			conn := packet.(*net.UDPConn)
-			raw, err := conn.SyscallConn()
-			if err != nil {
-				conn.Close()
-				t.Fatal(err)
-			}
-			engine := &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535}
-			if ready {
-				if _, err := engine.Watch(func() {}); err != nil {
-					engine.Close()
-					return nil, err
-				}
 			}
 			return func() { *engines = append(*engines, engine) }, nil
 		}
@@ -253,6 +243,7 @@ func nativeUDPRecoveryCyclesWith(t *testing.T, cycles int, ready bool, tcpLoad i
 		refused += cycle.ReopenRefused
 	}
 	evidence, _ := json.Marshal(map[string]any{"readyUDP": ready, "tcpLoad": tcpLoad, "cycles": results, "reopenAttempts": attempts, "reopenRefused": refused,
-		"source": source, "appBind": "wildcard port zero, connected", "engineBind": "specific source port zero, IP_UNICAST_IF"})
+		"source": source, "appBind": "wildcard port zero, connected", "engineBind": "specific source port zero, IP_UNICAST_IF",
+		"engineSocket": halves.kind()})
 	t.Logf("WINDOWS NATIVE UDP RECOVERY CYCLES %s", evidence)
 }

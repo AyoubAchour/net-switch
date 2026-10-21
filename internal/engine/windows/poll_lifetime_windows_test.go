@@ -21,22 +21,13 @@ func pollLifetimePair(t *testing.T) (*readiness, *readySocket) {
 			t.Error(err)
 		}
 	})
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	conn, err := net.Dial("tcp4", listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	peer, err := listener.Accept()
-	if err != nil {
-		conn.Close()
-		t.Fatal(err)
-	}
+	c, peer := dialNative(t, pool, listener)
 	t.Cleanup(func() { peer.Close() })
-	c := &readySocket{blocking: conn.(*net.TCPConn), pool: pool, local: conn.LocalAddr(), remote: conn.RemoteAddr()}
 	t.Cleanup(func() { c.Close() })
 	if _, err := c.Watch(func() {}); err != nil {
 		t.Fatal(err)

@@ -51,8 +51,11 @@ until the shared worker supplies its buffer. Microsoft documents `MSG_PEEK`
 only for non-overlapped receives, so the new Watch path does not depend on
 overlapped peeking or on `WSAEMSGSIZE` proving non-consumption. Native tests
 separately cover queued and later arrivals, empty/one-byte/large datagrams,
-exact payload/source, rearm, cancellation and close. The earlier blocking
-`WaitReadable` evidence is a separate test of Go's RawRead path.
+exact payload/source, rearm, cancellation and close. Before `Watch`, the same
+native socket keeps blocking `WaitReadable`/`ReadFrom`/`WriteTo` for the
+`UDPConn` contract by polling its own handle in 10 ms `WSAPoll` slices; Close
+waits for a running slice to finish before it closes the handle. The NAT never
+takes that path on Windows: it calls `Watch` first.
 Windows can return the same creation timestamp after an immediate same-process,
 same-port reopen. The native measurement observed 67 collisions in 100 immediate
 pairs, with collided creation calls spanning at most about 0.85 ms; none occurred
@@ -67,6 +70,39 @@ virtual interfaces eligible so VPN-as-a-line policy can be added independently.
 Outbound TCP also requests `SO_REUSE_UNICASTPORT`; its effect depends on Windows'
 existing auto-reuse port configuration. The engine never changes global port
 ranges or registry settings.
+
+Outbound sockets are created natively, with one handle owned from birth
+(SYSTEM-DESIGN 5.1). Go's network package never holds them, so nothing is copied
+back out of it: there is no `File()` duplicate and no second Winsock duplicate.
+Microsoft documents that a socket descriptor is valid in every thread of its
+process. The second copy was the only place a "stale duplicate" appeared (the
+same kernel socket, reported unbound, refusing `SO_UPDATE_CONNECT_CONTEXT`).
+
+- **UDP:** `WSASocket` (overlapped, not inheritable), Go's old family defaults
+  (`IPV6_V6ONLY`, IPv4 `SO_BROADCAST`), the line's interface option, a bind to the
+  line's source, `SIO_UDP_CONNRESET`/`SIO_UDP_NETRESET` off as Go set them, then
+  `FIONBIO`. `Watch` registers that same handle with the event-select groups.
+- **TCP:** the same creation and line options plus `SO_REUSE_UNICASTPORT`, a bind
+  to the line's source, and association with the engine's completion port at
+  creation. `ConnectEx` (looked up from each socket's own provider) runs on that
+  port, bounded by the dial context and the 10 s dial timeout. An abandoned
+  connect is cancelled with `CancelIoEx`, its packet drained, and only then is
+  the socket closed. The packet's NTSTATUS is read back with
+  `WSAGetOverlappedResult`, so port exhaustion stays `WSAENOBUFS`/`WSAEADDRINUSE`.
+  After `SO_UPDATE_CONNECT_CONTEXT` the socket gets what Go's dialer gave it:
+  `TCP_NODELAY` and keep-alive (30 s idle, 15 s interval, 9 probes), then
+  `FIONBIO`. One heap `socketWatch` owns the OVERLAPPED, destination and byte
+  count from creation to `Detach`.
+- **Completion mode:** the engine set it, so it is known; nothing is read back.
+  Skip-on-success is set only when every catalog provider returned IFS handles
+  at startup (Microsoft's documented `WSAEnumProtocols` check) and the socket's
+  own provider (`SO_PROTOCOL_INFOW`) still has `XP1_IFS_HANDLES`, which also
+  catches a non-IFS layered provider installed after startup.
+- **Health probes** dial their own Go connections with the identical line
+  options. They need blocking HTTP/TLS I/O with deadlines, which Go's network
+  package already does correctly, and they are never handed to the relay, so
+  they are never copied. A hosted test reads every line and connected option
+  back from both paths and requires them equal.
 The internal ceilings remain 65,536 flows / 8,192 per app. Windows acceptance
 instead requires graceful exhaustion of its native port pool, at least 95% of
 the isolated measurement for the same two-half layout, preserved held traffic
@@ -215,6 +251,7 @@ was copied or adapted.
 - [Datagram event readiness](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsaeventselect) and [WSAPoll](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsapoll)
 - [WSARecv flags and overlapped restrictions](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsarecv) and [WSARecvFrom](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsarecvfrom)
 - [Native socket-address storage and alignment](https://learn.microsoft.com/windows/win32/api/ws2def/ns-ws2def-sockaddr_storage_lh)
+- [ConnectEx and SO_UPDATE_CONNECT_CONTEXT](https://learn.microsoft.com/windows/win32/api/mswsock/nc-mswsock-lpfn_connectex), [WSASocket](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsasocketw), [WSADuplicateSocket's in-process note](https://learn.microsoft.com/windows/win32/api/winsock2/nf-winsock2-wsaduplicatesocketw) and [completion notification modes](https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-setfilecompletionnotificationmodes)
 - [WFP conditions and layers](https://learn.microsoft.com/windows/win32/fwp/filtering-conditions-available-at-each-filtering-layer)
 - [WFP filter arbitration](https://learn.microsoft.com/windows/win32/fwp/filter-arbitration)
 - [IP Helper route creation](https://learn.microsoft.com/windows/win32/api/netioapi/nf-netioapi-createipforwardentry2)
@@ -224,7 +261,9 @@ was copied or adapted.
 - [Windows ICMPv4](https://learn.microsoft.com/windows/win32/api/icmpapi/nf-icmpapi-icmpsendecho2ex) and [ICMPv6](https://learn.microsoft.com/windows/win32/api/icmpapi/nf-icmpapi-icmp6sendecho2)
 - [wireguard-go Windows TUN](https://git.zx2c4.com/wireguard-go/tree/tun/tun_windows.go)
 - [Tailscale Windows router](https://github.com/tailscale/tailscale/blob/main/wgengine/router/osrouter/router_windows.go) and [interface configuration](https://github.com/tailscale/tailscale/blob/main/wgengine/router/osrouter/ifconfig_windows.go)
-- The pinned Go 1.27.2 `net/fd_windows.go`, `internal/poll` and `os/file_windows.go`.
+- The pinned Go 1.27.2 `net/fd_windows.go`, `internal/poll` and `os/file_windows.go`;
+  Go 1.27.3's `net/fd_windows.go` ConnectEx path and socket defaults, read as
+  reference for the native constructors (no code copied).
 
 Runtime tests run only in GitHub Actions. On the developer's PC only build/vet
 are allowed, using the pinned compiler at Idle priority with two cores.

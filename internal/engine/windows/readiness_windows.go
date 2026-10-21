@@ -8,11 +8,9 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"os"
 	"runtime"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -24,9 +22,11 @@ import (
 
 var winsock = windows.NewLazySystemDLL("ws2_32.dll")
 
-// The shared relay consumes readiness, not blocking reads. Idle Windows sockets
-// post a zero-byte overlapped receive to one completion port: no payload buffer
-// and no goroutine per socket. Only backpressured writers use WSAPoll.
+// The shared relay consumes readiness, not blocking reads. Every outbound TCP
+// socket is associated with this one completion port when it is created: its
+// ConnectEx completes here, and once connected an idle socket posts a zero-byte
+// overlapped receive here. No payload buffer and no goroutine per socket. Only
+// backpressured writers use WSAPoll.
 type readiness struct {
 	mu          sync.Mutex
 	port        winhandle.Owner
@@ -42,10 +42,19 @@ type readiness struct {
 	poll        func([]pollFD) int32
 	policy      tcpCompletionPolicy
 	cancel      func(windows.Handle, *windows.Overlapped) error
-	queryModes  func(winhandle.Owner) (uint32, error)
+	providerIFS func(winhandle.Owner) (bool, error)
+	nonIFS      atomic.Uint64 // sockets whose own provider refused skip-success
+	providerErr atomic.Pointer[providerFailure]
 	immediate   atomic.Uint64
 	submitted   atomic.Uint64
 	completed   atomic.Uint64
+	connects    atomic.Uint64
+	pendingConn atomic.Uint64
+}
+
+type providerFailure struct {
+	count uint64
+	err   string
 }
 
 type nativeSocketClose struct {
@@ -55,23 +64,31 @@ type nativeSocketClose struct {
 	Error    string         `json:"error,omitempty"`
 }
 
+// socketWatch is the heap owner of everything the kernel may hold for one
+// socket: the OVERLAPPED shared by ConnectEx and the receive readiness, the
+// receive flags, and ConnectEx's destination and byte count. It lives from the
+// socket's creation until Detach, and op stays pinned for that whole time.
 type socketWatch struct {
 	mu                       sync.Mutex
 	pool                     *readiness
 	socket                   winhandle.Owner
 	key                      uintptr
-	localPort                uint16
-	remote                   string // diagnostics: the peer, set once under pool.mu
+	localPort                uint16 // diagnostics: set once under pool.mu after connecting
+	remote                   string // diagnostics: the peer, set with localPort
+	established              bool   // pool.mu
 	wake                     func()
 	op                       windows.Overlapped
 	flags                    uint32
+	name                     [16]uint64 // SOCKADDR_STORAGE size and alignment
+	sent                     uint32
+	connected                chan struct{} // closed by ConnectEx's completion packet
+	connecting               bool
 	pin                      runtime.Pinner
 	pending, detached, write bool
 	drained                  chan struct{}
 	detachDone               chan struct{}
 	detachErr                error
 	skipSuccess              bool
-	inheritedSkip            bool
 }
 
 func newReadiness() (*readiness, error) {
@@ -87,7 +104,7 @@ func newReadinessWithPolicy(policy tcpCompletionPolicy) (*readiness, error) {
 		port:    winhandle.Open(port, "TCP completion port open"),
 		watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{},
 		stop: make(chan struct{}), capture: hostedTraceEnabled(), poll: pollWritable,
-		policy: policy, cancel: windows.CancelIoEx, queryModes: socketCompletionModes,
+		policy: policy, cancel: windows.CancelIoEx, providerIFS: socketProviderIFS,
 	}
 	p.wg.Go(p.completions)
 	p.wg.Go(p.pollWrites)
@@ -124,6 +141,13 @@ func (p *readiness) completions() {
 		}
 		w.pending = false
 		p.completed.Add(1)
+		if w.connecting {
+			// The dialer reads ConnectEx's result from op after this packet.
+			w.connecting = false
+			close(w.connected)
+			w.mu.Unlock()
+			continue
+		}
 		detached := w.detached
 		if w.drained != nil {
 			close(w.drained)
@@ -134,7 +158,7 @@ func (p *readiness) completions() {
 		// recv reports EOF/reset on the next TryRead. A cancelled operation
 		// after Detach has no callback, and its memory is now safe to unpin.
 		_ = err
-		if !detached {
+		if !detached && wake != nil {
 			wake()
 		}
 	}
@@ -149,18 +173,19 @@ func (p *readiness) stats() map[string]any {
 	// by peer. Grouped, not one string per watch: at capacity the stats reply
 	// must stay under the control channel's 1 MiB cap (run 39597923669).
 	peers := map[string][]uint16{}
-	normal, skipped, inherited := 0, 0, 0
+	normal, skipped, connecting := 0, 0, 0
 	for _, watch := range p.watches {
-		ports = append(ports, watch.localPort)
-		peers[watch.remote] = append(peers[watch.remote], watch.localPort)
 		if watch.skipSuccess {
 			skipped++
 		} else {
 			normal++
 		}
-		if watch.inheritedSkip {
-			inherited++
+		if !watch.established {
+			connecting++
+			continue
 		}
+		ports = append(ports, watch.localPort)
+		peers[watch.remote] = append(peers[watch.remote], watch.localPort)
 	}
 	closes := make([]nativeSocketClose, 0, min(p.closedCount, uint64(len(p.closes))))
 	for i := p.closedCount - uint64(cap(closes)); i < p.closedCount; i++ {
@@ -170,13 +195,20 @@ func (p *readiness) stats() map[string]any {
 	if p.policy.err != nil {
 		queryError = p.policy.err.Error()
 	}
+	var providerErrors uint64
+	providerError := ""
+	if failure := p.providerErr.Load(); failure != nil {
+		providerErrors, providerError = failure.count, failure.err
+	}
 	return map[string]any{
-		"sockets": len(p.watches), "ports": ports, "peers": peers, "blockedWriters": len(p.writers),
-		"completionThread": p.thread.Load(), "closes": closes, "closedCount": p.closedCount,
-		"completionPolicy": p.policy.reason, "allowSkipCompletionOnSuccess": p.policy.allowSkip,
-		"protocolCatalogEntries": p.policy.entries, "nonIFSProvider": p.policy.nonIFS,
-		"providerQueryError": queryError, "normalCompletionSockets": normal,
-		"skipSuccessSockets": skipped, "inheritedSkipSuccessSockets": inherited,
+		"sockets": len(ports), "connectingSockets": connecting, "ports": ports, "peers": peers,
+		"blockedWriters": len(p.writers), "completionThread": p.thread.Load(), "closes": closes,
+		"closedCount": p.closedCount, "completionPolicy": p.policy.reason,
+		"allowSkipCompletionOnSuccess": p.policy.allowSkip, "protocolCatalogEntries": p.policy.entries,
+		"nonIFSProvider": p.policy.nonIFS, "providerQueryError": queryError,
+		"nonIFSSocketProviders": p.nonIFS.Load(), "socketProviderQueryErrors": providerErrors,
+		"socketProviderQueryError": providerError, "normalCompletionSockets": normal,
+		"skipSuccessSockets": skipped, "connects": p.connects.Load(), "pendingConnects": p.pendingConn.Load(),
 		"immediateReceiveSuccesses": p.immediate.Load(), "asyncReceiveSubmissions": p.submitted.Load(),
 		"completionPackets": p.completed.Load(),
 	}
@@ -220,7 +252,7 @@ func (p *readiness) pollWrites() {
 		rows, watches = rows[:0], watches[:0]
 		p.mu.Lock()
 		for _, w := range p.writers {
-			rows = append(rows, pollFD{Socket: w.socket.Handle("TCP write poll snapshot"), Events: 0x10}) // POLLWRNORM.
+			rows = append(rows, pollFD{Socket: w.socket.Handle("TCP write poll snapshot"), Events: pollWrNorm})
 			watches = append(watches, w)
 		}
 		if len(rows) == 0 {
@@ -258,23 +290,42 @@ func (p *readiness) pollWrites() {
 	}
 }
 
-func (p *readiness) watch(socket winhandle.Owner, localPort uint16, wake func()) (*socketWatch, error) {
-	// Query before association or submission: a duplicate can retain a mode
-	// set by Go, and setting only the event flag would not clear skip-success.
-	modes, err := p.queryModes(socket)
-	if err != nil {
-		return nil, err
+// register associates a socket the engine has just created with this port,
+// once, before any overlapped call on it. The engine created the socket, so
+// its completion mode is exactly what is set here, and nothing has to be read
+// back. Skip-on-success is set only when every catalog provider returned IFS
+// handles at startup and the socket's own provider still does now.
+func (p *readiness) register(socket winhandle.Owner) (*socketWatch, error) {
+	skip := false
+	if p.policy.allowSkip {
+		ifs, err := p.providerIFS(socket)
+		switch {
+		case err != nil:
+			// Normal notifications are always correct; record why skip was not used.
+			for {
+				old := p.providerErr.Load()
+				next := &providerFailure{count: 1, err: err.Error()}
+				if old != nil {
+					next.count = old.count + 1
+				}
+				if p.providerErr.CompareAndSwap(old, next) {
+					break
+				}
+			}
+		case !ifs:
+			p.nonIFS.Add(1)
+		default:
+			skip = true
+		}
 	}
-	inherited := modes&windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS != 0
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.next++
-	w := &socketWatch{pool: p, socket: socket, key: p.next, localPort: localPort, wake: wake,
-		skipSuccess: inherited, inheritedSkip: inherited}
+	w := &socketWatch{pool: p, socket: socket, key: p.next, connected: make(chan struct{})}
 	if _, err := windows.CreateIoCompletionPort(socket.Handle("TCP completion attach socket"), p.port.Handle("TCP completion attach port"), w.key, 0); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("TCP completion port association: %w", err)
 	}
-	if p.policy.allowSkip && !inherited {
+	if skip {
 		if err := windows.SetFileCompletionNotificationModes(socket.Handle("TCP completion modes"),
 			windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS|windows.FILE_SKIP_SET_EVENT_ON_HANDLE); err != nil {
 			return nil, fmt.Errorf("TCP set completion modes: %w", err)
@@ -392,13 +443,17 @@ func (p *readiness) close() error {
 	return p.port.HandleClose("TCP completion port close")
 }
 
+// errRelayOnly answers net.Conn's blocking calls. Every engine TCP socket
+// belongs to the relay from birth; health probes dial their own Go
+// connections (dialProbe), which are never handed to the relay.
+var errRelayOnly = errors.New("Windows engine TCP sockets carry relay readiness I/O only")
+
 type readySocket struct {
 	mu            sync.Mutex
-	blocking      *net.TCPConn
 	handle        winhandle.Owner
-	goOwner       winhandle.Owner
 	pool          *readiness
-	watch         *socketWatch
+	watch         *socketWatch // registered since creation; handed out by Watch
+	watched       bool
 	local, remote net.Addr
 	closed        bool
 }
@@ -406,140 +461,16 @@ type readySocket struct {
 func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.watch != nil {
+	if c.closed || c.watched {
 		return nil, net.ErrClosed
 	}
-	var err error
-	if c.goOwner.IsZero() {
-		c.goOwner, err = ownGoDescriptor(c.blocking, "TCP Go connection before transfer")
-		if err != nil {
-			return nil, err
-		}
-	}
-	// File performs Go's supported IOCP disassociation before duplication.
-	// A second native socket descriptor lets both Go descriptors be released.
-	file, err := c.blocking.File()
-	if err != nil {
-		return nil, err
-	}
-	fileOwner, err := ownGoDescriptor(file, "TCP File duplicate")
-	if err != nil {
-		file.Close()
-		return nil, err
-	}
-	defer fileOwner.CloseGo("TCP File duplicate close", file.Close)
-	h, err := duplicateForReadiness(file, fileOwner)
-	if err != nil {
-		return nil, err
-	}
-	w, err := c.pool.watch(h, uint16(c.local.(*net.TCPAddr).Port), wake)
-	if err != nil {
-		h.SocketClose("TCP failed readiness registration")
-		return nil, err
-	}
-	if c.remote != nil {
-		c.pool.mu.Lock()
-		w.remote = c.remote.String()
-		c.pool.mu.Unlock()
-	}
-	c.handle, c.watch = h, w
-	c.goOwner.CloseGo("TCP source Go connection close", c.blocking.Close)
-	c.blocking = nil
-	return w, nil
-}
-
-func duplicateForReadiness(file *os.File, source winhandle.Owner) (winhandle.Owner, error) {
-	// File's descriptor conversion disassociates Go's IOCP. Its returned
-	// integer is not an ownership reference: borrow the descriptor through
-	// RawConn while the native duplicate and its nonblocking mode are created.
-	file.Fd()
-	raw, err := file.SyscallConn()
-	if err != nil {
-		return winhandle.Owner{}, err
-	}
-	return duplicateBorrowedSocket(raw, source)
-}
-
-// staleDuplicates counts native duplicates discarded because Winsock reported
-// them unbound or bound elsewhere while their source was bound.
-var staleDuplicates atomic.Uint64
-
-// staleDuplicateAttempts bounds how many duplicates one transfer may try.
-const staleDuplicateAttempts = 3
-
-// duplicateName reads a fresh duplicate's name; tests replace it to make
-// Winsock's stale answer deterministic.
-var duplicateName = windows.Getsockname
-
-// sameSocketName reports whether two getsockname results are one address.
-func sameSocketName(a, b windows.Sockaddr) bool {
-	switch a := a.(type) {
-	case *windows.SockaddrInet4:
-		b, ok := b.(*windows.SockaddrInet4)
-		return ok && a.Port == b.Port && a.Addr == b.Addr
-	case *windows.SockaddrInet6:
-		b, ok := b.(*windows.SockaddrInet6)
-		return ok && a.Port == b.Port && a.Addr == b.Addr && a.ZoneId == b.ZoneId
-	}
-	return false
-}
-
-func duplicateBorrowedSocket(raw syscall.RawConn, source winhandle.Owner) (winhandle.Owner, error) {
-	var duplicate winhandle.Owner
-	var nativeError error
-	borrowError := raw.Control(func(descriptor uintptr) {
-		if windows.Handle(descriptor) != source.GoBorrow("WSADuplicateSocket source borrow") {
-			panic("Go descriptor changed inside its ownership borrow")
-		}
-		// Hosted x64 runs (descriptor test, rounds 12, 44 and 97 of 128): a
-		// duplicate of Go's File duplicate was the same kernel socket
-		// (CompareObjectHandles) yet Winsock reported it unbound and not
-		// connected, and refused SO_UPDATE_CONNECT_CONTEXT. Sends on it would
-		// fail. Check the duplicate's name against its source and discard a
-		// stale one; the source itself is never touched.
-		sourceName, sourceErr := windows.Getsockname(windows.Handle(descriptor))
-		for attempt := 0; attempt < staleDuplicateAttempts; attempt++ {
-			var protocol windows.WSAProtocolInfo
-			if err := windows.WSADuplicateSocket(windows.Handle(descriptor), uint32(os.Getpid()), &protocol); err != nil {
-				nativeError = fmt.Errorf("WSADuplicateSocket: %w", err)
-				return
-			}
-			h, err := windows.WSASocket(-1, -1, -1, &protocol, 0, windows.WSA_FLAG_OVERLAPPED|windows.WSA_FLAG_NO_HANDLE_INHERIT)
-			if err != nil {
-				nativeError = fmt.Errorf("WSASocket import: %w", err)
-				return
-			}
-			candidate := winhandle.Open(h, "WSASocket native duplicate")
-			if sourceErr != nil {
-				duplicate = candidate // an unbound source has no name to compare
-				break
-			}
-			name, nameErr := duplicateName(candidate.Handle("native duplicate name check"))
-			if nameErr == nil && sameSocketName(name, sourceName) {
-				duplicate = candidate
-				break
-			}
-			staleDuplicates.Add(1)
-			candidate.SocketClose("stale native duplicate close")
-			nativeError = fmt.Errorf("Winsock duplicate of socket %#x reported name %#v (%v), source %#v, after %d attempts",
-				descriptor, name, nameErr, sourceName, attempt+1)
-		}
-		if duplicate.IsZero() {
-			return
-		}
-		nativeError = nil
-		var nonblocking uint32 = 1
-		code, _, failure := winsock.NewProc("ioctlsocket").Call(uintptr(duplicate.Handle("native duplicate nonblocking")), 0x8004667e, uintptr(unsafe.Pointer(&nonblocking)))
-		if int32(code) != 0 {
-			nativeError = failure
-			duplicate.SocketClose("native duplicate nonblocking failure")
-			duplicate = winhandle.Owner{}
-		}
-	})
-	if err := errors.Join(borrowError, nativeError); err != nil {
-		return winhandle.Owner{}, err
-	}
-	return duplicate, nil
+	// The socket has been on the completion port since it was created, so
+	// handing it to the relay copies and re-registers nothing.
+	c.watch.mu.Lock()
+	c.watch.wake = wake
+	c.watch.mu.Unlock()
+	c.watched = true
+	return c.watch, nil
 }
 
 func socketIO(h winhandle.Owner, name string, b []byte) (int, error) {
@@ -589,7 +520,7 @@ func (c *readySocket) TryDiscard(scratch []byte) (int, error) {
 func (c *readySocket) tryReceive(b []byte, flags uint32) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.watch == nil {
+	if c.closed || !c.watched {
 		return 0, net.ErrClosed
 	}
 	return socketIOFlags(c.handle, "recv", b, flags)
@@ -597,66 +528,23 @@ func (c *readySocket) tryReceive(b []byte, flags uint32) (int, error) {
 func (c *readySocket) TryWrite(b []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed || c.watch == nil {
+	if c.closed || !c.watched {
 		return 0, net.ErrClosed
 	}
 	return socketIO(c.handle, "send", b)
 }
-func (c *readySocket) Read(b []byte) (int, error) {
-	c.mu.Lock()
-	conn := c.blocking
-	c.mu.Unlock()
-	if conn == nil {
-		return 0, errors.New("socket I/O transferred to relay")
-	}
-	return conn.Read(b)
-}
-func (c *readySocket) Write(b []byte) (int, error) {
-	c.mu.Lock()
-	conn := c.blocking
-	c.mu.Unlock()
-	if conn == nil {
-		return 0, errors.New("socket I/O transferred to relay")
-	}
-	return conn.Write(b)
-}
-func (c *readySocket) LocalAddr() net.Addr  { return c.local }
-func (c *readySocket) RemoteAddr() net.Addr { return c.remote }
-func (c *readySocket) SetDeadline(t time.Time) error {
-	c.mu.Lock()
-	conn := c.blocking
-	c.mu.Unlock()
-	if conn == nil {
-		return errors.New("deadline after readiness transfer")
-	}
-	return conn.SetDeadline(t)
-}
-func (c *readySocket) SetReadDeadline(t time.Time) error {
-	c.mu.Lock()
-	conn := c.blocking
-	c.mu.Unlock()
-	if conn == nil {
-		return errors.New("deadline after readiness transfer")
-	}
-	return conn.SetReadDeadline(t)
-}
-func (c *readySocket) SetWriteDeadline(t time.Time) error {
-	c.mu.Lock()
-	conn := c.blocking
-	c.mu.Unlock()
-	if conn == nil {
-		return errors.New("deadline after readiness transfer")
-	}
-	return conn.SetWriteDeadline(t)
-}
+func (c *readySocket) Read([]byte) (int, error)         { return 0, errRelayOnly }
+func (c *readySocket) Write([]byte) (int, error)        { return 0, errRelayOnly }
+func (c *readySocket) LocalAddr() net.Addr              { return c.local }
+func (c *readySocket) RemoteAddr() net.Addr             { return c.remote }
+func (c *readySocket) SetDeadline(time.Time) error      { return errRelayOnly }
+func (c *readySocket) SetReadDeadline(time.Time) error  { return errRelayOnly }
+func (c *readySocket) SetWriteDeadline(time.Time) error { return errRelayOnly }
 func (c *readySocket) SetLinger(seconds int) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return net.ErrClosed
-	}
-	if c.blocking != nil {
-		return c.blocking.SetLinger(seconds)
 	}
 	var linger windows.Linger
 	if seconds >= 0 {
@@ -670,12 +558,6 @@ func (c *readySocket) shutdown(how int) error {
 	if c.closed {
 		return net.ErrClosed
 	}
-	if c.blocking != nil {
-		if how == windows.SHUT_RD {
-			return c.blocking.CloseRead()
-		}
-		return c.blocking.CloseWrite()
-	}
 	return windows.Shutdown(c.handle.Handle("TCP shutdown"), how)
 }
 func (c *readySocket) CloseRead() error  { return c.shutdown(windows.SHUT_RD) }
@@ -687,16 +569,8 @@ func (c *readySocket) Close() error {
 		return nil
 	}
 	c.closed = true
-	if c.blocking != nil {
-		if c.goOwner.IsZero() {
-			var err error
-			c.goOwner, err = ownGoDescriptor(c.blocking, "TCP Go connection before close")
-			if err != nil {
-				return err
-			}
-		}
-		return c.goOwner.CloseGo("TCP Go connection close", c.blocking.Close)
-	}
+	// Cancel and drain any receive, and leave the port's registration, before
+	// the only handle is closed.
 	c.watch.Detach()
 	h := c.handle.Handle("TCP final close ownership")
 	err := c.handle.SocketClose("TCP native socket close")
@@ -704,5 +578,4 @@ func (c *readySocket) Close() error {
 	return err
 }
 
-// Used by probes before readiness transfer as well as the shared relay.
 var _ platform.ReadyTCP = (*readySocket)(nil)

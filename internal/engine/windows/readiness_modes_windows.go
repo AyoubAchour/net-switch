@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -21,9 +20,12 @@ type tcpCompletionPolicy struct {
 
 type protocolEnumerator func(*int32, *windows.WSAProtocolInfo, *uint32) (int32, error)
 
-// Microsoft documents non-IFS LSPs as incompatible with skip-success. Our
-// enabling policy checks every returned provider for XP1_IFS_HANDLES, rather
-// than Go's narrower TCP catalog and selected-socket checks. Do not filter it.
+// Microsoft documents skip-success as compatible only with providers that
+// return IFS handles, detected by XP1_IFS_HANDLES in every WSAEnumProtocols
+// entry. This catalog-wide check is kept as the documented gate, rather than
+// Go's narrower TCP-only catalog. register adds the socket's own provider
+// (SO_PROTOCOL_INFOW), which also sees a layered provider installed after
+// this startup snapshot. Both must allow it. Do not filter the catalog.
 // https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-setfilecompletionnotificationmodes
 func queryTCPCompletionPolicy(enumerate protocolEnumerator) tcpCompletionPolicy {
 	failure := func(err error) tcpCompletionPolicy {
@@ -61,42 +63,4 @@ func queryTCPCompletionPolicy(enumerate protocolEnumerator) tcpCompletionPolicy 
 		}
 	}
 	return tcpCompletionPolicy{allowSkip: true, reason: "all-ifs", entries: int(n)}
-}
-
-// A Go TCP socket may already have skip-success enabled, even if our broader
-// provider query forbids enabling it (or fails). The mode is shared by socket
-// duplicates and cannot be cleared. Reading it is essential: guessing normal
-// notifications would wait forever for a suppressed synchronous completion.
-// FileIoCompletionNotificationInformation (41) exists since Vista, but Microsoft
-// labels it reserved for system use. The pinned Go toolchain also queries it
-// when retaining borrowed completion modes. Treat this as a compatibility
-// dependency, not a promise that every provider implements the query: require
-// success and the complete Flags word, or fail before submitting any receive.
-// QueryInformationFile itself is synchronous even for an asynchronous file
-// object (IRP_SYNCHRONOUS_API); user-mode Nt and Zw entry points have identical
-// behavior. Its caller buffers therefore are not retained after this call.
-// https://learn.microsoft.com/windows-hardware/drivers/ddi/wdm/ne-wdm-_file_information_class
-// https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ioisoperationsynchronous
-// https://learn.microsoft.com/windows-hardware/drivers/kernel/using-nt-and-zw-versions-of-the-native-system-services-routines
-func socketCompletionModes(socket winhandle.Owner) (uint32, error) {
-	return querySocketCompletionModes(socket.Handle("TCP query completion modes"), windows.NtQueryInformationFile)
-}
-
-type completionModeQuery func(windows.Handle, *windows.IO_STATUS_BLOCK, *byte, uint32, uint32) error
-
-func querySocketCompletionModes(handle windows.Handle, query completionModeQuery) (uint32, error) {
-	var modes uint32
-	var status windows.IO_STATUS_BLOCK
-	err := query(handle, &status,
-		(*byte)(unsafe.Pointer(&modes)), uint32(unsafe.Sizeof(modes)), 41)
-	if err != nil {
-		return 0, fmt.Errorf("TCP completion modes query: %w", err)
-	}
-	if status.Status != 0 {
-		return 0, fmt.Errorf("TCP completion modes status: %w", status.Status)
-	}
-	if status.Information != unsafe.Sizeof(modes) {
-		return 0, fmt.Errorf("TCP completion modes query returned %d bytes", status.Information)
-	}
-	return modes, nil
 }

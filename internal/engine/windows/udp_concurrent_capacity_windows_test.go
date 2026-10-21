@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -45,7 +46,8 @@ type udpPairFailure struct {
 // nothing.
 type udpConcurrentPair struct {
 	app     *net.UDPConn
-	engine  *udpSocket
+	engine  io.Closer // a plain Go socket, or the engine's native socket
+	local   netip.AddrPort
 	appPort uint16
 	handle  uintptr
 	options map[string]int
@@ -217,7 +219,7 @@ func TestNativeUDPConcurrentPairedCapacity(t *testing.T) {
 				releaseErr = errors.Join(releaseErr, pool.close())
 			})
 			defer release()
-			config := net.ListenConfig{Control: bindSocket(Adapter{Index4: index}, false)}
+			halves := newUDPEngineHalves(native, index, source, pool)
 			destination := conn.LocalAddr().(*net.UDPAddr).AddrPort()
 			destination = netip.AddrPortFrom(destination.Addr().Unmap(), destination.Port())
 			unmapped := func(a netip.AddrPort) netip.AddrPort { return netip.AddrPortFrom(a.Addr().Unmap(), a.Port()) }
@@ -232,53 +234,59 @@ func TestNativeUDPConcurrentPairedCapacity(t *testing.T) {
 					return
 				}
 				p.app, p.appPort = app, uint16(app.LocalAddr().(*net.UDPAddr).Port)
-				packet, err := config.ListenPacket(context.Background(), "udp4", net.JoinHostPort(source, "0"))
-				if err != nil {
-					p.fail(n, "engine bind", err, started)
-					return
-				}
-				engineConn := packet.(*net.UDPConn)
-				raw, err := engineConn.SyscallConn()
-				if err != nil {
-					engineConn.Close()
-					p.fail(n, "engine SyscallConn", err, started)
-					return
-				}
-				p.engine = &udpSocket{conn: engineConn, raw: raw, pool: pool, local: engineConn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535}
-				if n == 0 {
-					p.options = map[string]int{}
-					var optionErr error
-					err := raw.Control(func(fd uintptr) {
-						for name, option := range map[string]int{"SO_REUSEADDR": windows.SO_REUSEADDR, "SO_EXCLUSIVEADDRUSE": ^windows.SO_REUSEADDR} {
-							var value int
-							value, optionErr = windows.GetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, option)
-							if optionErr != nil {
-								return
-							}
-							p.options[name] = value
-						}
-					})
-					if err = errors.Join(err, optionErr); err != nil {
-						p.fail(n, "engine socket options", err, started)
-						return
-					}
-				}
 				wake := make(chan struct{}, 1)
 				var watch *udpWatch
+				var engineConn *net.UDPConn
+				var engineSocket *udpSocket
 				if native {
-					// The callback only enqueues; it never blocks the shared worker.
-					value, err := p.engine.Watch(func() {
+					// The engine's own constructor, then Watch. The callback only
+					// enqueues; it never blocks the shared worker.
+					engineSocket, watch, err = halves.openReady(func() {
 						select {
 						case wake <- struct{}{}:
 						default:
 						}
 					})
 					if err != nil {
-						p.fail(n, "engine Watch", err, started)
+						p.fail(n, "engine bind", err, started)
 						return
 					}
-					watch = value.(*udpWatch)
-					p.handle = uintptr(p.engine.handle.Handle("UDP concurrent capacity evidence"))
+					p.engine, p.local = engineSocket, engineSocket.LocalAddr()
+					p.handle = uintptr(engineSocket.handle.Handle("UDP concurrent capacity evidence"))
+				} else {
+					engineConn, err = halves.openGo()
+					if err != nil {
+						p.fail(n, "engine bind", err, started)
+						return
+					}
+					p.engine, p.local = engineConn, engineConn.LocalAddr().(*net.UDPAddr).AddrPort()
+				}
+				if n == 0 {
+					p.options = map[string]int{}
+					read := func(h windows.Handle) error {
+						for name, option := range map[string]int{"SO_REUSEADDR": windows.SO_REUSEADDR, "SO_EXCLUSIVEADDRUSE": ^windows.SO_REUSEADDR} {
+							value, err := windows.GetsockoptInt(h, windows.SOL_SOCKET, option)
+							if err != nil {
+								return err
+							}
+							p.options[name] = value
+						}
+						return nil
+					}
+					var optionErr error
+					if native {
+						optionErr = read(engineSocket.handle.Handle("UDP concurrent capacity options"))
+					} else if raw, err := engineConn.SyscallConn(); err != nil {
+						optionErr = err
+					} else {
+						var readErr error
+						controlErr := raw.Control(func(fd uintptr) { readErr = read(windows.Handle(fd)) })
+						optionErr = errors.Join(controlErr, readErr)
+					}
+					if optionErr != nil {
+						p.fail(n, "engine socket options", optionErr, started)
+						return
+					}
 				}
 				var b [128]byte
 				request := []byte(udpPairToken(variant, 'A', n))
@@ -301,7 +309,7 @@ func TestNativeUDPConcurrentPairedCapacity(t *testing.T) {
 						p.fail(n, "engine Arm", err, started)
 						return
 					}
-					if _, err := p.engine.TryWriteTo(request, destination, false); err != nil {
+					if _, err := engineSocket.TryWriteTo(request, destination, false); err != nil {
 						p.fail(n, "engine write", err, started)
 						return
 					}
@@ -313,14 +321,14 @@ func TestNativeUDPConcurrentPairedCapacity(t *testing.T) {
 						p.fail(n, "engine readiness wake", os.ErrDeadlineExceeded, started)
 						return
 					}
-					got, from, err = p.engine.TryReadFrom(b[:])
+					got, from, err = engineSocket.TryReadFrom(b[:])
 				} else {
-					if _, err := p.engine.WriteTo(request, destination, false); err != nil {
+					if _, err := engineConn.WriteToUDPAddrPort(request, destination); err != nil {
 						p.fail(n, "engine write", err, started)
 						return
 					}
-					p.engine.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-					got, from, err = p.engine.ReadFrom(b[:])
+					engineConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+					got, from, err = engineConn.ReadFromUDPAddrPort(b[:])
 				}
 				if err == nil && (!bytes.Equal(b[:got], request) || unmapped(from) != destination) {
 					err = fmt.Errorf("%w: n=%d source=%s", errPairMismatch, got, from)
@@ -354,7 +362,7 @@ func TestNativeUDPConcurrentPairedCapacity(t *testing.T) {
 					}
 					a, appSeen := peer.seen[udpPairToken(variant, 'A', n)]
 					e, engineSeen := peer.seen[udpPairToken(variant, 'E', n)]
-					if appSeen && engineSeen && a.Port() == p.appPort && e == unmapped(p.engine.local) {
+					if appSeen && engineSeen && a.Port() == p.appPort && e == unmapped(p.local) {
 						verified += 2
 					} else {
 						mismatched = append(mismatched, i)
@@ -386,7 +394,7 @@ func TestNativeUDPConcurrentPairedCapacity(t *testing.T) {
 			ports := map[uint16]int{}
 			for _, p := range held {
 				ports[p.appPort]++
-				ports[p.engine.local.Port()]++
+				ports[p.local.Port()]++
 			}
 			collisions := 0
 			for _, count := range ports {

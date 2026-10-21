@@ -19,11 +19,11 @@ function functionRange(file, declaration) {
   return { file, first: start + 1, last: end };
 }
 const accept = functionRange('internal/engine/windows/pipe_windows.go', 'func (p *Pipe) Accept(');
-const watch = functionRange('internal/engine/windows/readiness_windows.go', 'func (p *readiness) watch(');
+const register = functionRange('internal/engine/windows/readiness_windows.go', 'func (p *readiness) register(');
+const udpWait = functionRange('internal/engine/windows/dial_windows.go', 'func (s *udpSocket) wait(');
 const echo = functionRange('internal/engine/windows/dial_windows.go', 'func (d *Dialer) Echo(');
 const mtu = functionRange('internal/engine/windows/dial_windows.go', 'func (s *udpSocket) pathMTU(');
 const registrar = functionRange('internal/wintun/registrar_windows.go', 'func startRegistrar(');
-const modes = functionRange('internal/engine/windows/readiness_modes_windows.go', 'func querySocketCompletionModes(');
 const pipeConnNew = functionRange('internal/engine/windows/pipe_windows.go', 'func newPipeConn(');
 const pipeTransfer = functionRange('internal/engine/windows/pipe_windows.go', 'func (c *pipeConn) transfer(');
 const session = functionRange('internal/wintun/session_windows.go', 'func (a *Adapter) startSession(');
@@ -38,7 +38,11 @@ const sites = [
   // payload is pinned (so heap-allocated) until its operation has finished.
   ['pipe connection OVERLAPPED owner', /pipe_windows\.go:\d+:\d+: &pipeConn\{.*escapes to heap$/, pipeConnNew],
   ['pipe connection payload', /pipe_windows\.go:\d+:\d+: leaking param: b$/, pipeTransfer],
-  ['TCP receive OVERLAPPED and flags owner', /readiness_windows\.go:\d+:\d+: &socketWatch\{.*escapes to heap$/, watch],
+  // One heap owner per native TCP socket, from creation to Detach: the
+  // OVERLAPPED shared by ConnectEx and receive readiness, ConnectEx's
+  // destination and byte count, and the receive flags.
+  ['TCP ConnectEx/receive OVERLAPPED, destination and flags owner', /readiness_windows\.go:\d+:\d+: &socketWatch\{.*escapes to heap$/, register],
+  ['UDP pre-Watch WSAPoll rows', /dial_windows\.go:\d+:\d+: \[\]pollFD\{.*escapes to heap$/, udpWait],
   ['ICMP caller request', /dial_windows\.go:\d+:\d+: leaking param: request$/, echo],
   ['ICMP aligned reply', /dial_windows\.go:\d+:\d+: make\(\[\]uint64,.*escapes to heap$/, echo],
   ['ICMP options', /dial_windows\.go:\d+:\d+: moved to heap: options$/, echo],
@@ -49,8 +53,6 @@ const sites = [
   ['registrar job UI limits', /registrar_windows\.go:\d+:\d+: moved to heap: ui$/, registrar],
   ['registrar inherited handle array', /registrar_windows\.go:\d+:\d+: make\(\[\]windows.Handle,.*escapes to heap$/, registrar],
   ['registrar atomic job-list array', /registrar_windows\.go:\d+:\d+: \[\]windows.Handle\{.*escapes to heap$/, registrar],
-  ['completion-mode output flags', /readiness_modes_windows\.go:\d+:\d+: moved to heap: modes$/, modes],
-  ['completion-mode status block', /readiness_modes_windows\.go:\d+:\d+: moved to heap: status$/, modes],
   ['Go file/socket OVERLAPPED operation', /fd_windows\.go:\d+:\d+: new\(operation\) escapes to heap$/],
   ['Go file/socket pinned buffers', /fd_windows\.go:\d+:\d+: leaking param content: pinPtrs$/],
   // Wait arrays live in heap owners and go through internal/platform/winapi,
@@ -77,6 +79,13 @@ const helperSource = readFileSync('internal/platform/winapi/winapi_windows.go', 
 assert.match(helperSource, /syscall\.SyscallN\(addr, uintptr\(len\(handles\)\), uintptr\(unsafe\.Pointer\(&handles\[0\]\)\), all, uintptr\(milliseconds\)\)/,
   'winapi must convert the array address inside the SyscallN argument list');
 assert.equal(helperSource.match(/&handles\[0\]/g)?.length, 1, 'winapi must not take the array address anywhere else');
+// ConnectEx is called through its provider's pointer: every Go pointer it
+// receives (heap fields of the socket's socketWatch) is converted inside the
+// SyscallN argument list, nowhere earlier.
+const connectSource = readFileSync('internal/engine/windows/connect_windows.go', 'utf8');
+assert.equal(connectSource.match(/syscall\.SyscallN\(connectEx, uintptr\(h\), uintptr\(unsafe\.Pointer\(&w\.name\[0\]\)\), uintptr\(length\),\s*0, 0, uintptr\(unsafe\.Pointer\(&w\.sent\)\), uintptr\(unsafe\.Pointer\(&w\.op\)\)\)/g)?.length, 1,
+  'ConnectEx must convert its destination, byte count and OVERLAPPED inside one SyscallN argument list');
+assert.equal(connectSource.match(/uintptr\(unsafe\.Pointer\(&w\./g)?.length, 3, 'socketWatch fields must not become integers outside that call');
 
 for (const tags of ['', 'netswitch_handlecheck']) {
   const build = spawnSync('go', ['build',

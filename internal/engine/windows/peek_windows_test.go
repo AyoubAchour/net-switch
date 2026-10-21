@@ -26,29 +26,17 @@ func TestReadyTCPPeekDiscardAndLevelRearm(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			address := "127.0.0.1:0"
-			if network == "tcp6" {
-				address = "[::1]:0"
-			}
-			listener, err := net.Listen(network, address)
+			listener, err := net.ListenTCP(network, &net.TCPAddr{IP: loopbackSource(network == "tcp6").AsSlice()})
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer listener.Close()
-			client, err := net.Dial(network, listener.Addr().String())
-			if err != nil {
-				t.Fatal(err)
-			}
-			c := &readySocket{blocking: client.(*net.TCPConn), pool: pool, local: client.LocalAddr(), remote: client.RemoteAddr()}
+			c, peer := dialNative(t, pool, listener)
 			t.Cleanup(func() {
 				if err := c.Close(); err != nil {
 					t.Error(err)
 				}
 			})
-			peer, err := listener.Accept()
-			if err != nil {
-				t.Fatal(err)
-			}
 			defer peer.Close()
 			wakes := make(chan struct{}, 1)
 			watch, err := c.Watch(func() {
@@ -118,7 +106,7 @@ func TestReadyTCPPeekDiscardAndLevelRearm(t *testing.T) {
 			if n, err := c.TryPeek(buf); n != 0 || !errors.Is(err, platform.ErrWouldBlock) {
 				t.Fatalf("discard left duplicated data: %d %v", n, err)
 			}
-			if err := peer.(*net.TCPConn).CloseWrite(); err != nil {
+			if err := peer.CloseWrite(); err != nil {
 				t.Fatal(err)
 			}
 			wake()

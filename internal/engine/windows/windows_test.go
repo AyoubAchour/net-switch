@@ -430,19 +430,13 @@ func TestOwnerIPv6AndMappedIPv4(t *testing.T) {
 	}
 }
 
+// The blocking calls a native datagram socket keeps before Watch: a readiness
+// wait consumes nothing, including an empty datagram, and Close wakes it.
 func TestUDPReadinessDoesNotConsume(t *testing.T) {
 	hosted(t)
-	server, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer server.Close()
-	raw, err := server.SyscallConn()
-	if err != nil {
-		t.Fatal(err)
-	}
-	s := &udpSocket{conn: server, raw: raw, local: server.LocalAddr().(*net.UDPAddr).AddrPort()}
-	client, err := net.DialUDP("udp4", nil, server.LocalAddr().(*net.UDPAddr))
+	s := openNativeUDP(t, nil, false)
+	defer s.Close()
+	client, err := net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(s.LocalAddr()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +489,6 @@ func TestReadinessHalfCloseAfterCollection(t *testing.T) {
 
 func testReadinessHalfClose(t *testing.T, collect bool) {
 	hosted(t)
-	startSocketDiagnostics(t)
 	pool, err := newReadiness()
 	if err != nil {
 		t.Fatal(err)
@@ -505,57 +498,42 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 			t.Error(err)
 		}
 	}()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
 	for round := range 256 {
-		client, err := net.Dial("tcp4", listener.Addr().String())
-		if err != nil {
-			t.Fatal(err)
-		}
-		server, err := listener.Accept()
-		if err != nil {
-			t.Fatal(err)
-		}
-		c := &readySocket{blocking: client.(*net.TCPConn), pool: pool, local: client.LocalAddr(), remote: client.RemoteAddr()}
+		c, server := dialNative(t, pool, listener)
 		defer c.Close()
 		defer server.Close()
-		diagnostic := tcpSocketEvidence(t, c, server.(*net.TCPConn))
-		defer diagnostic.closeTCP()
+		identity := c.handle.Handle("TCP half-close identity before Watch")
 		wake := make(chan struct{}, 1)
-		diagnostic.beforeWatch()
 		w, err := c.Watch(func() {
 			select {
 			case wake <- struct{}{}:
 			default:
 			}
 		})
-		diagnostic.afterWatch(c.handle, err)
 		if err != nil {
-			client.Close()
-			server.Close()
 			t.Fatal(err)
 		}
 		if collect {
 			runtime.GC()
 		}
 		if _, err := c.TryRead(make([]byte, 10)); !errors.Is(err, platform.ErrWouldBlock) {
-			diagnostic.failure("initial TryRead after Watch", err)
 			h := c.handle.Handle("TCP initial-read failure diagnostic")
 			local, localErr := windows.Getsockname(h)
 			kind, kindErr := windows.GetsockoptInt(h, windows.SOL_SOCKET, 0x1008)
-			t.Fatalf("round %d after transfer (GC=%t): %v; descriptor=%d local=%#v/%v type=%d/%v",
+			t.Fatalf("round %d after Watch (GC=%t): %v; descriptor=%d local=%#v/%v type=%d/%v",
 				round, collect, err, h, local, localErr, kind, kindErr)
 		}
 		if err := w.Arm(true, false); err != nil {
-			diagnostic.failure("initial TCP Arm(read)", err)
 			t.Fatal(err)
 		}
 		if round%2 == 0 {
 			server.Write([]byte("actual reply"))
-			if err := server.(*net.TCPConn).CloseWrite(); err != nil {
+			if err := server.CloseWrite(); err != nil {
 				t.Fatalf("round %d: peer half-close: %v", round, err)
 			}
 			var got []byte
@@ -573,11 +551,9 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 					break
 				}
 				if err != nil && !errors.Is(err, platform.ErrWouldBlock) {
-					diagnostic.failure("TryRead before peer EOF", err)
 					t.Fatal(err)
 				}
 				if err := w.Arm(true, false); err != nil {
-					diagnostic.failure("TCP Arm(read) before EOF", err)
 					t.Fatal(err)
 				}
 			}
@@ -589,12 +565,10 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 				n, err := c.TryWrite(remaining)
 				remaining = remaining[n:]
 				if err != nil && !errors.Is(err, platform.ErrWouldBlock) {
-					diagnostic.failure("TryWrite after peer EOF", err)
 					t.Fatalf("round %d: reverse write: %v", round, err)
 				}
 				if len(remaining) != 0 {
 					if err := w.Arm(false, true); err != nil {
-						diagnostic.failure("TCP Arm(write) after peer EOF", err)
 						t.Fatal(err)
 					}
 					select {
@@ -616,7 +590,6 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 				socketError, socketErr := windows.GetsockoptInt(h, windows.SOL_SOCKET, 0x1007) // SO_ERROR (Winsock).
 				server.SetReadDeadline(time.Now().Add(time.Second))
 				reply, readErr := io.ReadAll(server)
-				diagnostic.failure("CloseWrite after original peer/FIN observation", err)
 				t.Fatalf("round %d: native half-close: %v; descriptor=%d local=%+v/%v peer=%+v/%v SO_ERROR=%d/%v; before cleanup peer received %q read=%v",
 					round, err, h, local, localErr, peer, peerErr, socketError, socketErr, reply, readErr)
 			}
@@ -625,11 +598,13 @@ func testReadinessHalfClose(t *testing.T, collect bool) {
 			}
 			reply, err := io.ReadAll(server)
 			if err != nil || string(reply) != "still writable" {
-				diagnostic.failure("peer payload/FIN after successful CloseWrite", err)
 				t.Fatalf("round %d: native half-close returned success, peer received %q: %v", round, reply, err)
 			}
 		}
-		diagnostic.assertWatchIdentity()
+		// Watch hands over the socket's only handle; nothing was copied.
+		if h := c.handle.Handle("TCP half-close identity after relay I/O"); h != identity {
+			t.Fatalf("round %d: Watch changed the socket handle %#x -> %#x", round, identity, h)
+		}
 		w.Detach() // Odd rounds cancel a genuinely pending zero-byte receive.
 		c.Close()
 		server.Close()

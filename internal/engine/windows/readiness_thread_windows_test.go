@@ -23,22 +23,13 @@ func TestCompletionPortKeepsItsOSThread(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	client, err := net.Dial("tcp4", listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	server, err := listener.Accept()
-	if err != nil {
-		client.Close()
-		t.Fatal(err)
-	}
+	c, server := dialNative(t, pool, listener)
 	defer server.Close()
-	c := &readySocket{blocking: client.(*net.TCPConn), pool: pool, local: client.LocalAddr(), remote: client.RemoteAddr()}
 	defer c.Close()
 	wakes := make(chan uint32, 1)
 	var duplicate atomic.Uint32
