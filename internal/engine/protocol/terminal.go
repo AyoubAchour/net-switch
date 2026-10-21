@@ -5,12 +5,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
 )
 
 const TerminalDeliveryTimeout = 2 * time.Second
+const TerminalProbeJoinTimeout = time.Second
 
 var ErrNoController = errors.New("no attached controller connection")
 var ErrShutdownInProgress = errors.New("explicit stop or lease cleanup already started")
@@ -46,7 +48,11 @@ type terminalDelivery struct {
 // cancelled. No lease clock or renewal semantics are changed.
 // ErrShutdownInProgress leaves an earlier explicit stop/lease cleanup in charge;
 // no terminal record is sent and this call does not signal Done in that case.
-func (s *Server) StopWithReason(ctx context.Context, reason string) (cleanupErr, deliveryErr error) {
+// finalize is optional, belongs to this terminal owner, and runs after Stop and
+// probe joining. A probe timeout skips it: the caller must join transports/work
+// before finalizing remaining resources. Ownership locks belong to the caller
+// until after transport closure, not to finalize.
+func (s *Server) StopWithReason(ctx context.Context, reason string, finalize func() error) (cleanupErr, deliveryErr error) {
 	s.mu.Lock()
 	if s.terminal != nil {
 		s.mu.Unlock()
@@ -67,9 +73,7 @@ func (s *Server) StopWithReason(ctx context.Context, reason string) (cleanupErr,
 		OpID: hex.EncodeToString(nonce[:]), Reason: reason}, written: make(chan struct{}), acked: make(chan struct{})}
 	s.terminal = t
 	c := s.controller
-	// Probes outlive execute's mutex. Cancel/join their work while retaining
-	// the transport needed for the receipt; otherwise a probe could still own
-	// a native socket when runtime teardown reports completion.
+	// Cancel probes without closing the transport needed for the receipt.
 	for client := range s.clients {
 		client.stopWork()
 		close(client.terminalStarted)
@@ -83,17 +87,31 @@ func (s *Server) StopWithReason(ctx context.Context, reason string) (cleanupErr,
 		}
 	}
 	s.mu.Unlock()
+	// Restore ordinary routing first. A slow probe must neither delay this
+	// nor spend any of the context's cleanup budget before Stop begins.
+	cleanupErr = s.runtime.Stop(ctx)
+	join, cancelJoin := context.WithTimeout(context.Background(), TerminalProbeJoinTimeout)
+	joined := true
 	for _, done := range pending {
 		select {
 		case <-done:
-		case <-ctx.Done():
-			cleanupErr = ctx.Err()
+			continue
+		default:
 		}
-		if cleanupErr != nil {
+		select {
+		case <-done:
+		case <-join.Done():
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("probe did not stop before finalization: %w", join.Err()))
+			joined = false
+		}
+		if !joined {
 			break
 		}
 	}
-	cleanupErr = errors.Join(cleanupErr, s.runtime.Stop(ctx))
+	cancelJoin()
+	if joined && finalize != nil {
+		cleanupErr = errors.Join(cleanupErr, finalize())
+	}
 	s.mu.Lock()
 	s.stopped = cleanupErr == nil
 	if cleanupErr != nil {

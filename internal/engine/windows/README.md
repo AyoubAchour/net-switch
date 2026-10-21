@@ -7,7 +7,8 @@ hosted acceptance controller. Neither mode accepts a remote or ordinary-user
 client. Services, enrolment and desktop IPC belong to milestone 2.
 
 The engine holds an exclusive byte-range lock in a verified SYSTEM/Administrators
-folder through forwarding and ownership cleanup. The shared `winlock` helper also serves the
+folder until its pipe and clients have closed and ownership cleanup is complete.
+The shared `winlock` helper also serves the
 separate lifecycle store lock. A standard user holding the old predictable
 Global mutex cannot block it. Recovery runs under the file lock, before any
 Wintun DLL load. It calls
@@ -86,18 +87,25 @@ backend targets that PR's shared TCP relay; there is no second relay design.
 
 ## Adapter-lost terminal contract
 
-`wintun.ErrAdapterRemoved` (including helper death normalized by the session)
-hands shutdown to the Windows runtime. Both packet pumps use the same instance
+`wintun.ErrAdapterRemoved` hands shutdown to the Windows runtime. Both packet pumps use the same instance
 latch. The engine does not rebuild or enter `OnFatal` for this condition.
 Ordinary TUN failures keep their existing fatal cleanup path.
+Helper-death support depends on importing helper commit `b02af6f` first and its
+separate read/batch-write sentinel tests. This contract's wrapped-sentinel test
+does not itself prove helper-death normalization.
 
 `Server.StopWithReason` takes the existing command/attach fence, runs normal
 `Runtime.Stop`, then sends one reserved terminal record to the connection that
 attached the current epoch. Socket/TUN teardown and journal cleanup finish first;
-Windows also closes its remaining runtime resources before reporting success.
-In-flight control probes are cancelled and joined before that teardown while
-their transport remains available for the terminal receipt.
+`Runtime.Stop` restores routing immediately with its full cleanup context; it
+does not finalize process resources or cache a failed stop. Probes are cancelled
+at the fence, then joined **after** routing cleanup with a separate one-second
+bound. The terminal owner's optional `finalize` callback closes the profile and
+dialer only after this join. A timeout is reported as a cleanup failure and skips
+early finalization; remaining work is joined before final closure in the Serve tail.
 An explicit stop or lease cleanup that acquires the fence first wins instead.
+State-directory and journal ownership exclusion survive terminal delivery, pipe
+closure and client joining. Their late close errors affect the final exit status.
 
 The `hello` capability is `terminal-stop`. Example terminal record:
 
@@ -128,6 +136,10 @@ logged separately. Cleanup errors and simultaneous generic failures retain exit
 status **1**; they never qualify as a clean adapter loss. A joined late-close
 error cannot inherit the special status. Control's restart budget/latch and
 production service integration are outside this contract.
+Control must wait for process exit and inspect its final status before restarting;
+the terminal record precedes the final ownership-lock close. A queued generic
+failure together with latched loss always keeps the distinct reason and reports
+failure, regardless of which wakeup channel the Serve select chose.
 
 The added tests use in-memory controllers and the real engine pumps/stop plus
 an ownership journal with fake OS objects. A Windows test gives its fake TUN a
@@ -135,10 +147,23 @@ real anonymous event: an independent duplicate verifies the native object's
 handle count falls from two to one before the controller receives the terminal.
 This proves closure without relying on GC or the ownership counter. It does not
 replace the helper's production adapter-removal/handle-reuse acceptance tests.
-Protocol tests cover full event/reply queues, missing receipts, blocked writes,
-disconnects, fencing, explicit-stop precedence and cleanup errors. The generic
+Protocol tests cover a valid receipt while all 16 reply slots remain occupied,
+the complete delivery timeout after delayed cleanup, stubborn probes, disconnects,
+fencing, stop/lease precedence and cleanup errors. Windows tests execute the actual
+Serve decision/tail with injected resource boundaries; main's actual direct exit
+mapping has its own test. A hosted-only test fills the production engine pipe's
+64 KiB buffer (verified with PeekNamedPipe) and proves cancellation joins a blocked
+native writer while its client remains connected and is not reading. The generic
 engine tests cover read, scalar-write and batch-write failures with nil, declined
 and accepted handoffs.
+
+The real-pipe fixture's `terminalPipeObserver.Write` retains its payload in the
+heap-owned observer and pins it until `File.Write` returns. It creates no raw
+`OVERLAPPED`: Go 1.27.3 `internal/poll/fd_windows.go` owns that in `operationPool`
+(`new(operation)`, line 218); `execIO` pins the operation and payload (lines
+283–285), and `waitIO` drains cancellation with `waitCanceled` (line 245) before
+unpinning. `FD.Write` supplies the payload pin through `pinPtrsFromBuf` (line 879).
+The parent compiler-escape audit and hosted test execution remain required.
 
 Reference: Microsoft's [pipe flush contract](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
 requires waiting for the client to read, which is why this protocol uses a

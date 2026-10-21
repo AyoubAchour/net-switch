@@ -6,6 +6,9 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,7 +88,7 @@ func (r *terminalStopObserver) Stop(ctx context.Context) error {
 func stopTerminal(s *Server) <-chan terminalResult {
 	done := make(chan terminalResult, 1)
 	go func() {
-		cleanup, delivery := s.StopWithReason(context.Background(), "adapter lost")
+		cleanup, delivery := s.StopWithReason(context.Background(), "adapter lost", nil)
 		done <- terminalResult{cleanup, delivery}
 	}()
 	return done
@@ -109,6 +112,16 @@ func TestTerminalBypassesFullEventsAndOutstandingReplies(t *testing.T) {
 	stopped := make(chan struct{})
 	s.runtime = &terminalStopObserver{runtime, stopped}
 	c := connectTerminalController(t, s, true)
+	// Keep transport cancellation after ACK observable while checking the
+	// outstanding reply count. No writer can complete without client reads.
+	s.mu.Lock()
+	peer := s.controller
+	ackObserved := make(chan struct{})
+	releaseAck := sync.OnceFunc(func() { close(ackObserved) })
+	originalCancel := peer.cancel
+	peer.cancel = func() { <-ackObserved; originalCancel() }
+	s.mu.Unlock()
+	defer releaseAck()
 	// Stop reading: fill every ordinary reply slot and the droppable queue.
 	for range Outstanding {
 		if err := c.enc.Encode(Request{ID: "pending", Method: "hello"}); err != nil {
@@ -139,6 +152,17 @@ func TestTerminalBypassesFullEventsAndOutstandingReplies(t *testing.T) {
 	if err := c.enc.Encode(Request{ID: "early", Method: "terminalAck", Instance: s.Instance, Epoch: c.epoch, OpID: "unseen"}); err != nil {
 		t.Fatalf("terminal receipt admission blocked behind reply slots: %v", err)
 	}
+	// Ensure the terminal is reserved before allowing the blocked first reply
+	// to complete. Otherwise the test itself could free several reply slots
+	// while the shutdown goroutine is still publishing the terminal record.
+	queuedDeadline := time.After(time.Second)
+	for len(peer.terminal) == 0 {
+		select {
+		case <-queuedDeadline:
+			t.Fatal("terminal was not queued behind the blocked writer")
+		case <-time.After(time.Millisecond):
+		}
+	}
 	v := c.terminal(t)
 	if v.Reason != "adapter lost" || v.Instance != s.Instance || v.Epoch != c.epoch || v.OpID == "" || v.CleanupError != "" || runtime.stops.Load() != 1 {
 		t.Fatalf("terminal preceded successful cleanup or lost identity: %+v", v)
@@ -148,9 +172,30 @@ func TestTerminalBypassesFullEventsAndOutstandingReplies(t *testing.T) {
 		t.Fatal("finished before controller receipt acknowledgement")
 	default:
 	}
+	// Receiving the first ordinary reply may have admitted one normal read.
+	// Spend that reservation while the next reply is blocked, so the VALID
+	// receipt below must use the slot-less reader, not a reserved worker.
+	if err := c.enc.Encode(Request{ID: "fill-last-read", Method: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	if count := len(peer.slots); count != Outstanding {
+		t.Fatalf("receipt not sent at full slots: %d", count)
+	}
 	if err := c.enc.Encode(terminalAck(s, v)); err != nil {
 		t.Fatal(err)
 	}
+	s.mu.Lock()
+	accepted := s.terminal.acked
+	s.mu.Unlock()
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("valid receipt blocked behind full slots")
+	}
+	if count := len(peer.slots); count != Outstanding {
+		t.Fatalf("receipt consumed/freed an ordinary reply slot: %d", count)
+	}
+	releaseAck()
 	result := <-done
 	if result.cleanup != nil || result.delivery != nil {
 		t.Fatal(result)
@@ -256,7 +301,7 @@ func TestTerminalWithoutControllerAndAfterDisconnect(t *testing.T) {
 			c.conn.Close()
 			waitTerminalServe(t, c)
 		}
-		cleanup, delivery := s.StopWithReason(context.Background(), "adapter lost")
+		cleanup, delivery := s.StopWithReason(context.Background(), "adapter lost", nil)
 		if cleanup != nil || !errors.Is(delivery, ErrNoController) || runtime.stops.Load() != 1 {
 			t.Fatal(cleanup, delivery)
 		}
@@ -294,7 +339,7 @@ func TestTerminalReceiptImmediatelyFollowedByEOF(t *testing.T) {
 func TestExplicitStopWinsBeforeTerminal(t *testing.T) {
 	s, runtime, req := setup(t)
 	call(t, s, req("stop"))
-	cleanup, delivery := s.StopWithReason(context.Background(), "adapter lost")
+	cleanup, delivery := s.StopWithReason(context.Background(), "adapter lost", nil)
 	if cleanup != nil || !errors.Is(delivery, ErrShutdownInProgress) || runtime.stops.Load() != 1 || s.terminal != nil {
 		t.Fatal("adapter loss overrode explicit stop", cleanup, delivery)
 	}
@@ -303,34 +348,35 @@ func TestExplicitStopWinsBeforeTerminal(t *testing.T) {
 type terminalProbe struct {
 	started chan struct{}
 	closed  chan struct{}
+	release <-chan struct{}
 }
 
 func (p *terminalProbe) Probe(ctx context.Context, _, _ string) (platform.ProbeResult, error) {
 	close(p.started)
 	<-ctx.Done()
+	if p.release != nil {
+		<-p.release
+	}
 	close(p.closed) // represents the probe's native socket close before return
 	return platform.ProbeResult{}, ctx.Err()
 }
 
-type terminalProbeRuntime struct {
+type terminalCleanupRuntime struct {
 	*runtimeFake
-	probe *terminalProbe
+	stopped chan error
+	delay   time.Duration
 }
 
-func (r *terminalProbeRuntime) Stop(ctx context.Context) error {
-	select {
-	case <-r.probe.closed:
-	default:
-		return errors.New("runtime closed before probe released its socket")
-	}
+func (r *terminalCleanupRuntime) Stop(ctx context.Context) error {
+	r.stopped <- ctx.Err()
+	time.Sleep(r.delay)
 	return r.runtimeFake.Stop(ctx)
 }
 
-func TestTerminalCancelsAndJoinsProbeBeforeRuntimeCleanup(t *testing.T) {
+func TestTerminalCancelsAndJoinsProbeBeforeFinalization(t *testing.T) {
 	s, runtime := newTerminalServer()
 	p := &terminalProbe{started: make(chan struct{}), closed: make(chan struct{})}
 	s.prober = p
-	s.runtime = &terminalProbeRuntime{runtime, p}
 	c := connectTerminalController(t, s, true)
 	if err := c.enc.Encode(Request{ID: "probe", Method: "probe", Instance: s.Instance, Epoch: c.epoch, OpID: "pending-probe"}); err != nil {
 		t.Fatal(err)
@@ -340,7 +386,18 @@ func TestTerminalCancelsAndJoinsProbeBeforeRuntimeCleanup(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("probe precondition missing")
 	}
-	done := stopTerminal(s)
+	done := make(chan terminalResult, 1)
+	go func() {
+		cleanup, delivery := s.StopWithReason(context.Background(), "adapter lost", func() error {
+			select {
+			case <-p.closed:
+				return nil
+			default:
+				return errors.New("probe still owns socket at finalization")
+			}
+		})
+		done <- terminalResult{cleanup, delivery}
+	}()
 	v := c.terminal(t)
 	if v.CleanupError != "" || runtime.stops.Load() != 1 {
 		t.Fatalf("terminal cleanup preceded probe close: %+v", v)
@@ -352,4 +409,90 @@ func TestTerminalCancelsAndJoinsProbeBeforeRuntimeCleanup(t *testing.T) {
 		t.Fatal(result)
 	}
 	waitTerminalServe(t, c)
+}
+
+func TestStubbornProbeDoesNotDelayRoutingCleanupOrSpendItsContext(t *testing.T) {
+	s, runtime := newTerminalServer()
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	p := &terminalProbe{started: make(chan struct{}), closed: make(chan struct{}), release: release}
+	s.prober = p
+	stopped := make(chan error, 1)
+	s.runtime = &terminalCleanupRuntime{runtimeFake: runtime, stopped: stopped}
+	c := connectTerminalController(t, s, true)
+	if err := c.enc.Encode(Request{ID: "probe", Method: "probe", Instance: s.Instance, Epoch: c.epoch, OpID: "stubborn"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.started:
+	case <-time.After(time.Second):
+		t.Fatal("probe never started")
+	}
+	var finalized atomic.Bool
+	done := make(chan terminalResult, 1)
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	go func() {
+		cleanup, delivery := s.StopWithReason(cleanupCtx, "adapter lost", func() error { finalized.Store(true); return nil })
+		done <- terminalResult{cleanup, delivery}
+	}()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("routing cleanup received exhausted context: %v", err)
+		}
+	case <-time.After(TerminalProbeJoinTimeout / 2):
+		t.Fatal("routing cleanup waited behind probe join")
+	}
+	v := c.terminal(t)
+	if !strings.Contains(v.CleanupError, "probe did not stop before finalization") || finalized.Load() {
+		t.Fatalf("unsafe or hidden probe timeout: %+v", v)
+	}
+	if err := c.enc.Encode(terminalAck(s, v)); err != nil {
+		t.Fatal(err)
+	}
+	result := <-done
+	if !errors.Is(result.cleanup, context.DeadlineExceeded) || result.delivery != nil {
+		t.Fatal(result)
+	}
+	unblock()
+	waitTerminalServe(t, c)
+}
+
+func TestTerminalDeliveryDeadlineStartsAfterDelayedCleanup(t *testing.T) {
+	s, runtime := newTerminalServer()
+	const delay = 1500 * time.Millisecond
+	s.runtime = &terminalCleanupRuntime{runtimeFake: runtime, stopped: make(chan error, 1), delay: delay}
+	c := connectTerminalController(t, s, true)
+	started := time.Now()
+	done := stopTerminal(s)
+	c.terminal(t) // deliberately do not acknowledge
+	result := <-done
+	elapsed := time.Since(started)
+	if result.cleanup != nil || !errors.Is(result.delivery, context.DeadlineExceeded) || elapsed < delay+TerminalDeliveryTimeout || elapsed > delay+TerminalDeliveryTimeout+time.Second {
+		t.Fatalf("deadline borrowed cleanup time: %+v elapsed=%v", result, elapsed)
+	}
+	waitTerminalServe(t, c)
+}
+
+func TestLeaseCleanupWinsWithoutCallingTerminalFinalizer(t *testing.T) {
+	s, runtime, _ := setup(t)
+	s.mu.Lock()
+	expired := s.expires.Add(time.Nanosecond)
+	s.now = func() time.Time { return expired }
+	s.mu.Unlock()
+	if err := s.CheckLease(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	cleanup, delivery := s.StopWithReason(context.Background(), "adapter lost", func() error { called = true; return nil })
+	if cleanup != nil || !errors.Is(delivery, ErrShutdownInProgress) || called || runtime.stops.Load() != 1 {
+		t.Fatal(cleanup, delivery, called)
+	}
+	select {
+	case <-s.Done():
+	default:
+		t.Fatal("lease did not own completion")
+	}
 }

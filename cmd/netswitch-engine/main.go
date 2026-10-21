@@ -14,11 +14,18 @@ func main() {
 	}
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "netswitch-engine:", err)
-		// Only a direct, completed platform outcome may override failure.
-		// Do not search through joined cleanup errors for a clean exit reason.
-		if outcome, ok := err.(interface{ EngineExitCode() int }); ok {
-			os.Exit(outcome.EngineExitCode())
-		}
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+func exitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	// Only a direct, completed platform outcome may override failure.
+	// Do not search through joined cleanup errors for a clean exit reason.
+	if outcome, ok := err.(interface{ EngineExitCode() int }); ok {
+		return outcome.EngineExitCode()
+	}
+	return 1
 }

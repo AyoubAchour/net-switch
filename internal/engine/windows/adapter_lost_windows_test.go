@@ -119,9 +119,7 @@ func TestAdapterLossContractCleansJournalAndNativeHandleBeforeReceipt(t *testing
 		failJournal, failClose, failExit bool
 	}{
 		{"removed", wintun.ErrAdapterRemoved, false, false, false},
-		// The session normalizes registrar death to the existing sentinel; the
-		// engine contract does not import a particular helper implementation.
-		{"helper death", fmt.Errorf("registrar exited: %w", wintun.ErrAdapterRemoved), false, false, false},
+		{"wrapped removal", fmt.Errorf("session: %w", wintun.ErrAdapterRemoved), false, false, false},
 		{"journal failure", wintun.ErrAdapterRemoved, true, false, false},
 		{"close failure", wintun.ErrAdapterRemoved, false, true, false},
 		{"runtime resource close failure", wintun.ErrAdapterRemoved, false, false, true},
@@ -153,7 +151,7 @@ func TestAdapterLossContractCleansJournalAndNativeHandleBeforeReceipt(t *testing
 			if scenario.failExit {
 				exitErr = errors.New("runtime lifetime resource close failure")
 			}
-			runtime := &Runtime{Engine: e, loss: loss, exitCleanup: sync.OnceValue(func() error { return errors.Join(session.Close(), exitErr) }),
+			runtime := &Runtime{Engine: e,
 				routes: &Routes{Instance: "test-engine", timings: &phaseTimings{values: map[string]phaseTiming{}}}}
 			s := protocol.New(runtime, e.Table, nil)
 			server, controller := net.Pipe()
@@ -189,18 +187,24 @@ func TestAdapterLossContractCleansJournalAndNativeHandleBeforeReceipt(t *testing
 			if scenario.failJournal {
 				objects.fail = "capture"
 			}
-			tun.fault <- scenario.cause
-			select {
-			case <-loss.ready:
-			case <-time.After(time.Second):
-				t.Fatal("TUN failure was not handed to Windows lifecycle")
-			}
-			type outcome struct{ cleanup, delivery error }
-			stopped := make(chan outcome, 1)
+			var pipeClosed, joined, released atomic.Bool
+			stopped := make(chan error, 1)
 			go func() {
-				cleanup, delivery := s.StopWithReason(context.Background(), AdapterLostReason)
-				stopped <- outcome{cleanup, delivery}
+				stopped <- serveUntilStopped(context.Background(), shutdownTail{
+					runtime: runtime, server: s, loss: loss, fatal: make(chan error, 1),
+					cancel: cancel, closePipe: func() error { pipeClosed.Store(true); return nil },
+					join:     func() { <-served; joined.Store(true) },
+					finalize: sync.OnceValue(func() error { return exitErr }),
+					release: func() error {
+						if !pipeClosed.Load() || !joined.Load() {
+							return errors.New("ownership released before pipe and clients closed")
+						}
+						released.Store(true)
+						return session.Close()
+					},
+				})
 			}()
+			tun.fault <- scenario.cause
 			var terminal protocol.Terminal
 			if err := dec.Decode(&terminal); err != nil {
 				t.Fatal(err)
@@ -223,25 +227,19 @@ func TestAdapterLossContractCleansJournalAndNativeHandleBeforeReceipt(t *testing
 			if count := lossObjectHandles(t, witness); count != 1 {
 				t.Fatalf("engine leaked native TUN handle: %d", count)
 			}
+			if released.Load() {
+				t.Fatal("ownership released before terminal receipt")
+			}
 			if err := enc.Encode(protocol.Request{ID: "ack", Method: "terminalAck", Instance: s.Instance, Epoch: epoch, OpID: terminal.OpID}); err != nil {
 				t.Fatal(err)
 			}
-			result := <-stopped
-			if result.delivery != nil || (result.cleanup != nil) != failed {
-				t.Fatal(result)
-			}
-			if again := runtime.Stop(context.Background()); (again != nil) != failed {
-				t.Fatalf("terminal stop is not idempotent: %v", again)
-			}
-			exit := adapterLossResult(scenario.cause, result.cleanup)
+			exit := <-stopped
 			_, clean := exit.(*AdapterLostError)
 			if clean == failed {
 				t.Fatalf("cleanup failure has clean exit classification: %v", exit)
 			}
-			select {
-			case <-served:
-			case <-time.After(time.Second):
-				t.Fatal("controller transport did not join")
+			if !released.Load() {
+				t.Fatal("ownership not released after transport join")
 			}
 		})
 	}
