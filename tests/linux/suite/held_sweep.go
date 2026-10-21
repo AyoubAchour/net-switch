@@ -45,6 +45,30 @@ type sweepTally struct {
 	errors                                  map[string]int
 	rtts                                    []time.Duration // answered echoes only
 	appTime                                 time.Duration
+	// Continuity against the engine flow IDs recorded with the held pool:
+	// swept sessions the engine didn't list then, whose flow is gone now, or
+	// whose app source now belongs to a different flow ID (a replacement,
+	// even one that reuses the same outbound address and port).
+	unrecorded, vanished, replaced int
+}
+
+// sweepContinuity checks that each swept socket is still the session the
+// engine listed when the pool was recorded. now holds the engine's UDP flows
+// after the sweep, keyed by the app-side source.
+func sweepContinuity(t *sweepTally, ids map[int]string, locals []string, sockets []int, now map[string]engine.Flow) {
+	for _, i := range sockets {
+		want := ids[i]
+		if want == "" || i < 0 || i >= len(locals) {
+			t.unrecorded++
+			continue
+		}
+		f, ok := now[locals[i]]
+		if !ok {
+			t.vanished++
+		} else if f.ID != want {
+			t.replaced++
+		}
+	}
 }
 
 // tallySweep checks one app's sweep result against the sessions the servers
@@ -101,10 +125,12 @@ func ms(d time.Duration) float64 {
 
 // heldSweep runs the gate over the apps' held UDP sessions: every socket
 // whose first datagram reached a server and wasn't refused. It also checks
-// that the sweep neither added nor lost an engine UDP session.
+// that every swept session is still the engine flow recorded with the pool,
+// and that the sweep neither admitted, refused, added nor lost a session.
 func (e *Env) heldSweep(label string, names []string, bgs map[string]*Bg, release Release, results map[string]app.FloodResult, all map[string]sessions, s engine.Controller) {
 	before := stats(e, s)
 	var t sweepTally
+	swept := map[string][]int{}
 	start := time.Now()
 	for _, name := range names {
 		refused := map[int]bool{}
@@ -118,6 +144,7 @@ func (e *Env) heldSweep(label string, names []string, bgs map[string]*Bg, releas
 			}
 		}
 		slices.Sort(sockets)
+		swept[name] = sockets
 		req, err := json.Marshal(app.SweepRequest{Sockets: sockets, Concurrency: sweepConcurrency,
 			EchoTimeoutMS: int(sweepEchoTimeout / time.Millisecond), BudgetMS: int(sweepBudget / time.Millisecond)})
 		e.T.Require(err == nil, "%s: encode %s's sweep request (%v)", label, name, err)
@@ -135,10 +162,27 @@ func (e *Env) heldSweep(label string, names []string, bgs map[string]*Bg, releas
 	}
 	wall := time.Since(start)
 	after := stats(e, s)
+	now := map[string]engine.Flow{}
+	for _, f := range e.Flows() {
+		if f.Protocol == "udp" {
+			now[f.Source.String()] = f
+		}
+	}
+	for _, name := range names {
+		sweepContinuity(&t, all[name].flowID, results[name].Locals, swept[name], now)
+	}
+	e.sweepVerdict(label, t, wall, before, after)
+}
+
+// sweepVerdict makes the gate's hard checks on a finished sweep.
+func (e *Env) sweepVerdict(label string, t sweepTally, wall time.Duration, before, after engine.Stats) {
 	p99 := t.percentile(0.99)
-	e.T.Logf("HELD SWEEP %s: sessions=%d answered=%d wrong-source=%d unsent=%d errors=%v stale=%d concurrency=%d max-in-flight=%d p50=%.3fms p95=%.3fms p99=%.3fms max=%.3fms wall=%.3fs app-sum=%.3fs engine-UDP=%d->%d",
+	admitted, decisions := after.Admitted-before.Admitted, after.RefusedUDP.Count()-before.RefusedUDP.Count()
+	e.T.Logf("HELD SWEEP %s: sessions=%d answered=%d wrong-source=%d unsent=%d errors=%v stale=%d concurrency=%d max-in-flight=%d p50=%.3fms p95=%.3fms p99=%.3fms max=%.3fms wall=%.3fs app-sum=%.3fs engine-UDP=%d->%d unrecorded=%d vanished=%d replaced=%d admitted-during=%d UDP-refusals-during=%d; old source-and-count verdict=%t",
 		label, t.held, t.answered, t.wrongSource, t.unsent, t.errors, t.stale, sweepConcurrency, t.maxInFlight,
-		ms(t.percentile(0.50)), ms(t.percentile(0.95)), ms(p99), ms(t.percentile(1)), wall.Seconds(), t.appTime.Seconds(), before.UDP, after.UDP)
+		ms(t.percentile(0.50)), ms(t.percentile(0.95)), ms(p99), ms(t.percentile(1)), wall.Seconds(), t.appTime.Seconds(), before.UDP, after.UDP,
+		t.unrecorded, t.vanished, t.replaced, admitted, decisions,
+		t.held > 0 && t.answered == t.held && t.wrongSource == 0 && t.unsent == 0 && after.UDP == before.UDP)
 	e.T.Check(t.held > 0 && t.answered == t.held && t.wrongSource == 0 && t.unsent == 0,
 		"%s: every one of the %d held UDP sessions answered one echo through its original engine socket (%d answered, %d from another source, %d unsent, errors %v)",
 		label, t.held, t.answered, t.wrongSource, t.unsent, t.errors)
@@ -146,4 +190,8 @@ func (e *Env) heldSweep(label string, names []string, bgs map[string]*Bg, releas
 		"%s: held-session echo p99 is at most 250 ms, %d at a time (%.3f ms over %d echoes, at most %d in flight)", label, sweepConcurrency, ms(p99), t.held, t.maxInFlight)
 	e.T.Check(wall <= sweepWholeLimit, "%s: the sweep through all %d held sessions finished within 30 s, a tenth of the UDP idle timeout (%.3f s)", label, t.held, wall.Seconds())
 	e.T.Check(after.UDP == before.UDP, "%s: the sweep neither added nor lost an engine UDP session (%d before, %d after)", label, before.UDP, after.UDP)
+	e.T.Check(t.held > 0 && t.unrecorded == 0 && t.vanished == 0 && t.replaced == 0,
+		"%s: every swept session is still the engine flow recorded with the held pool, same flow ID for the same app source (%d not recorded, %d gone, %d replaced by a new flow)",
+		label, t.unrecorded, t.vanished, t.replaced)
+	e.T.Check(admitted == 0 && decisions == 0, "%s: the sweep made no new admission or UDP refusal (%d admitted, %d refusal decisions)", label, admitted, decisions)
 }
