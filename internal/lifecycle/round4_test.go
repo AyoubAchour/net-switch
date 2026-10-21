@@ -200,6 +200,57 @@ func TestHTTPAdmissionLooksUpEarlyWhenABatchWaits(t *testing.T) {
 	}
 }
 
+// A "batch waiting" signal left over from a batch that an earlier lookup
+// took without waiting must not let a single later connection skip the gap.
+func TestHTTPAdmissionIgnoresStaleBatchSignals(t *testing.T) {
+	raw, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const interval = 200 * time.Millisecond
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var starts []time.Time
+	var sizes []int
+	resolve := func(tuples []localipc.TCPTuple) []localipc.TCPIdentity {
+		mu.Lock()
+		starts = append(starts, time.Now())
+		sizes = append(sizes, len(tuples))
+		first := len(starts) == 1
+		mu.Unlock()
+		if first {
+			<-release
+		}
+		out := make([]localipc.TCPIdentity, len(tuples))
+		for i := range out {
+			out[i].User = "unresolved" // refused beyond two; only timing matters
+		}
+		return out
+	}
+	l := newHTTPListenerEvery(raw, &connectionLimits{owner: "owner", users: map[string]int{}}, func(string) {}, resolve, interval)
+	defer l.Close()
+	dialAll(t, raw.Addr().String(), 1)
+	waitFor(t, "first lookup", func() bool { mu.Lock(); defer mu.Unlock(); return len(starts) == 1 })
+	// While the first lookup is held past the interval, a full batch queues
+	// and signals. The next lookup then starts without waiting, takes the
+	// batch, and leaves that signal behind.
+	dialAll(t, raw.Addr().String(), httpLookupBatch)
+	waitFor(t, "batch queued", func() bool { return l.queued() == httpLookupBatch })
+	time.Sleep(interval + 20*time.Millisecond)
+	close(release)
+	waitFor(t, "batch looked up", func() bool { mu.Lock(); defer mu.Unlock(); return len(starts) == 2 })
+	dialAll(t, raw.Addr().String(), 1)
+	waitFor(t, "single connection looked up", func() bool { mu.Lock(); defer mu.Unlock(); return len(starts) == 3 })
+	mu.Lock()
+	defer mu.Unlock()
+	if sizes[1] != httpLookupBatch || sizes[2] != 1 {
+		t.Fatal("unexpected batches", sizes)
+	}
+	if gap := starts[2].Sub(starts[1]); gap < interval-20*time.Millisecond {
+		t.Fatal("a stale batch signal let a single connection skip the gap", gap)
+	}
+}
+
 // Churn must not buy one machine-wide snapshot per connection: lookups are
 // at least httpLookupInterval apart, and connections wait in one batch.
 func TestHTTPAdmissionSpacesLookupsUnderChurn(t *testing.T) {

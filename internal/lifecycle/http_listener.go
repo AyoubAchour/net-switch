@@ -181,12 +181,21 @@ func (l *httpListener) admit() {
 		}
 		if wait := l.interval - time.Since(last); wait > 0 {
 			timer := time.NewTimer(wait)
-			select {
-			case <-timer.C:
-			case <-l.full:
-			case <-l.done:
-				timer.Stop()
-				return
+		waiting:
+			for {
+				select {
+				case <-timer.C:
+					break waiting
+				case <-l.full:
+					// The signal can be left over from a batch an earlier
+					// lookup already took; only a batch waiting now counts.
+					if l.queued() >= httpLookupBatch {
+						break waiting
+					}
+				case <-l.done:
+					timer.Stop()
+					return
+				}
 			}
 			timer.Stop()
 		}
@@ -220,6 +229,12 @@ func (l *httpListener) admit() {
 			}
 		}
 	}
+}
+
+func (l *httpListener) queued() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.queue)
 }
 
 // drain closes everything that was accepted but never reached the server.

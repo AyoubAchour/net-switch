@@ -3,7 +3,6 @@
 package winapi
 
 import (
-	"runtime"
 	"testing"
 	"time"
 
@@ -43,22 +42,14 @@ func TestJobInformationRoundTrips(t *testing.T) {
 	}
 }
 
-// grow forces stack growth so a caller's stack-allocated array really moves.
-//
-//go:noinline
-func grow(n int) byte {
-	var pad [1024]byte
-	if n == 0 {
-		return pad[0]
-	}
-	return grow(n-1) + pad[n%len(pad)]
-}
-
-// The handle array is a small literal that escape analysis keeps on the
-// stack. Its stack is grown between building it and waiting on it, and a
-// second goroutine signals the second event while the wait runs, so the
-// kernel must still be reading the real handles.
-func TestWaitForMultipleObjectsReadsTheLiveArray(t *testing.T) {
+// A smoke test of the wrapper's behaviour on a stack-allocated handle
+// literal: it waits on the right handle, times out and rejects an empty list.
+// It cannot catch a regression to the unsafe x/sys shape, because a stack move
+// between conversion and syscall is not something a test can force. That
+// property is structural (the conversion sits inside the SyscallN argument
+// list, after the procedure lookup) and is checked by review and escape
+// analysis.
+func TestWaitForMultipleObjectsWaitsOnTheRightHandle(t *testing.T) {
 	first, err := windows.CreateEvent(nil, 1, 0, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -75,8 +66,6 @@ func TestWaitForMultipleObjectsReadsTheLiveArray(t *testing.T) {
 	}()
 	for range 50 {
 		handles := [2]windows.Handle{first, second}
-		_ = grow(64)
-		runtime.Gosched()
 		got, err := WaitForMultipleObjects(handles[:], false, 5000)
 		if err != nil {
 			t.Fatal(err)
