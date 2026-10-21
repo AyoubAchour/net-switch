@@ -158,19 +158,39 @@ func TestEnginePipeFullDuplex(t *testing.T) {
 		_, err := server.Read(b[:])
 		readDone <- err
 	}()
-	time.Sleep(50 * time.Millisecond) // let the read reach the kernel; the assertion below does not depend on it
-	closed := time.Now()
-	if err := server.Close(); err != nil {
-		t.Fatal(err)
+	// Close must find the read actually pending in the kernel, not merely
+	// started: wait for ReadFile's ERROR_IO_PENDING. This is a precondition,
+	// not a retry of the check below.
+	conn := server.(*pipeConn)
+	for deadline := time.Now().Add(2 * time.Second); conn.pending.Load() == 0; {
+		if time.Now().After(deadline) {
+			t.Fatal("the read never became pending in the kernel")
+		}
+		time.Sleep(time.Millisecond)
 	}
+	closed := time.Now()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- server.Close() }()
+	timeout := time.After(5 * time.Second)
 	select {
 	case err := <-readDone:
 		if !errors.Is(err, os.ErrClosed) {
 			t.Fatalf("pending read after Close returned %v; want os.ErrClosed", err)
 		}
 		t.Logf("pending read cancelled by Close in %s", time.Since(closed).Round(time.Microsecond))
-	case <-time.After(5 * time.Second):
+	case <-timeout:
 		t.Fatal("Close did not cancel the pending read")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-timeout:
+		t.Fatal("Close did not return after cancelling the pending read")
+	}
+	if n := conn.pending.Load(); n != 0 {
+		t.Fatalf("%d operations still pending after Close", n)
 	}
 	if _, err := server.Write([]byte("late")); !errors.Is(err, os.ErrClosed) {
 		t.Fatalf("write after Close returned %v; want os.ErrClosed", err)

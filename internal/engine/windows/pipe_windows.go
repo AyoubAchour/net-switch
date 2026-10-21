@@ -10,6 +10,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
@@ -171,6 +172,7 @@ type pipeConn struct {
 	closeErr    error
 	readEvent   winhandle.Owner
 	writeEvent  winhandle.Owner
+	pending     atomic.Int32 // operations the kernel reported as pending
 }
 
 // pipeOp is one direction's OVERLAPPED. It lives inside the heap pipeConn
@@ -193,11 +195,13 @@ func newPipeConn(h winhandle.Owner, name string) (io.ReadWriteCloser, error) {
 	return c, nil
 }
 
+// closeEvents runs once, after every operation has finished. The owners are
+// never reassigned after construction: Read and Write copy them without a
+// lock, and only use them once they have seen closed == false under mu.
 func (c *pipeConn) closeEvents() {
-	for _, event := range []*winhandle.Owner{&c.readEvent, &c.writeEvent} {
+	for _, event := range []winhandle.Owner{c.readEvent, c.writeEvent} {
 		if !event.IsZero() {
 			event.HandleClose("engine pipe connection event close")
-			*event = winhandle.Owner{}
 		}
 	}
 }
@@ -271,6 +275,10 @@ func (c *pipeConn) transfer(op *pipeOp, event winhandle.Owner, b []byte, write b
 	c.mu.Unlock()
 	if err != nil && !errors.Is(err, windows.ERROR_IO_PENDING) {
 		return 0, err
+	}
+	if err != nil {
+		c.pending.Add(1)
+		defer c.pending.Add(-1)
 	}
 	// Inline success and pending completion both report through the same
 	// OVERLAPPED. Wait for the final count; after cancellation this returns
