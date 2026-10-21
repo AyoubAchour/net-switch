@@ -377,7 +377,7 @@ func TestOwnerConcurrentSnapshots(t *testing.T) {
 	work.Wait()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := owners.tcpSnapshot(ctx, 0, 0); !errors.Is(err, context.Canceled) {
+	if _, _, err := owners.tcpSnapshot(ctx, ctx, 0, 0, 0, false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled snapshot returned %v", err)
 	}
 }

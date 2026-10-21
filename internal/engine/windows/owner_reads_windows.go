@@ -99,6 +99,23 @@ func (q *tableReads[S]) join(after time.Duration, run func(*tableRead[S])) *tabl
 	return r
 }
 
+// since returns the newest running read that started at or after instant,
+// else the queued read, which starts later than any current waiter, else nil.
+func (q *tableReads[S]) since(instant time.Duration) *tableRead[S] {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	var newest *tableRead[S]
+	for _, r := range q.running {
+		if r != nil && r.at >= instant && (newest == nil || r.at > newest.at) {
+			newest = r
+		}
+	}
+	if newest != nil {
+		return newest
+	}
+	return q.queued
+}
+
 // free returns a free slot or -1. It runs under q.mu.
 func (q *tableReads[S]) free() int {
 	for slot, running := range q.running {

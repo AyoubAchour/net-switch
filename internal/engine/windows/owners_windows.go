@@ -28,10 +28,22 @@ var tcpTable = iphlp.NewProc("GetExtendedTcpTable")
 var udpTable = iphlp.NewProc("GetExtendedUdpTable")
 var errOwnerMissing = errors.New("socket owner not found")
 
-// All states, including SYN_SENT. Filtering for ESTABLISHED loses the very
-// sockets whose SYN is waiting for the engine's admission decision.
-const tcpOwnerPIDAll = 5
+// TCP_TABLE_OWNER_PID_CONNECTIONS: every state except LISTEN, so SYN_SENT is
+// included. Filtering for ESTABLISHED loses the very sockets whose SYN is
+// waiting for the engine's admission decision, and a listener never matches a
+// SYN's 4-tuple. It is the cheapest class with owner PIDs (spec 5.6); the
+// MODULE classes add per-row module data, and OWNER_PID_ALL (5) also walks
+// the listener table. TestOwnerConnectionsClassKeepsSynSent checks both claims.
+const tcpOwnerPIDConnections = 4
+const tcpOwnerPIDAll = 5 // row counts in tests: every row the OS holds
 const udpOwnerModule = 2
+
+// The normal bound for one TCP owner lookup, and the overload hold (spec 5.6,
+// "Under overload"): when a table read that started after the SYN arrived is
+// still running at the normal bound, the SYN waits for that read, up to the
+// hold in total, before its owner becomes unknown.
+const ownerLookupBound = 50 * time.Millisecond
+const ownerOverloadHold = 250 * time.Millisecond
 
 type processKey struct {
 	pid   uint32
@@ -136,6 +148,10 @@ type LookupHistogram struct {
 	UDPPeakRows        uint64          `json:"udpPeakRows"`       // largest table read
 	UDPParallelPeak    int             `json:"udpParallelPeak"`   // most reads in flight for one family
 	TCPParallelPeak    int             `json:"tcpParallelPeak"`   // most reads in flight for one family
+	TCPHolds           uint64          `json:"tcpHolds"`          // lookups held past 50 ms for a fresh read
+	TCPHeldFound       uint64          `json:"tcpHeldFound"`      // held lookups that found the owner
+	TCPReadMaxUS       uint64          `json:"tcpReadMaxUS"`      // slowest native TCP read
+	TCPReadBuckets     []uint64        `json:"tcpReadBuckets"`    // native TCP reads alone, not lookups
 	Failures           []lookupFailure `json:"failures,omitempty"`
 }
 
@@ -160,8 +176,12 @@ type Owners struct {
 	tcpRefreshes, tcpReadNanos, tcpIndexNanos, cacheMissRefreshes atomic.Uint64
 	tcpRetries                                                    atomic.Uint64
 	tcpPeakRows                                                   atomic.Uint64
+	tcpHolds, tcpHeldFound, tcpReadMaxUS                          atomic.Uint64
+	tcpReadHist                                                   [len(lookupBounds)]atomic.Uint64
 	failures                                                      [16]lookupFailure
 	failureCount                                                  uint64
+	// readTCP replaces the native TCP table read in tests; nil in production.
+	readTCP func(ctx context.Context, family uint32, scratch *[]uint64) ([]byte, error)
 }
 
 func NewOwners() *Owners { return &Owners{paths: make(map[processKey]platform.Owner)} }
@@ -204,6 +224,11 @@ func (o *Owners) Stats() LookupHistogram {
 		TCPRetries: o.tcpRetries.Load(), SnapshotBuckets: make([]uint64, len(lookupBounds)), ProcessBuckets: make([]uint64, len(lookupBounds)), RefreshBuckets: make([]uint64, len(lookupBounds))}
 	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
 	h.TCPPeakRows = o.tcpPeakRows.Load()
+	h.TCPHolds, h.TCPHeldFound, h.TCPReadMaxUS = o.tcpHolds.Load(), o.tcpHeldFound.Load(), o.tcpReadMaxUS.Load()
+	h.TCPReadBuckets = make([]uint64, len(lookupBounds))
+	for i := range h.TCPReadBuckets {
+		h.TCPReadBuckets[i] = o.tcpReadHist[i].Load()
+	}
 	h.UDPRefreshes, h.UDPReadNanos, h.UDPIndexNanos = o.udpDumps.Load(), o.udpReadNanos.Load(), o.udpIndexNanos.Load()
 	h.UDPReadBuckets = make([]uint64, len(lookupBounds))
 	h.UDPRefreshBuckets = make([]uint64, len(lookupBounds))
@@ -331,28 +356,68 @@ func freshSnapshot(s *ownerSnapshot, after, now time.Duration) bool {
 	return s != nil && s.at > after && now >= s.at && now-s.at < 5*time.Millisecond
 }
 
-func (o *Owners) tcpSnapshot(ctx context.Context, after time.Duration, family int) (ownerSnapshot, error) {
+// tcpSnapshot returns a snapshot of one family that started after `after`.
+// normal ends at the lookup's 50 ms bound and ctx at the overload hold. When
+// normal ends first, the wait continues only for a read that started after
+// arrived (the SYN's arrival) and after `after`, and the result says it was
+// held. holding means an earlier step already held, so normal no longer
+// applies.
+func (o *Owners) tcpSnapshot(ctx, normal context.Context, after, arrived time.Duration, family int, holding bool) (ownerSnapshot, bool, error) {
 	start := winclock.Now()
 	defer measureStage(&o.snapshotHist, start)
 	run := func(r *tcpRefresh) { o.refreshTCP(r, family) }
+	if holding {
+		after = max(after, arrived-1) // reads at or after the arrival
+	}
 	for {
 		if err := ctx.Err(); err != nil {
-			return ownerSnapshot{}, err
+			return ownerSnapshot{}, holding, err
 		}
 		if s := o.snapshot[family].Load(); freshSnapshot(s, after, winclock.Now()) {
-			return *s, s.err
+			return *s, holding, s.err
 		}
 		pending := o.tcpReads[family].join(after, run)
-		select {
-		case <-ctx.Done():
-			return ownerSnapshot{}, ctx.Err()
-		case <-pending.done:
-			s := pending.result
-			if s.at <= after {
-				continue
-			}
-			return *s, s.err
+		bound := normal.Done()
+		if holding {
+			bound = nil
 		}
+	wait:
+		for {
+			select {
+			case <-ctx.Done():
+				return ownerSnapshot{}, holding, ctx.Err()
+			case <-pending.done:
+				break wait
+			case <-bound:
+				select {
+				case <-pending.done:
+					break wait // finished at the bound: no hold needed
+				default:
+				}
+				// Spec 5.6, "Under overload". A read that started after the SYN
+				// may already have finished while this lookup waited on an
+				// older one; its snapshot serves without a hold.
+				// Started after `after`, and at or after the arrival: a read
+				// started in the same clock tick as the lookup still counts.
+				threshold := max(after+1, arrived)
+				if s := o.snapshot[family].Load(); s != nil && s.at >= threshold {
+					return *s, holding, s.err
+				}
+				// A queued read counts: it starts only when a slot frees, so
+				// after the SYN, and the hold's total still bounds the wait.
+				fresh := o.tcpReads[family].since(threshold)
+				if fresh == nil {
+					return ownerSnapshot{}, holding, normal.Err()
+				}
+				o.tcpHolds.Add(1)
+				pending, bound, holding, after = fresh, nil, true, threshold-1
+			}
+		}
+		s := pending.result
+		if s.at <= after {
+			continue
+		}
+		return *s, holding, s.err
 	}
 }
 
@@ -361,7 +426,9 @@ func (o *Owners) refreshTCP(pending *tcpRefresh, family int) {
 	// most ownerParallelReads snapshots per family in flight, while every
 	// lookup can leave at its own 50 ms deadline. One caller's cancellation
 	// cannot poison peers.
-	ctx, cancel := winclock.System.WithTimeout(context.Background(), 50*time.Millisecond)
+	// The read's own deadline is the overload hold: a SYN held for this read
+	// (spec 5.6) must not see it abandoned between sizing calls at 50 ms.
+	ctx, cancel := winclock.System.WithTimeout(context.Background(), ownerOverloadHold)
 	defer cancel()
 	s := ownerSnapshot{at: pending.at}
 	o.tcpRefreshes.Add(1)
@@ -371,8 +438,17 @@ func (o *Owners) refreshTCP(pending *tcpRefresh, family int) {
 	}
 	readStart := winclock.Now()
 	// Each slot owns its scratch buffer; the reads may overlap.
-	b, err := readOwnerTableInto(ctx, tcpTable, af, tcpOwnerPIDAll, &o.tcpBuffers[family][pending.slot])
-	o.tcpReadNanos.Add(uint64(winclock.Since(readStart)))
+	var b []byte
+	var err error
+	if o.readTCP != nil {
+		b, err = o.readTCP(ctx, af, &o.tcpBuffers[family][pending.slot])
+	} else {
+		b, err = readOwnerTableInto(ctx, tcpTable, af, tcpOwnerPIDConnections, &o.tcpBuffers[family][pending.slot])
+	}
+	readTook := winclock.Since(readStart)
+	o.tcpReadNanos.Add(uint64(readTook))
+	measureStage(&o.tcpReadHist, readStart)
+	storeMax(&o.tcpReadMaxUS, uint64(max(0, readTook.Microseconds())))
 	s.err = err
 	if s.err == nil {
 		indexStart := winclock.Now()
@@ -451,6 +527,10 @@ func (o *Owners) process(pid uint32) (platform.Owner, error) {
 	return cached, nil
 }
 
+// TCPLookupBound is how long the context the TCP forwarder passes must allow:
+// the overload hold. TCP applies the normal 50 ms bound itself.
+func (o *Owners) TCPLookupBound() time.Duration { return ownerOverloadHold }
+
 func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.Owner, err error) {
 	start := winclock.Now()
 	// Where a failed lookup stopped, for the failure ring: at the OS port
@@ -469,8 +549,21 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 				at.family, at.pid, winclock.Since(start).Microseconds()), tuple.Source, "", err)
 		}
 	}()
-	ctx, cancel := winclock.System.WithTimeout(ctx, 50*time.Millisecond)
+	// ctx bounds the overload hold; normal is the ordinary 50 ms bound. The
+	// forwarder's context allows the hold (TCPLookupBound).
+	ctx, cancel := winclock.System.WithTimeout(ctx, ownerOverloadHold)
 	defer cancel()
+	normal, cancelNormal := winclock.System.WithTimeout(ctx, ownerLookupBound)
+	defer cancelNormal()
+	held := false
+	defer func() {
+		if held {
+			at.stage = "held: " + at.stage
+			if err == nil {
+				o.tcpHeldFound.Add(1)
+			}
+		}
+	}()
 	var after [2]time.Duration
 	primary := 0
 	if tuple.Source.Addr().Is6() {
@@ -478,13 +571,19 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		at.stage, at.attempt = "bound check", attempt
-		if winclock.Since(start) >= 50*time.Millisecond {
+		// Retries never run past the normal bound. A held lookup gets its
+		// one fresh read per family, not more attempts.
+		if winclock.Since(start) >= ownerLookupBound {
+			if held {
+				at.stage = "not in the held read"
+				return owner, errOwnerMissing
+			}
 			return owner, context.DeadlineExceeded
 		}
 		if attempt != 0 {
 			o.tcpRetries.Add(1)
 			at.stage = "retry wait"
-			if err := winclock.System.Wait(ctx, 2*time.Millisecond); err != nil {
+			if err := winclock.System.Wait(normal, 2*time.Millisecond); err != nil {
 				return owner, err
 			}
 		}
@@ -492,9 +591,10 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 		// after an IPv4 miss; an IPv6 tuple needs only the IPv6 table.
 		for family := primary; family < 2; family++ {
 			at.stage, at.family = "snapshot", family
-			s, e := o.tcpSnapshot(ctx, after[family], family)
+			s, h, e := o.tcpSnapshot(ctx, normal, after[family], start, family, held)
+			held = held || h
 			if e != nil {
-				if family == primary || ctx.Err() != nil {
+				if family == primary || ctx.Err() != nil || (!held && normal.Err() != nil) {
 					return owner, e
 				}
 				continue
@@ -510,9 +610,11 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 			if candidates.count == 0 && s.at < start {
 				o.cacheMissRefreshes.Add(1)
 				at.stage = "fresh read"
-				s, e = o.tcpSnapshot(ctx, max(s.at, start), family)
+				var h bool
+				s, h, e = o.tcpSnapshot(ctx, normal, max(s.at, start), start, family, held)
+				held = held || h
 				if e != nil {
-					if family == primary || ctx.Err() != nil {
+					if family == primary || ctx.Err() != nil || (!held && normal.Err() != nil) {
 						return owner, e
 					}
 					continue
@@ -527,7 +629,7 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 				processStart := winclock.Now()
 				owner, err = o.process(candidates.pid)
 				measureStage(&o.processHist, processStart)
-				if winclock.Since(start) >= 50*time.Millisecond {
+				if elapsed := winclock.Since(start); elapsed >= ownerOverloadHold || elapsed >= ownerLookupBound && !held {
 					return platform.Owner{}, context.DeadlineExceeded
 				}
 				if ctx.Err() != nil {
