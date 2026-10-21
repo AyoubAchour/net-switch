@@ -201,8 +201,8 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 				t.Fatalf("native pair limit was not established: %v", limit)
 			}
 			space := diagnoseUDPPortSpace(context.Background())
-			if cycles := udpRecoveryCycleCount(); !native && cycles > 0 {
-				nativeUDPRecoveryCycles(t, cycles, &apps, &engines, peer, config, source, space, pool)
+			if cycles := udpRecoveryCycleCount(); cycles > 0 {
+				nativeUDPRecoveryCycles(t, cycles, native, &apps, &engines, peer, config, source, space, pool)
 			}
 			memory, memoryErr := processMemory()
 			evidence, _ := json.Marshal(map[string]any{"readyUDP": native, "heldPairs": len(apps),

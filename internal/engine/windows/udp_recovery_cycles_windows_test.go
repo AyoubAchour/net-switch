@@ -80,7 +80,9 @@ func freeDynamicUDP4(t *testing.T, space *udpPortSpace) int {
 	return free
 }
 
-func nativeUDPRecoveryCycles(t *testing.T, cycles int, apps *[]*net.UDPConn, engines *[]*udpSocket, peer *net.UDPConn,
+// ready also puts each engine half through the engine's readiness path
+// (native duplicate plus event registration), as production sessions are.
+func nativeUDPRecoveryCycles(t *testing.T, cycles int, ready bool, apps *[]*net.UDPConn, engines *[]*udpSocket, peer *net.UDPConn,
 	config net.ListenConfig, source string, space *udpPortSpace, pool *udpReadiness) {
 	t.Helper()
 	destination := peer.LocalAddr().(*net.UDPAddr)
@@ -104,9 +106,14 @@ func nativeUDPRecoveryCycles(t *testing.T, cycles int, apps *[]*net.UDPConn, eng
 				conn.Close()
 				t.Fatal(err)
 			}
-			return func() {
-				*engines = append(*engines, &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535})
-			}, nil
+			engine := &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535}
+			if ready {
+				if _, err := engine.Watch(func() {}); err != nil {
+					engine.Close()
+					return nil, err
+				}
+			}
+			return func() { *engines = append(*engines, engine) }, nil
 		}
 		for _, half := range []string{"app connect", "engine bind"} {
 			keep, err := attempt(half)
@@ -158,7 +165,7 @@ func nativeUDPRecoveryCycles(t *testing.T, cycles int, apps *[]*net.UDPConn, eng
 		attempts += cycle.Reopen
 		refused += cycle.ReopenRefused
 	}
-	evidence, _ := json.Marshal(map[string]any{"cycles": results, "reopenAttempts": attempts, "reopenRefused": refused,
+	evidence, _ := json.Marshal(map[string]any{"readyUDP": ready, "cycles": results, "reopenAttempts": attempts, "reopenRefused": refused,
 		"source": source, "appBind": "wildcard port zero, connected", "engineBind": "specific source port zero, IP_UNICAST_IF"})
 	t.Logf("WINDOWS NATIVE UDP RECOVERY CYCLES %s", evidence)
 }
