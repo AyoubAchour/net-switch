@@ -17,18 +17,19 @@ import (
 )
 
 type udpAllocationFailure struct {
-	At           time.Time          `json:"at"`
-	Error        string             `json:"error"`
-	Code         uint32             `json:"code"`
-	Call         string             `json:"call"`
-	Line         string             `json:"line"`
-	Source       netip.Addr         `json:"source"`
-	System       map[string]any     `json:"system"`
-	Process      ProcessMemory      `json:"process"`
-	ProcessError string             `json:"processError,omitempty"`
-	NativeUDP    map[string]any     `json:"nativeUDPState"`
-	Handles      any                `json:"handleOwnership,omitempty"`
-	FixedPort    fixedUDPAllocation `json:"fixedPortProbe"`
+	At           time.Time            `json:"at"`
+	Error        string               `json:"error"`
+	Code         uint32               `json:"code"`
+	Call         string               `json:"call"`
+	Line         string               `json:"line"`
+	Source       netip.Addr           `json:"source"`
+	System       map[string]any       `json:"system"`
+	Process      ProcessMemory        `json:"process"`
+	ProcessError string               `json:"processError,omitempty"`
+	NativeUDP    map[string]any       `json:"nativeUDPState"`
+	Handles      any                  `json:"handleOwnership,omitempty"`
+	FixedPort    fixedUDPAllocation   `json:"fixedPortProbe"`
+	Reservation  *udpReservationProbe `json:"udpPortReservation"`
 }
 
 type fixedUDPAllocation struct {
@@ -81,7 +82,8 @@ func (d *Dialer) captureUDPAllocationFailure(line string, source netip.Addr, ada
 	}
 	// Only the first failing allocation takes these read-only snapshots.
 	// Other refusals do not wait for it; there is no bind retry or new socket.
-	snapshot.NativeUDP = nativeUDPState()
+	space := captureUDPPortSpace()
+	snapshot.NativeUDP, snapshot.Reservation = space.Native, space.Probe
 	snapshot.System = systemResources()
 	var memoryError error
 	snapshot.Process, memoryError = processMemory()
@@ -99,4 +101,7 @@ func (d *Dialer) captureUDPAllocationFailure(line string, source netip.Addr, ada
 		"nativeUniquePorts": snapshot.NativeUDP["uniquePorts"], "handleOwnership": snapshot.Handles,
 		"fixedPortProbe": snapshot.FixedPort})
 	log.Printf("WINDOWS UDP ALLOCATION FAILURE %s", value)
+	// Port settings are read in the background against the table captured
+	// above; the result is logged and replaces "pending" in stats.
+	d.reservations.start(space, runNetsh)
 }
