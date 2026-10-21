@@ -28,24 +28,80 @@ type closureRetry struct {
 	nextAt   int64
 }
 
-// All journal writes happen under applyMu, only when a revision or intent
-// changes. Memory remains authoritative if the recovery disk is unavailable;
-// stopping a lane switch would leave traffic on a dead or exhausted line.
-func (c *Core) persistJournal() {
+// Journal writes run under applyMu. The compatibility launcher retains its
+// milestone-one best-effort behavior. Services commit the complete desired
+// state before engine mutations and recover from that authoritative record.
+func (c *Core) persistJournal() error {
+	return c.writeJournal(nil)
+}
+
+// routingIntent is a change to the owner's routing choice. A fresh intent
+// also clears the retry backoff and the crash latch.
+type routingIntent struct{ wanted, fresh bool }
+
+// commitIntent writes the owner's routing choice before publishing it. The
+// supervisor reads wanted and the retry schedule without applyMu, so a choice
+// the journal refused must never appear in memory: it would start routing
+// once writes recover, after the owner was told the request failed. Callers
+// hold applyMu, which orders every journal write.
+func (c *Core) commitIntent(next routingIntent) error {
+	if err := c.writeJournal(&next); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.publishIntentLocked(next)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Core) publishIntentLocked(next routingIntent) {
+	c.wanted = next.wanted
+	if next.fresh {
+		c.retryAttempts, c.retryAt, c.failureTimes = 0, 0, nil
+	}
+}
+
+// writeJournal records the current state. A pending intent stands in for the
+// published one, so the record matches what commitIntent will publish.
+func (c *Core) writeJournal(pending *routingIntent) error {
 	if c.op.Journal == nil {
-		return
+		return nil
 	}
 	c.mu.Lock()
 	number := c.revision
 	intents := append([]closureIntent{}, c.closures...)
+	desired, instance := c.pendingRevision, c.pendingInstance
+	values := map[string]any{}
+	for k, v := range c.values {
+		values[k] = v
+	}
+	failures := append([]int64{}, c.failureTimes...)
+	wanted := c.wanted
+	if pending != nil {
+		wanted = pending.wanted
+		if pending.fresh {
+			failures = []int64{}
+		}
+	}
+	failureID := c.lastFailureID
 	c.mu.Unlock()
-	_, err := c.op.Journal.Update(map[string]any{
+	record := map[string]any{
 		"revision": number, "closures": intents,
 		"desired": settings.Delete, "settings": settings.Delete,
-	})
+	}
+	if c.op.ServiceMode {
+		record["desired"], record["settings"], record["engineInstanceId"], record["failures"] = desired, values, instance, failures
+		record["wanted"], record["bootId"] = wanted, c.op.BootID
+		record["lastFailureId"] = failureID
+	}
+	_, err := c.op.Journal.Update(record)
 	if err != nil {
+		if c.op.ServiceMode {
+			return fmt.Errorf("control journal was not committed; engine unchanged: %w", err)
+		}
 		c.log("CONTROL JOURNAL WRITE FAILED: %v; routing continues, crash recovery is incomplete", err)
 	}
+	return nil
 }
 
 func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine.Revision, error) {
@@ -60,9 +116,17 @@ func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine
 	if previous := c.pendingRevision; previous != nil && c.pendingInstance == snapshot.Instance &&
 		snapshot.AppliedRevision < previous.Number && previous.Hash == hash && reflect.DeepEqual(c.closures, intents) {
 		c.mu.Unlock()
+		if c.op.ServiceMode {
+			if err := c.persistJournal(); err != nil {
+				return engine.Revision{}, err
+			}
+		}
 		return *previous, nil
 	}
 	number := c.revision + 1
+	if c.op.ServiceMode {
+		number = max(c.revision, snapshot.AppliedRevision) + 1
+	}
 	c.mu.Unlock()
 	revision := engine.Revision{Number: number, Hash: hash, Policy: p}
 	applied := snapshot.AppliedRevision
@@ -73,11 +137,18 @@ func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine
 		}
 	}
 	c.mu.Lock()
+	oldNumber, oldPending, oldInstance, oldClosures := c.revision, c.pendingRevision, c.pendingInstance, c.closures
 	c.revision = number
 	c.pendingRevision, c.pendingInstance = &revision, snapshot.Instance
 	c.closures = append([]closureIntent{}, intents...)
 	c.mu.Unlock()
-	c.persistJournal()
+	if err := c.persistJournal(); err != nil {
+		c.mu.Lock()
+		c.revision, c.pendingRevision, c.pendingInstance, c.closures = oldNumber, oldPending, oldInstance, oldClosures
+		c.mu.Unlock()
+		return engine.Revision{}, err
+	}
+	c.checkpoint("control-after-desired-commit")
 	return revision, nil
 }
 
@@ -113,8 +184,7 @@ func (c *Core) completeIntent(id string) error {
 	delete(c.closureRetries, id)
 	delete(c.deferClosures, id)
 	c.mu.Unlock()
-	c.persistJournal()
-	return nil
+	return c.persistJournal()
 }
 func (c *Core) saveIntent(intent closureIntent) error {
 	c.mu.Lock()
@@ -130,8 +200,7 @@ func (c *Core) saveIntent(intent closureIntent) error {
 		c.closures = append(c.closures, intent)
 	}
 	c.mu.Unlock()
-	c.persistJournal()
-	return nil
+	return c.persistJournal()
 }
 
 func closureNeeded(p engine.Policy, line string) bool {
@@ -296,6 +365,7 @@ func (c *Core) finishClosures(ctx context.Context, gen uint64) error {
 			failures = append(failures, c.retryClosure(intent, err))
 			continue
 		}
+		c.checkpoint("control-after-close-ack")
 		if result.Closed > 0 && intent.Purpose != "reconnect" {
 			plural := ""
 			if result.Closed != 1 {

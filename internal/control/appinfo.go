@@ -9,6 +9,20 @@ import (
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 )
 
+// DesktopConnected reopens failed display-only reads after the owner's session
+// returns. Routing never depends on the availability of shell metadata.
+func (c *Core) DesktopConnected() {
+	// Do not wait for an in-flight desktop call here: the connecting desktop
+	// cannot poll/complete that call until this handshake is acknowledged.
+	c.installedSession.Add(1)
+	c.mu.Lock()
+	c.infoAttempted = map[string]bool{}
+	c.mu.Unlock()
+	if c.op.AutostartAllowed {
+		c.op.Background(func() { c.RefreshAutostart(c.ctx) })
+	}
+}
+
 func (c *Core) lookupInfo(paths []string) {
 	c.mu.Lock()
 	if c.ctx.Err() != nil {
@@ -68,7 +82,8 @@ func (c *Core) queueInfoLocked(paths []string) {
 }
 func (c *Core) InstalledApps(ctx context.Context) (any, error) {
 	c.installedMu.Lock()
-	if c.installedCached == nil || c.now() >= c.installedExpires {
+	session := c.installedSession.Load()
+	if c.installedCached == nil || c.now() >= c.installedExpires || c.installedCachedSession != session {
 		v, err := c.op.Platform.Call(ctx, "installed-apps", nil)
 		if err != nil {
 			c.installedMu.Unlock()
@@ -80,6 +95,7 @@ func (c *Core) InstalledApps(ctx context.Context) (any, error) {
 			return nil, fmt.Errorf("the installed-app worker returned no list")
 		}
 		c.installedCached = list
+		c.installedCachedSession = session
 		c.installedExpires = c.now() + 5*60000
 	}
 	b, err := js.Marshal(c.installedCached)

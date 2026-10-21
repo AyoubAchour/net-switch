@@ -235,7 +235,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Reproduce the x/sys wait-array stack move and prove the helper
         run: |
-          go test -count=1 -v -timeout=5m ./internal/winwait
+          go test -count=1 -v -timeout=5m ./internal/platform/winapi
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build and hash the uninstrumented release engine
         id: engine

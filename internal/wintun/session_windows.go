@@ -13,9 +13,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
-	"github.com/AyoubAchour/net-switch/internal/winwait"
 	"golang.org/x/sys/windows"
 )
 
@@ -495,7 +495,7 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 			handles = append(handles, s.cancelOwner.Handle("Wintun cancellation wait"))
 		}
 		s.readWaits.Add(1)
-		event, err := winwait.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		event, err := winapi.WaitForMultipleObjects(handles, false, windows.INFINITE)
 		if err != nil {
 			err = fmt.Errorf("Wintun read wait (wake %#x, read event %#x, registrar exit %#x, cancel %#x): %w",
 				handles[0], handles[1], waitRole(handles, exitIdx), waitRole(handles, cancelIdx), err)

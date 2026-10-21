@@ -27,7 +27,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/winwait"
+	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
 	"golang.org/x/sys/windows"
 )
 
@@ -380,7 +380,7 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 			handles = append(handles, cancelEvent)
 		}
 		s.readWaits.Add(1)
-		_, err := winwait.WaitForMultipleObjects(handles, false, windows.INFINITE)
+		_, err := winapi.WaitForMultipleObjects(handles, false, windows.INFINITE)
 		if err == nil {
 			s.readWakes.Add(1)
 		}

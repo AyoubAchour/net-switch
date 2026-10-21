@@ -127,7 +127,7 @@ func (s *Server) StopWithReason(ctx context.Context, reason string, finalize fun
 		c.terminal <- t // one terminal record per instance, one reserved slot
 	}
 	s.mu.Unlock()
-	defer s.finished()
+	defer s.finish()
 	if c == nil || !connected {
 		return cleanupErr, ErrNoController
 	}

@@ -379,15 +379,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Read the pinned Go version
-        id: pins
-        shell: pwsh
-        run: |
-          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
-          "go_version=$($pins.go.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ steps.pins.outputs.go_version }}
+          go-version-file: go.mod
           cache: false
       # The 1.0 trees by name: "./..." from the root would also walk dist/, where
       # the build scripts keep a whole Go toolchain.
@@ -505,14 +499,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Read the pinned Go version
-        id: pins
-        run: |
-          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
-          "go_version=$($pins.go.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ steps.pins.outputs.go_version }}
+          go-version-file: go.mod
           cache: false
       - name: Build and identify the release registrar executable
         run: |

@@ -20,9 +20,9 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
-	"github.com/AyoubAchour/net-switch/internal/winwait"
 	"golang.org/x/sys/windows"
 )
 
@@ -195,7 +195,7 @@ func (p *heapProfile) run() {
 	var sequence uint64
 	for {
 		p.waits = [2]windows.Handle{p.stop.Handle("heap stop wait"), p.request.Handle("heap request wait")}
-		result, err := winwait.WaitForMultipleObjects(p.waits[:], false, windows.INFINITE)
+		result, err := winapi.WaitForMultipleObjects(p.waits[:], false, windows.INFINITE)
 		if err != nil {
 			p.err = fmt.Errorf("heap capture wait (stop %#x, request %#x): %w", p.waits[0], p.waits[1], err)
 			return

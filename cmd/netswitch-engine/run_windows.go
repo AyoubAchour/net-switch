@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 
 	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
-	winplatform "github.com/AyoubAchour/net-switch/internal/platform/windows"
 	"github.com/AyoubAchour/net-switch/internal/wintun"
 	"golang.org/x/sys/windows"
 )
@@ -26,14 +25,8 @@ func run(args []string) error {
 	if len(args) > 0 && args[0] == "heap-capture" {
 		return winengine.CaptureHeapCommand(args[1:])
 	}
-	// Only this read operation is exposed by the standalone engine. Reuse the
-	// existing native worker protocol and isolation instead of a scripting host.
-	if len(args) == 3 && args[0] == "worker" && args[1] == "query" && args[2] == "tcp-port-configuration" {
-		if winplatform.Run(args[1:]) != 0 {
-			return errors.New("TCP port configuration worker failed")
-		}
-		return nil
-	}
+	// "worker" (including the restricted TCP port-configuration query) is
+	// dispatched by main to lifecycle.Worker, the same native worker.
 	if len(args) == 1 && args[0] == "firewall-state" {
 		state, err := winengine.FirewallState()
 		if err != nil {

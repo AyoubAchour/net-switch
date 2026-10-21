@@ -47,6 +47,8 @@ type Options struct {
 	ListFiles                 func(string) ([]string, error)
 	Verify                    func() error
 	StartProcess              func(string, string, string) (Child, error)
+	NormalizeProcessPath      func(string) string
+	PrepareConfig             func([]byte) ([]byte, error)
 	Crash                     *crashnet.Net
 }
 type Child interface {
@@ -191,6 +193,13 @@ func (a *Adapter) status(status string, err error) {
 	}
 }
 func (a *Adapter) Fail(err error) { a.status("error", err) }
+
+// Health checks the forwarding process independently of expensive flow
+// snapshots. The service host owns the consecutive-failure window.
+func (a *Adapter) Health(ctx context.Context) error {
+	_, _, err := a.request(ctx, "GET", "/version", nil)
+	return err
+}
 func (a *Adapter) ForgetLane(id string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -275,6 +284,9 @@ func (a *Adapter) Connections(ctx context.Context) ([]engine.Connection, error) 
 		var c apps.Connection
 		if err := json.Unmarshal(raw, &c); err != nil {
 			return nil, err
+		}
+		if a.o.NormalizeProcessPath != nil {
+			c.Metadata.ProcessPath = a.o.NormalizeProcessPath(c.Metadata.ProcessPath)
 		}
 		var meta struct {
 			Metadata struct {
@@ -632,7 +644,7 @@ func (a *Adapter) verify() error {
 		}
 	}
 	required := []string{filepath.Base(a.o.Executable)}
-	if arch != "arm64" {
+	if runtime.GOOS == "windows" && arch != "arm64" {
 		required = append(required, "libcronet.dll")
 	}
 	for _, name := range required {
@@ -785,6 +797,9 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 		}
 	}
 	b, err := ConfigBytes(ConfigOptions{a.o.Mode, p.Lines, apiPort, secret, proxyPort, a.o.DataDir, p.IPv6})
+	if err == nil && a.o.PrepareConfig != nil {
+		b, err = a.o.PrepareConfig(b)
+	}
 	if err != nil {
 		return err
 	}

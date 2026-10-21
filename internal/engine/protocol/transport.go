@@ -13,7 +13,7 @@ type connection struct {
 	events          chan Event
 	replies         chan Reply
 	slots           chan struct{}
-	finished        func()
+	stopped         func()
 	terminal        chan *terminalDelivery
 	done            chan struct{}
 	cancel          context.CancelFunc
@@ -24,6 +24,7 @@ type connection struct {
 // Serve owns the transport until EOF or cancellation. Its reader and writer
 // are independent of forwarding; at most 16 replies may be outstanding.
 func (s *Server) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
+	defer s.finishStopped()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	work, stopWork := context.WithCancel(ctx)
@@ -31,7 +32,7 @@ func (s *Server) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 	defer rw.Close()
 	stop := context.AfterFunc(ctx, func() { rw.Close() })
 	defer stop()
-	c := &connection{events: make(chan Event, 64), replies: make(chan Reply, Outstanding), slots: make(chan struct{}, Outstanding), finished: s.finished,
+	c := &connection{events: make(chan Event, 64), replies: make(chan Reply, Outstanding), slots: make(chan struct{}, Outstanding), stopped: s.finish,
 		terminal: make(chan *terminalDelivery, 1), done: make(chan struct{}), cancel: cancel, stopWork: stopWork,
 		terminalStarted: make(chan struct{})}
 	defer close(c.done)
@@ -190,8 +191,8 @@ func (c *connection) write(ctx context.Context, w io.Writer) error {
 		}
 		if reply {
 			<-c.slots
-			if value.(Reply).terminal && c.finished != nil {
-				c.finished()
+			if value.(Reply).stop && c.stopped != nil {
+				c.stopped()
 			}
 		}
 	}

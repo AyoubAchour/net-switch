@@ -1,19 +1,17 @@
-// Command netswitchctl installs, migrates, recovers and diagnoses Net Switch
-// 1.0. Only "version" works so far; the rest arrives with the 1.0 milestones.
+// Command netswitchctl manages 1.0 services, enrollment and recovery.
+// The 0.3.x migration transaction belongs to milestone five.
 package main
 
 import (
 	"fmt"
 	"os"
 
-	"github.com/AyoubAchour/net-switch/internal/buildinfo"
+	"github.com/AyoubAchour/net-switch/internal/lifecycle"
 )
 
 func main() {
-	if len(os.Args) == 2 && os.Args[1] == "version" {
-		fmt.Println("netswitchctl", buildinfo.String())
-		return
+	if err := lifecycle.Ctl(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
-	fmt.Fprintln(os.Stderr, "usage: netswitchctl version")
-	os.Exit(2)
 }

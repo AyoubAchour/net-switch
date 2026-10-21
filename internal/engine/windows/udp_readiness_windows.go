@@ -11,9 +11,9 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
-	"github.com/AyoubAchour/net-switch/internal/winwait"
 	"golang.org/x/sys/windows"
 )
 
@@ -255,7 +255,7 @@ func (p *udpReadiness) run(worker int) {
 		for i := range perWaiter {
 			handles[i+1] = events[(cursor+i)%perWaiter]
 		}
-		result, err := winwait.WaitForMultipleObjects(handles[:], false, windows.INFINITE)
+		result, err := winapi.WaitForMultipleObjects(handles[:], false, windows.INFINITE)
 		if err != nil {
 			p.fail(fmt.Errorf("UDP readiness waiter %d wait (stop %#x and %d shard events %#x): %w", worker, handles[0], perWaiter, handles[1:], err))
 			return

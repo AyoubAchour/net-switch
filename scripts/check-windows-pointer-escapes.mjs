@@ -53,8 +53,8 @@ const sites = [
   ['completion-mode status block', /readiness_modes_windows\.go:\d+:\d+: moved to heap: status$/, modes],
   ['Go file/socket OVERLAPPED operation', /fd_windows\.go:\d+:\d+: new\(operation\) escapes to heap$/],
   ['Go file/socket pinned buffers', /fd_windows\.go:\d+:\d+: leaking param content: pinPtrs$/],
-  // Wait arrays live in heap owners and go through internal/winwait, which
-  // converts the address only inside the non-splitting SyscallN call.
+  // Wait arrays live in heap owners and go through internal/platform/winapi,
+  // which converts the address only inside the non-splitting SyscallN call.
   ['Wintun read wait array owner', /session_windows\.go:\d+:\d+: &Session\{.*escapes to heap$/, session],
   ['UDP readiness wait arrays owner', /udp_readiness_windows\.go:\d+:\d+: &udpReadiness\{.*escapes to heap$/, udpReady],
   // Old-path evidence, not a heap proof: x/sys leaves a caller's handle array
@@ -71,12 +71,12 @@ const listed = spawnSync('git', ['grep', '-n', '-F', 'windows.WaitForMultipleObj
   { encoding: 'utf8', windowsHide: true });
 assert(listed.status === 0 || listed.status === 1, listed.stderr);
 const unsafeWaits = listed.stdout.split(/\r?\n/).filter(Boolean)
-  .filter((line) => !line.startsWith('internal/winwait/wait_windows_test.go:'));
-assert.deepEqual(unsafeWaits, [], 'Use internal/winwait for handle-array waits');
-const helperSource = readFileSync('internal/winwait/wait_windows.go', 'utf8');
+  .filter((line) => !line.startsWith('internal/platform/winapi/stack_move_windows_test.go:'));
+assert.deepEqual(unsafeWaits, [], 'Use internal/platform/winapi for handle-array waits');
+const helperSource = readFileSync('internal/platform/winapi/winapi_windows.go', 'utf8');
 assert.match(helperSource, /syscall\.SyscallN\(addr, uintptr\(len\(handles\)\), uintptr\(unsafe\.Pointer\(&handles\[0\]\)\), all, uintptr\(milliseconds\)\)/,
-  'winwait must convert the array address inside the SyscallN argument list');
-assert.equal(helperSource.match(/unsafe\.Pointer/g)?.length, 1, 'winwait must not convert the array address anywhere else');
+  'winapi must convert the array address inside the SyscallN argument list');
+assert.equal(helperSource.match(/&handles\[0\]/g)?.length, 1, 'winapi must not take the array address anywhere else');
 
 for (const tags of ['', 'netswitch_handlecheck']) {
   const build = spawnSync('go', ['build',

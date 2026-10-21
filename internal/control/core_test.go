@@ -30,6 +30,7 @@ type memoryFiles struct {
 	mu            sync.Mutex
 	data          map[string][]byte
 	fail          bool
+	failPrefix    string
 	writes        []recordedWrite
 	logs          []string
 	removes       []string
@@ -38,6 +39,7 @@ type memoryFiles struct {
 	events        []any
 	order         []string
 	syncs         []string
+	beforeWrite   func(path string)
 }
 
 func (f *memoryFiles) recordOrder(kind string) {
@@ -67,9 +69,12 @@ func (f *memoryFiles) ReadFile(p string) ([]byte, error) {
 	return append([]byte{}, b...), nil
 }
 func (f *memoryFiles) WriteFile(p string, b []byte, _ fs.FileMode) error {
+	if f.beforeWrite != nil {
+		f.beforeWrite(p)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.fail {
+	if f.fail || f.failPrefix != "" && strings.HasPrefix(p, f.failPrefix) {
 		return errors.New("disk full")
 	}
 	f.data[p] = append([]byte{}, b...)

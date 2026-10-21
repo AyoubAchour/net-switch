@@ -27,12 +27,16 @@ type Request struct {
 	Line          string           `json:"line,omitempty"`
 	Operator      string           `json:"operator,omitempty"`
 	App           string           `json:"app,omitempty"`
+	// Adapter is the temporary milestone-two compatibility payload. It is
+	// accepted only by a runtime advertising singbox-adapter-v1; the lease and
+	// fencing are identical to the native engine protocol.
+	Adapter json.RawMessage `json:"adapter,omitempty"`
 }
 type Reply struct {
-	ID       string `json:"id"`
-	Result   any    `json:"result,omitempty"`
-	Error    string `json:"error,omitempty"`
-	terminal bool
+	ID     string `json:"id"`
+	Result any    `json:"result,omitempty"`
+	Error  string `json:"error,omitempty"`
+	stop   bool
 }
 type Event = flowapi.Event
 
@@ -50,7 +54,7 @@ func Decode(b []byte) (Request, error) {
 	if d.Decode(&extra) != io.EOF {
 		return r, errors.New("trailing JSON")
 	}
-	if r.ID == "" || len(r.ID) > 128 || len(r.OpID) > 128 || len(r.App) > 512 || len(r.Line) > 64 || len(r.Operator) > 256 {
+	if r.ID == "" || len(r.ID) > 128 || len(r.OpID) > 128 || len(r.Cursor) > 128 || len(r.App) > 512 || len(r.Line) > 64 || len(r.Operator) > 256 {
 		return r, errors.New("invalid request fields")
 	}
 	return r, nil
