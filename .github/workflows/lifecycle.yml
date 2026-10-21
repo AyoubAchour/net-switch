@@ -1,11 +1,14 @@
 name: Service lifecycle
 
+# Every input of the real-service tests: the Go packages they build or import
+# (including test packages and their own imports), the embedded UI and version,
+# the sing-box pins and download list, and the Windows preparation script.
 on:
   push:
     branches: [main]
-    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/topo/**', 'tests/windows/testisp/**', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
+    paths: ['internal/**', 'cmd/**', 'assets.go', 'package.json', 'ui/**', 'tests/lifecycle/**', 'tests/linux/topo/**', 'tests/linux/inet/**', 'tests/linux/engine/**', 'tests/linux/harness/**', 'tests/linux/netns/**', 'tests/linux/wire/**', 'tests/linux/sing-box-linux.json', 'tests/windows/testisp/**', 'tests/windows/socket/**', 'packaging/versions.json', 'scripts/build-common.ps1', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
   pull_request:
-    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/topo/**', 'tests/windows/testisp/**', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
+    paths: ['internal/**', 'cmd/**', 'assets.go', 'package.json', 'ui/**', 'tests/lifecycle/**', 'tests/linux/topo/**', 'tests/linux/inet/**', 'tests/linux/engine/**', 'tests/linux/harness/**', 'tests/linux/netns/**', 'tests/linux/wire/**', 'tests/linux/sing-box-linux.json', 'tests/windows/testisp/**', 'tests/windows/socket/**', 'packaging/versions.json', 'scripts/build-common.ps1', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
   workflow_dispatch:
 
 permissions:
