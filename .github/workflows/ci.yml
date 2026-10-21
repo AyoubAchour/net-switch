@@ -5,7 +5,9 @@ on:
   # as well doubled every job and left the shared runner queue hours long.
   push:
     branches: [main]
+  # Label changes run it again, so adding or removing ci:full takes effect.
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
   workflow_dispatch:
     inputs:
       control_security:
@@ -28,6 +30,42 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Picks the jobs a pull request needs from its changed files
+  # (.github/ci/changes.mjs); pushes, manual runs and the ci:full label get
+  # every group. A gated job runs unless this job succeeded and answered false
+  # for its group, so a failure here costs runner time, never coverage.
+  changes:
+    name: Changed files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Every group, so this job is the same in each workflow that has one.
+    outputs:
+      node: ${{ steps.filter.outputs.node }}
+      helper: ${{ steps.filter.outputs.helper }}
+      installer: ${{ steps.filter.outputs.installer }}
+      legacy_windows: ${{ steps.filter.outputs.legacy_windows }}
+      testisp: ${{ steps.filter.outputs.testisp }}
+      wintun: ${{ steps.filter.outputs.wintun }}
+      go_windows: ${{ steps.filter.outputs.go_windows }}
+      go_linux: ${{ steps.filter.outputs.go_linux }}
+      acceptance: ${{ steps.filter.outputs.acceptance }}
+      control: ${{ steps.filter.outputs.control }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # The merge base and its file list need the whole history.
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Test the changed-file classifier
+        run: node --test .github/ci/changes.test.mjs
+      - name: Choose jobs from the changed files
+        id: filter
+        run: node .github/ci/changes.mjs
+
   control-security:
     name: Control security / Windows x64
     if: github.event_name == 'workflow_dispatch' && inputs.control_security
@@ -110,7 +148,8 @@ jobs:
           retention-days: 14
 
   windows-acceptance:
-    if: github.event_name != 'workflow_dispatch'
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.legacy_windows != 'false') }}
     name: Windows acceptance / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
@@ -186,7 +225,8 @@ jobs:
           retention-days: 14
 
   testisp:
-    if: github.event_name != 'workflow_dispatch'
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.testisp != 'false') }}
     name: TestISP proof / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -241,7 +281,8 @@ jobs:
           retention-days: 14
 
   engine:
-    if: github.event_name != 'workflow_dispatch'
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.legacy_windows != 'false') }}
     name: Windows ${{ matrix.arch }} / engine configs and TUN
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -319,8 +360,11 @@ jobs:
 
   # Net Switch 1.0, in progress: the Go code in the root module (cmd/, internal/).
   # Nothing here ships until 1.0; 0.3.x keeps building from the jobs below.
-  go1:
-    if: github.event_name != 'workflow_dispatch'
+  # Windows and Linux are separate jobs, so a change can skip one of them; both
+  # run the same steps.
+  go1-windows:
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go_windows != 'false') }}
     name: Go 1.0 / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -332,15 +376,11 @@ jobs:
             runner: windows-latest
           - name: Windows ARM64
             runner: windows-11-arm
-          - name: Linux x64
-            runner: ubuntu-24.04
-          - name: Linux ARM64
-            runner: ubuntu-24.04-arm
-    env:
+    env: &go1-env
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
       GOFLAGS: -mod=vendor -p=2
-    steps:
+    steps: &go1-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -439,8 +479,26 @@ jobs:
           go test -run '^$' -fuzz '^FuzzUDPHandler$' -fuzztime 30s -parallel 2 ./internal/engine/udp
           go test -run '^$' -fuzz '^FuzzProtocol$' -fuzztime 30s -parallel 2 ./internal/engine/protocol
 
+  go1-linux:
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go_linux != 'false') }}
+    name: Go 1.0 / ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-24.04
+          - name: Linux ARM64
+            runner: ubuntu-24.04-arm
+    env: *go1-env
+    steps: *go1-steps
+
   wintun:
-    if: github.event_name != 'workflow_dispatch'
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.wintun != 'false') }}
     name: Wintun session / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
@@ -516,7 +574,8 @@ jobs:
           ./bin/wintun-race.test.exe '-test.v' '-test.timeout=5m' '-test.run=TestRing|TestWintun(RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|Lifetime)$'
 
   linux:
-    if: github.event_name != 'workflow_dispatch'
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
     name: Linux / Node ${{ matrix.node }} (shared code)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -535,7 +594,8 @@ jobs:
       - run: npm test
 
   linux-helper:
-    if: github.event_name != 'workflow_dispatch'
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.helper != 'false') }}
     name: Linux / helper build and shared tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -561,54 +621,88 @@ jobs:
       - run: go test ./...
       - run: go build ./...
 
-  test:
-    if: github.event_name != 'workflow_dispatch'
-    name: Windows / Node ${{ matrix.node }}
+  # Two plain jobs, not a matrix: their names are required checks. A matrix job
+  # skipped by its condition reports its name with the matrix expression still
+  # in it, and a fixed name on a matrix job gets the matrix values appended.
+  test-node-22:
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
+    name: Windows / Node 22
     runs-on: windows-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ['22', '24']
-    defaults:
+    defaults: &windows-node-defaults
       run:
         # The app and C# tray tests must work under Windows PowerShell 5.1.
         shell: powershell
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - &windows-node-checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: ${{ matrix.node }}
+          node-version: '22'
           package-manager-cache: false
-      - name: Test download retries and hash checks (PowerShell 5.1)
+      - &windows-node-download-ps51
+        name: Test download retries and hash checks (PowerShell 5.1)
         run: ./scripts/test-build-download.ps1
-      - name: Test download retries and hash checks (PowerShell 7)
+      - &windows-node-download-ps7
+        name: Test download retries and hash checks (PowerShell 7)
         shell: pwsh
         run: ./scripts/test-build-download.ps1
-      - uses: ./.github/actions/cache-pinned-archive
+      - &windows-node-go-archive
+        uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: go
-      - uses: ./.github/actions/cache-pinned-archive
+      - &windows-node-wintun-archive
+        uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: wintun
-      - name: Build and test the native helper with the pinned Go
+      - &windows-node-helper
+        name: Build and test the native helper with the pinned Go
         run: ./scripts/build-helper.ps1
-      - name: Build the tray program with the C# compiler that comes with Windows
+      - &windows-node-tray
+        name: Build the tray program with the C# compiler that comes with Windows
         run: ./scripts/build-tray.ps1
-      - name: Test app, tray program and C# tray with Windows PowerShell 5.1
+      - &windows-node-tests
+        name: Test app, tray program and C# tray with Windows PowerShell 5.1
         run: npm test
-      - name: Route real connections through the engine, per app and combined
+      - &windows-node-routing
+        name: Route real connections through the engine, per app and combined
         run: |
           ./scripts/fetch-engine.ps1
           node scripts/e2e-routing.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify pinned downloads and stage the installer payload
+      - &windows-node-payload
+        name: Verify pinned downloads and stage the installer payload
         run: ./scripts/build-release.ps1 -SkipInstaller
 
+  test-node-24:
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
+    name: Windows / Node 24
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults: *windows-node-defaults
+    steps:
+      - *windows-node-checkout
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - *windows-node-download-ps51
+      - *windows-node-download-ps7
+      - *windows-node-go-archive
+      - *windows-node-wintun-archive
+      - *windows-node-helper
+      - *windows-node-tray
+      - *windows-node-tests
+      - *windows-node-routing
+      - *windows-node-payload
+
   installer:
-    if: github.event_name != 'workflow_dispatch'
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.installer != 'false') }}
     name: Installer smoke test
     runs-on: windows-latest
     timeout-minutes: 30
@@ -633,7 +727,8 @@ jobs:
           ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-x64.exe"
 
   arm64:
-    if: github.event_name != 'workflow_dispatch'
+    needs: changes
+    if: ${{ github.event_name != 'workflow_dispatch' && !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.node != 'false') }}
     name: Windows ARM64 / tests and installer
     runs-on: windows-11-arm
     timeout-minutes: 30
