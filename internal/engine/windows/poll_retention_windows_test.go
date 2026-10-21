@@ -13,22 +13,13 @@ type pollCallbackLifetime struct{ bytes [1024]byte }
 
 func closeCallbackPair(t *testing.T, pool *readiness, polled bool) <-chan struct{} {
 	t.Helper()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	conn, err := net.Dial("tcp4", listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	peer, err := listener.Accept()
-	if err != nil {
-		conn.Close()
-		t.Fatal(err)
-	}
+	c, peer := dialNative(t, pool, listener)
 	defer peer.Close()
-	c := &readySocket{blocking: conn.(*net.TCPConn), pool: pool, local: conn.LocalAddr(), remote: conn.RemoteAddr()}
 	defer c.Close()
 	collected := make(chan struct{})
 	lifetime := new(pollCallbackLifetime)

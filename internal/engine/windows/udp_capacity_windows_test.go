@@ -7,7 +7,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"testing"
@@ -62,6 +64,66 @@ func udpPairBinding(t *testing.T) (uint32, string, net.IP) {
 	return index, source, peerSource
 }
 
+// udpEngineHalves opens the engine half of each pair, bound to the line's
+// source with the line's options: plain Go sockets for the native control, or
+// the engine's own native constructor plus readiness registration, as
+// production sessions are.
+type udpEngineHalves struct {
+	ready  bool
+	line   Adapter
+	source netip.Addr
+	config net.ListenConfig
+	pool   *udpReadiness
+}
+
+func newUDPEngineHalves(ready bool, index uint32, source string, pool *udpReadiness) udpEngineHalves {
+	line := Adapter{Index4: index}
+	return udpEngineHalves{ready: ready, line: line, source: netip.MustParseAddr(source),
+		config: net.ListenConfig{Control: bindSocket(line, false)}, pool: pool}
+}
+
+func (h udpEngineHalves) openGo() (*net.UDPConn, error) {
+	packet, err := h.config.ListenPacket(context.Background(), "udp4", netip.AddrPortFrom(h.source, 0).String())
+	if err != nil {
+		return nil, err
+	}
+	return packet.(*net.UDPConn), nil
+}
+
+func (h udpEngineHalves) openReady(wake func()) (*udpSocket, *udpWatch, error) {
+	s, err := openUDP(h.line, netip.AddrPortFrom(h.source, 0), h.pool)
+	if err != nil {
+		return nil, nil, err
+	}
+	watch, err := s.Watch(wake)
+	if err != nil {
+		return nil, nil, errors.Join(err, s.Close())
+	}
+	return s, watch.(*udpWatch), nil
+}
+
+func (h udpEngineHalves) open() (io.Closer, error) {
+	if h.ready {
+		s, _, err := h.openReady(func() {})
+		if err != nil {
+			return nil, err
+		}
+		return s, nil
+	}
+	conn, err := h.openGo()
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (h udpEngineHalves) kind() string {
+	if h.ready {
+		return "engine native constructor, Watch"
+	}
+	return "plain Go socket"
+}
+
 func TestNativeUDPPairedCapacity(t *testing.T) {
 	hosted(t)
 	if os.Getenv("NETSWITCH_PORT_GATE") != "1" {
@@ -85,7 +147,7 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 				}
 			}()
 			var apps []*net.UDPConn
-			var engines []*udpSocket
+			var engines []io.Closer
 			defer func() {
 				for _, app := range apps {
 					app.Close()
@@ -95,7 +157,7 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 				}
 			}()
 			wake := make(chan struct{}, 1)
-			config := net.ListenConfig{Control: bindSocket(Adapter{Index4: index}, false)}
+			halves := newUDPEngineHalves(native, index, source, pool)
 			ports := map[uint16]bool{}
 			payload := []byte("native UDP pairs")
 			var received [64]byte
@@ -119,49 +181,62 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 					limit, phase = err, "app connect"
 					break
 				}
-				packet, err := config.ListenPacket(context.Background(), "udp4", net.JoinHostPort(source, "0"))
+				var conn *net.UDPConn
+				var engine *udpSocket
+				var watch *udpWatch
+				var local netip.AddrPort
+				if native {
+					engine, watch, err = halves.openReady(func() { wake <- struct{}{} })
+					if err == nil {
+						local = engine.LocalAddr()
+					}
+				} else if conn, err = halves.openGo(); err == nil {
+					local = conn.LocalAddr().(*net.UDPAddr).AddrPort()
+				}
 				if err != nil {
 					app.Close()
 					limit, phase = err, "engine bind"
 					break
 				}
-				conn := packet.(*net.UDPConn)
-				raw, err := conn.SyscallConn()
-				if err != nil {
-					app.Close()
-					conn.Close()
-					t.Fatal(err)
-				}
 				if len(apps) == 0 {
-					var optionErr error
-					err := raw.Control(func(fd uintptr) {
+					read := func(h windows.Handle) error {
 						for name, option := range map[string]int{"SO_REUSEADDR": windows.SO_REUSEADDR, "SO_EXCLUSIVEADDRUSE": ^windows.SO_REUSEADDR} {
-							var value int
-							value, optionErr = windows.GetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, option)
-							if optionErr != nil {
-								return
+							value, err := windows.GetsockoptInt(h, windows.SOL_SOCKET, option)
+							if err != nil {
+								return err
 							}
 							options[name] = value
 						}
-					})
-					if err != nil || optionErr != nil {
+						return nil
+					}
+					var optionErr error
+					if native {
+						optionErr = read(engine.handle.Handle("UDP pair options"))
+					} else if raw, err := conn.SyscallConn(); err != nil {
+						optionErr = err
+					} else {
+						var readErr error
+						controlErr := raw.Control(func(fd uintptr) { readErr = read(windows.Handle(fd)) })
+						optionErr = errors.Join(controlErr, readErr)
+					}
+					if optionErr != nil {
 						app.Close()
-						conn.Close()
-						t.Fatalf("matched native socket options: %v %v", err, optionErr)
+						if native {
+							engine.Close()
+						} else {
+							conn.Close()
+						}
+						t.Fatalf("matched native socket options: %v", optionErr)
 					}
 				}
-				engine := &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535}
-				apps, engines = append(apps, app), append(engines, engine)
-				ports[uint16(app.LocalAddr().(*net.UDPAddr).Port)] = true
-				ports[engine.local.Port()] = true
-				var watch *udpWatch
+				apps = append(apps, app)
 				if native {
-					value, err := engine.Watch(func() { wake <- struct{}{} })
-					if err != nil {
-						t.Fatal(err)
-					}
-					watch = value.(*udpWatch)
+					engines = append(engines, engine)
+				} else {
+					engines = append(engines, conn)
 				}
+				ports[uint16(app.LocalAddr().(*net.UDPAddr).Port)] = true
+				ports[local.Port()] = true
 				if _, err := app.Write(payload); err != nil {
 					t.Fatal(err)
 				}
@@ -178,7 +253,7 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 					if _, err := engine.TryWriteTo(payload, destination, false); err != nil {
 						t.Fatal(err)
 					}
-				} else if _, err := engine.WriteTo(payload, destination, false); err != nil {
+				} else if _, err := conn.WriteToUDPAddrPort(payload, destination); err != nil {
 					t.Fatal(err)
 				}
 				echo()
@@ -190,9 +265,9 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 						t.Fatalf("native engine receive: %d %s %v", n, source, err)
 					}
 				} else {
-					engine.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-					n, source, err := engine.ReadFrom(received[:])
-					if err != nil || source != destination || !bytes.Equal(received[:n], payload) {
+					conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+					n, source, err := conn.ReadFromUDPAddrPort(received[:])
+					if err != nil || unmapped(source) != destination || !bytes.Equal(received[:n], payload) {
 						t.Fatalf("Go engine receive: %d %s %v", n, source, err)
 					}
 				}
@@ -202,12 +277,12 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 			}
 			space := diagnoseUDPPortSpace(context.Background())
 			if cycles := udpRecoveryCycleCount(); cycles > 0 {
-				nativeUDPRecoveryCycles(t, cycles, native, &apps, &engines, peer, config, source, space, pool)
+				nativeUDPRecoveryCycles(t, cycles, halves, &apps, &engines, peer, source, space)
 				if !native {
 					// The engine's gated cycle runs with the TCP corner held; this
 					// is the native control for that condition.
 					held, release := holdNativeTCPLoad(t)
-					nativeUDPRecoveryCyclesWith(t, cycles, false, held, &apps, &engines, peer, config, source, space, pool)
+					nativeUDPRecoveryCyclesWith(t, cycles, halves, held, &apps, &engines, peer, source, space)
 					release()
 				}
 			}
@@ -216,9 +291,9 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 				"uniquePorts": len(ports), "echoedDatagrams": len(apps) * 2, "phase": phase,
 				"family": "ipv4", "source": source, "interfaceIndex": index,
 				"appBind": "wildcard port zero, connected", "engineBind": "specific source port zero, IP_UNICAST_IF",
-				"engineOptions": options,
-				"portSpace":     space.Probe,
-				"error":         limit.Error(), "processMemory": memory, "memoryError": errorText(memoryErr)})
+				"engineSocket": halves.kind(), "engineOptions": options,
+				"portSpace": space.Probe,
+				"error":     limit.Error(), "processMemory": memory, "memoryError": errorText(memoryErr)})
 			t.Logf("WINDOWS NATIVE UDP PAIRED CAPACITY %s", evidence)
 		})
 	}

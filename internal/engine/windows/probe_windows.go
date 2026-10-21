@@ -73,7 +73,7 @@ func (d *Dialer) Probe(ctx context.Context, line, operator string) (platform.Pro
 		if !address.IsValid() {
 			address = netip.MustParseAddrPort(host + ":443")
 		}
-		c, err := d.DialTCP(ctx, line, address)
+		c, err := d.dialProbe(ctx, line, address)
 		if err != nil {
 			return result(false, err)
 		}
@@ -86,7 +86,7 @@ func (d *Dialer) Probe(ctx context.Context, line, operator string) (platform.Pro
 			if err != nil {
 				return nil, err
 			}
-			return d.DialTCP(ctx, line, dst)
+			return d.dialProbe(ctx, line, dst)
 		}}
 	defer transport.CloseIdleConnections()
 	client := http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

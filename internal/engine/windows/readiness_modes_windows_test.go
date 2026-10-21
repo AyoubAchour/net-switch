@@ -7,7 +7,6 @@ import (
 	"testing"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 
@@ -83,51 +82,6 @@ func TestTCPCompletionProviderPolicy(t *testing.T) {
 			}
 			if tc.probe != nil && !errors.Is(policy.err, tc.probe) || tc.query != nil && !errors.Is(policy.err, tc.query) {
 				t.Fatalf("query diagnostic lost its cause: %v", policy.err)
-			}
-		})
-	}
-}
-
-func TestTCPCompletionModeQueryRejectsUnknown(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		mode   uint32
-		bytes  uintptr
-		status windows.NTStatus
-		err    error
-		valid  bool
-	}{
-		{name: "normal", bytes: 4, valid: true},
-		{name: "inherited-skip", mode: windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS, bytes: 4, valid: true},
-		{name: "unsupported", err: windows.STATUS_INVALID_INFO_CLASS},
-		{name: "short-result", bytes: 3},
-		{name: "oversize-result", bytes: 8},
-		{name: "status-failure", bytes: 4, status: windows.STATUS_INVALID_HANDLE},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			modes, err := querySocketCompletionModes(123, func(h windows.Handle, status *windows.IO_STATUS_BLOCK, out *byte, size, class uint32) error {
-				if h != 123 || size != 4 || class != 41 {
-					t.Fatalf("wrong native query contract: handle=%d size=%d class=%d", h, size, class)
-				}
-				*(*uint32)(unsafe.Pointer(out)) = tc.mode
-				status.Information, status.Status = tc.bytes, tc.status
-				return tc.err
-			})
-			if tc.valid {
-				if err != nil || modes != tc.mode {
-					t.Fatalf("valid query: modes=%#x err=%v", modes, err)
-				}
-				return
-			}
-			if err == nil || modes != 0 {
-				t.Fatalf("unknown mode accepted: modes=%#x err=%v", modes, err)
-			}
-			// No native calls are permitted after an unknown mode. Even an
-			// uninitialized pool/owner is safe: watch must return at the query.
-			p := &readiness{queryModes: func(winhandle.Owner) (uint32, error) { return 0, err }}
-			w, watchErr := p.watch(winhandle.Owner{}, 0, func() { t.Error("unknown-mode callback") })
-			if w != nil || !errors.Is(watchErr, err) || p.next != 0 || p.immediate.Load() != 0 || p.submitted.Load() != 0 {
-				t.Fatalf("unknown mode entered registration or receive: watch=%v error=%v", w, watchErr)
 			}
 		})
 	}

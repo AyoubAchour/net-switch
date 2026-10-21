@@ -2,7 +2,7 @@ name: Windows handle diagnostics
 
 on:
   push:
-    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section, engine/windows-platform-udp-latency-arm64, engine/windows-platform-pointers-arm64, engine/windows-platform-terminal-arm64, engine/windows-platform-completions-arm64, engine/windows-platform-registrar, engine/windows-platform-closetrace, engine/windows-platform-udpready]
+    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-section, engine/windows-platform-udp-latency-arm64, engine/windows-platform-pointers-arm64, engine/windows-platform-terminal-arm64, engine/windows-platform-completions-arm64, engine/windows-platform-registrar, engine/windows-platform-udpready]
   workflow_dispatch:
     inputs:
       arch:
@@ -19,7 +19,7 @@ jobs:
     if: ${{ !endsWith(github.ref, '-section') && !contains(github.ref, '-udp-latency') && !contains(github.ref, 'windows-platform-registrar') }}
     name: Native handle diagnostics / ${{ (inputs.arch != 'x64' && (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64'))) && 'ARM64' || 'x64' }}
     runs-on: ${{ (inputs.arch != 'x64' && (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64'))) && 'windows-11-arm' || 'windows-latest' }}
-    timeout-minutes: ${{ (endsWith(github.ref, '-closetrace') || endsWith(github.ref, '-udpready')) && 50 || 15 }}
+    timeout-minutes: ${{ endsWith(github.ref, '-udpready') && 50 || 15 }}
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
@@ -38,7 +38,7 @@ jobs:
           go-version-file: go.mod
           cache: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: ${{ contains(github.ref, '-socket-trace') || contains(github.ref, '-pointers') || contains(github.ref, '-terminal') || contains(github.ref, '-completions') }}
+        if: ${{ contains(github.ref, '-pointers') || contains(github.ref, '-terminal') || contains(github.ref, '-completions') }}
         with:
           node-version: '24.21.0'
           package-manager-cache: false
@@ -49,13 +49,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -count=1 -v -timeout=2m -run '^Test(NativeEchoReplyPayload|PipeCloseWakesAccept|PipeDisconnectedBeforeAcceptIsRetryable)$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify ordinary and inherited TCP completion ownership
+      - name: Verify native TCP connect and completion ownership
         if: ${{ !cancelled() && contains(github.ref, '-completions') }}
         run: |
-          go test -count=1 -v -timeout=3m -run '^TestTCP(Readiness|Completion)' ./internal/engine/windows
+          go test -count=1 -v -timeout=3m -run '^Test(TCP(Readiness|Completion)|NativeTCP)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if ('${{ runner.arch }}' -eq 'X64') {
-            go test -race -count=1 -v -timeout=3m -run '^TestTCP(Readiness|Completion)' ./internal/engine/windows
+            go test -race -count=1 -v -timeout=3m -run '^Test(TCP(Readiness|Completion)|NativeTCP)' ./internal/engine/windows
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - name: Exercise adapter-loss cleanup and terminal receipt under pressure
@@ -68,40 +68,28 @@ jobs:
             go test -race -count=1 -v -timeout=3m -run $cases ./internal/engine/protocol ./internal/engine/windows ./internal/engine ./cmd/netswitch-engine
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-      - name: Repeat the Windows engine package with every handle OPEN and CLOSE traced
-        if: ${{ endsWith(github.ref, '-closetrace') }}
-        env:
-          NETSWITCH_HANDLE_CLOSE_TRACE: '1'
-        run: |
-          # The defect has shown inside this one test (rounds 44 and 97 of
-          # 128) even when it ran second in the package; repeat it alone.
-          go test -count=30 -v -failfast -timeout=20m -run '^TestNativeTransferWithoutReadinessKeepsEndpoint$' ./internal/engine/windows
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Write-Output "CLOSE TRACE PACKAGE ROUND"
-          go test -count=1 -v -failfast -timeout=15m ./internal/engine/windows
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Count native UDP reopen refusals with and without the readiness path
         if: ${{ endsWith(github.ref, '-udpready') }}
         env:
           NETSWITCH_PORT_GATE: '1'
           NETSWITCH_UDP_RECOVERY_CYCLES: '30'
         run: |
-          # No engine: plain sockets, plain under TCP load, and sockets through
-          # the engine's readiness path (two duplicates and event registration).
+          # No engine: plain Go sockets, plain under TCP load, and the engine's
+          # own native sockets through its readiness path (event registration).
           go test -count=1 -v -timeout=40m -run '^TestNativeUDPPairedCapacity$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove native poll lifetime, callback collection and heap publication
-        if: ${{ !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && !endsWith(github.ref, '-closetrace') && !endsWith(github.ref, '-udpready') }}
+        if: ${{ !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-udpready') }}
         run: |
           go test -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check the same ownership boundaries under race
-        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && !endsWith(github.ref, '-closetrace') && !endsWith(github.ref, '-udpready') && runner.arch == 'X64' }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-udpready') && runner.arch == 'X64' }}
         run: |
           go test -race -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check shared UDP destroy and setup-refusal accounting
-        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && !endsWith(github.ref, '-closetrace') && !endsWith(github.ref, '-udpready') }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-udpready') }}
         run: |
           go test -count=1 -v -run '^Test(DestroyFinishesAcrossFailedSetupCachePublication|FailedUDPSetupRetiresBeforeRefusalAndBoundsNegativeCache)$' ./internal/engine/udp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -119,27 +107,6 @@ jobs:
         run: |
           go test -count=1 -v -timeout=2m -run '^TestRingRemovalBetweenMarkerCheckAndClose$' ./internal/wintun
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build the opt-in OS socket trace fixture
-        id: socket-build
-        if: ${{ contains(github.ref, '-socket-trace') }}
-        run: |
-          go test -c -o dist/windows-test/socket-diagnostics.exe ./internal/engine/windows
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Prove OS trace controls and observe bounded socket churn
-        if: ${{ !cancelled() && steps.socket-build.outcome == 'success' }}
-        env:
-          NETSWITCH_SOCKET_DIAGNOSTICS: '1'
-        run: |
-          node tests/windows/socket-trace.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Keep the exact executable for resolving raw trace addresses
-        if: ${{ always() && steps.socket-build.outcome == 'success' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: socket-trace-${{ (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64')) && 'ARM64' || 'x64' }}
-          path: dist/windows-test/socket-diagnostics.exe
-          if-no-files-found: error
-          retention-days: 14
 
   section:
     if: ${{ endsWith(github.ref, '-section') }}

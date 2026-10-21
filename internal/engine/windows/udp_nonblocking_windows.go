@@ -18,7 +18,8 @@ import (
 
 var _ platform.ReadyUDP = (*udpSocket)(nil)
 
-// Watch transfers the Go descriptor to native, nonblocking datagram I/O.
+// Watch hands the socket's only handle to the shared event-select readiness.
+// Nothing is copied: the engine created this socket natively and owns it.
 // Shared workers own scheduling, packetization and byte-budget policy.
 func (s *udpSocket) Watch(wake func()) (platform.Readiness, error) {
 	s.mu.Lock()
@@ -29,40 +30,11 @@ func (s *udpSocket) Watch(wake func()) (platform.Readiness, error) {
 	if s.pool == nil {
 		return nil, errors.New("UDP readiness service is not initialized")
 	}
-	if s.goOwner.IsZero() {
-		var err error
-		s.goOwner, err = ownGoDescriptor(s.conn, "UDP Go connection before transfer")
-		if err != nil {
-			return nil, err
-		}
-	}
-	// Each step names itself: hosted runs saw WSAENOBUFS here with thousands
-	// of ports free, and a bare error could not say which call refused.
-	file, err := s.conn.File()
+	watch, err := s.pool.watch(s.handle, wake)
 	if err != nil {
-		return nil, fmt.Errorf("UDP readiness Go File duplicate: %w", err)
-	}
-	fileOwner, err := ownGoDescriptor(file, "UDP File duplicate")
-	if err != nil {
-		file.Close()
-		return nil, err
-	}
-	defer fileOwner.CloseGo("UDP File duplicate close", file.Close)
-	h, err := duplicateForReadiness(file, fileOwner)
-	if err != nil {
-		return nil, fmt.Errorf("UDP readiness native duplicate: %w", err)
-	}
-	watch, err := s.pool.watch(h, wake)
-	if err != nil {
-		h.SocketClose("UDP failed readiness registration")
 		return nil, fmt.Errorf("UDP readiness event registration: %w", err)
 	}
-	s.handle, s.watch = h, watch
-	err = s.goOwner.CloseGo("UDP source Go connection close", s.conn.Close)
-	s.conn, s.raw = nil, nil
-	if err != nil {
-		return nil, err // Close still owns the installed watch and native handle.
-	}
+	s.watch = watch
 	return watch, nil
 }
 
@@ -72,6 +44,11 @@ func (s *udpSocket) TryReadFrom(b []byte) (int, netip.AddrPort, error) {
 	if s.closed || s.watch == nil {
 		return 0, netip.AddrPort{}, net.ErrClosed
 	}
+	return s.receive(b, "UDP nonblocking receive")
+}
+
+// receive is one synchronous nonblocking WSARecvFrom; the caller holds s.mu.
+func (s *udpSocket) receive(b []byte, site string) (int, netip.AddrPort, error) {
 	buf := windows.WSABuf{Len: uint32(len(b))}
 	if len(b) != 0 {
 		buf.Buf = &b[0]
@@ -85,7 +62,7 @@ func (s *udpSocket) TryReadFrom(b []byte) (int, netip.AddrPort, error) {
 	var received, flags uint32
 	// NULL overlapped/completion routine selects documented synchronous usage.
 	// FIONBIO on the descriptor makes that usage nonblocking.
-	err := windows.WSARecvFrom(s.handle.Handle("UDP nonblocking receive"), &buf, 1, &received, &flags, source, &sourceLength, nil, nil)
+	err := windows.WSARecvFrom(s.handle.Handle(site), &buf, 1, &received, &flags, source, &sourceLength, nil, nil)
 	runtime.KeepAlive(b)
 	if errors.Is(err, windows.WSAEWOULDBLOCK) {
 		return 0, netip.AddrPort{}, platform.ErrWouldBlock
@@ -102,18 +79,11 @@ func (s *udpSocket) TryReadFrom(b []byte) (int, netip.AddrPort, error) {
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	switch a := sa.(type) {
-	case *windows.SockaddrInet4:
-		return int(received), netip.AddrPortFrom(netip.AddrFrom4(a.Addr), uint16(a.Port)), nil
-	case *windows.SockaddrInet6:
-		address := netip.AddrFrom16(a.Addr)
-		if a.ZoneId != 0 {
-			address = address.WithZone(strconv.FormatUint(uint64(a.ZoneId), 10))
-		}
-		return int(received), netip.AddrPortFrom(address, uint16(a.Port)), nil
-	default:
+	from, ok := addrPort(sa)
+	if !ok {
 		return 0, netip.AddrPort{}, fmt.Errorf("unexpected UDP address family %T", sa)
 	}
+	return int(received), from, nil
 }
 
 func (s *udpSocket) TryWriteTo(b []byte, destination netip.AddrPort, df bool) (int, error) {
@@ -122,11 +92,17 @@ func (s *udpSocket) TryWriteTo(b []byte, destination netip.AddrPort, df bool) (i
 	if s.closed || s.watch == nil {
 		return 0, net.ErrClosed
 	}
+	return s.send(b, destination, df, "nonblocking send")
+}
+
+// send is one synchronous nonblocking WSASendTo; the caller holds s.mu. stage
+// names the caller in the send-failure diagnostics.
+func (s *udpSocket) send(b []byte, destination netip.AddrPort, df bool, stage string) (int, error) {
 	if !destination.IsValid() {
 		return 0, errors.New("invalid UDP destination")
 	}
 	if err := s.fragmentation(s.handle.Handle("UDP fragmentation option"), df); err != nil {
-		noteUDPSendFailure("nonblocking send fragmentation option", destination, err)
+		noteUDPSendFailure(stage+" fragmentation option", destination, err)
 		return 0, err
 	}
 	// Use a full sockaddr allocation. x/sys's WSASendto convenience wrapper
@@ -169,6 +145,6 @@ func (s *udpSocket) TryWriteTo(b []byte, destination netip.AddrPort, df bool) (i
 	if platform.IsTooBig(err) {
 		return 0, &platform.TooBig{MTU: s.pathMTU(destination.Addr())}
 	}
-	noteUDPSendFailure("nonblocking send", destination, err)
+	noteUDPSendFailure(stage, destination, err)
 	return int(sent), err
 }

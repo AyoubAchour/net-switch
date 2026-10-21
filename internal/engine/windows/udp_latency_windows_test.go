@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"runtime"
 	"slices"
@@ -63,17 +64,12 @@ func TestReadyUDPArmedIdleLatency(t *testing.T) {
 	watches := make([]platform.Readiness, count)
 	wakes := make([]chan struct{}, active)
 	var unexpected atomic.Uint64
+	line := loopbackLine(t)
 	for i := range sockets {
-		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2)})
+		s, err := openUDP(line, netip.MustParseAddrPort("127.0.0.2:0"), pool)
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw, err := conn.SyscallConn()
-		if err != nil {
-			conn.Close()
-			t.Fatal(err)
-		}
-		s := &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535}
 		t.Cleanup(func() {
 			if err := s.Close(); err != nil {
 				t.Error(err)

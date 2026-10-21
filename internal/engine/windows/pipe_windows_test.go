@@ -58,16 +58,6 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
-	if os.Getenv("NETSWITCH_HANDLE_CLOSE_TRACE") == "1" {
-		if err := enableCloseTrace(); err != nil {
-			fmt.Fprintln(os.Stderr, "handle close trace:", err)
-			os.Exit(1)
-		}
-		// Helper children re-run this binary and some answer on stdout in
-		// JSON: they neither trace nor print (x64 job 119277279747).
-		os.Unsetenv("NETSWITCH_HANDLE_CLOSE_TRACE")
-		fmt.Fprintln(os.Stderr, "HANDLE CLOSE TRACE ON for the whole package run")
-	}
 	result := m.Run()
 	if winhandle.Enabled {
 		value, _ := json.Marshal(winhandle.Stats())

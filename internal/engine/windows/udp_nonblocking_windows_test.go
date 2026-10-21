@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"runtime"
 	"testing"
 	"time"
@@ -20,9 +21,6 @@ import (
 
 func udpReceiveDiagnostic(t *testing.T, s *udpSocket) {
 	t.Helper()
-	if value, ok := udpSocketEvidence.Load(s); ok {
-		value.(*socketEvidence).failure("TryReadFrom after Watch", errors.New("original UDP assertion follows"))
-	}
 	h := s.handle.Handle("UDP failure diagnostic")
 	local, localErr := windows.Getsockname(h)
 	kind, kindErr := windows.GetsockoptInt(h, windows.SOL_SOCKET, 0x1008) // SO_TYPE.
@@ -39,10 +37,11 @@ func udpReceiveDiagnostic(t *testing.T, s *udpSocket) {
 		h, s.local, local, localErr, kind, kindErr, n, peer, digest, err)
 }
 
+// nativeUDPPair opens an engine socket through the production constructor
+// and a plain Go peer on another loopback address.
 func nativeUDPPair(t *testing.T, network string) (*udpSocket, *net.UDPConn) {
 	t.Helper()
 	hosted(t)
-	startSocketDiagnostics(t)
 	pool, err := newUDPReadiness(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -52,23 +51,17 @@ func nativeUDPPair(t *testing.T, network string) (*udpSocket, *net.UDPConn) {
 			t.Error(err)
 		}
 	})
-	address := net.IPv4(127, 0, 0, 2)
+	address := netip.MustParseAddr("127.0.0.2")
 	peerAddress := net.IPv4(127, 0, 0, 1)
 	if network == "udp6" {
-		address, peerAddress = net.IPv6loopback, net.IPv6loopback
+		address, peerAddress = netip.IPv6Loopback(), net.IPv6loopback
 	}
-	conn, err := net.ListenUDP(network, &net.UDPAddr{IP: address})
+	s, err := openUDP(loopbackLine(t), netip.AddrPortFrom(address, 0), pool)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := conn.SyscallConn()
-	if err != nil {
-		conn.Close()
-		t.Fatal(err)
-	}
-	s := &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), v6: network == "udp6", mtu: 65535}
 	t.Cleanup(func() {
-		if err := closeUDPEvidence(t, s); err != nil {
+		if err := s.Close(); err != nil {
 			t.Error(err)
 		}
 	})
@@ -77,7 +70,6 @@ func nativeUDPPair(t *testing.T, network string) (*udpSocket, *net.UDPConn) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { peer.Close() })
-	newUDPSocketEvidence(t, s, peer)
 	return s, peer
 }
 
@@ -121,21 +113,16 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 						}
 					}
 					if immediate {
-						send() // Queued before descriptor transfer and event installation.
+						send() // Queued before event installation.
 					}
 					wakes := make(chan struct{}, 1)
-					var diagnostic *socketEvidence
-					if value, ok := udpSocketEvidence.Load(s); ok {
-						diagnostic = value.(*socketEvidence)
-					}
-					diagnostic.beforeWatch()
+					identity := s.handle.Handle("UDP identity before Watch")
 					watch, err := s.Watch(func() {
 						select {
 						case wakes <- struct{}{}:
 						default:
 						}
 					})
-					diagnostic.afterWatch(s.handle, err)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -147,7 +134,6 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 						}
 					}
 					if err := watch.Arm(true, false); err != nil {
-						diagnostic.failure("UDP initial Arm(read)", err)
 						t.Fatal(err)
 					}
 					if !immediate {
@@ -157,7 +143,6 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 					udpWake(t, wakes)
 					// Rearm without consuming: the same datagram must stay readable.
 					if err := watch.Arm(true, false); err != nil {
-						diagnostic.failure("UDP Arm(read) with unread datagram", err)
 						t.Fatal(err)
 					}
 					udpWake(t, wakes)
@@ -174,17 +159,14 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 					// Cancellation is a one-shot interest replacement, with no
 					// receive operation whose cleanup could discard the datagram.
 					if err := watch.Arm(true, false); err != nil {
-						diagnostic.failure("UDP Arm(read) before cancellation", err)
 						t.Fatal(err)
 					}
 					if err := watch.Arm(false, false); err != nil {
-						diagnostic.failure("UDP cancellation Arm(false,false)", err)
 						t.Fatal(err)
 					}
 					send()
 					noUDPWake(t, wakes)
 					if err := watch.Arm(true, false); err != nil {
-						diagnostic.failure("UDP rearm after cancellation", err)
 						t.Fatal(err)
 					}
 					udpWake(t, wakes)
@@ -195,12 +177,10 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 					}
 					if network == "udp4" || size <= 65000 {
 						if err := watch.Arm(false, true); err != nil {
-							diagnostic.failure("UDP Arm(write)", err)
 							t.Fatal(err)
 						}
 						udpWake(t, wakes)
 						if n, err := s.TryWriteTo(payload, wantSource, false); err != nil || n != len(payload) {
-							diagnostic.failure("TryWriteTo after Watch", err)
 							t.Fatalf("nonblocking send: %d %v", n, err)
 						}
 						peer.SetReadDeadline(time.Now().Add(time.Second))
@@ -210,10 +190,12 @@ func TestReadyUDPDoesNotConsumeDatagrams(t *testing.T) {
 						}
 					}
 					if err := watch.Arm(true, false); err != nil {
-						diagnostic.failure("UDP Arm(read) before detach", err)
 						t.Fatal(err)
 					}
-					diagnostic.assertWatchIdentity()
+					// Watch registered the socket's only handle; nothing was copied.
+					if h := s.handle.Handle("UDP identity after Watch"); h != identity {
+						t.Fatalf("Watch changed the socket handle %#x -> %#x", identity, h)
+					}
 					watch.Detach()
 					if err := s.Close(); err != nil {
 						t.Fatal(err)
@@ -255,17 +237,12 @@ func TestReadyUDPSharedEventAndIdleCost(t *testing.T) {
 	sockets := make([]*udpSocket, count)
 	watches := make([]platform.Readiness, count)
 	wakes := make(chan int, count*2)
+	line := loopbackLine(t)
 	for i := range sockets {
-		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2)})
+		s, err := openUDP(line, netip.MustParseAddrPort("127.0.0.2:0"), pool)
 		if err != nil {
 			t.Fatal(err)
 		}
-		raw, err := conn.SyscallConn()
-		if err != nil {
-			conn.Close()
-			t.Fatal(err)
-		}
-		s := &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535}
 		t.Cleanup(func() {
 			if err := s.Close(); err != nil {
 				t.Error(err)

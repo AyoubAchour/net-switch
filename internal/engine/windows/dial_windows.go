@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -139,24 +140,19 @@ func (d *Dialer) Close() error {
 	return err
 }
 
+// bindSocket is the Go dial path's Control hook. Only health probes and the
+// tests' plain-Go controls use it; it sets exactly the line options of the
+// engine's native sockets.
 func bindSocket(a Adapter, v6 bool) func(string, string, syscall.RawConn) error {
 	return func(network, _ string, raw syscall.RawConn) error {
 		var callErr error
 		err := raw.Control(func(fd uintptr) {
-			level, index := windows.IPPROTO_IP, a.Index4
-			if v6 {
-				level, index = windows.IPPROTO_IPV6, a.Index6
-			} else {
-				var b [4]byte
-				binary.BigEndian.PutUint32(b[:], index)
-				index = binary.LittleEndian.Uint32(b[:])
-			}
-			callErr = windows.SetsockoptInt(windows.Handle(fd), level, 31, int(index))
+			callErr = setLineInterface(windows.Handle(fd), a, v6)
 			if callErr == nil && strings.HasPrefix(network, "tcp") {
 				// ConnectEx requires an explicit source bind. Let Windows reuse
 				// ephemeral ports when its existing auto-reuse configuration
 				// permits it; never change that machine-wide configuration.
-				callErr = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, 0x3007, 1) // SO_REUSE_UNICASTPORT.
+				callErr = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, soReuseUnicastPort, 1)
 			}
 		})
 		return errors.Join(err, callErr)
@@ -171,11 +167,34 @@ func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort
 	if err != nil {
 		return nil, err
 	}
+	note, started := d.startDial(line, remote)
+	c, err := d.pool.dial(ctx, a, source, remote)
+	var conn net.Conn
+	if c != nil {
+		conn = c
+	}
+	d.finishDial(note, started, conn, err)
+	if err != nil {
+		d.ports.observe(err)
+		return nil, err
+	}
+	return c, nil
+}
+
+// dialProbe gives a health probe a Go connection with the line's exact bind
+// options. Probes need blocking net.Conn I/O with deadlines (HTTP/TLS), which
+// Go's network package already provides; this connection is never handed to
+// the relay, so it is never copied and Go keeps its only descriptor.
+func (d *Dialer) dialProbe(ctx context.Context, line string, remote netip.AddrPort) (net.Conn, error) {
+	a, source, err := d.Routes.binding(line, remote.Addr().Is6())
+	if err != nil {
+		return nil, err
+	}
 	network := "tcp4"
 	if remote.Addr().Is6() {
 		network = "tcp6"
 	}
-	dial := net.Dialer{Timeout: 10 * time.Second, LocalAddr: net.TCPAddrFromAddrPort(netip.AddrPortFrom(source, 0)),
+	dial := net.Dialer{Timeout: tcpDialTimeout, LocalAddr: net.TCPAddrFromAddrPort(netip.AddrPortFrom(source, 0)),
 		Control: bindSocket(a, remote.Addr().Is6()), KeepAlive: 30 * time.Second}
 	note, started := d.startDial(line, remote)
 	c, err := dial.DialContext(ctx, network, remote.String())
@@ -184,22 +203,92 @@ func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort
 		d.ports.observe(err)
 		return nil, err
 	}
-	return &readySocket{blocking: c.(*net.TCPConn), pool: d.pool, local: c.LocalAddr(), remote: c.RemoteAddr()}, nil
+	tcp := c.(*net.TCPConn)
+	owner, err := ownGoDescriptor(tcp, "probe TCP Go connection")
+	if err != nil {
+		return nil, errors.Join(err, tcp.Close())
+	}
+	return &probeConn{TCPConn: tcp, owner: owner}, nil
 }
 
+// probeConn records the Go descriptor's close with the ownership tripwire.
+// HTTP and TLS may close a connection more than once; Go's own close stays
+// the only one.
+type probeConn struct {
+	*net.TCPConn
+	owner winhandle.Owner
+	once  sync.Once
+	err   error
+}
+
+func (c *probeConn) Close() error {
+	c.once.Do(func() { c.err = c.owner.CloseGo("probe TCP Go connection close", c.TCPConn.Close) })
+	return c.err
+}
+
+// udpSocket is the NAT's outbound datagram socket, created natively with one
+// handle owned from birth. Watch registers that same handle with the shared
+// event-select readiness; it is never associated with a completion port.
 type udpSocket struct {
-	conn    *net.UDPConn
-	raw     syscall.RawConn
-	mu      sync.Mutex
-	v6      bool
-	mtu     uint32
-	luid    uint64
-	local   netip.AddrPort
-	pool    *udpReadiness
-	watch   *udpWatch
-	handle  winhandle.Owner
-	goOwner winhandle.Owner
-	closed  bool
+	mu     sync.Mutex
+	handle winhandle.Owner
+	v6     bool
+	mtu    uint32
+	luid   uint64
+	local  netip.AddrPort
+	pool   *udpReadiness
+	watch  *udpWatch
+	closed bool
+	// Blocking calls before Watch poll the handle in short slices; Close
+	// waits for every one of them to leave before closing it.
+	waiters int
+	left    *sync.Cond
+}
+
+// openUDP creates and binds one native datagram socket. Its options follow
+// the old Go path exactly: Go's family defaults, the line's interface, the
+// bind to the line's source, then no ICMP-driven receive errors.
+func openUDP(a Adapter, local netip.AddrPort, pool *udpReadiness) (*udpSocket, error) {
+	v6 := local.Addr().Is6()
+	socket, err := newSocket(v6, windows.SOCK_DGRAM, windows.IPPROTO_UDP, "UDP native socket open")
+	if err != nil {
+		return nil, err
+	}
+	bound, err := prepareUDP(socket, a, local, v6)
+	if err != nil {
+		return nil, closeFailed(socket, "UDP native setup failure close", err)
+	}
+	s := &udpSocket{handle: socket, v6: v6, mtu: a.MTU, luid: a.LUID, local: bound, pool: pool}
+	s.left = sync.NewCond(&s.mu)
+	return s, nil
+}
+
+func prepareUDP(socket winhandle.Owner, a Adapter, local netip.AddrPort, v6 bool) (netip.AddrPort, error) {
+	h := socket.Handle("UDP native socket setup")
+	if err := setFamilyDefaults(h, v6, true); err != nil {
+		return netip.AddrPort{}, err
+	}
+	if err := setLineInterface(h, a, v6); err != nil {
+		return netip.AddrPort{}, err
+	}
+	if err := bindSource(h, local); err != nil {
+		return netip.AddrPort{}, err
+	}
+	// Go disabled both reports on every UDP socket: an ICMP port or network
+	// unreachable must not fail the mapping's next receive.
+	for _, control := range [...]struct {
+		name string
+		code uint32
+	}{{"SIO_UDP_CONNRESET", windows.SIO_UDP_CONNRESET}, {"SIO_UDP_NETRESET", windows.SIO_UDP_NETRESET}} {
+		var off, returned uint32
+		if err := windows.WSAIoctl(h, control.code, (*byte)(unsafe.Pointer(&off)), uint32(unsafe.Sizeof(off)), nil, 0, &returned, nil, 0); err != nil {
+			return netip.AddrPort{}, os.NewSyscallError("WSAIoctl "+control.name, err)
+		}
+	}
+	if err := setNonblocking(socket, "UDP native nonblocking"); err != nil {
+		return netip.AddrPort{}, err
+	}
+	return localName(h)
 }
 
 func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UDPConn, error) {
@@ -211,9 +300,10 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 	if v6 {
 		network = "udp6"
 	}
-	lc := net.ListenConfig{Control: bindSocket(a, v6)}
-	c, err := lc.ListenPacket(ctx, network, netip.AddrPortFrom(source, 0).String())
+	local := netip.AddrPortFrom(source, 0)
+	s, err := openUDP(a, local, d.udp)
 	if err != nil {
+		err = &net.OpError{Op: "listen", Net: network, Addr: net.UDPAddrFromAddrPort(local), Err: err}
 		if portLimit(err) {
 			total := d.udpExhaustions.Add(1)
 			d.captureUDPAllocationFailure(line, source, a, err)
@@ -225,14 +315,7 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 		}
 		return nil, err
 	}
-	u := c.(*net.UDPConn)
-	raw, err := u.SyscallConn()
-	if err != nil {
-		u.Close()
-		return nil, err
-	}
-	return &udpSocket{conn: u, raw: raw, v6: v6, mtu: a.MTU, luid: a.LUID,
-		local: u.LocalAddr().(*net.UDPAddr).AddrPort(), pool: d.udp}, nil
+	return s, nil
 }
 func (s *udpSocket) Close() error {
 	s.mu.Lock()
@@ -241,93 +324,93 @@ func (s *udpSocket) Close() error {
 		return nil
 	}
 	s.closed = true
-	if s.watch == nil {
-		if s.goOwner.IsZero() {
-			var err error
-			s.goOwner, err = ownGoDescriptor(s.conn, "UDP Go connection before close")
-			if err != nil {
-				return err
-			}
-		}
-		return s.goOwner.CloseGo("UDP Go connection close", s.conn.Close)
+	for s.waiters != 0 {
+		s.left.Wait()
 	}
-	s.watch.Detach()
-	return errors.Join(s.watch.err, s.handle.SocketClose("UDP native socket close"))
+	var err error
+	if s.watch != nil {
+		s.watch.Detach()
+		err = s.watch.err
+	}
+	return errors.Join(err, s.handle.SocketClose("UDP native socket close"))
 }
 func (s *udpSocket) LocalAddr() netip.AddrPort { return s.local }
+
+// udpWaitSlice bounds each blocking poll before Watch, so Close and
+// cancellation are seen promptly. The NAT never takes this path on Windows:
+// it calls Watch first (internal/engine/udp startReady).
+const udpWaitSlice = 10 * time.Millisecond
+
+var udpWaitPoll = winsock.NewProc("WSAPoll")
+
+func (s *udpSocket) wait(ctx context.Context, events int16, site string) error {
+	for {
+		s.mu.Lock()
+		if s.closed || s.watch != nil {
+			s.mu.Unlock()
+			return net.ErrClosed
+		}
+		if err := ctx.Err(); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		rows := []pollFD{{Socket: s.handle.Handle(site), Events: events}}
+		s.waiters++
+		s.mu.Unlock()
+		n, _, callErr := udpWaitPoll.Call(uintptr(unsafe.Pointer(&rows[0])), uintptr(len(rows)), uintptr(udpWaitSlice.Milliseconds()))
+		s.mu.Lock()
+		s.waiters--
+		if s.waiters == 0 {
+			s.left.Broadcast()
+		}
+		s.mu.Unlock()
+		if int32(n) == -1 {
+			return os.NewSyscallError("WSAPoll", callErr)
+		}
+		if n > 0 {
+			return nil
+		}
+	}
+}
+
+// WaitReadable consumes nothing: WSAPoll only reports queued datagrams,
+// including empty ones.
 func (s *udpSocket) WaitReadable(ctx context.Context) error {
-	s.mu.Lock()
-	transferred, closed := s.watch != nil, s.closed
-	s.mu.Unlock()
-	if closed || transferred {
-		return net.ErrClosed
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	cancelled := make(chan struct{})
-	stop := context.AfterFunc(ctx, func() {
-		s.conn.SetReadDeadline(time.Now())
-		close(cancelled)
-	})
-	defer func() {
-		if !stop() {
-			<-cancelled
-		}
-		s.conn.SetReadDeadline(time.Time{})
-	}()
-	waited := false
-	// Go 1.27's Windows RawRead waits with a zero-byte overlapped MSG_PEEK
-	// for datagram sockets. It consumes nothing, including zero-byte UDP.
-	err := s.raw.Read(func(uintptr) bool {
-		if waited {
-			return true
-		}
-		waited = true
-		return false
-	})
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	return err
+	return s.wait(ctx, pollRdNorm, "UDP readable wait")
 }
 func (s *udpSocket) ReadFrom(b []byte) (int, netip.AddrPort, error) {
-	s.mu.Lock()
-	transferred, closed := s.watch != nil, s.closed
-	s.mu.Unlock()
-	if closed || transferred {
-		return 0, netip.AddrPort{}, net.ErrClosed
+	for {
+		if err := s.wait(context.Background(), pollRdNorm, "UDP blocking receive wait"); err != nil {
+			return 0, netip.AddrPort{}, err
+		}
+		s.mu.Lock()
+		if s.closed || s.watch != nil {
+			s.mu.Unlock()
+			return 0, netip.AddrPort{}, net.ErrClosed
+		}
+		n, from, err := s.receive(b, "UDP blocking receive")
+		s.mu.Unlock()
+		if !errors.Is(err, platform.ErrWouldBlock) {
+			return n, from, err
+		}
 	}
-	n, addr, err := s.conn.ReadFromUDPAddrPort(b)
-	if platform.IsTooBig(err) {
-		err = &platform.TooBig{MTU: s.mtu}
-	}
-	return n, addr, err
 }
 func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed || s.watch != nil {
-		return 0, net.ErrClosed
+	for {
+		s.mu.Lock()
+		if s.closed || s.watch != nil {
+			s.mu.Unlock()
+			return 0, net.ErrClosed
+		}
+		n, err := s.send(b, dst, df, "first send")
+		s.mu.Unlock()
+		if !errors.Is(err, platform.ErrWouldBlock) {
+			return n, err
+		}
+		if err := s.wait(context.Background(), pollWrNorm, "UDP blocking send wait"); err != nil {
+			return 0, err
+		}
 	}
-	var optionErr error
-	err := s.raw.Control(func(fd uintptr) {
-		optionErr = s.fragmentation(windows.Handle(fd), df)
-	})
-	if err != nil || optionErr != nil {
-		err = errors.Join(err, optionErr)
-		noteUDPSendFailure("first send fragmentation option", dst, err)
-		return 0, err
-	}
-	n, err := s.conn.WriteToUDPAddrPort(b, dst)
-	if errors.Is(err, windows.WSAENOBUFS) {
-		return n, platform.ErrDatagramDropped
-	}
-	if platform.IsTooBig(err) {
-		err = &platform.TooBig{MTU: s.pathMTU(dst.Addr())}
-	}
-	noteUDPSendFailure("first send", dst, err)
-	return n, err
 }
 
 func (s *udpSocket) fragmentation(fd windows.Handle, df bool) error {
