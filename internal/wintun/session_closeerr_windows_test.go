@@ -5,6 +5,8 @@ package wintun
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,7 +26,10 @@ func (o *faultyOwner) end(r *rings, _ func(windows.Handle) error) (bool, error) 
 	return false, errTestRetire
 }
 
-func newFaultySession(t *testing.T, lost bool) *Session {
+// newFaultySession builds a session whose ring owner reports a teardown error
+// (and optionally that it had already exited). The returned counter records any
+// call to the ring opener, which a lost session must never make.
+func newFaultySession(t *testing.T, lost bool) (*Session, *atomic.Int64) {
 	t.Helper()
 	r, err := allocateRings(MinCapacity)
 	must(t, err)
@@ -36,12 +41,17 @@ func newFaultySession(t *testing.T, lost bool) *Session {
 	must(t, err)
 	cancel, err := windows.CreateEvent(nil, 1, 0, nil)
 	must(t, err)
+	opened := &atomic.Int64{}
 	s := &Session{adapter: &Adapter{config: Config{Name: "closeerr-test"}}, rings: r, wake: wake, cancelEvent: cancel,
 		wakeOwner: winhandle.Open(wake, "test wake"), cancelOwner: winhandle.Open(cancel, "test cancel"),
 		changed: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}),
-		repair: make(chan error, 1), events: make(chan Event, 8)}
+		repair: make(chan error, 1), events: make(chan Event, 8),
+		open: func() (*rings, error) {
+			opened.Add(1)
+			return nil, errors.New("ring opener must not be called for a lost session")
+		}}
 	go s.maintain()
-	return s
+	return s, opened
 }
 
 func waitForEvent(t *testing.T, s *Session, kind string) Event {
@@ -72,7 +82,7 @@ func TestSessionCloseReportsRetirementError(t *testing.T) {
 			terminal = ErrRegistrarExited
 		}
 		t.Run(name, func(t *testing.T) {
-			s := newFaultySession(t, lost)
+			s, _ := newFaultySession(t, lost)
 			s.fail(errOwnerLost)
 			removed := waitForEvent(t, s, "removed")
 			if !errors.Is(removed.Err, terminal) {
@@ -90,5 +100,29 @@ func TestSessionCloseReportsRetirementError(t *testing.T) {
 				t.Fatalf("Session.Close dropped the retirement error: %v", err)
 			}
 		})
+	}
+}
+
+// A confirmed owner loss discovered during retirement must take precedence over
+// a corruption cause that queued the recovery: the session is lost (adapter-
+// removed plus owner-exit), the opener is never called (no in-place rebuild),
+// and the retirement error is still preserved for Close.
+func TestSessionCorruptionYieldsToConfirmedOwnerLoss(t *testing.T) {
+	s, opened := newFaultySession(t, true) // retirement reveals the owner already exited
+	// Corruption queues the recovery first; only during retirement does end()
+	// report that the registrar had already exited.
+	s.fail(fmt.Errorf("injected ring corruption: %w", ErrCorrupt))
+	removed := waitForEvent(t, s, "removed")
+	if opened.Load() != 0 {
+		t.Fatalf("a confirmed owner loss rebuilt in place: opener called %d times", opened.Load())
+	}
+	if !errors.Is(removed.Err, ErrAdapterRemoved) || !errors.Is(removed.Err, ErrRegistrarExited) {
+		t.Fatalf("terminal reason %v is not adapter-lost with the owner-exit identity", removed.Err)
+	}
+	if errors.Is(removed.Err, errTestRetire) {
+		t.Fatalf("the retirement cleanup error leaked into the terminal reason: %v", removed.Err)
+	}
+	if err := s.Close(); !errors.Is(err, errTestRetire) {
+		t.Fatalf("Session.Close dropped the retirement error after corruption yielded to loss: %v", err)
 	}
 }
