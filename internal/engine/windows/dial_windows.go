@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/netip"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -337,14 +339,18 @@ func (d *Dialer) Echo(ctx context.Context, line string, destination netip.Addr, 
 		}
 		return nil
 	})
-	event, err := windows.CreateEvent(nil, 1, 0, nil)
-	if err != nil {
-		return nil, err
-	}
-	eventOwner := winhandle.Open(event, "ICMP completion event open")
-	defer eventOwner.HandleClose("ICMP completion event close")
 	payload := request[8:]
-	reply := make([]byte, len(payload)+256)
+	// ICMP_ECHO_REPLY and the API's IO_STATUS_BLOCK need pointer alignment.
+	// Pin all payload storage explicitly, including a caller's stack-sized
+	// request. Neither an integer pointer nor KeepAlive alone forces escape.
+	words := make([]uint64, (len(payload)+256+7)/8)
+	reply := unsafe.Slice((*byte)(unsafe.Pointer(&words[0])), len(words)*8)
+	var pinned runtime.Pinner
+	pinned.Pin(&words[0])
+	if len(payload) != 0 {
+		pinned.Pin(&payload[0])
+	}
+	defer pinned.Unpin()
 	options := ipOptions{TTL: 64}
 	var data uintptr
 	if len(payload) != 0 {
@@ -361,34 +367,22 @@ func (d *Dialer) Echo(ctx context.Context, line string, destination netip.Addr, 
 			src.Scope_id = a.Index6
 		}
 		dst := windows.RawSockaddrInet6{Family: windows.AF_INET6, Addr: destination.As16()}
-		count, _, callErr = iphlp.NewProc("Icmp6SendEcho2").Call(uintptr(icmpOwner.Handle("ICMPv6 echo")), uintptr(eventOwner.Handle("ICMPv6 completion event")), 0, 0,
+		count, _, callErr = iphlp.NewProc("Icmp6SendEcho2").Call(uintptr(icmpOwner.Handle("ICMPv6 echo")), 0, 0, 0,
 			uintptr(unsafe.Pointer(&src)), uintptr(unsafe.Pointer(&dst)), data, uintptr(len(payload)),
 			uintptr(unsafe.Pointer(&options)), uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)), uintptr(timeout))
 	} else {
 		src, dst := source.As4(), destination.As4()
-		count, _, callErr = iphlp.NewProc("IcmpSendEcho2Ex").Call(uintptr(icmpOwner.Handle("ICMPv4 echo")), uintptr(eventOwner.Handle("ICMPv4 completion event")), 0, 0,
+		count, _, callErr = iphlp.NewProc("IcmpSendEcho2Ex").Call(uintptr(icmpOwner.Handle("ICMPv4 echo")), 0, 0, 0,
 			uintptr(binary.LittleEndian.Uint32(src[:])), uintptr(binary.LittleEndian.Uint32(dst[:])),
 			data, uintptr(len(payload)), uintptr(unsafe.Pointer(&options)), uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)), uintptr(timeout))
 	}
-	if count == 0 && !errors.Is(callErr, windows.ERROR_IO_PENDING) {
-		return nil, callErr
-	}
+	// Event and APC are both nil: the documented synchronous API completes
+	// before returning, including timeout. The old async path could time out
+	// its event wait and release a reply buffer still owned by the kernel.
+	// The native timeout remains capped at three seconds, as before; engine
+	// shutdown joins its bounded echo workers before releasing the dialer.
 	if count == 0 {
-		status, err := windows.WaitForSingleObject(eventOwner.Handle("ICMP completion wait"), timeout+1000)
-		if err != nil {
-			return nil, err
-		}
-		if status != windows.WAIT_OBJECT_0 {
-			return nil, errors.New("ICMP completion timed out")
-		}
-		parse := "IcmpParseReplies"
-		if destination.Is6() {
-			parse = "Icmp6ParseReplies"
-		}
-		count, _, callErr = iphlp.NewProc(parse).Call(uintptr(unsafe.Pointer(&reply[0])), uintptr(len(reply)))
-		if count == 0 {
-			return nil, callErr
-		}
+		return nil, fmt.Errorf("native ICMP echo failed: %w", callErr)
 	}
 	out := append([]byte(nil), request...)
 	if destination.Is6() {

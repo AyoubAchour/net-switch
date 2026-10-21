@@ -38,7 +38,7 @@ func TestNativeEchoReplyPayload(t *testing.T) {
 	routes.bindings.Store(&bindings)
 	dialer := &Dialer{Routes: routes}
 	for _, destination := range bindings["echo-fixture"].Addresses {
-		for _, size := range []int{1, 32, 1400} {
+		for _, size := range []int{0, 1, 32, 1400, 8992} {
 			t.Run(fmt.Sprintf("%s/%d", destination, size), func(t *testing.T) {
 				request := make([]byte, 8+size)
 				request[0], request[4], request[6] = 8, 17, 39

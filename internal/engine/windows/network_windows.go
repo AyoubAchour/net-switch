@@ -29,6 +29,11 @@ type Adapter struct {
 	Metric    uint32       `json:"metric"`
 }
 
+// IP Helper copies these structures during the call. Preserve the compiler's
+// pointer/escape contract across this Go wrapper too: lazy procedure lookup
+// may grow the caller's stack before the native call begins.
+//
+//go:uintptrescapes
 func api(proc string, args ...uintptr) error {
 	code, _, _ := iphlp.NewProc(proc).Call(args...)
 	if code != 0 {

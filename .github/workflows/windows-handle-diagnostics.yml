@@ -2,7 +2,7 @@ name: Windows handle diagnostics
 
 on:
   push:
-    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section, engine/windows-platform-udp-latency-arm64]
+    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section, engine/windows-platform-udp-latency-arm64, engine/windows-platform-pointers-arm64]
   workflow_dispatch:
     inputs:
       arch:
@@ -17,8 +17,8 @@ permissions:
 jobs:
   handles:
     if: ${{ !endsWith(github.ref, '-section') && !contains(github.ref, '-udp-latency') }}
-    name: Native handle diagnostics / ${{ (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64')) && 'ARM64' || 'x64' }}
-    runs-on: ${{ (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64')) && 'windows-11-arm' || 'windows-latest' }}
+    name: Native handle diagnostics / ${{ (inputs.arch != 'x64' && (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64'))) && 'ARM64' || 'x64' }}
+    runs-on: ${{ (inputs.arch != 'x64' && (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64'))) && 'windows-11-arm' || 'windows-latest' }}
     timeout-minutes: 15
     env:
       GOTOOLCHAIN: local
@@ -38,17 +38,24 @@ jobs:
           go-version-file: go.mod
           cache: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: ${{ contains(github.ref, '-socket-trace') }}
+        if: ${{ contains(github.ref, '-socket-trace') || contains(github.ref, '-pointers') }}
         with:
           node-version: '24.21.0'
           package-manager-cache: false
+      - name: Prove heap placement for retained Windows pointers
+        if: ${{ contains(github.ref, '-pointers') }}
+        run: |
+          node scripts/check-windows-pointer-escapes.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -count=1 -v -timeout=2m -run '^Test(NativeEchoReplyPayload|PipeCloseWakesAccept|PipeDisconnectedBeforeAcceptIsRetryable)$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove native poll lifetime, callback collection and heap publication
         if: ${{ !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') }}
         run: |
           go test -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check the same ownership boundaries under race
-        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && inputs.arch != 'ARM64' }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && runner.arch == 'X64' }}
         run: |
           go test -race -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -57,7 +64,7 @@ jobs:
         run: |
           go test -count=1 -v -run '^Test(DestroyFinishesAcrossFailedSetupCachePublication|FailedUDPSetupRetiresBeforeRefusalAndBoundsNegativeCache)$' ./internal/engine/udp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if ('${{ inputs.arch }}' -ne 'ARM64') {
+          if ('${{ runner.arch }}' -eq 'X64') {
             go test -race -count=1 -v -run '^Test(DestroyFinishesAcrossFailedSetupCachePublication|FailedUDPSetupRetiresBeforeRefusalAndBoundsNegativeCache)$' ./internal/engine/udp
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
