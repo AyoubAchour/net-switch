@@ -655,18 +655,8 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 	// Send memory, then exercise the same detection/unregister/reopen path used
 	// for driver corruption. These are deterministic fault injections, reported
 	// separately from naturally occurring driver faults in the stress test.
-	recoveryMS := map[string]float64{}
-	oldWindowPass := true
 	for _, kind := range []string{"size", "tail", "alignment", "body"} {
 		before := s.Stats().Recoveries
-		for drained := false; !drained; {
-			select {
-			case <-s.Events():
-			default:
-				drained = true
-			}
-		}
-		injected := time.Now()
 		s.mu.Lock()
 		r := s.rings
 		head := r.head
@@ -701,38 +691,13 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 			// Windows may emit DNS/IPv6 discovery after a media reconnect.
 		}
 		cancel()
-		// The old check required recovery inside that 500 ms read window. A
-		// recovery now starts a registrar process, which under the race
-		// detector finished just after it (run 39559172829). Wait for the
-		// session's own outcome, bounded by the registrar's start, stop and
-		// kill timeouts, and keep the old verdict and the time in the report.
-		if s.Stats().Recoveries != before+1 {
-			oldWindowPass = false
-			bound := time.NewTimer(registrarStartTimeout + registrarStopTimeout + registrarKillTimeout)
-		wait:
-			for {
-				select {
-				case e := <-s.Events():
-					if e.Kind == "recovering" {
-						continue
-					}
-					if e.Kind != "recovered" {
-						bound.Stop()
-						t.Fatalf("%s recovery ended as %q: %v (%+v)", kind, e.Kind, e.Err, s.Stats())
-					}
-					break wait
-				case <-bound.C:
-					t.Fatalf("%s did not recover within the registrar's own bounds: %+v", kind, s.Stats())
-				}
-			}
-			bound.Stop()
-		}
-		recoveryMS[kind] = float64(time.Since(injected).Microseconds()) / 1000
+		// Recovery must finish inside that 500 ms window. Under -race a
+		// race-built test registrar missed it (run 39559172829); the release
+		// engine registrar above is production's, so the window is unchanged.
 		if s.Stats().Recoveries != before+1 {
 			t.Fatalf("%s did not recover: %+v", kind, s.Stats())
 		}
 	}
-	t.Logf("injected recovery times (ms, including the 500 ms no-escape read window): %v old_500ms_window_pass=%t", recoveryMS, oldWindowPass)
 	f.startEcho(t)
 	c := udpSocket(t)
 	defer c.Close()
@@ -766,8 +731,7 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("close left a blocked reader")
 	}
-	report(t, map[string]any{"test": "injected_recovery", "arch": runtime.GOARCH, "stats": s.Stats(),
-		"recovery_ms": recoveryMS, "old_500ms_window_pass": oldWindowPass})
+	report(t, map[string]any{"test": "injected_recovery", "arch": runtime.GOARCH, "stats": s.Stats()})
 }
 
 func processUsage(t *testing.T) (uint32, uint64) {
