@@ -410,6 +410,26 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         }, 'UDP native ports and sessions released by the one-second reconciliation', 3000);
         const returned = await clients[0].call('open', { ...target, count: 512 });
         const failures = returned.attempts.filter((item) => item.Error);
+        if (failures.length) {
+          // Evidence only: who held the dynamic ports when a re-open failed
+          // (ARM64 853e295: 1 of 512 app-side ENOBUFS). The check is unchanged.
+          const [portSpace, stats] = await Promise.all([
+            udpPortSpaceAtFailure().catch((error) => ({ error: String(error) })),
+            engineStats().catch((error) => ({ error: String(error) })),
+          ]);
+          // Dynamic-range UDP ports per process; the engine is the largest
+          // non-client holder. Client processes are summed separately.
+          const clientPIDs = new Set((evidence.clientPIDs ?? []).map((item) => item.pid));
+          const owners = { clients: 0, byPID: {} };
+          for (const group of stats.nativeUDPState?.groups ?? []) {
+            const dynamic = group.ports.filter((port) => port >= 49152).length;
+            if (clientPIDs.has(group.pid)) owners.clients += dynamic;
+            else owners.byPID[group.pid] = (owners.byPID[group.pid] ?? 0) + dynamic;
+          }
+          evidence.recoveryFailure = { failures, portSpace, dynamicPortOwners: owners, engineUDP: stats.flows?.UDP,
+            heldBeforeReopen: held, socketExhaustions: stats.udpSocketExhaustions };
+          console.log(`WINDOWS UDP RECOVERY FAILURE ${JSON.stringify(evidence.recoveryFailure)}`);
+        }
         assert.equal(failures.length, 0, `UDP capacity did not recover on first attempts: ${JSON.stringify(failures)}`);
         held += 512;
         evidence.recovery = { released, reconciled, returned, ms: performance.now() - started, verified: await verify('after-recovery') };
