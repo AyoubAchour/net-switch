@@ -393,6 +393,49 @@ func TestBlockedRelayOwnsBytesAcrossWorkerScratchReuse(t *testing.T) {
 	}
 }
 
+// The app-to-remote discard consumes exactly the bytes the remote accepted,
+// without copying them a second time over the peeked buffer.
+func TestUploadDiscardConsumesWithoutCopying(t *testing.T) {
+	control := &testfake.Controller{}
+	ticket, _ := control.Begin("tcp", platform.Tuple{})
+	defer ticket.Close()
+	data := bytes.Repeat([]byte("upload\n"), 100)
+	ep := &readableEndpoint{data: data}
+	r := &readyRelay{workers: &relayWorkers{}, remote: newReadyPeer(), c: &connection{ticket: ticket, ep: ep}}
+	scratch := new(relayScratch)
+	sentinel := bytes.Repeat([]byte{0xa5}, 300)
+	copy(scratch.buffer[:], sentinel)
+	if err := r.discard(true, scratch.buffer[:300], scratch); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(scratch.buffer[:300], sentinel) {
+		t.Fatal("the discard wrote over the peeked bytes")
+	}
+	if !bytes.Equal(ep.data, data[300:]) {
+		t.Fatalf("consumed %d bytes, want 300", len(data)-len(ep.data))
+	}
+	if allocs := testing.AllocsPerRun(100, func() {
+		ep.data = data
+		if err := r.discard(true, scratch.buffer[:300], scratch); err != nil {
+			t.Fatal(err)
+		}
+	}); allocs != 0 {
+		t.Fatalf("the discard allocated %.1f times", allocs)
+	}
+	// A short write leaves the rest queued, as gVisor's Read requires.
+	w := discardWriter{n: 5}
+	if n, err := w.Write(make([]byte, 10)); n != 5 || err != io.ErrShortWrite {
+		t.Fatalf("first short write: %d %v", n, err)
+	}
+	if n, err := w.Write(make([]byte, 1)); n != 0 || err != io.ErrShortWrite {
+		t.Fatalf("exhausted writer: %d %v", n, err)
+	}
+	w = discardWriter{n: 4}
+	if n, err := w.Write(make([]byte, 4)); n != 4 || err != nil || w.n != 0 {
+		t.Fatalf("exact write: %d %v %d", n, err, w.n)
+	}
+}
+
 func TestStalledDirectionsStopReadingAtTheirSharedBufferBound(t *testing.T) {
 	w := &relayWorkers{}
 	control := &testfake.Controller{}

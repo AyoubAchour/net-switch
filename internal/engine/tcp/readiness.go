@@ -46,8 +46,25 @@ type relayDirection struct {
 // rather than allocating an interface-backed reader/writer for every chunk.
 type relayScratch struct {
 	receive tcpip.SliceWriter
+	discard discardWriter
 	send    bytes.Reader
 	buffer  [RelayBuffer]byte
+}
+
+// discardWriter consumes up to n bytes from the app's endpoint without
+// copying them: the relay has already peeked and sent them. gVisor's
+// endpoint Read trims exactly what a writer accepted, so a short write leaves
+// the rest queued, as SliceWriter's would.
+type discardWriter struct{ n int }
+
+func (d *discardWriter) Write(b []byte) (int, error) {
+	if len(b) <= d.n {
+		d.n -= len(b)
+		return len(b), nil
+	}
+	n := d.n
+	d.n = 0
+	return n, io.ErrShortWrite
 }
 
 type readyRelay struct {
@@ -316,9 +333,8 @@ func (r *readyRelay) discard(up bool, b []byte, scratch *relayScratch) error {
 		var n int
 		var err error
 		if up {
-			scratch.receive = tcpip.SliceWriter(b)
-			result, e := r.c.ep.Read(&scratch.receive, tcpip.ReadOptions{})
-			scratch.receive = nil
+			scratch.discard = discardWriter{n: len(b)}
+			result, e := r.c.ep.Read(&scratch.discard, tcpip.ReadOptions{})
 			n, err = result.Count, stackError(e)
 		} else {
 			n, err = r.remote.TryDiscard(b)
