@@ -127,6 +127,8 @@ func TestLogindOwnerPresenceStatesAndErrors(t *testing.T) {
 		{name: "opening scope", fixture: logindFixture{sessions: []logindTestSession{opening}}, present: true},
 		{name: "all owner sessions closing", fixture: logindFixture{sessions: []logindTestSession{closing, closing}}},
 		{name: "closing with online manager", fixture: logindFixture{sessions: []logindTestSession{closing, {uid: 1000, state: "online", class: "manager"}}}},
+		{name: "closing with active manager", fixture: logindFixture{sessions: []logindTestSession{closing, {uid: 1000, state: "active", class: "manager"}}}},
+		{name: "closing with opening manager", fixture: logindFixture{sessions: []logindTestSession{closing, {uid: 1000, state: "opening", class: "manager"}}}},
 		{name: "manager early only", fixture: logindFixture{sessions: []logindTestSession{{uid: 1000, state: "online", class: "manager-early"}}}},
 		{name: "manager with real login", fixture: logindFixture{sessions: []logindTestSession{{uid: 1000, state: "online", class: "manager"}, active}}, present: true},
 		{name: "manager with linger", fixture: logindFixture{sessions: []logindTestSession{{uid: 1000, state: "online", class: "manager"}}, linger: true}, present: true},
