@@ -112,4 +112,41 @@ func assertServiceIsolation(t *testing.T, control, engine uint32) {
 			t.Fatalf("service %d is in a worker job", pid)
 		}
 	}
+	// Only Control reads owner sessions (WTSQueryUserToken); the Engine's
+	// required-privilege list leaves SeTcbPrivilege out of its token.
+	if !servicePrivilege(t, control, "SeTcbPrivilege") || servicePrivilege(t, engine, "SeTcbPrivilege") {
+		t.Fatal("SeTcbPrivilege must be in Control's token and absent from the Engine's")
+	}
+	t.Log("SeTcbPrivilege: present in Control, absent from Engine")
+}
+
+func servicePrivilege(t *testing.T, pid uint32, name string) bool {
+	t.Helper()
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(h)
+	var token windows.Token
+	if err := windows.OpenProcessToken(h, windows.TOKEN_QUERY, &token); err != nil {
+		t.Fatal("open service token", pid, err)
+	}
+	defer token.Close()
+	var want windows.LUID
+	if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &want); err != nil {
+		t.Fatal(err)
+	}
+	var size uint32
+	_ = windows.GetTokenInformation(token, windows.TokenPrivileges, nil, 0, &size)
+	words := make([]uint64, (size+7)/8+1)
+	if err := windows.GetTokenInformation(token, windows.TokenPrivileges, (*byte)(unsafe.Pointer(&words[0])), uint32(len(words)*8), &size); err != nil {
+		t.Fatal(err)
+	}
+	privileges := (*windows.Tokenprivileges)(unsafe.Pointer(&words[0]))
+	for _, p := range privileges.AllPrivileges() {
+		if p.Luid == want {
+			return true
+		}
+	}
+	return false
 }

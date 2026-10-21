@@ -64,6 +64,27 @@ func clientMain(args []string) int {
 		}
 		return 0
 	}
+	if len(args) == 2 && args[0] == "http-churn" {
+		if err := httpChurn(args[1]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if len(args) == 3 && args[0] == "http-latency" {
+		if err := httpLatency(args[1], args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if len(args) == 1 && args[0] == "medium-pipe-read" {
+		if err := mediumPipeRead(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if len(args) == 1 && args[0] == "low-pipe" {
 		if err := lowPipeClient(); err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -665,7 +686,9 @@ func TestRealServices(t *testing.T) {
 		}
 	})
 	t.Run("low-integrity-owner-cannot-exhaust-owner-slots", func(t *testing.T) { lowIntegrityCapacity(t, owner) })
+	t.Run("low-integrity-owner-cannot-pair-over-HTTP", func(t *testing.T) { lowIntegrityPairing(t, c, owner) })
 	t.Run("HTTP-flood-preserves-owner-capacity", func(t *testing.T) { httpCapacity(t, c, owner, other) })
+	t.Run("HTTP-churn-keeps-owner-latency", func(t *testing.T) { httpChurnLatency(t, c, owner, other) })
 	t.Run("idle-open-flood-preserves-owner-admission", func(t *testing.T) { idleAdmissionCapacity(t, dir, data, owner, other) })
 	t.Run("last-logind-session-stops-routing", func(t *testing.T) { ownerSignout(t, c, owner) })
 	t.Run("engine-ipc-rejects-standard-users", func(t *testing.T) {
