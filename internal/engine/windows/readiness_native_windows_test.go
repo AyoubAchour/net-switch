@@ -494,7 +494,7 @@ func TestTCPReadinessNativeNormalCancelAndGenerations(t *testing.T) {
 			if p.completed.Load() != packets+1 || p.stats()["sockets"] != 0 || wakes.Load() != 0 {
 				t.Fatalf("cancellation lost its packet or invoked a detached callback: %v wakes=%d", p.stats(), wakes.Load())
 			}
-			if kind, err := windows.GetsockoptInt(c.handle.Handle("readiness test detached socket still live"), windows.SOL_SOCKET, windows.SO_TYPE); err != nil || kind != windows.SOCK_STREAM {
+			if kind, err := windows.GetsockoptInt(c.handle.Handle("readiness test detached socket still live"), windows.SOL_SOCKET, 0x1008); err != nil || kind != windows.SOCK_STREAM { // SO_TYPE.
 				t.Fatalf("Detach closed/recycled the native socket: type=%d %v", kind, err)
 			}
 			// The peer remains live and idle until after Detach and Close. Its

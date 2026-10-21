@@ -72,7 +72,12 @@ func queryTCPCompletionPolicy(enumerate protocolEnumerator) tcpCompletionPolicy 
 // when retaining borrowed completion modes. Treat this as a compatibility
 // dependency, not a promise that every provider implements the query: require
 // success and the complete Flags word, or fail before submitting any receive.
+// QueryInformationFile itself is synchronous even for an asynchronous file
+// object (IRP_SYNCHRONOUS_API); user-mode Nt and Zw entry points have identical
+// behavior. Its caller buffers therefore are not retained after this call.
 // https://learn.microsoft.com/windows-hardware/drivers/ddi/wdm/ne-wdm-_file_information_class
+// https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ioisoperationsynchronous
+// https://learn.microsoft.com/windows-hardware/drivers/kernel/using-nt-and-zw-versions-of-the-native-system-services-routines
 func socketCompletionModes(socket winhandle.Owner) (uint32, error) {
 	return querySocketCompletionModes(socket.Handle("TCP query completion modes"), windows.NtQueryInformationFile)
 }
