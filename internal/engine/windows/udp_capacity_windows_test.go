@@ -16,11 +16,11 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func TestNativeUDPPairedCapacity(t *testing.T) {
-	hosted(t)
-	if os.Getenv("NETSWITCH_PORT_GATE") != "1" {
-		t.Skip("native UDP pair isolation belongs to the hosted capacity fixture")
-	}
+// udpPairBinding returns the matched baseline's interface index, engine source
+// and peer address: loopback unless the hosted fixture names the actual
+// TestISP source and interface.
+func udpPairBinding(t *testing.T) (uint32, string, net.IP) {
+	t.Helper()
 	interfaces, err := net.Interfaces()
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +59,15 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 		}
 		index, source, peerSource = uint32(value), configured, net.ParseIP(configured)
 	}
+	return index, source, peerSource
+}
+
+func TestNativeUDPPairedCapacity(t *testing.T) {
+	hosted(t)
+	if os.Getenv("NETSWITCH_PORT_GATE") != "1" {
+		t.Skip("native UDP pair isolation belongs to the hosted capacity fixture")
+	}
+	index, source, peerSource := udpPairBinding(t)
 	for _, native := range []bool{false, true} {
 		t.Run(map[bool]string{false: "Go", true: "ReadyUDP"}[native], func(t *testing.T) {
 			peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: peerSource})
