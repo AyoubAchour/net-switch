@@ -18,6 +18,8 @@ export const areas = {
   tests_windows: ['node', 'go_windows', 'legacy_windows', 'testisp', 'control'],
 };
 
+const windowsGo = /_windows(?:_(?:amd64|arm64|386))?(?:_test)?\.go$/;
+
 export function areaFor(path) {
   // These exclusions precede documentation and platform matching. A README
   // in vendor or a fixture is still an input, not documentation-only work.
@@ -27,11 +29,14 @@ export function areaFor(path) {
   // The installer copies these entire trees, not just today's user guide.
   if (path === 'THIRD_PARTY_NOTICES.md' || (/^(?:lib|ui|tools|licenses|docs)\//.test(path) && path.endsWith('.md'))) return null;
   if (path.endsWith('.md') && !path.startsWith('test/')) return 'docs';
-  // Node's trace coverage test reads this source, and its fixture tests read
-  // internal/**/node-*.json. Those cross-language inputs take the full path.
+  // Node's trace coverage test reads this Go source. drift.test.mjs fails if
+  // a test or script reads another mapped file its area wouldn't select.
   if (path === 'internal/control/http.go') return null;
+  // go1-linux vets, tests and builds ./tests/..., so only Windows-suffixed Go
+  // files under tests/windows are Windows-only.
+  if (/^tests\/windows\/.+\.go$/.test(path) && !windowsGo.test(path)) return null;
   if (/^(?:internal|cmd)\/.+\.go$/.test(path)) {
-    if (/_windows(?:_(?:amd64|arm64|386))?(?:_test)?\.go$/.test(path)) return 'go_windows';
+    if (windowsGo.test(path)) return 'go_windows';
     if (/_linux(?:_(?:amd64|arm64|386))?(?:_test)?\.go$/.test(path)) return 'go_linux';
     // A folder named windows is NOT an OS constraint: meters.go, network.go
     // and others there compile and run tests on Linux too.
@@ -76,23 +81,38 @@ export function decide(eventName, event, git) {
   if (eventName !== 'pull_request' || event.pull_request?.labels?.some(label => label.name === 'ci:full')) {
     return classify([], new Set(), { eventName, labels: event.pull_request?.labels?.map(label => label.name) });
   }
+  // A stacked PR can later be retargeted to the default branch, and that
+  // fires no run. Its checks must already cover everything it would merge.
+  const base = event.pull_request?.base?.ref, defaultBranch = event.repository?.default_branch;
+  if (!base || !defaultBranch || base !== defaultBranch) {
+    const result = classify([], new Set(), { eventName: 'stacked' });
+    result.reasons = [`base branch ${JSON.stringify(base ?? null)} is not the default branch ${JSON.stringify(defaultBranch ?? null)}`];
+    return result;
+  }
   const { paths, knownPaths, mergeBase } = changedFiles(event.pull_request?.base?.sha, event.pull_request?.head?.sha, git);
   const result = classify(paths, knownPaths);
   result.reasons.unshift(`merge base: ${mergeBase}`);
   return result;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  let result;
+// Failure must cost capacity, never coverage. The workflow also falls back to
+// all jobs if checkout, the tests, or this process fails altogether.
+export function run(eventName, readEvent, git) {
   try {
-    result = decide(process.env.GITHUB_EVENT_NAME, JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8')));
+    return decide(eventName, JSON.parse(readEvent()), git);
   } catch (error) {
-    // Failure must cost capacity, never coverage. The workflow also falls back
-    // to all jobs if checkout, the tests, or this process fails altogether.
-    console.log(`::warning::Changed-file classification failed; running everything: ${String(error.message).replace(/[\r\n]/g, ' ')}`);
-    result = classify([], new Set(), { eventName: 'classification-failed' });
+    const result = classify([], new Set(), { eventName: 'classification-failed' });
+    result.warning = `Changed-file classification failed; running everything: ${String(error.message).replace(/[\r\n]/g, ' ')}`;
+    return result;
   }
+}
+
+export const outputLines = result => groups.map(group => `${group}=${result.outputs[group] === false ? 'false' : 'true'}\n`).join('');
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const result = run(process.env.GITHUB_EVENT_NAME, () => readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'));
+  if (result.warning) console.log(`::warning::${result.warning}`);
   console.log(JSON.stringify(result, null, 2));
-  appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(result.outputs).map(([key, value]) => `${key}=${value}\n`).join(''));
+  appendFileSync(process.env.GITHUB_OUTPUT, outputLines(result));
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### Changed-file decision\n\nFull run: ${result.full}\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\`\n`);
 }
