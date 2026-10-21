@@ -44,13 +44,14 @@ func ConnectDesktop(ctx context.Context, status bool) (*RPC, error) {
 	return NewRPC(conn), nil
 }
 
-// ConnectStatus opens a read-only status connection without activating
-// Control. Every signed-in user may open the public endpoint, so one of them
+// ConnectStatus opens a connection for status without explicitly activating
+// Control. Linux's public fallback retains normal socket activation. Every
+// signed-in user may open the public endpoint, so one of them
 // can keep it busy (on Windows, idle opens hold its listening instance through
 // each bounded identity read). Callers with protected rights (the owner, an
 // elevated administrator, SYSTEM or root) therefore read status on the
-// protected endpoint, which the kernel refuses to other users before any
-// instance is used. Only a denied or missing protected endpoint falls back to
+// protected endpoint with its separate admission and owner access rules.
+// Only a denied or missing protected endpoint falls back to
 // the public, status-only one; any other failure is reported as is.
 func ConnectStatus(ctx context.Context) (*RPC, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
