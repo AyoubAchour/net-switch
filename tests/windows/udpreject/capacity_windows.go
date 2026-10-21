@@ -103,7 +103,11 @@ func capacityError(err error) string {
 	if errors.As(err, &timed) && timed.Timeout() {
 		return "TIMEOUT"
 	}
-	return err.Error()
+	var code syscall.Errno
+	if errors.As(err, &code) {
+		return fmt.Sprintf("ERRNO_%d", code)
+	}
+	return "OTHER"
 }
 
 // The host sends commands on stdin and receives one JSON reply per command.

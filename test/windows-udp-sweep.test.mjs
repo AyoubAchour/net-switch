@@ -98,3 +98,23 @@ test('a zero or fractional sample is rejected rather than trusted', () => {
     assert.equal(latency.minUS, null);
   }
 });
+
+test('invalid failure counts cannot disguise excess echoes as held sessions', () => {
+  for (const bad of [-1, 0.5, '1', Number.MAX_SAFE_INTEGER + 1]) {
+    const entry = app(1, [1, 1, 1]);
+    entry.expectedCount = entry.result.checked = 2;
+    entry.result.failures = { OTHER: bad };
+    const result = heldSweepLatency({ held: 2, sweepMS: 1, apps: [entry] });
+    assert.equal(result.passed, false);
+    assert.equal(result.pass.represented, false);
+    assert(result.censored >= 0);
+  }
+});
+
+test('invalid sweep times and duplicated app populations cannot pass', () => {
+  for (const sweepMS of [-1, NaN, Infinity, '1']) {
+    assert.equal(heldSweepLatency({ held: 1, sweepMS, apps: [app(1, [1])] }).pass.sweep, false);
+  }
+  const duplicate = app(1, [1]);
+  assert.equal(heldSweepLatency({ held: 2, sweepMS: 1, apps: [duplicate, duplicate] }).pass.represented, false);
+});

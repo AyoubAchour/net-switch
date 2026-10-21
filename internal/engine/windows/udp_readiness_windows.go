@@ -139,7 +139,7 @@ func (p *udpReadiness) watch(socket winhandle.Owner, wake func()) (*udpWatch, er
 		}
 		s.mu.Unlock()
 	}
-	return nil, errors.New("Windows UDP readiness reached its 16384 socket ceiling")
+	return nil, fmt.Errorf("Windows UDP readiness reached its %d socket ceiling", udpShardCount*udpShardCapacity)
 }
 
 func (w *udpWatch) Arm(read, write bool) error {
@@ -207,6 +207,26 @@ func (p *udpReadiness) fail(err error) {
 	for _, stop := range p.stops {
 		windows.SetEvent(stop.Handle("UDP failure wake"))
 	}
+	// A failed waiter ends readiness for the whole pool. Wake every armed
+	// mapping, including those owned by the other waiter, before reporting the
+	// fatal error. Callbacks only schedule work and run outside the shard lock.
+	for i := range p.shards {
+		s := &p.shards[i]
+		callbacks := make([]func(), 0, udpShardCapacity)
+		s.mu.Lock()
+		for w := range s.watches {
+			if w.events == 0 {
+				continue
+			}
+			w.events = 0
+			w.err = errors.Join(err, selectUDPEvents(w.socket, 0, 0))
+			callbacks = append(callbacks, w.wake)
+		}
+		s.mu.Unlock()
+		for _, callback := range callbacks {
+			callback()
+		}
+	}
 	if p.onError != nil {
 		p.onError(err)
 	}
@@ -216,15 +236,19 @@ func (p *udpReadiness) run(worker int) {
 	defer p.wg.Done()
 	const perWaiter = udpShardCount / udpWaiters
 	var handles [perWaiter + 1]windows.Handle
+	var events [perWaiter]windows.Handle
+	// These values remain owned until both waiters have joined in close().
+	handles[0] = p.stops[worker].Handle("UDP waiter stop")
+	for i := range perWaiter {
+		events[i] = p.shards[i*udpWaiters+worker].event.Handle("UDP waiter shard event")
+	}
 	rows := make([]pollFD, 0, udpShardCapacity)
 	watches := make([]*udpWatch, 0, udpShardCapacity)
 	callbacks := make([]func(), 0, udpShardCapacity)
 	cursor := 0
 	for {
-		handles[0] = p.stops[worker].Handle("UDP waiter stop")
 		for i := range perWaiter {
-			index := ((cursor+i)%perWaiter)*udpWaiters + worker
-			handles[i+1] = p.shards[index].event.Handle("UDP waiter shard event")
+			handles[i+1] = events[(cursor+i)%perWaiter]
 		}
 		result, err := windows.WaitForMultipleObjects(handles[:], false, windows.INFINITE)
 		if err != nil {

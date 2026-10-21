@@ -85,16 +85,25 @@ function nearestRank(sorted, population, perMille) {
 // client's verify reply, present even when it reported failed echoes.
 export function heldSweepLatency({ held, sweepMS, apps }) {
   const samples = [], perApp = [], failures = {};
-  let represented = 0, expected = 0, failed = 0, complete = true;
+  let represented = 0, expected = 0, failed = 0;
+  let complete = Number.isSafeInteger(held) && held > 0;
+  const seenApps = new Set();
   for (const item of apps) {
     const result = item.result, values = Array.isArray(result?.samplesUS) ? result.samplesUS : [];
     const counts = result?.failures ?? {};
-    const appFailed = Object.values(counts).reduce((n, count) => n + count, 0);
-    for (const [label, count] of Object.entries(counts)) failures[label] = (failures[label] ?? 0) + count;
+    const validCounts = typeof counts === 'object' && !Array.isArray(counts) &&
+      Object.values(counts).every((count) => Number.isSafeInteger(count) && count >= 0);
+    const appFailed = validCounts ? Object.values(counts).reduce((n, count) => n + count, 0) : 0;
+    if (validCounts) {
+      for (const [label, count] of Object.entries(counts)) failures[label] = (failures[label] ?? 0) + count;
+    }
     const valid = values.every((value) => Number.isSafeInteger(value) && value > 0);
     const digestMatches = result?.heldDigest === item.expectedDigest;
-    const whole = Boolean(result) && valid && digestMatches && result.checked === item.expectedCount &&
+    const whole = Boolean(result) && valid && validCounts && Number.isSafeInteger(appFailed) &&
+      Number.isSafeInteger(item.expectedCount) && item.expectedCount >= 0 && !seenApps.has(item.app) &&
+      digestMatches && result.checked === item.expectedCount &&
       result.echoed === values.length && values.length + appFailed === result.checked;
+    seenApps.add(item.app);
     if (valid) samples.push(...values);
     expected += item.expectedCount;
     failed += appFailed;
@@ -117,9 +126,9 @@ export function heldSweepLatency({ held, sweepMS, apps }) {
   const quantilesUS = Object.fromEntries([['p50', 500], ['p90', 900], ['p99', 990], ['p999', 999]]
     .map(([name, perMille]) => [name, nearestRank(samples, population, perMille)]));
   const pass = {
-    represented: complete && expected === held && represented === held,
+    represented: complete && censored >= 0 && expected === held && represented === held,
     p99: quantilesUS.p99 !== null && quantilesUS.p99 <= heldUDPSweepGate.p99US,
-    sweep: sweepMS <= heldUDPSweepGate.sweepMS,
+    sweep: Number.isFinite(sweepMS) && sweepMS >= 0 && sweepMS <= heldUDPSweepGate.sweepMS,
   };
   pass.p99 &&= pass.represented;
   return {

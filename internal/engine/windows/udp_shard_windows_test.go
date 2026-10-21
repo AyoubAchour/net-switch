@@ -4,22 +4,19 @@ package winengine
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
-func TestUDPShardPollKeepsBorrowAndOtherWaiterProgress(t *testing.T) {
-	hosted(t)
-	first, peer := nativeUDPPair(t, "udp4")
-	pool := first.pool
-	firstWatch, err := first.Watch(func() {})
-	if err != nil {
-		t.Fatal(err)
-	}
+func socketInUDPTestPool(t *testing.T, pool *udpReadiness) *udpSocket {
+	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 2)})
 	if err != nil {
 		t.Fatal(err)
@@ -29,12 +26,24 @@ func TestUDPShardPollKeepsBorrowAndOtherWaiterProgress(t *testing.T) {
 		conn.Close()
 		t.Fatal(err)
 	}
-	second := &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535}
+	socket := &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535}
 	t.Cleanup(func() {
-		if err := second.Close(); err != nil {
+		if err := socket.Close(); err != nil {
 			t.Error(err)
 		}
 	})
+	return socket
+}
+
+func TestUDPShardPollKeepsBorrowAndOtherWaiterProgress(t *testing.T) {
+	hosted(t)
+	first, peer := nativeUDPPair(t, "udp4")
+	pool := first.pool
+	firstWatch, err := first.Watch(func() {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := socketInUDPTestPool(t, pool)
 	wake := make(chan struct{}, 1)
 	secondWatch, err := second.Watch(func() {
 		select {
@@ -45,8 +54,8 @@ func TestUDPShardPollKeepsBorrowAndOtherWaiterProgress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.watch.shard == second.watch.shard {
-		t.Fatal("fixture needs distinct shards")
+	if first.watch.shard != &pool.shards[0] || second.watch.shard != &pool.shards[1] || udpWaiters < 2 {
+		t.Fatal("fixture needs shards on distinct waiters")
 	}
 	entered, resume := make(chan struct{}), make(chan struct{})
 	release := sync.OnceFunc(func() { close(resume) })
@@ -124,4 +133,77 @@ func TestUDPShardPollKeepsBorrowAndOtherWaiterProgress(t *testing.T) {
 		t.Fatal("Close stayed blocked after query returned")
 	}
 	t.Log("paused native query fenced Close while the other waiter delivered an exact datagram")
+}
+
+func TestUDPShardFailureWakesEveryArmedMapping(t *testing.T) {
+	hosted(t)
+	injected := errors.New("injected UDP poll failure")
+	fatal := make(chan error, 1)
+	pool, err := newUDPReadiness(func(err error) { fatal <- err })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := pool.close(); !errors.Is(err, injected) {
+			t.Errorf("pool close lost its failure: %v", err)
+		}
+	})
+	var fail atomic.Bool
+	pool.poll = func(rows []pollFD) (int32, error) {
+		if fail.Load() {
+			return -1, injected
+		}
+		return pollUDP(rows)
+	}
+	wakes := make(chan int, udpShardCount*2)
+	watches := make([]*udpWatch, udpShardCount)
+	for i := range watches {
+		socket := socketInUDPTestPool(t, pool)
+		_, err := socket.Watch(func() { wakes <- i })
+		if err != nil {
+			t.Fatal(err)
+		}
+		watches[i] = socket.watch
+		if socket.watch.shard != &pool.shards[i] {
+			t.Fatal("fixture failed to cover every shard")
+		}
+		if err := socket.watch.Arm(true, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fail.Store(true)
+	if err := windows.SetEvent(pool.shards[0].event.Handle("UDP failure fixture wake")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-fatal:
+		if !errors.Is(err, injected) {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pool failure did not finish its notification")
+	}
+	joined := make(chan struct{})
+	go func() { pool.wg.Wait(); close(joined) }()
+	select {
+	case <-joined:
+	case <-time.After(time.Second):
+		t.Fatal("failed waiters did not exit")
+	}
+	seen := make(map[int]bool)
+	for len(wakes) != 0 {
+		i := <-wakes
+		if seen[i] {
+			t.Errorf("mapping %d woke twice", i)
+		}
+		seen[i] = true
+	}
+	if len(seen) != udpShardCount {
+		t.Fatalf("failure woke %d of %d armed mappings", len(seen), udpShardCount)
+	}
+	for _, watch := range watches {
+		if err := watch.Arm(true, false); !errors.Is(err, injected) {
+			t.Fatalf("rearm lost the pool failure: %v", err)
+		}
+	}
 }
