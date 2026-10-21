@@ -47,6 +47,7 @@ func (r *Runtime) Stats() any {
 		stats["nativeSocketState"] = nativeSocketState()
 		stats["nativeUDPState"] = nativeUDPState()
 		stats["nativeReadiness"] = r.dialer.pool.stats()
+		stats["nativeUDPReadiness"] = r.dialer.udp.stats()
 	}
 	if memory, err := processMemory(); err == nil {
 		stats["processMemory"] = memory

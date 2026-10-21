@@ -6,8 +6,10 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"time"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
@@ -25,6 +27,8 @@ type udpReadiness struct {
 	err     error
 	onError func(error)
 	done    chan struct{}
+	capture bool
+	metrics udpReadinessMetrics
 }
 
 type udpWatch struct {
@@ -41,7 +45,7 @@ func newUDPReadiness(onError func(error)) (*udpReadiness, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &udpReadiness{event: winhandle.Open(event, "UDP readiness event open"), watches: map[*udpWatch]struct{}{}, done: make(chan struct{}), onError: onError}
+	p := &udpReadiness{event: winhandle.Open(event, "UDP readiness event open"), watches: map[*udpWatch]struct{}{}, done: make(chan struct{}), onError: onError, capture: hostedTraceEnabled()}
 	go p.run()
 	return p, nil
 }
@@ -70,8 +74,16 @@ func (p *udpReadiness) watch(socket winhandle.Owner, wake func()) (*udpWatch, er
 
 func (w *udpWatch) Arm(read, write bool) error {
 	p := w.pool
+	var started time.Duration
+	if p.capture {
+		started = winclock.Now()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.capture {
+		p.metrics.ArmLockWait.add(winclock.Since(started))
+		defer func() { p.metrics.Arm.add(winclock.Since(started)) }()
+	}
 	if w.detached || p.closed {
 		return net.ErrClosed
 	}
@@ -101,6 +113,9 @@ func (w *udpWatch) Arm(read, write bool) error {
 		// FD_WRITE is edge-triggered, and an unconnected UDP socket need not
 		// have had a connect event. Query current state once on every arm;
 		// later network changes wake the same event without a receive.
+		if p.capture {
+			p.metrics.SetEvents++
+		}
 		return windows.SetEvent(p.event.Handle("UDP arm wake"))
 	}
 	return nil
@@ -136,6 +151,11 @@ func (p *udpReadiness) run() {
 		// Reset before querying readiness. Arrivals after this point leave the
 		// event signalled for the next pass; those before it are in the query.
 		resetErr := windows.ResetEvent(p.event.Handle("UDP event reset"))
+		var began time.Duration
+		if p.capture {
+			p.metrics.WaitReturns++
+			began = winclock.Now()
+		}
 		rows, watches, callbacks = rows[:0], watches[:0], callbacks[:0]
 		for w := range p.watches {
 			if w.events != 0 {
@@ -144,14 +164,29 @@ func (p *udpReadiness) run() {
 			}
 		}
 		err := errors.Join(waitErr, resetErr)
+		if p.capture {
+			p.metrics.BuildRows.add(winclock.Since(began))
+			began = winclock.Now()
+		}
 		if len(rows) > 0 && err == nil {
 			n, _, callErr := winsock.NewProc("WSAPoll").Call(uintptr(unsafe.Pointer(&rows[0])), uintptr(len(rows)), 0)
+			if p.capture {
+				p.metrics.Poll.add(winclock.Since(began))
+				p.metrics.PollRows += uint64(len(rows))
+				p.metrics.MaxPollRows = max(p.metrics.MaxPollRows, uint64(len(rows)))
+				if n == 0 {
+					p.metrics.ZeroReadyPolls++
+				}
+			}
 			if int32(n) == -1 {
 				err = callErr
 			}
 		}
 		if err != nil {
 			p.err = err
+		}
+		if p.capture {
+			began = winclock.Now()
 		}
 		for i, row := range rows {
 			if row.Returned == 0 && err == nil {
@@ -162,14 +197,27 @@ func (p *udpReadiness) run() {
 			w.err = errors.Join(err, selectUDPEvents(w.socket, 0, 0))
 			callbacks = append(callbacks, w.wake)
 		}
+		if p.capture {
+			p.metrics.ReadyRows += uint64(len(callbacks))
+			p.metrics.Disarm.add(winclock.Since(began))
+		}
 		p.mu.Unlock()
 		// Detach may race these already-selected callbacks. The shared worker
 		// ignores late scheduling after it finishes; callbacks do no socket I/O.
+		if p.capture {
+			began = winclock.Now()
+		}
 		for i, callback := range callbacks {
 			callback()
 			callbacks[i] = nil
 		}
 		clear(watches)
+		if p.capture {
+			elapsed := winclock.Since(began)
+			p.mu.Lock()
+			p.metrics.Callbacks.add(elapsed)
+			p.mu.Unlock()
+		}
 		if err != nil {
 			if p.onError != nil {
 				p.onError(err)

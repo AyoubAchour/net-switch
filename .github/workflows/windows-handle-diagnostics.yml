@@ -2,7 +2,7 @@ name: Windows handle diagnostics
 
 on:
   push:
-    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section]
+    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section, engine/windows-platform-udp-latency-arm64]
   workflow_dispatch:
     inputs:
       arch:
@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   handles:
-    if: ${{ !endsWith(github.ref, '-section') }}
+    if: ${{ !endsWith(github.ref, '-section') && !contains(github.ref, '-udp-latency') }}
     name: Native handle diagnostics / ${{ (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64')) && 'ARM64' || 'x64' }}
     runs-on: ${{ (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64')) && 'windows-11-arm' || 'windows-latest' }}
     timeout-minutes: 15
@@ -126,4 +126,31 @@ jobs:
       - name: Register shared pages, exchange packets and retire the helper
         run: |
           ./bin/wintun-section.test.exe '-test.v' '-test.timeout=4m' '-test.run=^TestWintunSharedSectionOwner$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  udp-latency:
+    if: ${{ contains(github.ref, '-udp-latency') }}
+    name: UDP armed-reader latency / ${{ inputs.arch || 'ARM64' }}
+    runs-on: ${{ inputs.arch == 'x64' && 'windows-latest' || 'windows-11-arm' }}
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      GOFLAGS: -mod=vendor -p=2 -tags=netswitch_handlecheck
+      NETSWITCH_EXPECT_HANDLECHECK: '1'
+      NETSWITCH_ENGINE_TEST_TRACE: '1'
+      NETSWITCH_UDP_READINESS_GATE: '1'
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Measure fixed sockets with progressively armed idle readers
+        run: |
+          go test -count=1 -v -timeout=4m -run '^TestReadyUDPArmedIdleLatency$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
