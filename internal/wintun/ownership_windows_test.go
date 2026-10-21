@@ -143,6 +143,12 @@ func TestRingRemovalBetweenMarkerCheckAndClose(t *testing.T) {
 			r.device, r.registered = device, true
 			r.deviceOwner = winhandle.OpenDriverHandle(device, "test Wintun device")
 			var replacement windows.Handle
+			var replacementWitness windows.Handle
+			defer func() {
+				if replacementWitness != 0 {
+					windows.CloseHandle(replacementWitness)
+				}
+			}()
 			var replacementOwner winhandle.Owner
 			var driverErr error
 			attempts := 0
@@ -151,6 +157,9 @@ func TestRingRemovalBetweenMarkerCheckAndClose(t *testing.T) {
 					driverErr = windows.CloseHandle(h) // TunDispatchPnp's ObCloseHandle(UserMode).
 					if driverErr == nil {
 						replacement, attempts = reuseValue(t, h)
+						if replacement != 0 {
+							replacementWitness = witness(t, replacement)
+						}
 						if replacement != 0 && tracked {
 							replacementOwner = winhandle.Open(replacement, "test replacement owner")
 						}
@@ -167,10 +176,16 @@ func TestRingRemovalBetweenMarkerCheckAndClose(t *testing.T) {
 			// retains these pages; the fixture owns their deferred release.
 			report(t, map[string]any{"test": "removal_between_marker_check_and_close", "arch": runtime.GOARCH,
 				"tracked": tracked, "handlecheck": winhandle.Enabled, "driver_close_error": errText(driverErr),
-				"reuse_attempts": attempts, "replacement": replacement != 0, "violation": fmt.Sprint(violation), "close_error": errText(err)})
+				"reuse_attempts": attempts, "replacement": replacement != 0,
+				"replacement_same_object": replacement != 0 && sameObject(replacement, replacementWitness),
+				"violation":               fmt.Sprint(violation), "close_error": errText(err)})
 			if violation != nil {
-				if replacement != 0 {
-					windows.CloseHandle(replacement)
+				if replacement != 0 && sameObject(replacement, replacementWitness) {
+					if replacementOwner.IsZero() {
+						windows.CloseHandle(replacement)
+					} else {
+						replacementOwner.HandleClose("test replacement after violation")
+					}
 				}
 				if !strings.Contains(fmt.Sprint(violation), "WINDOWS HANDLE OWNERSHIP VIOLATION") {
 					panic(violation)
@@ -181,6 +196,9 @@ func TestRingRemovalBetweenMarkerCheckAndClose(t *testing.T) {
 				t.Fatal("the injected removal never had its handle number reused; the race was not exercised")
 			}
 			if replacement != 0 {
+				if !sameObject(replacement, replacementWitness) {
+					t.Fatal("replacement handle no longer names its original object; a later reuse cannot rescue the check")
+				}
 				if err := windows.SetEvent(replacement); err != nil {
 					t.Fatalf("closed another owner's handle that reused the device number: %v", err)
 				}
