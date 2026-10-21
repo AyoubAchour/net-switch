@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	var index uint32
+	source, peerSource := "127.0.0.2", net.IPv4(127, 0, 0, 3)
 	for _, item := range interfaces {
 		if item.Flags&net.FlagLoopback != 0 {
 			index = uint32(item.Index)
@@ -34,9 +36,32 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 	if index == 0 {
 		t.Fatal("no loopback interface")
 	}
+	if configured := os.Getenv("NETSWITCH_UDP_BASELINE_SOURCE"); configured != "" {
+		value, err := strconv.ParseUint(os.Getenv("NETSWITCH_UDP_BASELINE_INDEX"), 10, 32)
+		if err != nil || value == 0 || net.ParseIP(configured).To4() == nil {
+			t.Fatalf("invalid matched UDP baseline binding: %q %d %v", configured, value, err)
+		}
+		iface, err := net.InterfaceByIndex(int(value))
+		if err != nil {
+			t.Fatal(err)
+		}
+		addresses, err := iface.Addrs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		matches := false
+		for _, address := range addresses {
+			ip, _, err := net.ParseCIDR(address.String())
+			matches = matches || (err == nil && ip.Equal(net.ParseIP(configured)))
+		}
+		if !matches {
+			t.Fatal("matched baseline source is not on the specified interface")
+		}
+		index, source, peerSource = uint32(value), configured, net.ParseIP(configured)
+	}
 	for _, native := range []bool{false, true} {
 		t.Run(map[bool]string{false: "Go", true: "ReadyUDP"}[native], func(t *testing.T) {
-			peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 3)})
+			peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: peerSource})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -78,13 +103,14 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 			}
 			var limit error
 			var phase string
+			options := map[string]int{}
 			for range 12000 {
 				app, err := net.DialUDP("udp4", nil, peer.LocalAddr().(*net.UDPAddr))
 				if err != nil {
 					limit, phase = err, "app connect"
 					break
 				}
-				packet, err := config.ListenPacket(context.Background(), "udp4", "127.0.0.2:0")
+				packet, err := config.ListenPacket(context.Background(), "udp4", net.JoinHostPort(source, "0"))
 				if err != nil {
 					app.Close()
 					limit, phase = err, "engine bind"
@@ -96,6 +122,24 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 					app.Close()
 					conn.Close()
 					t.Fatal(err)
+				}
+				if len(apps) == 0 {
+					var optionErr error
+					err := raw.Control(func(fd uintptr) {
+						for name, option := range map[string]int{"SO_REUSEADDR": windows.SO_REUSEADDR, "SO_EXCLUSIVEADDRUSE": ^windows.SO_REUSEADDR} {
+							var value int
+							value, optionErr = windows.GetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, option)
+							if optionErr != nil {
+								return
+							}
+							options[name] = value
+						}
+					})
+					if err != nil || optionErr != nil {
+						app.Close()
+						conn.Close()
+						t.Fatalf("matched native socket options: %v %v", err, optionErr)
+					}
 				}
 				engine := &udpSocket{conn: conn, raw: raw, pool: pool, local: conn.LocalAddr().(*net.UDPAddr).AddrPort(), mtu: 65535}
 				apps, engines = append(apps, app), append(engines, engine)
@@ -150,7 +194,10 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 			memory, memoryErr := processMemory()
 			evidence, _ := json.Marshal(map[string]any{"readyUDP": native, "heldPairs": len(apps),
 				"uniquePorts": len(ports), "echoedDatagrams": len(apps) * 2, "phase": phase,
-				"error": limit.Error(), "processMemory": memory, "memoryError": memoryErr})
+				"family": "ipv4", "source": source, "interfaceIndex": index,
+				"appBind": "wildcard port zero, connected", "engineBind": "specific source port zero, IP_UNICAST_IF",
+				"engineOptions": options,
+				"error":         limit.Error(), "processMemory": memory, "memoryError": memoryErr})
 			t.Logf("WINDOWS NATIVE UDP PAIRED CAPACITY %s", evidence)
 		})
 	}

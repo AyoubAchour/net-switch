@@ -155,7 +155,7 @@ export async function capacity({ server, harness, directory, line }) {
       .map((text) => JSON.parse(text.slice(text.indexOf(releaseMarker) + releaseMarker.length)));
     assert(nativeRelease.length && nativeRelease.at(-1).remaining === 0);
     Object.assign(progress, { nativeSamples, nativeRelease, refusalBaseline, refusalLimitMs, floor, layoutCapacity });
-    const nativeUDP = await nativeUDPCapacity();
+    const nativeUDP = await nativeUDPCapacity(harness.testisp);
     await server.api('routing', { on: true });
     await server.on();
     const engineBefore = await server.api('engine-command', { method: 'hello' });
