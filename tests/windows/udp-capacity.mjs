@@ -6,7 +6,7 @@ import path from 'node:path';
 import { hostedOnly, run, until } from './testisp/harness.mjs';
 import { captureHeap } from './heap-profile.mjs';
 
-export async function nativeUDPCapacity() {
+export async function nativeUDPCapacity(binding) {
   hostedOnly();
   const result = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
     ['-test.v', '-test.run=^TestNativeUDPSocketCapacity$', '-test.timeout=1m'],
@@ -16,7 +16,21 @@ export async function nativeUDPCapacity() {
   assert(line, result.stdout);
   const native = JSON.parse(line.slice(line.indexOf(marker) + marker.length));
   assert(native.held > 0 && native.uniquePorts === native.held && Object.keys(native.failures).length);
-  return native;
+  const paired = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
+    ['-test.v', '-test.run=^TestNativeUDPPairedCapacity$', '-test.timeout=3m'],
+    { env: { NETSWITCH_PORT_GATE: '1', NETSWITCH_UDP_BASELINE_SOURCE: binding.address,
+      NETSWITCH_UDP_BASELINE_INDEX: String(binding.index) }, timeout: 180_000 });
+  const pairMarker = 'WINDOWS NATIVE UDP PAIRED CAPACITY ';
+  const pairs = paired.stdout.split(/\r?\n/).filter((value) => value.includes(pairMarker))
+    .map((value) => JSON.parse(value.slice(value.indexOf(pairMarker) + pairMarker.length)));
+  assert.equal(pairs.length, 2, 'Both Go and ReadyUDP matched baselines must run');
+  for (const sample of pairs) {
+    assert.equal(sample.source, binding.address);
+    assert.equal(sample.interfaceIndex, binding.index);
+    assert(sample.heldPairs > 0 && sample.echoedDatagrams === sample.heldPairs * 2);
+  }
+  console.log(`WINDOWS MATCHED UDP BASELINE ${JSON.stringify({ legacy: native, pairs })}`);
+  return { ...native, matchedPairs: pairs };
 }
 
 async function client(server, directory, line, app) {
@@ -112,6 +126,12 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
       }
     }
     Object.assign(evidence, { held, failed, attempts });
+    const matched = native.matchedPairs.find((sample) => sample.readyUDP);
+    evidence.floorVerdicts = { legacyLoopbackFloor: evidence.floor, legacyWouldPass: held >= evidence.floor,
+      matchedPairFloor: Math.ceil(matched.heldPairs * 0.95),
+      matchedWouldPass: held >= Math.ceil(matched.heldPairs * 0.95),
+      appliedGate: 'legacy floor remains hard until excluded-range evidence explains the difference' };
+    console.log(`WINDOWS UDP FLOOR VERDICTS ${JSON.stringify(evidence.floorVerdicts)}`);
     assert(failed.length, 'UDP fixture did not reach the native OS port limit');
     assert(failed.every((item) => ['ENOBUFS', 'EADDRINUSE', 'ECONNRESET', 'ECONNREFUSED'].includes(item.Error)),
       `UDP delivery loss or unrelated failure: ${JSON.stringify(failed)}`);
