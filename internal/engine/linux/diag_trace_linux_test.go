@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -16,6 +17,71 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"golang.org/x/sys/unix"
 )
+
+// Cancellation is real; only the point where it occurs is deterministic.
+// The first Err check admits the query, and the next checks its queued reply
+// before canceling. An earlier extra check would fail the fixture's proof.
+type cancelBeforeReadContext struct {
+	context.Context
+	cancel       context.CancelFunc
+	beforeCancel func()
+	checks       atomic.Int32
+}
+
+func (c *cancelBeforeReadContext) Err() error {
+	if c.checks.Add(1) == 2 {
+		c.beforeCancel()
+		c.cancel()
+	}
+	return c.Context.Err()
+}
+
+// Model the valid interval between an absolute deadline and its timer
+// goroutine closing Done. Err stays nil while Done remains open.
+type pendingDeadlineContext struct {
+	context.Context
+	deadline time.Time
+	done     chan struct{}
+}
+
+func (c pendingDeadlineContext) Deadline() (time.Time, bool) { return c.deadline, true }
+func (c pendingDeadlineContext) Done() <-chan struct{}       { return c.done }
+
+func TestLateExactReplyCannotUseCachedIdentityBeforeContextTimerRuns(t *testing.T) {
+	app, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	tuple := platform.Tuple{Source: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), app.LocalAddr().(*net.UDPAddr).AddrPort().Port()), Destination: netip.MustParseAddrPort("192.0.2.1:443")}
+	o := newTestOwners(t)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	if err := o.Warm(ctx); err != nil {
+		t.Fatal(err)
+	}
+	known, err := o.UDPFor(ctx, tuple)
+	if err != nil || known.PID != uint32(os.Getpid()) || known.AppID == "" || known.Generation == "" {
+		t.Fatalf("fixture must first establish a cached real owner: %+v %v", known, err)
+	}
+	if len(o.queries.idle) != 1 {
+		t.Fatalf("fixture has %d idle query sockets, want one", len(o.queries.idle))
+	}
+	previous := o.queries.idle[0].file
+	before := o.Stats().(lookupStats)
+	late := pendingDeadlineContext{Context: context.Background(), deadline: time.Now().Add(-time.Second), done: make(chan struct{})}
+	owner, err := o.UDPFor(late, tuple)
+	if !errors.Is(err, context.DeadlineExceeded) || owner.Generation != known.Generation || owner.PID != 0 || owner.AppID != "" || owner.Path != "" || late.Err() != nil {
+		t.Fatalf("absolute deadline allowed overdue cached identity or lost its cookie: %+v %v parentErr=%v", owner, err, late.Err())
+	}
+	after := o.Stats().(lookupStats)
+	if after.ExactRepliesAfterDeadline != before.ExactRepliesAfterDeadline+1 || after.ExpiredBeforeHolderScan != before.ExpiredBeforeHolderScan+1 || after.HolderTimeouts != before.HolderTimeouts {
+		t.Fatalf("late reply was not distinguished from a scan timeout: before=%+v after=%+v", before, after)
+	}
+	if _, err := previous.Stat(); !errors.Is(err, os.ErrClosed) || len(o.queries.idle) != 0 {
+		t.Fatalf("recovered late query socket was pooled: idle=%d err=%v", len(o.queries.idle), err)
+	}
+}
 
 func TestExpiredNetlinkDeadlinePreservesReadyExactReply(t *testing.T) {
 	// The isolated kernel-test namespace can begin with loopback down.

@@ -103,6 +103,7 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 	deadline, timed := ctx.Deadline()
 	var canceled chan struct{}
 	var stop func() bool
+	lateReply := false
 	// A lookup's native read deadline is already at most 8 ms. It needs no
 	// extra cancellation goroutine/channel; cancellation still finishes
 	// inside that budget. Longer dumps retain immediate cancellation.
@@ -119,7 +120,7 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 		if stop != nil && !stop() {
 			<-canceled
 		}
-		if err != nil || dump || ctx.Err() != nil {
+		if err != nil || dump || lateReply || ctx.Err() != nil {
 			f.Close()
 			return
 		}
@@ -180,7 +181,6 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 		defer diagDumpBuffers.Put(pooled)
 		buf = *pooled
 	}
-	lateReply := false
 	for {
 		if lateReply {
 			// One ready packet is the complete salvage budget. An unrelated
@@ -254,8 +254,9 @@ func readNetlink(f *os.File, b []byte) (int, error) {
 
 // RawRead checks its deadline before recvmsg, even when the exact response
 // is already queued by Sendto. Retrieve that one ready response without a
-// new request, wait or deadline reset. Owner resolution still uses the same
-// expired context, so this preserves a cookie, never an overdue identity.
+// new request, wait or deadline reset. Owner resolution still checks the same
+// absolute deadline even before the context timer updates Err(), so this
+// preserves a cookie, never an overdue identity.
 // Dumps must not use this: a ready multipart stream could bypass its deadline.
 func readExactNetlink(ctx context.Context, f *os.File, b []byte) (int, bool, error) {
 	if errors.Is(ctx.Err(), context.Canceled) {

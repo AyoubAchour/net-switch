@@ -54,38 +54,40 @@ type fdWindow struct {
 	identity   *ownerValidation
 }
 type Owners struct {
-	queries               diagPool
-	batches               descriptorBatches
-	warmed                bool
-	budget                flows.Limits // the limits service_linux.go gives the engine
-	descriptors           *descriptorReservation
-	udpGenerationSequence atomic.Uint64
-	udpGenerationFailures [8]atomic.Pointer[udpGenerationFailure]
-	lookupErrors          [4]atomic.Uint64
-	cgroupStats           [3]atomic.Uint64
-	sharedScans           atomic.Uint64
-	metadataPasses        atomic.Uint64
-	sharedMetadata        atomic.Uint64
-	sharedScopes          atomic.Uint64
-	holderTimeouts        atomic.Uint64
-	timeoutPhases         [lookupPhases]lookupPhaseCounter
-	lastLookupError       atomic.Pointer[string]
-	mu                    sync.Mutex
-	cgroupMu              sync.RWMutex
-	recentMu              sync.RWMutex
-	cgroups               map[uint64]string
-	scopeReads            [64]atomic.Pointer[scopePIDSnapshot]
-	recent                map[uint32]*recentOwners
-	index                 [ownerIndexShards]ownerIndex
-	indexSeed             maphash.Seed
-	windows               map[uint32]fdWindow
-	ambiguousPorts        map[uint16]time.Time
+	queries                 diagPool
+	batches                 descriptorBatches
+	warmed                  bool
+	budget                  flows.Limits // the limits service_linux.go gives the engine
+	descriptors             *descriptorReservation
+	udpGenerationSequence   atomic.Uint64
+	expiredBeforeHolderScan atomic.Uint64
+	udpGenerationFailures   [8]atomic.Pointer[udpGenerationFailure]
+	lookupErrors            [4]atomic.Uint64
+	cgroupStats             [3]atomic.Uint64
+	sharedScans             atomic.Uint64
+	metadataPasses          atomic.Uint64
+	sharedMetadata          atomic.Uint64
+	sharedScopes            atomic.Uint64
+	holderTimeouts          atomic.Uint64
+	timeoutPhases           [lookupPhases]lookupPhaseCounter
+	lastLookupError         atomic.Pointer[string]
+	mu                      sync.Mutex
+	cgroupMu                sync.RWMutex
+	recentMu                sync.RWMutex
+	cgroups                 map[uint64]string
+	scopeReads              [64]atomic.Pointer[scopePIDSnapshot]
+	recent                  map[uint32]*recentOwners
+	index                   [ownerIndexShards]ownerIndex
+	indexSeed               maphash.Seed
+	windows                 map[uint32]fdWindow
+	ambiguousPorts          map[uint16]time.Time
 	// Fault callbacks are assigned only by the acceptance build.
 	fault        func(context.Context) error
 	destroyFault func(context.Context, socketRow, func())
 }
 
 type lookupStats struct {
+	ExpiredBeforeHolderScan   uint64
 	ExactRepliesAfterDeadline uint64
 	// This remains explicit while the eBPF initiator/sender backend is pending.
 	Backend                                                                              string
@@ -120,6 +122,7 @@ type lookupStats struct {
 func (o *Owners) Stats() any {
 	s := lookupStats{Backend: "proc-fallback", Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
 	s.ExactRepliesAfterDeadline = o.queries.lateReplies.Load()
+	s.ExpiredBeforeHolderScan = o.expiredBeforeHolderScan.Load()
 	if size, err := descriptorTableSize(); err == nil {
 		s.FDTableSize = size
 	} else {
@@ -636,6 +639,12 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 	if r.inode == 0 {
 		return platform.Owner{}, os.ErrNotExist
 	}
+	deadline, timed := ctx.Deadline()
+	expired := func() bool { return ctx.Err() != nil || (timed && !time.Now().Before(deadline)) }
+	if expired() {
+		o.expiredBeforeHolderScan.Add(1)
+		return platform.Owner{}, fmt.Errorf("attribution expired before holder scan: %w", context.DeadlineExceeded)
+	}
 	requested := time.Now()
 	var timing lookupTiming
 	var validationTime, initialIndexTime, scopeTime time.Duration
@@ -651,11 +660,6 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 			lookupErr = fmt.Errorf("%w (uid=%d inode=%d hints=%d pids=%d fds=%d lastPID=%d fdUID=%d indexed=%t frontier=%d indexWait=%s validation=%s scope=%s)", lookupErr, r.uid, r.inode, hinted, scannedPIDs, scannedFDs, lastPID, lastUID, lastIndexed, lastPosition, initialIndexTime, validationTime, scopeTime)
 		}
 	}()
-	deadline, timed := ctx.Deadline()
-	expired := func() bool { return ctx.Err() != nil || (timed && !time.Now().Before(deadline)) }
-	if expired() {
-		return platform.Owner{}, context.DeadlineExceeded
-	}
 	var result platform.Owner
 	var found []holder
 	var unconfirmed []uint32

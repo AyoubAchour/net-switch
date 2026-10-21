@@ -87,14 +87,20 @@ func TestDiagnosticPoolCancellationAndClose(t *testing.T) {
 	defer cancel()
 	var cookie uint64
 	canceled := 0
+	shortReplies := 0
 	for i := 0; i < 100; i++ {
 		short, done := context.WithTimeout(ctx, time.Microsecond)
-		_, shortErr := o.query(short, unix.AF_INET, unix.IPPROTO_UDP, source, destination)
+		shortRows, shortErr := o.query(short, unix.AF_INET, unix.IPPROTO_UDP, source, destination)
 		done()
 		if errors.Is(shortErr, context.DeadlineExceeded) || errors.Is(shortErr, os.ErrDeadlineExceeded) {
 			canceled++
 		} else if shortErr != nil {
 			t.Fatalf("short query: %v", shortErr)
+		} else {
+			if len(shortRows) != 1 || (cookie != 0 && shortRows[0].cookie != cookie) {
+				t.Fatalf("short or recovered reply has the wrong cookie: %+v", shortRows)
+			}
+			shortReplies++
 		}
 		rows, err := o.query(ctx, unix.AF_INET, unix.IPPROTO_UDP, source, destination)
 		if err != nil || len(rows) != 1 {
@@ -105,11 +111,35 @@ func TestDiagnosticPoolCancellationAndClose(t *testing.T) {
 		}
 		cookie = rows[0].cookie
 	}
-	if canceled == 0 {
-		t.Fatal("no query was canceled; cancellation path wasn't exercised")
-	}
 	if len(o.queries.idle) != 1 {
 		t.Fatalf("expected a live reusable socket before cleanup, got %d", len(o.queries.idle))
+	}
+	abandoned := o.queries.idle[0].file
+	inner, stop := context.WithCancel(ctx)
+	defer stop()
+	observed := make(chan diagQueryTrace, 1)
+	forced := &cancelBeforeReadContext{Context: inner, cancel: stop, beforeCancel: func() {
+		trace := diagQueryTrace{Sequence: diagSequence.Load()}
+		trace.peek(abandoned)
+		observed <- trace
+	}}
+	if _, err := o.query(forced, unix.AF_INET, unix.IPPROTO_UDP, source, destination); !errors.Is(err, context.Canceled) {
+		t.Fatalf("forced cancellation was not returned: %v", err)
+	}
+	select {
+	case trace := <-observed:
+		if !trace.ReplyReady || !trace.ReplyFromKernel || !trace.ReplySequenceMatches || trace.ReplyType != 20 || trace.ReplyCookie != strconv.FormatUint(cookie, 16) {
+			t.Fatalf("fixture did not leave its own cookie queued before cancellation: %+v", trace)
+		}
+	default:
+		t.Fatal("fixture did not reach cancellation after its first context check")
+	}
+	if _, err := abandoned.Stat(); !errors.Is(err, os.ErrClosed) || len(o.queries.idle) != 0 {
+		t.Fatalf("canceled query with a queued reply was reused instead of closed: idle=%d err=%v", len(o.queries.idle), err)
+	}
+	rows, err := o.query(ctx, unix.AF_INET, unix.IPPROTO_UDP, source, destination)
+	if err != nil || len(rows) != 1 || rows[0].cookie != cookie || len(o.queries.idle) != 1 {
+		t.Fatalf("fresh query after forced cancellation: %+v %v", rows, err)
 	}
 	live := o.queries.idle[0].file
 	if _, err := live.Stat(); err != nil {
@@ -122,7 +152,7 @@ func TestDiagnosticPoolCancellationAndClose(t *testing.T) {
 	if _, err := o.query(ctx, unix.AF_INET, unix.IPPROTO_UDP, source, destination); !errors.Is(err, net.ErrClosed) {
 		t.Fatalf("closed pool accepted lookup: %v", err)
 	}
-	t.Logf("%d canceled queries, 100 fresh matching replies; idle descriptor closed", canceled)
+	t.Logf("short queries: %d deadline failures, %d valid replies; old timing cancellation guard=%t; deterministic queued-reply cancellation and idle cleanup passed", canceled, shortReplies, canceled > 0)
 }
 
 func TestTCPReadinessPreservesDataEOFAndClose(t *testing.T) {
