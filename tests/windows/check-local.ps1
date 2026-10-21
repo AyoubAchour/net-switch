@@ -5,9 +5,12 @@ $env:GOTOOLCHAIN = 'local'
 $env:GOMAXPROCS = '2'
 $env:GOFLAGS = '-p=2'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
-$pins = Get-Content (Join-Path $root 'packaging/versions.json') -Raw | ConvertFrom-Json
+$module = Get-Content (Join-Path $root 'go.mod') -Raw
+$pin = [regex]::Match($module, '(?m)^go\s+(\d+\.\d+\.\d+)\s*$')
+if (-not $pin.Success) { throw 'The root go.mod must pin an exact Go version.' }
+$version = $pin.Groups[1].Value
 $Go = (Get-Command $Go -ErrorAction Stop).Source
-if ((& $Go version) -notmatch "go$([regex]::Escape($pins.go.version)) ") { throw 'Use the Go version pinned in packaging/versions.json.' }
+if ((& $Go version) -notmatch "go$([regex]::Escape($version)) ") { throw "Use Go $version, pinned in the root go.mod." }
 $arguments = switch ($Action) {
   'vendor' { @('mod', 'vendor') }
   'verify' { @('mod', 'verify') }

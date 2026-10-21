@@ -33,20 +33,23 @@ test('recorded controller traces replay in the same input and completion order',
   t.diagnostic(`Compared ${names.length} traces, ${Object.values(actual).reduce((count, trace) => count + trace.entries.length, 0)} entries.`);
 });
 
-test('the recorded scenarios exercise every HTTP route and restored log condition', async (t) => {
+test('the recorded scenarios exercise every compatibility HTTP route and restored log condition', async (t) => {
   const directory = new URL('../tests/oracle/fixtures/', import.meta.url);
   const traces = await Promise.all((await readdir(directory)).filter((name) => name.endsWith('.trace.json')).map(async (name) => JSON.parse(await readFile(new URL(name, directory), 'utf8'))));
   const httpSource = await readFile(new URL('../internal/control/http.go', import.meta.url), 'utf8');
   const registered = [...new Set([...httpSource.matchAll(/"(\/api\/[a-z][a-z/-]*)"/g)].map((match) => match[1]))].sort();
   const nodeSource = await readFile(new URL('../lib/server-factory.mjs', import.meta.url), 'utf8');
   const nodeRoutes = [...new Set([...nodeSource.matchAll(/'(?:GET|POST) (\/api\/[a-z][a-z/-]*)'/g)].map((match) => match[1]).concat([...nodeSource.matchAll(/url\.pathname === '(\/api\/icon)'/g)].map((match) => match[1])))].sort();
-  assert.deepEqual(registered, nodeRoutes, 'Node and Go route lists diverged');
+  // Pairing is a service-only extension covered by the hosted lifecycle suite.
+  // Keep this explicit: any other added or missing route must still fail.
+  const serviceRoutes = ['/api/pair'];
+  assert.deepEqual(registered, [...nodeRoutes, ...serviceRoutes].sort(), 'Node and Go compatibility route lists diverged');
   const exercised = [...new Set(traces.flatMap((trace) => trace.scenario.steps.filter((step) => step.kind === 'http').map((step) => step.route.split('?')[0])))].sort();
-  assert.deepEqual(exercised, registered);
+  assert.deepEqual(exercised, registered.filter((route) => !serviceRoutes.includes(route)));
   assert.deepEqual(exercised, nodeRoutes);
   const logs = traces.flatMap((trace) => trace.entries.filter((entry) => entry.kind === 'log').map((entry) => entry.value.text));
   for (const condition of [/hasn't answered for 20 polls; restarting it/, /^routing restarts to use /, /'s data cap reset$/, /^added /, /^removed /, /^line order: /, /^starting with Windows is on$/, /^starting with Windows is off$/, /^quit failed:/]) assert(logs.some((line) => condition.test(line)), `unexercised log: ${condition}`);
-  t.diagnostic(`${registered.length} HTTP endpoints and all nine requested log conditions exercised.`);
+  t.diagnostic(`${nodeRoutes.length} compatibility HTTP endpoints and all nine requested log conditions exercised; service-only pairing is covered by the lifecycle suite.`);
 });
 
 test('Undo failures and partial restoration still match the Node oracle', async (t) => {

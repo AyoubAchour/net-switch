@@ -1,3 +1,6 @@
+# github.com/godbus/dbus/v5 v5.2.4
+## explicit; go 1.20
+github.com/godbus/dbus/v5
 # github.com/google/btree v1.1.2
 ## explicit; go 1.18
 github.com/google/btree
@@ -41,6 +44,9 @@ golang.org/x/sys/cpu
 golang.org/x/sys/unix
 golang.org/x/sys/windows
 golang.org/x/sys/windows/registry
+golang.org/x/sys/windows/svc
+golang.org/x/sys/windows/svc/eventlog
+golang.org/x/sys/windows/svc/mgr
 # golang.org/x/time v0.15.0
 ## explicit; go 1.25.0
 golang.org/x/time/rate

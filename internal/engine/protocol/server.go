@@ -27,6 +27,10 @@ type Runtime interface {
 	Apply(context.Context, policy.Revision) (policy.Applied, error)
 	Stop(context.Context) error
 }
+type AdapterRuntime interface {
+	AdapterSnapshot() any
+	AdapterRequest(context.Context, Request) (any, error)
+}
 type operation struct {
 	hash   [32]byte
 	result any
@@ -35,11 +39,13 @@ type operation struct {
 }
 type Server struct {
 	mu                          sync.Mutex
+	mutation                    sync.Mutex
 	Instance                    string
 	now                         func() time.Time
 	epoch                       uint64
 	expires                     time.Time
 	attached, stopping, stopped bool
+	leaseExpired                bool
 	runtime                     Runtime
 	table                       *flows.Table
 	prober                      platform.Prober
@@ -47,6 +53,8 @@ type Server struct {
 	order                       []string
 	clients                     map[*connection]struct{}
 	EventsDropped               atomic.Uint64
+	done                        chan struct{}
+	doneOnce                    sync.Once
 }
 
 func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
@@ -54,7 +62,40 @@ func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
 	if _, err := rand.Read(id[:]); err != nil {
 		panic(err)
 	}
-	return &Server{Instance: hex.EncodeToString(id[:]), now: time.Now, runtime: runtime, table: table, prober: prober, operations: map[string]*operation{}, clients: map[*connection]struct{}{}}
+	s := &Server{Instance: hex.EncodeToString(id[:]), now: leaseNow, runtime: runtime, table: table, prober: prober, operations: map[string]*operation{}, clients: map[*connection]struct{}{}, done: make(chan struct{})}
+	if counter, ok := runtime.(interface{ InitialEpoch() uint64 }); ok {
+		s.epoch = counter.InitialEpoch()
+	}
+	return s
+}
+func (s *Server) Done() <-chan struct{} { return s.done }
+
+func (s *Server) LeaseExpired() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.leaseExpired
+}
+
+// Resume gives Control a bounded opportunity to run after the OS wakes.
+// It cannot resurrect an instance whose cleanup already started.
+func (s *Server) Resume() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.attached && !s.stopping && !s.stopped {
+		grace := s.now().Add(10 * time.Second)
+		if s.expires.Before(grace) {
+			s.expires = grace
+		}
+	}
+}
+func (s *Server) finish() { s.doneOnce.Do(func() { close(s.done) }) }
+func (s *Server) finishStopped() {
+	s.mu.Lock()
+	stopped := s.stopped
+	s.mu.Unlock()
+	if stopped {
+		s.finish()
+	}
 }
 func (s *Server) fence(r Request) error {
 	if r.Instance != s.Instance || !s.attached || r.Epoch != s.epoch {
@@ -69,6 +110,7 @@ func (s *Server) fence(r Request) error {
 func (s *Server) Handle(ctx context.Context, r Request) Reply {
 	result, err := s.execute(ctx, r)
 	reply := Reply{ID: r.ID, Result: result}
+	reply.stop = r.Method == "stop" && err == nil
 	if err != nil {
 		reply.Result = nil
 		reply.Error = err.Error()
@@ -76,10 +118,21 @@ func (s *Server) Handle(ctx context.Context, r Request) Reply {
 	return reply
 }
 func (s *Server) execute(ctx context.Context, r Request) (any, error) {
+	switch r.Method {
+	case "attach", "start", "apply", "stop", "closeFlows", "adapterForgetLane":
+		// A new controller cannot overtake an accepted mutation. Renewals
+		// remain independent of adapter file/HTTP work and disk flushes.
+		s.mutation.Lock()
+		defer s.mutation.Unlock()
+	}
 	s.mu.Lock()
 	if r.Method == "hello" {
 		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks"}}
 		s.mu.Unlock()
+		if adapter, ok := s.runtime.(AdapterRuntime); ok {
+			v["capabilities"] = []string{"singbox-adapter-v1", "revisions", "lease"}
+			v["adapterSnapshot"] = adapter.AdapterSnapshot()
+		}
 		return v, nil
 	}
 	if r.Method == "attach" {
@@ -87,7 +140,21 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 			s.mu.Unlock()
 			return nil, errors.New("attach refused")
 		}
-		s.epoch++
+		next := s.epoch + 1
+		if store, ok := s.runtime.(interface{ SaveEpoch(uint64) error }); ok {
+			s.mu.Unlock()
+			err := store.SaveEpoch(next)
+			s.mu.Lock()
+			if err != nil {
+				s.mu.Unlock()
+				return nil, err
+			}
+			if s.stopping || s.stopped || s.attached && !s.now().Before(s.expires) {
+				s.mu.Unlock()
+				return nil, errors.New("attach refused after lease expiry")
+			}
+		}
+		s.epoch = next
 		s.expires = s.now().Add(Lease)
 		s.attached = true
 		s.table.SetEpoch(s.epoch)
@@ -100,7 +167,9 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		return true, nil
 	}
 	if r.Method == "stop" && s.stopping && r.Instance == s.Instance && r.Epoch == s.epoch {
+		s.mu.Unlock()
 		err := s.runtime.Stop(ctx)
+		s.mu.Lock()
 		if err == nil {
 			s.stopped = true
 		}
@@ -114,6 +183,12 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 	if r.Method == "probe" {
 		s.mu.Unlock()
 		return s.effect(ctx, r, func() (any, error) {
+			if r.Adapter != nil {
+				if adapter, ok := s.runtime.(AdapterRuntime); ok {
+					return adapter.AdapterRequest(ctx, r)
+				}
+				return nil, errors.New("adapter payload is not supported")
+			}
 			if s.prober == nil {
 				return nil, platform.ErrNotYet
 			}
@@ -123,6 +198,14 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		})
 	}
 	defer s.mu.Unlock()
+	if r.Adapter != nil && r.Method != "stop" && r.Method != "renew" {
+		if adapter, ok := s.runtime.(AdapterRuntime); ok {
+			s.mu.Unlock()
+			defer s.mu.Lock()
+			return adapter.AdapterRequest(ctx, r)
+		}
+		return nil, errors.New("adapter payload is not supported")
+	}
 	switch r.Method {
 	case "renew":
 		s.expires = s.now().Add(Lease)
@@ -134,12 +217,19 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 			return nil, errors.New("revision required")
 		}
 		if r.Method == "start" {
+			s.mu.Unlock()
+			defer s.mu.Lock()
 			return s.runtime.Start(ctx, *r.Revision)
 		}
+		s.mu.Unlock()
+		defer s.mu.Lock()
 		return s.runtime.Apply(ctx, *r.Revision)
 	case "stop":
 		s.stopping = true
-		if err := s.runtime.Stop(ctx); err != nil {
+		s.mu.Unlock()
+		err := s.runtime.Stop(ctx)
+		s.mu.Lock()
+		if err != nil {
 			return nil, err
 		}
 		s.stopped = true
@@ -247,18 +337,46 @@ func (s *Server) effect(ctx context.Context, r Request, run func() (any, error))
 	return result, err
 }
 
-// CheckLease shares the mutation/attach lock. Once cleanup begins, no new
-// controller can resurrect this engine instance.
-func (s *Server) CheckLease(ctx context.Context) error {
+// Expired fences attachment immediately, including while an accepted mutation
+// is blocked in I/O. The service host can then bound whole-process cleanup.
+func (s *Server) Expired() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {
-		return nil
+	if !s.attached || s.stopped || s.now().Before(s.expires) {
+		return false
 	}
 	s.stopping = true
+	s.leaseExpired = true
+	return true
+}
+
+// CheckLease marks expiry before waiting for an in-flight mutation. Once
+// cleanup begins, no new controller can resurrect this engine instance.
+func (s *Server) CheckLease(ctx context.Context) error {
+	s.mu.Lock()
+	if !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {
+		s.mu.Unlock()
+		return nil
+	}
+	if !s.stopping {
+		s.leaseExpired = true
+	}
+	s.stopping = true
+	s.mu.Unlock()
+	s.mutation.Lock()
+	defer s.mutation.Unlock()
+	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return nil
+	}
+	s.mu.Unlock()
 	err := s.runtime.Stop(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err == nil {
 		s.stopped = true
+		s.finish()
 	}
 	return err
 }

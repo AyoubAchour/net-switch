@@ -1,0 +1,16 @@
+:root { color-scheme: dark; font-family: "Segoe UI", system-ui, sans-serif; color: #eceef1; background: #0d0f12; }
+body { margin: 0; min-height: 100svh; display: grid; place-items: center; }
+main { width: min(24rem, calc(100% - 3rem)); padding-block: 3rem; }
+h1 { font-size: 1.6rem; line-height: 1.25; margin-block: 1rem; font-weight: 600; text-wrap: balance; }
+p { line-height: 1.5; }
+form { margin-block: 2rem; }
+label { display: block; font-weight: 600; margin-bottom: .5rem; }
+input { display: block; box-sizing: border-box; width: 100%; padding: .75rem; font: inherit; font-size: 1.5rem; font-variant-numeric: tabular-nums; letter-spacing: .25em; border: 1px solid #7e8590; border-radius: .4rem; background: #14171c; color: inherit; caret-color: #f5b13d; }
+button { font: inherit; font-weight: 600; padding: .75rem 1.25rem; border: 1px solid #343a44; border-radius: .4rem; background: #191d23; color: #eceef1; cursor: pointer; touch-action: manipulation; }
+@media (hover: hover) { button:hover { background: #262b33; border-color: #7e8590; } }
+button:active { background: #343a44; }
+button:disabled { opacity: .65; cursor: wait; }
+:focus-visible { outline: 2px solid #f4f5f7; outline-offset: 3px; }
+#help, .footnote { color: #a3a9b3; font-size: .9rem; }
+#error { color: #f26d6d; min-height: 1.5em; overflow-wrap: anywhere; }
+::selection { background: #f5b13d; color: #0d0f12; }

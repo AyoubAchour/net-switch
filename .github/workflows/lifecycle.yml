@@ -1,0 +1,115 @@
+name: Service lifecycle
+
+# Every input of the real-service tests: the Go packages they build or import
+# (including test packages and their own imports), the embedded UI and version,
+# the sing-box pins and download list, and the Windows preparation script.
+on:
+  push:
+    branches: [main]
+    paths: ['internal/**', 'cmd/**', 'assets.go', 'package.json', 'ui/**', 'tests/lifecycle/**', 'tests/linux/topo/**', 'tests/linux/inet/**', 'tests/linux/engine/**', 'tests/linux/harness/**', 'tests/linux/netns/**', 'tests/linux/wire/**', 'tests/linux/sing-box-linux.json', 'tests/windows/testisp/**', 'tests/windows/socket/**', 'packaging/versions.json', 'scripts/build-common.ps1', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
+  pull_request:
+    paths: ['internal/**', 'cmd/**', 'assets.go', 'package.json', 'ui/**', 'tests/lifecycle/**', 'tests/linux/topo/**', 'tests/linux/inet/**', 'tests/linux/engine/**', 'tests/linux/harness/**', 'tests/linux/netns/**', 'tests/linux/wire/**', 'tests/linux/sing-box-linux.json', 'tests/windows/testisp/**', 'tests/windows/socket/**', 'packaging/versions.json', 'scripts/build-common.ps1', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('lifecycle-pr-{0}', github.ref) || format('lifecycle-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  services:
+    name: Lifecycle / ${{ matrix.os }} ${{ matrix.arch }}${{ matrix.variant }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - runner: windows-latest
+            os: Windows
+            arch: x64
+          - runner: windows-11-arm
+            os: Windows
+            arch: ARM64
+          - runner: ubuntu-24.04
+            os: Linux
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            os: Linux
+            arch: ARM64
+          - runner: ubuntu-26.04
+            os: Linux
+            arch: x64
+            variant: ' (Ubuntu 26.04)'
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_LIFECYCLE_CI: '1'
+      NETSWITCH_EXPECT_LOGIND_MANAGER: ${{ matrix.runner == 'ubuntu-26.04' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Offline contracts
+        shell: bash
+        run: go test -v -count=1 ./internal/control ./internal/lifecycle ./internal/engine/protocol ./internal/localipc ./internal/service
+      - name: Build and run disposable Windows services
+        if: matrix.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          go test -v -count=1 ./internal/winlock
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles 'NetSwitch-Lifecycle-CI'
+          foreach ($name in @('netswitch', 'netswitch-engine', 'netswitch-desktop', 'netswitchctl')) {
+            go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') ./tests/lifecycle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'ipc.test.exe') ./internal/localipc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'session.test.exe') ./internal/lifecycle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle-other-app.exe') ./tests/lifecycle/trafficclient
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'testisp.exe') ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/lifecycle/prepare-windows.ps1 -Directory $env:NETSWITCH_LIFECYCLE_DIR
+          Set-Location tests/lifecycle
+          & (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') run-hosted
+          exit $LASTEXITCODE
+      - name: Build and run disposable Linux services
+        if: matrix.os == 'Linux'
+        shell: bash
+        env:
+          NETSWITCH_LIFECYCLE_DIR: /usr/lib/netswitch-lifecycle-ci
+        run: |
+          sudo install -d -o "$(id -u)" -g "$(id -g)" "$NETSWITCH_LIFECYCLE_DIR"
+          for name in netswitch netswitch-engine netswitch-desktop netswitchctl; do
+            go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o "$NETSWITCH_LIFECYCLE_DIR/$name" "./cmd/$name"
+          done
+          go test -c -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" ./tests/lifecycle
+          go build -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle-other-app" ./tests/lifecycle/trafficclient
+          sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"
+          cd tests/lifecycle
+          sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR,NETSWITCH_EXPECT_LOGIND_MANAGER "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v -test.timeout=22m
+      - name: Linux service diagnostics
+        if: always() && matrix.os == 'Linux'
+        shell: bash
+        run: sudo journalctl -u netswitch.service -u netswitch-engine.service --no-pager --lines=150
+      - name: Windows service diagnostics
+        if: always() && matrix.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='NetSwitch'] or Provider[@Name='NetSwitchEngine']]]" -MaxEvents 30 -ErrorAction SilentlyContinue | ForEach-Object { $_.ToXml() }
+          Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'; StartTime=(Get-Date).AddMinutes(-25)} -ErrorAction SilentlyContinue | Where-Object { $_.Message -match 'NetSwitch' } | ForEach-Object { $_.ToXml() }
+          exit 0

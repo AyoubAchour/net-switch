@@ -167,3 +167,36 @@ func (f *FileStore) Append(record Record) error {
 	f.dirty = false
 	return nil
 }
+
+// ClearRetired is used only under the engine's lifetime lock, after all
+// recorded objects have been retired. Truncation is safe there: a crash leaves
+// either historical removed records or an empty journal, never lost ownership.
+func (f *FileStore) ClearRetired() error {
+	records, err := f.Records()
+	if err != nil {
+		return err
+	}
+	live := map[string]bool{}
+	for _, r := range records {
+		if r.Phase == "removed" {
+			delete(live, r.ID)
+		} else {
+			live[r.ID] = true
+		}
+	}
+	if len(live) != 0 {
+		return errors.New("cannot compact live ownership records")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	file, err := os.OpenFile(f.Path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	err = file.Sync()
+	err = errors.Join(err, file.Close())
+	if err != nil {
+		return err
+	}
+	return f.SyncParent(filepath.Dir(f.Path))
+}

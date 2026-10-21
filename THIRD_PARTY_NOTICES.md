@@ -71,6 +71,11 @@ to Net Switch's code only, not to the installer as a whole.
 
 ## Go runtime and golang.org/x/sys
 
+The unshipped Net Switch 1.0 Linux desktop also uses
+[godbus/dbus v5.2.4](https://github.com/godbus/dbus/tree/v5.2.4), under BSD-2-Clause,
+to show pairing codes through the owner's session bus. Its license is retained
+in `vendor/github.com/godbus/dbus/v5/LICENSE`.
+
 - What it does here: `helper\netswitch-helper.exe` is Net Switch's own small
   program (its source is in the repository's `helper` folder) that reads the
   line meters and the connections that go around routing. It is written in Go, so the Go runtime

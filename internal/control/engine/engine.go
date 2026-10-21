@@ -1,5 +1,5 @@
-// Package engine is the control service's engine boundary. Milestone two can
-// implement it over IPC without giving the controller access to engine internals.
+// Package engine is the control service's engine boundary. The lifecycle
+// package implements it over IPC without exposing engine process internals.
 package engine
 
 import (
@@ -32,6 +32,7 @@ type Snapshot struct {
 	AppliedRevision uint64
 	AppliedHash     string
 	AppliedAt       time.Time
+	FailureID       string `json:"failureId,omitempty"`
 }
 
 type Revision struct {

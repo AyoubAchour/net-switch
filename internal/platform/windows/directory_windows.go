@@ -117,7 +117,7 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 		}
 	}
 	for i := len(parents) - 1; i >= 0; i-- {
-		if _, err := open(parents[i], 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE); err != nil {
+		if _, err := open(parents[i], windows.FILE_LIST_DIRECTORY, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE); err != nil {
 			return err
 		}
 	}
