@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -80,9 +81,94 @@ func freeDynamicUDP4(t *testing.T, space *udpPortSpace) int {
 	return free
 }
 
+// holdNativeTCPLoad fills the TCP ephemeral pool the way the native TCP
+// baseline does (production bind options, loopback listeners, 32 dials at a
+// time) until Windows refuses, and holds every connection: the TCP side of
+// the engine run's mixed corner, with no engine. It returns the held count
+// and a release that aborts them, so no TIME_WAIT outlives the control.
+func holdNativeTCPLoad(t *testing.T) (int, func()) {
+	t.Helper()
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var index uint32
+	for _, iface := range interfaces {
+		if iface.Flags&net.FlagLoopback != 0 {
+			index = uint32(iface.Index)
+			break
+		}
+	}
+	var mu sync.Mutex
+	var held []*net.TCPConn
+	var listeners []*net.TCPListener
+	var acceptors sync.WaitGroup
+	release := func() {
+		for _, listener := range listeners {
+			listener.Close()
+		}
+		acceptors.Wait()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range held {
+			conn.SetLinger(0)
+			conn.Close()
+		}
+		held = nil
+	}
+	for range 8 {
+		listener, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 2)})
+		if err != nil {
+			release()
+			t.Fatal(err)
+		}
+		listeners = append(listeners, listener)
+		acceptors.Go(func() {
+			for {
+				peer, err := listener.AcceptTCP()
+				if err != nil {
+					return
+				}
+				mu.Lock()
+				held = append(held, peer)
+				mu.Unlock()
+			}
+		})
+	}
+	dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}, Control: bindSocket(Adapter{Index4: index}, false), Timeout: 5 * time.Second}
+	clients := 0
+	for refused := false; !refused && clients < 65536; {
+		var workers sync.WaitGroup
+		var batchMu sync.Mutex
+		for n := range 32 {
+			remote := listeners[n%len(listeners)].Addr().String()
+			workers.Go(func() {
+				conn, err := dialer.DialContext(context.Background(), "tcp4", remote)
+				batchMu.Lock()
+				defer batchMu.Unlock()
+				if err != nil {
+					refused = true
+					return
+				}
+				clients++
+				mu.Lock()
+				held = append(held, conn.(*net.TCPConn))
+				mu.Unlock()
+			})
+		}
+		workers.Wait()
+	}
+	return clients, release
+}
+
 // ready also puts each engine half through the engine's readiness path
 // (native duplicate plus event registration), as production sessions are.
 func nativeUDPRecoveryCycles(t *testing.T, cycles int, ready bool, apps *[]*net.UDPConn, engines *[]*udpSocket, peer *net.UDPConn,
+	config net.ListenConfig, source string, space *udpPortSpace, pool *udpReadiness) {
+	nativeUDPRecoveryCyclesWith(t, cycles, ready, 0, apps, engines, peer, config, source, space, pool)
+}
+
+func nativeUDPRecoveryCyclesWith(t *testing.T, cycles int, ready bool, tcpLoad int, apps *[]*net.UDPConn, engines *[]*udpSocket, peer *net.UDPConn,
 	config net.ListenConfig, source string, space *udpPortSpace, pool *udpReadiness) {
 	t.Helper()
 	destination := peer.LocalAddr().(*net.UDPAddr)
@@ -165,7 +251,7 @@ func nativeUDPRecoveryCycles(t *testing.T, cycles int, ready bool, apps *[]*net.
 		attempts += cycle.Reopen
 		refused += cycle.ReopenRefused
 	}
-	evidence, _ := json.Marshal(map[string]any{"readyUDP": ready, "cycles": results, "reopenAttempts": attempts, "reopenRefused": refused,
+	evidence, _ := json.Marshal(map[string]any{"readyUDP": ready, "tcpLoad": tcpLoad, "cycles": results, "reopenAttempts": attempts, "reopenRefused": refused,
 		"source": source, "appBind": "wildcard port zero, connected", "engineBind": "specific source port zero, IP_UNICAST_IF"})
 	t.Logf("WINDOWS NATIVE UDP RECOVERY CYCLES %s", evidence)
 }
