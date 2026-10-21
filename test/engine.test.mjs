@@ -378,3 +378,5 @@ test('ARM64 uses its checkout checksums or the installed list, and only ARM64 ma
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// Validation-only change for PR #54 job gating (frozen 0.3.x suite case). Do not merge.
