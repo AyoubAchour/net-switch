@@ -172,6 +172,71 @@ func traceHas(entries []socketTraceEntry, h windows.Handle, tid uintptr, kind ui
 	return false
 }
 
+// closeTraceOn is set by TestMain when NETSWITCH_HANDLE_CLOSE_TRACE=1: OS
+// handle tracing for the whole package run, from before any test creates a
+// handle. It is for the intermittent duplicate-socket defect, where a handle
+// we just created turned out to name a different, brand-new socket: the
+// history of that value shows who closed it. Hosted CI only. With tracing on,
+// any use of an invalid handle raises STATUS_INVALID_HANDLE; without a
+// debugger that ends the process with the faulting stack, which is evidence
+// too.
+var closeTraceOn bool
+
+func enableCloseTrace() error {
+	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		return errors.New("only on disposable hosted CI")
+	}
+	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" || unsafe.Sizeof(socketTraceEntry{}) != 160 {
+		return fmt.Errorf("unverified trace layout on %s", runtime.GOARCH)
+	}
+	config := struct{ Flags, Slots uint32 }{Slots: socketTraceSlots}
+	if err := windows.NtSetInformationProcess(windows.CurrentProcess(), windows.ProcessHandleTracing,
+		unsafe.Pointer(&config), uint32(unsafe.Sizeof(config))); err != nil {
+		return fmt.Errorf("enable ProcessHandleTracing: %w", err)
+	}
+	// Positive control: a real OPEN and CLOSE of a known value are recorded.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	tid := uintptr(windows.GetCurrentThreadId())
+	h, err := windows.CreateEvent(nil, 0, 0, nil)
+	if err != nil {
+		return err
+	}
+	if err := windows.CloseHandle(h); err != nil {
+		return err
+	}
+	entries, err := querySocketTrace(h)
+	if err != nil {
+		return err
+	}
+	if !traceHas(entries, h, tid, 1) || !traceHas(entries, h, tid, 2) {
+		return fmt.Errorf("trace control lacks OPEN/CLOSE: handle=%#x entries=%d", h, len(entries))
+	}
+	closeTraceOn = true
+	return nil
+}
+
+// handleFailureEvidence logs, at a handle identity failure, the OS history of
+// each value (when the close trace is on) and every goroutine's stack, which
+// shows background work left by earlier tests.
+func handleFailureEvidence(t *testing.T, values map[string]windows.Handle) {
+	t.Helper()
+	if closeTraceOn {
+		for role, h := range values {
+			entries, err := querySocketTrace(h)
+			if err != nil {
+				t.Logf("HTRACE %s handle=%#x query: %v", role, h, err)
+				continue
+			}
+			logSocketTrace(t, role, entries)
+		}
+	} else {
+		t.Log("HTRACE off; set NETSWITCH_HANDLE_CLOSE_TRACE=1 on hosted CI to record every OPEN and CLOSE")
+	}
+	stacks := make([]byte, 1<<20)
+	t.Logf("GOROUTINES AT FAILURE\n%s", stacks[:runtime.Stack(stacks, true)])
+}
+
 func querySocketTrace(h windows.Handle) ([]socketTraceEntry, error) {
 	q := new(socketTraceQuery) // typed storage supplies native pointer alignment
 	q.Handle = h
