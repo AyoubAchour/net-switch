@@ -121,7 +121,10 @@ func TestWintunSectionProbeChild(t *testing.T) {
 	os.Exit(0)
 }
 
-type sectionProbeIO struct{ rings *rings }
+type sectionProbeIO struct {
+	rings           *rings
+	wakes, timeouts uint64 // read only after the echo worker joins
+}
 
 func (s *sectionProbeIO) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) (int, error) {
 	for {
@@ -132,9 +135,17 @@ func (s *sectionProbeIO) ReadBatch(ctx context.Context, buffers [][]byte, sizes 
 		if n != 0 || err != nil {
 			return n, err
 		}
-		_, err = windows.WaitForSingleObject(s.rings.readHandle(), 20)
+		result, err := windows.WaitForSingleObject(s.rings.readHandle(), 20)
 		if err != nil {
 			return 0, err
+		}
+		switch result {
+		case windows.WAIT_OBJECT_0:
+			s.wakes++
+		case uint32(windows.WAIT_TIMEOUT):
+			s.timeouts++
+		default:
+			return 0, fmt.Errorf("unexpected section read wait result %d", result)
 		}
 	}
 }
@@ -186,6 +197,13 @@ func runSectionOwnerProbe(t *testing.T, adapter *Adapter, mode string) {
 		Read:    uint64(events[0].Handle("section read inheritance")), Write: uint64(events[1].Handle("section write inheritance")),
 		Stop: uint64(events[2].Handle("section stop inheritance")), ParentAddress: uint64(view)}
 	inherit := []syscall.Handle{syscall.Handle(config.Mapping), syscall.Handle(config.Read), syscall.Handle(config.Write), syscall.Handle(config.Stop)}
+	var witnesses [4]winhandle.Owner
+	for i, handle := range inherit {
+		var copy windows.Handle
+		must(t, windows.DuplicateHandle(windows.CurrentProcess(), windows.Handle(handle), windows.CurrentProcess(), &copy, 0, false, windows.DUPLICATE_SAME_ACCESS))
+		witnesses[i] = winhandle.Open(copy, "section parent object witness")
+		defer witnesses[i].HandleClose("section parent object witness close")
+	}
 	for _, handle := range inherit {
 		must(t, windows.SetHandleInformation(windows.Handle(handle), windows.HANDLE_FLAG_INHERIT, windows.HANDLE_FLAG_INHERIT))
 	}
@@ -204,6 +222,7 @@ func runSectionOwnerProbe(t *testing.T, adapter *Adapter, mode string) {
 	must(t, cmd.Start())
 	ready := make(chan sectionProbeReady, 1)
 	scanned := make(chan struct{})
+	var scanErr error // published by close(scanned)
 	go func() {
 		defer close(scanned)
 		scanner := bufio.NewScanner(output)
@@ -211,16 +230,20 @@ func runSectionOwnerProbe(t *testing.T, adapter *Adapter, mode string) {
 			line := scanner.Text()
 			if strings.HasPrefix(line, "SECTION_HELPER_READY ") {
 				var value sectionProbeReady
-				if json.Unmarshal([]byte(strings.TrimPrefix(line, "SECTION_HELPER_READY ")), &value) == nil {
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "SECTION_HELPER_READY ")), &value); err == nil {
 					ready <- value
+				} else {
+					scanErr = fmt.Errorf("invalid helper ready line %q: %w", line, err)
+					t.Log(scanErr)
 				}
 			} else {
 				t.Logf("section helper: %s", line)
 			}
 		}
+		scanErr = errors.Join(scanErr, scanner.Err())
 	}()
 	done := make(chan error, 1)
-	go func() { <-scanned; done <- cmd.Wait() }()
+	go func() { <-scanned; done <- errors.Join(cmd.Wait(), scanErr, ctx.Err()) }()
 	joined := false
 	defer func() {
 		if !joined {
@@ -248,7 +271,8 @@ func runSectionOwnerProbe(t *testing.T, adapter *Adapter, mode string) {
 		receive:   ring{data[sectionRingBytes : sectionRingBytes*2], MinCapacity},
 		readEvent: windows.Handle(config.Read), writeEvent: windows.Handle(config.Write),
 		readOwner: events[0], writeOwner: events[1]}
-	f := &fixture{a: adapter, io: &sectionProbeIO{r}}
+	probeIO := &sectionProbeIO{rings: r}
+	f := &fixture{a: adapter, io: probeIO}
 	f.startEcho(t)
 	defer f.stopEcho()
 	client := udpSocket(t)
@@ -283,6 +307,12 @@ func runSectionOwnerProbe(t *testing.T, adapter *Adapter, mode string) {
 	if f.faults.Load() != 0 {
 		t.Fatalf("shared-section packet path failed: %v", f.fault())
 	}
+	if probeIO.wakes == 0 {
+		t.Fatalf("packet polling hid a broken inherited read event: wakes=%d timeouts=%d", probeIO.wakes, probeIO.timeouts)
+	}
+	if r.send.load(4) == ^uint32(0) || r.receive.load(0) == ^uint32(0) {
+		t.Fatal("registration was already released before the lifecycle action")
+	}
 	removalObserved := false
 	guardsChecked := 0
 	if mode == "adapter-remove" {
@@ -309,10 +339,10 @@ func runSectionOwnerProbe(t *testing.T, adapter *Adapter, mode string) {
 		must(t, adapter.Close())
 		assertPnPAbsent(t, adapter.instanceID)
 		deadline := time.Now().Add(5 * time.Second)
-		for r.send.load(4) != ^uint32(0) && time.Now().Before(deadline) {
+		for (r.send.load(4) != ^uint32(0) || r.receive.load(0) != ^uint32(0)) && time.Now().Before(deadline) {
 			time.Sleep(time.Millisecond)
 		}
-		removalObserved = r.send.load(4) == ^uint32(0)
+		removalObserved = r.send.load(4) == ^uint32(0) && r.receive.load(0) == ^uint32(0)
 		if !removalObserved {
 			t.Fatal("real adapter removal did not release the helper's registration")
 		}
@@ -350,6 +380,11 @@ func runSectionOwnerProbe(t *testing.T, adapter *Adapter, mode string) {
 	if r.send.load(4) != ^uint32(0) || r.receive.load(0) != ^uint32(0) {
 		t.Fatal("helper process finished without both driver-release markers")
 	}
+	for i, handle := range inherit {
+		if !sameObject(windows.Handle(handle), witnesses[i].Handle("section parent object identity after helper exit")) {
+			t.Fatalf("parent mapping/event %d no longer names its original object", i)
+		}
+	}
 	report(t, map[string]any{"test": "shared_section_owner", "mode": mode,
 		"parent_address": uint64(view), "helper_address": child.Address,
 		"parent_memory_type": memory.Type, "helper_memory_type": child.MemoryType,
@@ -358,7 +393,9 @@ func runSectionOwnerProbe(t *testing.T, adapter *Adapter, mode string) {
 		"section_backing_bytes": sectionProbeBytes,
 		"coherent_views":        true, "round_trips_no_retries": 64, "helper_packet_work": false,
 		"helper_exited": true, "driver_markers_after_exit": true, "exit_ms": float64(elapsed(started)) / float64(time.Millisecond),
-		"external_removal_before_helper_exit":       removalObserved,
-		"unrelated_parent_objects_preserved":        guardsChecked,
+		"external_removal_before_helper_exit": removalObserved,
+		"unrelated_parent_objects_preserved":  guardsChecked,
+		"parent_mapping_and_events_verified":  len(witnesses),
+		"read_event_wakes":                    probeIO.wakes, "read_wait_timeouts": probeIO.timeouts,
 		"query_remove_and_job_crash_not_yet_tested": true})
 }
