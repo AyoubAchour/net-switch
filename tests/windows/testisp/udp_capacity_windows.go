@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sync"
+	"time"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -21,10 +22,18 @@ type udpCapacityResponder struct {
 	mu        sync.Mutex
 	active    bool
 	seen      map[string]string
+	lastSeen  map[string]time.Time
+	changes   []udpSourceChange
 	packets   uint64
 	replies   uint64
 	dropped   uint64
 	conflicts uint64
+}
+
+type udpSourceChange struct {
+	Token, Previous, Current string
+	PreviousAt, At           time.Time
+	GapMS                    int64
 }
 
 func (g *gateway) installUDPCapacity(mux *http.ServeMux) {
@@ -37,6 +46,7 @@ func (g *gateway) installUDPCapacity(mux *http.ServeMux) {
 			return
 		}
 		c.active, c.seen = true, make(map[string]string)
+		c.lastSeen, c.changes = make(map[string]time.Time), nil
 		c.packets, c.replies, c.dropped, c.conflicts = 0, 0, 0, 0
 		json.NewEncoder(w).Encode(map[string]any{"host": "198.19.128.2", "host6": "2001:db8:198::2", "port": 26000})
 	})
@@ -45,7 +55,8 @@ func (g *gateway) installUDPCapacity(mux *http.ServeMux) {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]any{"seen": c.seen, "packets": c.packets,
-			"replies": c.replies, "dropped": c.dropped, "conflicts": c.conflicts})
+			"replies": c.replies, "dropped": c.dropped, "conflicts": c.conflicts,
+			"sourceChanges": c.changes, "capturedAt": time.Now()})
 	})
 	mux.HandleFunc("POST /udp-capacity-close", func(w http.ResponseWriter, r *http.Request) {
 		c := &g.udpCapacity
@@ -74,14 +85,21 @@ func (g *gateway) capacityUDP(id stack.TransportEndpointID, packet *stack.Packet
 	}
 	token := hex.EncodeToString(data[8:16])
 	source := id.RemoteAddress.String() + ":" + portString(id.RemotePort)
+	now := time.Now()
 	if previous, ok := c.seen[token]; ok && previous != source {
 		c.conflicts++
+		if len(c.changes) < 64 {
+			last := c.lastSeen[token]
+			c.changes = append(c.changes, udpSourceChange{Token: token, Previous: previous, Current: source,
+				PreviousAt: last, At: now, GapMS: now.Sub(last).Milliseconds()})
+		}
 	}
 	if len(c.seen) >= 65536 {
 		c.dropped++
 		return true
 	}
 	c.seen[token] = source
+	c.lastSeen[token] = now
 	c.packets++
 	payload := data
 	if len(data) == 18 {
