@@ -2,7 +2,7 @@ name: Windows handle diagnostics
 
 on:
   push:
-    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section, engine/windows-platform-udp-latency-arm64, engine/windows-platform-pointers-arm64, engine/windows-platform-terminal-arm64, engine/windows-platform-completions-arm64, engine/windows-platform-registrar]
+    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace, engine/windows-platform-socket-trace-arm64, engine/windows-platform-section, engine/windows-platform-udp-latency-arm64, engine/windows-platform-pointers-arm64, engine/windows-platform-terminal-arm64, engine/windows-platform-completions-arm64, engine/windows-platform-registrar, engine/windows-platform-closetrace]
   workflow_dispatch:
     inputs:
       arch:
@@ -19,7 +19,7 @@ jobs:
     if: ${{ !endsWith(github.ref, '-section') && !contains(github.ref, '-udp-latency') && !contains(github.ref, 'windows-platform-registrar') }}
     name: Native handle diagnostics / ${{ (inputs.arch != 'x64' && (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64'))) && 'ARM64' || 'x64' }}
     runs-on: ${{ (inputs.arch != 'x64' && (inputs.arch == 'ARM64' || endsWith(github.ref, '-arm64'))) && 'windows-11-arm' || 'windows-latest' }}
-    timeout-minutes: 15
+    timeout-minutes: ${{ endsWith(github.ref, '-closetrace') && 50 || 15 }}
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
@@ -68,18 +68,28 @@ jobs:
             go test -race -count=1 -v -timeout=3m -run $cases ./internal/engine/protocol ./internal/engine/windows ./internal/engine ./cmd/netswitch-engine
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
+      - name: Repeat the Windows engine package with every handle OPEN and CLOSE traced
+        if: ${{ endsWith(github.ref, '-closetrace') }}
+        env:
+          NETSWITCH_HANDLE_CLOSE_TRACE: '1'
+        run: |
+          for ($round = 1; $round -le 3; $round++) {
+            Write-Output "CLOSE TRACE PACKAGE ROUND $round"
+            go test -count=1 -v -failfast -timeout=15m ./internal/engine/windows
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Prove native poll lifetime, callback collection and heap publication
-        if: ${{ !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') }}
+        if: ${{ !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && !endsWith(github.ref, '-closetrace') }}
         run: |
           go test -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check the same ownership boundaries under race
-        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && runner.arch == 'X64' }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && !endsWith(github.ref, '-closetrace') && runner.arch == 'X64' }}
         run: |
           go test -race -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll|HeapCapture|HeapEvent)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check shared UDP destroy and setup-refusal accounting
-        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !contains(github.ref, '-socket-trace') && !endsWith(github.ref, '-closetrace') }}
         run: |
           go test -count=1 -v -run '^Test(DestroyFinishesAcrossFailedSetupCachePublication|FailedUDPSetupRetiresBeforeRefusalAndBoundsNegativeCache)$' ./internal/engine/udp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -112,6 +112,7 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 								sourceAddr, sourceErr = windows.Getsockname(source)
 							}
 							peerAddr, peerErr := windows.Getpeername(value)
+							handleFailureEvidence(t, map[string]windows.Handle{"native duplicate": value, "source": source})
 							t.Fatalf("round=%d stage=%s source=%d native=%d family=%d type=%d/%d type-error=%v address=%#v want-port=%d address-error=%v source-address=%#v source-error=%v native-peer=%#v native-peer-error=%v",
 								round, stage, source, value, family, gotKind, kind, kindErr, addr, wantPort, addrErr, sourceAddr, sourceErr, peerAddr, peerErr)
 						}
