@@ -37,49 +37,74 @@ type Dialer struct {
 	slowDials         atomic.Uint64
 	slowMu            sync.Mutex
 	slowRecent        []slowDial
+	inFlight          map[*slowDial]time.Time
 }
 
 // Diagnostics only: a TCP dial that takes this long is recorded with its
-// outcome. The OS-limit gate measures resets against a ~2 s native refusal,
-// and a dial that outlives it leaves the app's SYN unanswered.
+// outcome, and one still running that long is listed by the stats. The
+// OS-limit gate measures resets against a ~2 s native refusal, and a dial
+// that outlives it leaves the app's SYN unanswered.
 const slowDialAfter = time.Second
 
 type slowDial struct {
 	AtUnixMilli int64   `json:"at"`
+	Line        string  `json:"line"`
 	Remote      string  `json:"remote"`
 	Local       string  `json:"local,omitempty"`
 	MS          float64 `json:"ms"`
 	Error       string  `json:"error,omitempty"`
 }
 
-func (d *Dialer) noteDial(remote netip.AddrPort, c net.Conn, started time.Time, err error) {
+func (d *Dialer) startDial(line string, remote netip.AddrPort) (*slowDial, time.Time) {
+	started := time.Now()
+	s := &slowDial{AtUnixMilli: started.UnixMilli(), Line: line, Remote: remote.String()}
+	d.slowMu.Lock()
+	if d.inFlight == nil {
+		d.inFlight = map[*slowDial]time.Time{}
+	}
+	d.inFlight[s] = started
+	d.slowMu.Unlock()
+	return s, started
+}
+
+func (d *Dialer) finishDial(s *slowDial, started time.Time, c net.Conn, err error) {
 	d.tcpDials.Add(1)
 	took := time.Since(started)
+	d.slowMu.Lock()
+	defer d.slowMu.Unlock()
+	delete(d.inFlight, s)
 	if took < slowDialAfter {
 		return
 	}
 	d.slowDials.Add(1)
-	s := slowDial{AtUnixMilli: started.UnixMilli(), Remote: remote.String(), MS: float64(took.Microseconds()) / 1000}
+	s.MS = float64(took.Microseconds()) / 1000
 	if c != nil {
 		s.Local = c.LocalAddr().String()
 	}
 	if err != nil {
 		s.Error = err.Error()
 	}
-	d.slowMu.Lock()
 	if len(d.slowRecent) == 32 {
 		d.slowRecent = append(d.slowRecent[:0], d.slowRecent[1:]...)
 	}
-	d.slowRecent = append(d.slowRecent, s)
-	d.slowMu.Unlock()
+	d.slowRecent = append(d.slowRecent, *s)
 }
 
 // Stats reports the dialer's diagnostics through the engine's optional hook.
 func (d *Dialer) Stats() any {
 	d.slowMu.Lock()
+	defer d.slowMu.Unlock()
 	recent := append([]slowDial(nil), d.slowRecent...)
-	d.slowMu.Unlock()
-	return map[string]any{"tcpDials": d.tcpDials.Load(), "slowTCPDials": d.slowDials.Load(), "slowRecent": recent}
+	var running []slowDial
+	for s, started := range d.inFlight {
+		if took := time.Since(started); took >= slowDialAfter && len(running) < 32 {
+			r := *s
+			r.MS = float64(took.Microseconds()) / 1000
+			running = append(running, r)
+		}
+	}
+	return map[string]any{"tcpDials": d.tcpDials.Load(), "slowTCPDials": d.slowDials.Load(), "slowRecent": recent,
+		"inFlight": len(d.inFlight), "slowInFlight": running}
 }
 
 func NewDialer(routes *Routes) (*Dialer, error) {
@@ -152,9 +177,9 @@ func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort
 	}
 	dial := net.Dialer{Timeout: 10 * time.Second, LocalAddr: net.TCPAddrFromAddrPort(netip.AddrPortFrom(source, 0)),
 		Control: bindSocket(a, remote.Addr().Is6()), KeepAlive: 30 * time.Second}
-	started := time.Now()
+	note, started := d.startDial(line, remote)
 	c, err := dial.DialContext(ctx, network, remote.String())
-	d.noteDial(remote, c, started, err)
+	d.finishDial(note, started, c, err)
 	if err != nil {
 		d.ports.observe(err)
 		return nil, err
