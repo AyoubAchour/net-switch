@@ -2,7 +2,7 @@ name: Windows handle diagnostics
 
 on:
   push:
-    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe]
+    branches: [engine/windows-platform-handles, engine/windows-platform-wintun-probe, engine/windows-platform-socket-trace]
   workflow_dispatch:
     inputs:
       arch:
@@ -37,17 +37,17 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Prove native poll lifetime and callback collection
-        if: ${{ !endsWith(github.ref, '-wintun-probe') }}
+        if: ${{ !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-socket-trace') }}
         run: |
           go test -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check the same ownership boundaries under race
-        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && inputs.arch != 'ARM64' }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-socket-trace') && inputs.arch != 'ARM64' }}
         run: |
           go test -race -count=1 -v -timeout=2m -run '^Test(TCPWritePoll|OldUnlockedPoll)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check shared UDP destroy and setup-refusal accounting
-        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') }}
+        if: ${{ !cancelled() && !endsWith(github.ref, '-wintun-probe') && !endsWith(github.ref, '-socket-trace') }}
         run: |
           go test -count=1 -v -run '^Test(DestroyFinishesAcrossFailedSetupCachePublication|FailedUDPSetupRetiresBeforeRefusalAndBoundsNegativeCache)$' ./internal/engine/udp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -65,3 +65,24 @@ jobs:
         run: |
           go test -count=1 -v -timeout=2m -run '^TestRingRemovalBetweenMarkerCheckAndClose$' ./internal/wintun
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build the opt-in OS socket trace fixture
+        id: socket-build
+        if: ${{ endsWith(github.ref, '-socket-trace') }}
+        run: |
+          go test -c -o dist/windows-test/socket-diagnostics.exe ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Prove OS trace controls and observe bounded socket churn
+        if: ${{ !cancelled() && steps.socket-build.outcome == 'success' }}
+        env:
+          NETSWITCH_SOCKET_DIAGNOSTICS: '1'
+        run: |
+          ./dist/windows-test/socket-diagnostics.exe '-test.v' '-test.count=1' '-test.failfast' '-test.timeout=10m' '-test.run=^(TestSocketHandleTrace(Control|Churn)|TestReadinessHalfClose(AndCancellation|AfterCollection)|TestReadyUDPDoesNotConsumeDatagrams)$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Keep the exact executable for resolving raw trace addresses
+        if: ${{ always() && steps.socket-build.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: socket-trace-${{ inputs.arch || 'x64' }}
+          path: dist/windows-test/socket-diagnostics.exe
+          if-no-files-found: error
+          retention-days: 14
