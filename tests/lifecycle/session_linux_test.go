@@ -127,7 +127,7 @@ func openLogindLogin(t *testing.T, a *linuxActor, label string) *logindLogin {
 	unit := fmt.Sprintf("netswitch-logout-%d-%s", os.Getpid(), label)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	args := []string{"--quiet", "--wait", "--pipe", "--collect", "--unit=" + unit,
-		"--uid=" + a.name, "--property=PAMName=login", "--property=KillMode=process",
+		"--uid=" + a.name, "--property=PAMName=login", "--property=KillMode=mixed",
 		"--setenv=GITHUB_ACTIONS=true", "--setenv=RUNNER_ENVIRONMENT=github-hosted",
 		"--setenv=NETSWITCH_LIFECYCLE_CI=1", "--setenv=NETSWITCH_LOGIND_LOGIN_HELPER=1",
 		exe, "-test.run=^TestHostedLogindLoginHelper$", "-test.v", "-test.timeout=90s"}
@@ -179,6 +179,10 @@ func openLogindLogin(t *testing.T, a *linuxActor, label string) *logindLogin {
 			t.Fatal(err)
 		}
 	case <-l.done:
+		diagnostic, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stop()
+		b, _ := exec.CommandContext(diagnostic, "journalctl", "-u", unit, "--no-pager", "--lines=30").CombinedOutput()
+		t.Logf("PAM helper unit diagnostics:\n%s", b)
 		t.Fatal("PAM login helper exited before ready", l.err, l.log.String(), l.output.String())
 	case <-time.After(20 * time.Second):
 		t.Fatal("PAM login helper did not report a session")
