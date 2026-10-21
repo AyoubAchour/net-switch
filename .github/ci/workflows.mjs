@@ -38,6 +38,19 @@ function items(lines, indent) {
   return result;
 }
 
+// A plain, literal (|) or folded (>) scalar's text.
+export function scalar({ inline, lines }) {
+  const style = /^([|>])[-+]?$/.exec(inline);
+  if (!style) {
+    if (lines.length) throw new Error(`Multi-line plain scalar: ${inline}`);
+    return inline.replace(/^'(.*)'$/, '$1');
+  }
+  const content = lines.filter(line => line.trim() !== '');
+  const indent = Math.min(...content.map(line => /^ */.exec(line)[0].length));
+  const text = lines.map(line => line.slice(indent));
+  return style[1] === '|' ? text.join('\n') : text.join(' ');
+}
+
 const flowList = value => /^\[(.*)\]$/.test(value)
   ? value.slice(1, -1).split(',').map(part => part.trim().replace(/^'(.*)'$/, '$1')).filter(Boolean)
   : [value.replace(/^'(.*)'$/, '$1')];
@@ -49,10 +62,20 @@ export function readWorkflow(text) {
   const end = lines.findIndex((line, index) => index > start && /^\S/.test(line));
   const jobs = blocks(lines.slice(start + 1, end < 0 ? undefined : end), 2);
   const anchors = new Map();
+  const fieldAnchors = new Map();
   const parsed = new Map();
   for (const job of jobs) {
     if (job.inline) throw new Error(`Job ${job.key} must be a block`);
     const fields = Object.fromEntries(blocks(job.lines, 4).map(field => [field.key, field]));
+    // Job-level mappings shared by anchor (env: &go1-env, defaults: *x).
+    for (const field of Object.values(fields)) {
+      if (field.key === 'steps') continue;
+      if (field.inline.startsWith('&')) fieldAnchors.set(field.inline.slice(1), field.lines);
+      else if (field.inline.startsWith('*')) {
+        if (!fieldAnchors.has(field.inline.slice(1))) throw new Error(`Job ${job.key} uses unknown anchor ${field.inline}`);
+        field.lines = fieldAnchors.get(field.inline.slice(1));
+      }
+    }
     const steps = fields.steps;
     let stepItems;
     if (!steps) throw new Error(`Job ${job.key} has no steps`);
@@ -73,9 +96,11 @@ export function readWorkflow(text) {
       const resolved = item.alias ? anchors.get(item.alias) : item;
       if (!resolved) throw new Error(`Job ${id} uses unknown step anchor ${item.alias}`);
       const keys = Object.fromEntries(blocks(resolved.lines, 8).map(entry => [entry.key, entry]));
-      return { if: keys.if?.inline, text: resolved.lines.join('\n'), keys };
+      return { if: keys.if?.inline, text: resolved.lines.join('\n'), keys, run: keys.run && scalar(keys.run) };
     });
     const strategy = fields.strategy ? [fields.strategy.inline, ...fields.strategy.lines].join('\n') : '';
+    const defaults = fields.defaults ? blocks(fields.defaults.lines, 6) : [];
+    const runDefaults = defaults.find(entry => entry.key === 'run');
     result.set(id, {
       id,
       name: fields.name?.inline,
@@ -85,6 +110,8 @@ export function readWorkflow(text) {
       matrix: matrixEntries(fields['runs-on']?.inline, strategy),
       hasStrategy: Boolean(fields.strategy),
       outputs: fields.outputs ? Object.fromEntries(blocks(fields.outputs.lines, 6).map(entry => [entry.key, entry.inline])) : {},
+      env: fields.env ? Object.fromEntries(blocks(fields.env.lines, 6).map(entry => [entry.key, entry.inline])) : {},
+      workingDirectory: runDefaults ? Object.fromEntries(blocks(runDefaults.lines, 8).map(entry => [entry.key, entry.inline]))['working-directory'] : undefined,
       steps,
     });
   }

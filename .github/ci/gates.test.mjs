@@ -59,12 +59,16 @@ function* scenarios(file, changes) {
     : [{ run: '' }];
   // Every group alone true or alone false, plus all true and all false, so a
   // gate reading another group's output is caught as well as a wrong value.
+  // Job outputs are strings; boolean false must not count as 'false', so a
+  // gate comparing with a boolean would skip on output it never gets.
   const outputSets = [
     Object.fromEntries(groups.map(group => [group, 'true'])),
     Object.fromEntries(groups.map(group => [group, 'false'])),
+    Object.fromEntries(groups.map(group => [group, false])),
     ...groups.flatMap(only => [
       Object.fromEntries(groups.map(group => [group, String(group === only)])),
       Object.fromEntries(groups.map(group => [group, String(group !== only)])),
+      Object.fromEntries(groups.map(group => [group, group !== only])),
     ]),
     {},
   ];
@@ -82,6 +86,9 @@ function* scenarios(file, changes) {
         for (const changesResult of ['success', 'failure', 'cancelled']) {
           for (const outputs of outputSets) yield { ...base, changesResult, outputs };
         }
+        // Skipped although its condition holds (a re-run of only some jobs,
+        // or a future condition): no outputs, and every gated job must run.
+        yield { ...base, changesResult: 'skipped', outputs: {} };
       }
     }
   }
@@ -172,6 +179,9 @@ test('a broken gate fails the gate check', () => {
     'two groups': gate.replace("needs.changes.outputs.installer != 'false'", "needs.changes.outputs.installer != 'false' || needs.changes.outputs.node != 'false'"),
     'implicit success()': gate.replace('!cancelled() && ', 'true && '),
     'compares with true': gate.replace("outputs.installer != 'false'", "outputs.installer == 'true'"),
+    'compares with boolean false': gate.replace("outputs.installer != 'false'", 'outputs.installer != false'),
+    // Differs from the real gate only when the classifier is skipped on a PR.
+    'skips when the classifier is skipped': gate.replace('!cancelled() && ', "!cancelled() && needs.changes.result != 'skipped' && "),
   };
   for (const [name, broken] of Object.entries(mutations)) {
     assert.notEqual(broken, gate, name);
