@@ -29,6 +29,10 @@ const sites = [
 const proof = sites.map(([site, pattern]) => {
   const evidence = lines.find((line) => pattern.test(line));
   assert(evidence, `Missing heap proof for ${site}; inspect escape analysis before changing this assertion`);
-  return { site, evidence };
+  // Keep the exact compiler finding without presenting successful escape
+  // diagnostics as errors to Actions' filename:line:column problem matcher.
+  const match = evidence.match(/^(.+\.go):(\d+):(\d+): (.*)$/);
+  assert(match, `Unexpected compiler diagnostic for ${site}`);
+  return { site, file: match[1], line: Number(match[2]), column: Number(match[3]), message: match[4] };
 });
 console.log(`WINDOWS POINTER ESCAPE ${JSON.stringify({ version: version.stdout.trim(), proof })}`);
