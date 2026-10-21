@@ -383,6 +383,7 @@ func (e *Engine) Stats() any {
 		s["tcpRejected"] = e.tcp.Rejected.Load()
 		s["tcpInvalid"] = e.tcp.Invalid.Load()
 		s["tcpDialFailed"] = e.tcp.DialFailed.Load()
+		s["tcpSilentSYN"] = e.tcp.SilentStats()
 		s["tcpFlows"], s["tcpFlowsOmitted"] = e.tcp.Diagnostics(128)
 	}
 	if e.stack != nil {
