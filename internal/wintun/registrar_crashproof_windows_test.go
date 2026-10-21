@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func TestWintunRegistrarSurpriseCreatorChild(t *testing.T) {
 	fmt.Println("CREATOR_READY " + a.InstanceID())
 	command, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil || strings.TrimSpace(command) != "close" {
-		a.Close()
+		a.Close() // on a lost command pipe, still remove the owned device before failing
 		t.Fatalf("creator child expected the close command, got %q (err %v)", command, err)
 	}
 	must(t, a.Close()) // SwDeviceClose -> surprise removal, then DIF_REMOVE
@@ -95,26 +96,73 @@ func TestWintunRegistrarRealEngineHolderChild(t *testing.T) {
 
 // ---- completion-aware child process wrapper ----
 
-// managedChild owns a child test process. Its stdout is scanned on one
-// goroutine that, at stdout EOF, reaps the child with a single Wait and records
-// the exit code. await reads a reported marker with a deadline; join observes
-// the recorded exit. No path calls Wait twice.
+// managedChild owns a child test process. One goroutine reads its stdout to
+// EOF and can never block: only the declared marker lines are offered to a
+// bounded channel with a non-blocking send, everything else goes to a bounded
+// diagnostic tail, and a duplicate or overflowing marker is a recorded failure
+// that kills the child but keeps draining. At EOF the child is reaped with a
+// single Wait. No path calls Wait twice, and no unread output can wedge the
+// child on a full pipe.
 type managedChild struct {
 	cmd   *exec.Cmd
 	stdin io.WriteCloser
-	lines chan string
-	done  chan struct{}
-	code  int // valid once done is closed
+	lines chan string   // declared markers only
+	done  chan struct{} // closed after the single Wait returns
+	code  int           // valid once done is closed
+
+	mu   sync.Mutex
+	err  error    // first reader failure (duplicate/overflow/scan error)
+	tail []string // bounded diagnostic tail of non-marker lines
+}
+
+func (c *managedChild) fail(err error) {
+	c.mu.Lock()
+	if c.err == nil {
+		c.err = err
+	}
+	c.mu.Unlock()
+	c.cmd.Process.Kill() // unblock the child; the reader keeps draining to EOF
+}
+
+func (c *managedChild) firstErr() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+func (c *managedChild) addTail(line string) {
+	c.mu.Lock()
+	c.tail = append(c.tail, line)
+	if len(c.tail) > 20 {
+		c.tail = c.tail[len(c.tail)-20:]
+	}
+	c.mu.Unlock()
+}
+
+func (c *managedChild) diagnostics() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return strings.Join(c.tail, "\n")
+}
+
+func matchMarker(line string, markers []string) (string, bool) {
+	for _, m := range markers {
+		if strings.HasPrefix(line, m) {
+			return m, true
+		}
+	}
+	return "", false
 }
 
 // startChild launches exe in the named test mode with one extra environment
-// entry. afterJoin, if set, runs inside the cleanup after the child is killed
-// and reaped, so a creator's owned-GUID phantom is swept only once it is gone.
-func startChild(t *testing.T, mode, env string, afterJoin func()) *managedChild {
+// entry. markers are the stdout prefixes await can wait for; afterJoin, if set,
+// runs inside the cleanup once the child is killed and reaped, so a creator's
+// owned-GUID device is swept and its absence asserted only after it is gone.
+func startChild(t *testing.T, mode, env string, markers []string, afterJoin func()) *managedChild {
 	t.Helper()
 	exe, err := os.Executable()
 	must(t, err)
-	c := &managedChild{lines: make(chan string, 64), done: make(chan struct{})}
+	c := &managedChild{lines: make(chan string, 8), done: make(chan struct{})}
 	c.cmd = exec.Command(exe, "-test.run=^"+mode+"$", "-test.v")
 	c.cmd.Env = append(os.Environ(), env)
 	c.cmd.Stderr = os.Stderr
@@ -125,16 +173,40 @@ func startChild(t *testing.T, mode, env string, afterJoin func()) *managedChild 
 	must(t, c.cmd.Start())
 	go func() {
 		scan := bufio.NewScanner(stdout)
+		seen := map[string]bool{}
 		for scan.Scan() {
-			c.lines <- scan.Text() // paced by the handshake; the buffer absorbs test-framework lines
+			line := scan.Text()
+			prefix, isMarker := matchMarker(line, markers)
+			if !isMarker {
+				c.addTail(line)
+				continue
+			}
+			if seen[prefix] {
+				c.fail(fmt.Errorf("child repeated marker %q", prefix))
+				continue
+			}
+			seen[prefix] = true
+			select {
+			case c.lines <- line:
+			default:
+				c.fail(fmt.Errorf("child marker channel overflow at %q", line))
+			}
+		}
+		if err := scan.Err(); err != nil {
+			c.fail(fmt.Errorf("child stdout scan: %w", err))
 		}
 		c.cmd.Wait() // all reads are done: reap exactly once
 		c.code = c.cmd.ProcessState.ExitCode()
 		close(c.done)
 	}()
 	t.Cleanup(func() {
-		c.cmd.Process.Kill()
-		<-c.done // the single Wait completes after the kill closes stdout
+		c.stdin.Close()      // EOF for a child blocked reading stdin; all paths
+		c.cmd.Process.Kill() // idempotent
+		select {
+		case <-c.done:
+		case <-time.After(10 * time.Second):
+			t.Errorf("child %d did not exit during cleanup", c.cmd.Process.Pid)
+		}
 		if afterJoin != nil {
 			afterJoin()
 		}
@@ -143,8 +215,9 @@ func startChild(t *testing.T, mode, env string, afterJoin func()) *managedChild 
 }
 
 // await returns the text after prefix on the child's first matching line, or
-// fails on the child's exit or the deadline. On exit it still drains already
-// buffered lines, so a marker printed just before exit is not missed.
+// fails on the child's exit, a recorded reader failure, or the deadline. On
+// exit it still drains already buffered markers, so one printed just before
+// exit is not missed.
 func (c *managedChild) await(t *testing.T, prefix string, within time.Duration) string {
 	t.Helper()
 	deadline := time.After(within)
@@ -162,24 +235,31 @@ func (c *managedChild) await(t *testing.T, prefix string, within time.Duration) 
 						return rest
 					}
 				default:
-					t.Fatalf("child exited (code %d) before reporting %q", c.code, prefix)
+					if err := c.firstErr(); err != nil {
+						t.Fatalf("child failed before reporting %q: %v\n%s", prefix, err, c.diagnostics())
+					}
+					t.Fatalf("child exited (code %d) before reporting %q\n%s", c.code, prefix, c.diagnostics())
 				}
 			}
 		case <-deadline:
-			t.Fatalf("child did not report %q within %v", prefix, within)
+			t.Fatalf("child did not report %q within %v\n%s", prefix, within, c.diagnostics())
 		}
 	}
 }
 
 // join returns the recorded exit code once the child has exited. Wait already
-// ran in the reader goroutine; this only observes its result.
+// ran in the reader goroutine; this only observes its result and surfaces any
+// reader failure.
 func (c *managedChild) join(t *testing.T, within time.Duration) int {
 	t.Helper()
 	select {
 	case <-c.done:
+		if err := c.firstErr(); err != nil {
+			t.Fatalf("child reader failed: %v\n%s", err, c.diagnostics())
+		}
 		return c.code
 	case <-time.After(within):
-		t.Fatalf("child did not exit within %v", within)
+		t.Fatalf("child did not exit within %v\n%s", within, c.diagnostics())
 		return 0
 	}
 }
@@ -195,27 +275,45 @@ func pinProcess(t *testing.T, pid uint32) windows.Handle {
 	return h
 }
 
-// pnpPresent reports whether the exact device instance is PnP-present. Unlike
-// pnpExists (which, by design, also matches non-present phantom records), this
-// enumerates with DIGCF_PRESENT, so it answers "is the started device there",
-// not "is any leftover record there".
-func pnpPresent(t *testing.T, instance string) bool {
-	t.Helper()
-	set, err := windows.SetupDiGetClassDevsEx(&netClass, "SWD\\Wintun", 0, windows.DIGCF_PRESENT, 0, "")
-	must(t, err)
+// devicePresent reports whether the exact Wintun device instance exists. With
+// presentOnly it enumerates DIGCF_PRESENT ("is the started device there");
+// without it, all records including non-present phantoms. It returns errors
+// instead of failing, so cleanup can use it without a fatal.
+func devicePresent(instance string, presentOnly bool) (bool, error) {
+	flags := uint32(0)
+	if presentOnly {
+		flags = windows.DIGCF_PRESENT
+	}
+	set, err := windows.SetupDiGetClassDevsEx(&netClass, "SWD\\Wintun", 0, flags, 0, "")
+	if err != nil {
+		return false, err
+	}
 	defer set.Close()
 	for i := 0; ; i++ {
 		dev, err := set.EnumDeviceInfo(i)
 		if err == windows.ERROR_NO_MORE_ITEMS {
-			return false
+			return false, nil
 		}
-		must(t, err)
+		if err != nil {
+			return false, err
+		}
 		id, err := set.DeviceInstanceID(dev)
-		must(t, err)
+		if err != nil {
+			return false, err
+		}
 		if strings.EqualFold(id, instance) {
-			return true
+			return true, nil
 		}
 	}
+}
+
+// pnpPresent is the fatal-on-error body wrapper for a DIGCF_PRESENT exact
+// match. Unlike pnpExists it does not match non-present phantom records.
+func pnpPresent(t *testing.T, instance string) bool {
+	t.Helper()
+	present, err := devicePresent(instance, true)
+	must(t, err)
+	return present
 }
 
 type survivingHandle struct{ h, witness windows.Handle }
@@ -274,16 +372,41 @@ func TestWintunRegistrarSurpriseRemovalReleasesCrossProcessRegistration(t *testi
 	guid, err := windows.GenerateGUID()
 	must(t, err)
 	config := Config{Name: "NsRingSurpriseCI", GUID: guid.String(), Capacity: MinCapacity}
-	// Fatal cleanup reaps the creator and only then removes its owned-GUID
-	// phantom: the creator owns the device (Create), and borrowed.Close releases
-	// a reference without removing it. Best-effort, logged, never masking.
-	creator := startChild(t, "TestWintunRegistrarSurpriseCreatorChild", "NETSWITCH_WINTUN_SURPRISE_CREATOR="+guid.String(),
-		func() {
-			if removed, err := recoverAfterCrash(config); err != nil {
-				t.Logf("surprise-removal phantom cleanup: removed=%d err=%v", removed, err)
+	var instance string
+	// Cleanup reaps the creator and only then confirms its owned-GUID device is
+	// gone: the creator owns the device (Create), so borrowed.Close releases a
+	// reference without removing it. This can only fail the proof, never pass it.
+	sweepCreatorPhantom := func() {
+		if instance != "" {
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				present, err := devicePresent(instance, true)
+				if err != nil {
+					t.Errorf("surprise cleanup present check: %v", err)
+					break
+				}
+				if !present {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Errorf("owned adapter %s still present after the creator exited", instance)
+					break
+				}
+				time.Sleep(50 * time.Millisecond)
 			}
-		})
-	instance := creator.await(t, "CREATOR_READY ", 30*time.Second)
+		}
+		if removed, err := recoverAfterCrash(config); err != nil {
+			t.Errorf("surprise-removal phantom cleanup failed: removed=%d err=%v", removed, err)
+		}
+		if instance != "" {
+			if present, err := devicePresent(instance, false); err != nil || present {
+				t.Errorf("adapter %s left behind after cleanup: present=%v err=%v", instance, present, err)
+			}
+		}
+	}
+	creator := startChild(t, "TestWintunRegistrarSurpriseCreatorChild", "NETSWITCH_WINTUN_SURPRISE_CREATOR="+guid.String(),
+		[]string{"CREATOR_READY ", "CREATOR_CLOSED"}, sweepCreatorPhantom)
+	instance = creator.await(t, "CREATOR_READY ", 30*time.Second)
 
 	borrowed, err := Open(Config{Name: "NsRingSurpriseCI", GUID: guid.String(), Capacity: MinCapacity})
 	must(t, err)
@@ -390,7 +513,8 @@ func TestWintunRegistrarSurpriseRemovalReleasesCrossProcessRegistration(t *testi
 func TestWintunRegistrarEngineCrashReleasesRealRegistration(t *testing.T) {
 	a := newAdapter(t, MinCapacity) // Create + IP config; requireRunner inside; t.Cleanup a.Close
 	instance := a.InstanceID()
-	engine := startChild(t, "TestWintunRegistrarRealEngineHolderChild", "NETSWITCH_WINTUN_REAL_ENGINE_HOLDER="+a.config.GUID, nil)
+	engine := startChild(t, "TestWintunRegistrarRealEngineHolderChild", "NETSWITCH_WINTUN_REAL_ENGINE_HOLDER="+a.config.GUID,
+		[]string{"HOLDER_READY "}, nil)
 	regPID, err := strconv.ParseUint(engine.await(t, "HOLDER_READY ", 30*time.Second), 10, 32)
 	must(t, err)
 	enginePID := uint32(engine.cmd.Process.Pid)
