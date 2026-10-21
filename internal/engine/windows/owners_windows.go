@@ -483,10 +483,15 @@ func (o *Owners) TCP(ctx context.Context, tuple platform.Tuple) (owner platform.
 			}
 			candidates := s.rows.find(tuple)
 			// Cached absence predating this socket is not a native lookup
-			// miss. Refresh before spending one of the retry delays.
+			// miss. Refresh before spending one of the retry delays, with a
+			// read that started after this lookup began: the app's row exists
+			// before its SYN reaches us, so that read contains it. A read
+			// merely newer than the stale snapshot could still predate the
+			// SYN and miss again (mixed corner on x64, 18b0d14: four SYNs ran
+			// out of the 50 ms bound this way).
 			if candidates.count == 0 && s.at < start {
 				o.cacheMissRefreshes.Add(1)
-				s, e = o.tcpSnapshot(ctx, s.at, family)
+				s, e = o.tcpSnapshot(ctx, max(s.at, start), family)
 				if e != nil {
 					if family == primary || ctx.Err() != nil {
 						return owner, e

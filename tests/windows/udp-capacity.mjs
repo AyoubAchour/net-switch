@@ -401,6 +401,16 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
       recover: async () => {
         const before = await engineStats();
         const released = await clients[0].call('release', { count: 512 });
+        // Evidence only: other processes' dynamic UDP ports just before the
+        // re-open, to compare with the moment a re-open fails.
+        const othersBeforeReopen = (stats) => {
+          const clientPIDs = new Set((evidence.clientPIDs ?? []).map((item) => item.pid));
+          const byPID = {};
+          for (const group of stats.nativeUDPState?.groups ?? []) {
+            if (!clientPIDs.has(group.pid)) byPID[group.pid] = (byPID[group.pid] ?? 0) + group.ports.filter((port) => port >= 49152).length;
+          }
+          return byPID;
+        };
         assert.equal(released.released, 512);
         held -= 512;
         const started = performance.now();
@@ -408,6 +418,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
           const stats = await engineStats();
           return stats.flows.UDP <= before.flows.UDP - 512 && stats;
         }, 'UDP native ports and sessions released by the one-second reconciliation', 3000);
+        const preReopen = othersBeforeReopen(await engineStats().catch(() => ({})));
         const returned = await clients[0].call('open', { ...target, count: 512 });
         const failures = returned.attempts.filter((item) => item.Error);
         if (failures.length) {
@@ -426,7 +437,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
             if (clientPIDs.has(group.pid)) owners.clients += dynamic;
             else owners.byPID[group.pid] = (owners.byPID[group.pid] ?? 0) + dynamic;
           }
-          evidence.recoveryFailure = { failures, portSpace, dynamicPortOwners: owners, engineUDP: stats.flows?.UDP,
+          evidence.recoveryFailure = { failures, portSpace, dynamicPortOwners: owners, nonClientPortsBeforeReopen: preReopen, engineUDP: stats.flows?.UDP,
             heldBeforeReopen: held, socketExhaustions: stats.udpSocketExhaustions };
           console.log(`WINDOWS UDP RECOVERY FAILURE ${JSON.stringify(evidence.recoveryFailure)}`);
         }
