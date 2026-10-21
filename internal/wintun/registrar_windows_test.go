@@ -9,7 +9,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime"
@@ -24,6 +26,270 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+const deviceGuardFixtureEnv = "NETSWITCH_WINTUN_DEVICE_GUARD_FIXTURE_CHILD"
+const deviceGuardFixtureDone = "NETSWITCH_DEVICE_GUARD_DONE"
+
+// Preserve stdout verbatim while retaining only completion markers and one
+// partial line. A helper's marker cannot prove the suite completed: the parent
+// requires the PID of the one process it actually launched.
+type deviceGuardOutput struct {
+	partial string
+	done    map[int]bool
+}
+
+func (o *deviceGuardOutput) Write(p []byte) (int, error) {
+	n, err := os.Stdout.Write(p)
+	o.partial += string(p[:n])
+	for {
+		line, rest, ok := strings.Cut(o.partial, "\n")
+		if !ok {
+			break
+		}
+		o.partial = rest
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == deviceGuardFixtureDone {
+			if pid, err := strconv.Atoi(fields[1]); err == nil {
+				o.done[pid] = true
+			}
+		}
+	}
+	if len(o.partial) > 256 {
+		o.partial = "" // completion markers are much shorter than this
+	}
+	return n, err
+}
+
+// ExitProcess can wait for DLL detach callbacks, including a DLL with a stuck
+// thread. TerminateProcess avoids those callbacks. Never return a late result
+// if termination itself is delayed; the enclosing process has its own bound.
+func abortDeviceGuardFixture(code uint32) {
+	windows.TerminateProcess(windows.CurrentProcess(), code)
+	for {
+		time.Sleep(time.Second)
+	}
+}
+
+// Run the original selection once, with its original arguments and timeout.
+// One child for the entire suite preserves accumulated state between tests.
+// TestMain dispatches registrar special modes before reaching this hook; test
+// helper children inherit the marker and never start another suite wrapper.
+func runDeviceGuardFixture(m *testing.M) (int, bool) {
+	if os.Getenv("NETSWITCH_WINTUN_CI") != "1" || os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		return 0, false
+	}
+	if os.Getenv(deviceGuardFixtureEnv) == "1" {
+		code := m.Run()
+		if code == 0 {
+			fmt.Fprintf(os.Stdout, "\n%s %d\n", deviceGuardFixtureDone, os.Getpid())
+		}
+		return code, true
+	}
+	if !flag.Parsed() {
+		flag.Parse()
+	}
+	limit := 15 * time.Minute // also bounds an explicit -test.timeout=0
+	if f := flag.Lookup("test.timeout"); f != nil {
+		if d, err := time.ParseDuration(f.Value.String()); err == nil && d > 0 && d < time.Duration(1<<63-1)-30*time.Second {
+			limit = d + 30*time.Second
+		}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "device-file fixture executable:", err)
+		return 1, true
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	// CommandContext kills at limit. Even an unkillable native wait must not
+	// strand the supervisor's Wait forever; the job then fails with code 99.
+	hardStop := time.AfterFunc(limit+10*time.Second, func() { abortDeviceGuardFixture(99) })
+	defer func() {
+		if !hardStop.Stop() {
+			abortDeviceGuardFixture(99)
+		}
+	}()
+	cmd := exec.CommandContext(ctx, exe, os.Args[1:]...)
+	cmd.Env = append(os.Environ(), deviceGuardFixtureEnv+"=1")
+	cmd.Stdin = os.Stdin
+	// Writer wrappers deliberately use os/exec's copying pipes. Run joins their
+	// drain goroutines; WaitDelay bounds an inherited output pipe held by a child.
+	output := &deviceGuardOutput{done: map[int]bool{}}
+	cmd.Stdout = output
+	cmd.Stderr = struct{ io.Writer }{os.Stderr}
+	cmd.WaitDelay = 5 * time.Second
+	err = cmd.Run()
+	if cmd.ProcessState != nil && !cmd.ProcessState.Success() {
+		if cmd.ProcessState.ExitCode() == 98 {
+			fmt.Fprintln(os.Stderr, "device-file query watchdog terminated the fixture; the last query identifies the blocked operation")
+		}
+		return cmd.ProcessState.ExitCode(), true
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "device-file fixture failed to start or drain:", err)
+		return 1, true
+	}
+	if !output.done[cmd.Process.Pid] {
+		fmt.Fprintln(os.Stderr, "device-file fixture exited without completing its test selection")
+		return 1, true
+	}
+	return 0, true
+}
+
+// A borrowed File can become a pipe between classification and a metadata
+// query. A timeout must end the fixture process, not abandon a goroutine with
+// a native buffer still in use. The outer wrapper kills/reaps it as a backstop.
+// Keep the synchronous query on this goroutine, with all its buffers live.
+func deviceGuardQuery(t *testing.T, h windows.Handle, what string, query func() error) error {
+	t.Helper()
+	requireRunner(t)
+	if os.Getenv(deviceGuardFixtureEnv) != "1" {
+		t.Fatal("device-file metadata requires the bounded fixture child")
+	}
+	t.Logf("device-file query handle=%#x operation=%s", h, what)
+	timer := time.AfterFunc(5*time.Second, func() { abortDeviceGuardFixture(98) })
+	defer func() {
+		if !timer.Stop() {
+			abortDeviceGuardFixture(98) // never turn a committed timeout into a pass
+		}
+	}()
+	return query()
+}
+
+// x/sys GetFileType maps a valid UNKNOWN + NO_ERROR to syscall.EINVAL. Read
+// the raw result so an unsupported type is not mislabeled as a failed call.
+// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfiletype
+var guardGetFileType = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetFileType")
+
+func guardFileType(t *testing.T, h windows.Handle) (uint32, error) {
+	var kind uint32
+	err := deviceGuardQuery(t, h, "GetFileType", func() error {
+		r, _, err := guardGetFileType.Call(uintptr(h))
+		kind = uint32(r)
+		if kind == windows.FILE_TYPE_UNKNOWN && err != windows.ERROR_SUCCESS {
+			return err
+		}
+		return nil
+	})
+	return kind, err
+}
+
+// A second CreateFile of the pinned DLL has its own FILE_OBJECT. Compare file
+// identity, not CompareObjectHandles or a basename. The cached owner keeps the
+// original file open, so this ID cannot be recycled while the guard uses it.
+// https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_id_info
+type guardFileID struct {
+	Volume uint64
+	ID     [16]byte
+}
+
+func readGuardFileID(t *testing.T, h windows.Handle) (guardFileID, error) {
+	var id guardFileID
+	err := deviceGuardQuery(t, h, "FileIdInfo", func() error {
+		return windows.GetFileInformationByHandleEx(h, windows.FileIdInfo, (*byte)(unsafe.Pointer(&id)), uint32(unsafe.Sizeof(id)))
+	})
+	if err == nil && id.ID == [16]byte{} {
+		err = errors.New("file identity returned an empty file ID")
+	}
+	return id, err
+}
+
+// Reading a delta must not load the DLL itself and change the measured state.
+func cachedGuardDLLID(t *testing.T) *guardFileID {
+	dllCache.Lock()
+	l := dllCache.loaded
+	dllCache.Unlock()
+	if l == nil {
+		return nil
+	}
+	id, err := readGuardFileID(t, windows.Handle(l.file.Fd()))
+	must(t, err)
+	return &id
+}
+
+// This is a check of one vanished snapshot entry, never a retry of a failed
+// baseline. A reused/still-present value remains an error, even if it now names
+// an innocent object. Log the old failure as well as the independent absence.
+func guardSnapshotGone(t *testing.T, h windows.Handle, err error) bool {
+	t.Helper()
+	if !errors.Is(err, windows.ERROR_INVALID_HANDLE) && !errors.Is(err, windows.STATUS_INVALID_HANDLE) {
+		return false
+	}
+	present := handleSnapshot(t)[h]
+	t.Logf("device-file snapshot race handle=%#x error=%v fresh_present=%t old_pass=false", h, err, present)
+	return !present
+}
+
+// These exact names were measured in the native diagnostic, including before
+// any registration. No name prefix, baseline value, access mask, or UNKNOWN
+// subtype alone excludes a device. The registered Wintun name query returned
+// NOT_SUPPORTED: that and every other unrecognized result remain offenders.
+func classifyGuardFile(t *testing.T, h windows.Handle, dllID *guardFileID) (kind, oldKind string, err error) {
+	t.Helper()
+	kind, oldKind = "File", "File"
+	fileType, err := guardFileType(t, h)
+	if fileType == windows.FILE_TYPE_UNKNOWN || err != nil {
+		oldKind = "unreadable" // reproduce the old x/sys-based delta's result
+	}
+	if err != nil {
+		return kind, oldKind, err
+	}
+	if fileType == windows.FILE_TYPE_PIPE {
+		return "Pipe", "Pipe", nil
+	}
+	if fileType == windows.FILE_TYPE_DISK {
+		var info nativeFileStandard
+		err = deviceGuardQuery(t, h, "FileStandardInfo", func() error {
+			var queryErr error
+			info, queryErr = nativeFileStandardInfo(h)
+			return queryErr
+		})
+		if err != nil {
+			return kind, oldKind, err
+		}
+		if info.Directory != 0 {
+			return "Directory", oldKind, nil
+		}
+		if dllID != nil {
+			id, idErr := readGuardFileID(t, h)
+			if idErr != nil {
+				return kind, oldKind, idErr
+			}
+			t.Logf("device-file disk handle=%#x volume=%#x fileID=%x pinned_volume=%#x pinned_fileID=%x same_file=%t old_pass=false", h, id.Volume, id.ID, dllID.Volume, dllID.ID, id == *dllID)
+			if id == *dllID {
+				return "PinnedDLL", oldKind, nil
+			}
+		} else {
+			t.Logf("device-file disk handle=%#x standard=%+v has no cached pinned DLL identity", h, info)
+		}
+		return kind, oldKind, nil
+	}
+	if fileType != windows.FILE_TYPE_CHAR && fileType != windows.FILE_TYPE_UNKNOWN {
+		return kind, oldKind, nil
+	}
+	var name string
+	err = deviceGuardQuery(t, h, "ObjectNameInformation", func() error {
+		var queryErr error
+		name, queryErr = diagnosticDeviceFileName(h)
+		return queryErr
+	})
+	t.Logf("device-file identity handle=%#x fileType=%#x nativeName=%q nameError=%v old_pass=false", h, fileType, name, err)
+	if err != nil {
+		return kind, oldKind, err
+	}
+	switch fileType {
+	case windows.FILE_TYPE_CHAR:
+		if name == `\Device\ConDrv` || name == `\Device\Null` {
+			kind = "WindowsDevice"
+		}
+	case windows.FILE_TYPE_UNKNOWN:
+		switch name {
+		case `\Device\CNG`, `\Device\DeviceApi`, `\Device\Nsi`, `\Device\KsecDD`:
+			kind = "WindowsDevice"
+		}
+	}
+	return kind, oldKind, nil
+}
 
 // ---- refusal and fault fixtures (no adapter required) ----
 
@@ -113,18 +379,51 @@ func handleSnapshot(t *testing.T) map[windows.Handle]bool {
 func newHandleKinds(t *testing.T, before, after map[windows.Handle]bool) map[string]int {
 	t.Helper()
 	kinds := map[string]int{}
+	oldKinds := map[string]int{}
+	fixture := os.Getenv(deviceGuardFixtureEnv) == "1" && os.Getenv("NETSWITCH_WINTUN_CI") == "1" && os.Getenv("GITHUB_ACTIONS") == "true" && os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted"
+	var dllID *guardFileID
+	if fixture {
+		dllID = cachedGuardDLLID(t)
+	}
 	for h := range after {
 		if before[h] {
 			continue
 		}
 		kind, err := objectType(h)
 		if err != nil {
+			oldKinds["unreadable"]++
+			if fixture && guardSnapshotGone(t, h, err) {
+				continue
+			}
 			kinds["unreadable"]++
 			continue
 		}
 		if kind == "File" {
+			if fixture {
+				classified, oldKind, classifyErr := classifyGuardFile(t, h, dllID)
+				oldKinds[oldKind]++
+				if classifyErr != nil {
+					if guardSnapshotGone(t, h, classifyErr) {
+						continue
+					}
+					t.Logf("new file handle %#x remains unclassified: %v", h, classifyErr)
+				}
+				// File remains an inclusive non-pipe count for startup-failure
+				// leak checks. The session check below explicitly discounts only
+				// evidenced Windows providers; directories/DLL opens still count.
+				if classified != "Pipe" {
+					kinds["File"]++
+				}
+				if classified != "File" {
+					kinds[classified]++
+				}
+				continue
+			}
+			// Non-driver unit tests keep their original count-only check. They
+			// must never start native name queries outside the hosted fixture.
 			fileType, err := windows.GetFileType(h)
 			if err != nil {
+				oldKinds["unreadable"]++
 				kinds["unreadable"]++
 				continue
 			}
@@ -132,8 +431,10 @@ func newHandleKinds(t *testing.T, before, after map[windows.Handle]bool) map[str
 				kind = "Pipe"
 			}
 		}
+		oldKinds[kind]++
 		kinds[kind]++
 	}
+	t.Logf("new-handle comparison old_counts=%v old_file_gate_pass=%t classified_counts=%v", oldKinds, oldKinds["File"] == 0 && oldKinds["unreadable"] == 0, kinds)
 	return kinds
 }
 
@@ -141,20 +442,20 @@ func newHandleKinds(t *testing.T, before, after map[windows.Handle]bool) map[str
 // Only explicitly owned, lifetime-stable files get identity witnesses. Never
 // duplicate a handle discovered in a snapshot: a concurrent close/reuse could
 // turn even a successfully classified file into a socket before duplication.
-// Native directory handles (including the OS's current-directory handle) are
-// classified afresh without duplicating them. The independent native snapshot
+// Every other file is classified afresh. The independent native snapshot
 // must be clean at construction and on every check; unknown baseline files are
 // not silently grandfathered in.
 type deviceFileGuard struct {
 	files     map[windows.Handle]windows.Handle // known owned file -> identity witness
 	witnesses map[windows.Handle]bool
+	dllID     *guardFileID
 }
 
 func newDeviceFileGuard(t *testing.T) *deviceFileGuard {
 	t.Helper()
 	l, err := loadLibrary()
 	must(t, err)
-	g := &deviceFileGuard{files: map[windows.Handle]windows.Handle{}, witnesses: map[windows.Handle]bool{}}
+	g := &deviceFileGuard{files: map[windows.Handle]windows.Handle{}, witnesses: map[windows.Handle]bool{}, dllID: cachedGuardDLLID(t)}
 	t.Cleanup(func() {
 		for _, w := range g.files {
 			if err := windows.CloseHandle(w); err != nil {
@@ -218,18 +519,23 @@ func nativeFileStandardInfo(h windows.Handle) (nativeFileStandard, error) {
 	return info, err
 }
 
-// offenders returns every unowned/changed File except positively classified
-// pipes and disk directories. A failed subtype/directory query is conservatively
-// an offender, never an exclusion. unreadable counts failed object-type queries;
-// either result makes the guard fail. Nothing here duplicates handles.
+// Every snapshot is classified afresh. Only pipes, directories, the pinned DLL
+// file ID, and the exact evidenced Windows devices are excluded. Unknown names
+// and unsupported queries remain offenders. No borrowed handle is duplicated.
 func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, unreadable int) {
 	t.Helper()
+	oldOffenders, oldUnreadable := 0, 0
+	classified := map[string]int{}
 	for h := range handleSnapshot(t) {
 		if g.witnesses[h] {
 			continue // retained by this guard until t.Cleanup, never a session file
 		}
 		kind, err := objectType(h)
 		if err != nil {
+			oldUnreadable++
+			if guardSnapshotGone(t, h, err) {
+				continue
+			}
 			unreadable++
 			t.Logf("device-file guard cannot classify handle %#x: %v", h, err)
 			continue
@@ -240,19 +546,23 @@ func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, u
 		if w, ok := g.files[h]; ok && sameObject(h, w) {
 			continue
 		}
-		fileType, err := windows.GetFileType(h)
-		if err == nil && fileType == windows.FILE_TYPE_PIPE {
-			continue
+		kind, _, err = classifyGuardFile(t, h, g.dllID)
+		classified[kind]++
+		if kind != "Pipe" && kind != "Directory" {
+			oldOffenders++
 		}
-		if err == nil && fileType == windows.FILE_TYPE_DISK {
-			info, infoErr := nativeFileStandardInfo(h)
-			if infoErr == nil && info.Directory != 0 {
+		if err != nil {
+			if guardSnapshotGone(t, h, err) {
 				continue
 			}
-			t.Logf("device-file guard disk %#x: standard=%+v standardError=%v", h, info, infoErr)
+			t.Logf("device-file guard cannot identify File %#x: %v", h, err)
+		}
+		if kind != "File" {
+			continue
 		}
 		offenders = append(offenders, h)
 	}
+	t.Logf("device-file guard comparison old_pass=%t old_offenders=%d old_unreadable=%d classified=%v new_offenders=%d new_unreadable=%d", oldOffenders == 0 && oldUnreadable == 0, oldOffenders, oldUnreadable, classified, len(offenders), unreadable)
 	return offenders, unreadable
 }
 
@@ -260,14 +570,8 @@ func (g *deviceFileGuard) assertNone(t *testing.T) {
 	t.Helper()
 	offenders, unreadable := g.offenders(t)
 	if len(offenders) != 0 || unreadable != 0 {
-		// Keep unknown baseline files rejected, but make a hosted failure useful
-		// without unsafe duplication or file-name queries. Windows/runtime-owned
-		// files beyond the known owners must be evidenced before any exclusion.
-		for _, h := range offenders {
-			kind, kindErr := objectType(h)
-			fileType, fileErr := windows.GetFileType(h)
-			t.Logf("device-file guard offender %#x: object=%q objectError=%v fileType=%#x fileTypeError=%v", h, kind, kindErr, fileType, fileErr)
-		}
+		// Classification already logged the result that failed. Re-querying here
+		// could describe a replacement and conceal the original observation.
 		t.Fatalf("device-file guard is not clean: %d unowned/changed non-pipe or unclassified file handle(s) %v, %d unreadable handles", len(offenders), offenders, unreadable)
 	}
 }
@@ -295,10 +599,15 @@ func TestWintunRegistrarDeviceFileGuardDiagnostics(t *testing.T) {
 		if err != nil {
 			t.Fatalf("device-file diagnostics incomplete: %v (deadline: %v)", err, ctx.Err())
 		}
+		for _, stage := range []string{"loaded-library", "adapter-created", "in-process-registered", "in-process-closed"} {
+			if !strings.Contains(output.String(), "diagnostic "+stage+" complete:") {
+				t.Fatalf("device-file diagnostics never completed %s", stage)
+			}
+		}
 		return
 	}
 
-	_, err := loadLibrary()
+	library, err := loadLibrary()
 	must(t, err)
 	if unsafe.Sizeof(nativeFileStandard{}) != 24 || unsafe.Offsetof(nativeFileStandard{}.Directory) != 21 {
 		t.Fatal("unexpected FILE_STANDARD_INFO layout")
@@ -315,12 +624,15 @@ func TestWintunRegistrarDeviceFileGuardDiagnostics(t *testing.T) {
 		for _, h := range handles {
 			kind, err := objectType(h)
 			if err != nil {
+				if h != device && guardSnapshotGone(t, h, err) {
+					continue
+				}
 				t.Fatalf("diagnostic %s handle %#x object type: %v", stage, h, err)
 			}
 			if kind != "File" {
 				continue
 			}
-			fileType, fileErr := windows.GetFileType(h)
+			fileType, fileErr := guardFileType(t, h)
 			if fileErr == nil && fileType == windows.FILE_TYPE_PIPE {
 				continue // never query pipe/socket names
 			}
@@ -333,13 +645,24 @@ func TestWintunRegistrarDeviceFileGuardDiagnostics(t *testing.T) {
 			// handle/pointer counts, then ten reserved ULONGs. No file I/O.
 			var basic [14]uint32
 			status, _, _ := ntQueryObject.Call(uintptr(h), 0, uintptr(unsafe.Pointer(&basic[0])), unsafe.Sizeof(basic), 0)
-			t.Logf("diagnostic %s handle=%#x actualDevice=%t fileType=%#x fileError=%v basicStatus=%#x attributes=%#x access=%#x handles=%d references=%d", stage, h, h == device, fileType, fileErr, status, basic[0], basic[1], basic[2], basic[3])
+			knownOwner := h == windows.Handle(library.file.Fd()) || h == windows.Handle(os.Stdin.Fd()) || h == windows.Handle(os.Stdout.Fd()) || h == windows.Handle(os.Stderr.Fd())
+			t.Logf("diagnostic %s handle=%#x actualDevice=%t knownOwnedFile=%t fileType=%#x fileError=%v basicStatus=%#x attributes=%#x access=%#x handles=%d references=%d", stage, h, h == device, knownOwner, fileType, fileErr, status, basic[0], basic[1], basic[2], basic[3])
 			if fileErr == nil && fileType == windows.FILE_TYPE_DISK {
-				info, infoErr := nativeFileStandardInfo(h)
+				var info nativeFileStandard
+				infoErr := deviceGuardQuery(t, h, "diagnostic FileStandardInfo", func() error {
+					var err error
+					info, err = nativeFileStandardInfo(h)
+					return err
+				})
 				t.Logf("diagnostic %s handle=%#x standard=%+v standardError=%v", stage, h, info, infoErr)
 			}
 			// The preceding line survives a hung query and identifies its handle.
-			name, nameErr := diagnosticDeviceFileName(h)
+			var name string
+			nameErr := deviceGuardQuery(t, h, "diagnostic ObjectNameInformation", func() error {
+				var err error
+				name, err = diagnosticDeviceFileName(h)
+				return err
+			})
 			t.Logf("diagnostic %s handle=%#x nativeName=%q nameError=%v", stage, h, name, nameErr)
 		}
 		if !foundDevice {
@@ -371,7 +694,7 @@ func TestWintunRegistrarDeviceFileGuardDiagnostics(t *testing.T) {
 	dump("in-process-closed", 0)
 }
 
-// Only the disposable diagnostic child above may query a borrowed file's name.
+// Only a synchronous, watchdog-bounded query in the fixture child may call this.
 // The aligned buffer escapes through LazyProc.Call's //go:uintptrescapes with
 // the conversion inline; it lives until the synchronous query returns or the
 // entire child exits. No async I/O or goroutine can retain a retired buffer.
@@ -496,7 +819,7 @@ func TestWintunRegistrarSession(t *testing.T) {
 	if !exited || code != 0 {
 		t.Fatalf("registrar did not exit cleanly after Close: exited=%v code=%#x", exited, code)
 	}
-	if kinds["File"] != 0 || kinds["unreadable"] != 0 {
+	if kinds["File"] != kinds["WindowsDevice"] || kinds["unreadable"] != 0 {
 		t.Fatalf("session added a non-pipe file or unreadable handle to the engine: %v", kinds)
 	}
 	if int64(afterBytes)-int64(beforeBytes) > 16<<20 {
@@ -529,7 +852,23 @@ func TestWintunRegistrarDeviceFileGuardNegativeControl(t *testing.T) {
 	if !handleSnapshot(t)[directory] || !nativeDirectory(directory) {
 		t.Fatal("limited-access directory fixture is absent from the native handle table or cannot be classified")
 	}
+	// Re-open the verified DLL as a separate FILE_OBJECT. This is deliberately
+	// not one of the known owners the guard witnesses. Its positive classification
+	// must come from volume/file ID, while the registered device below must fail.
+	dllName, err := windows.UTF16PtrFromString(a.dll.file.Name())
+	must(t, err)
+	separateDLL, err := windows.CreateFile(dllName, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, 0, 0)
+	must(t, err)
+	defer windows.CloseHandle(separateDLL)
+	if !handleSnapshot(t)[separateDLL] {
+		t.Fatal("separately opened DLL fixture is absent from the native snapshot")
+	}
 	guard := newDeviceFileGuard(t)
+	dllKind, _, dllErr := classifyGuardFile(t, separateDLL, guard.dllID)
+	if dllErr != nil || dllKind != "PinnedDLL" || guard.files[separateDLL] != 0 {
+		t.Fatalf("separate DLL open was not identified independently: kind=%q err=%v", dllKind, dllErr)
+	}
+	t.Logf("device-file DLL control separately_opened=%#x same_kernel_object=%t same_file_id=true", separateDLL, sameObject(separateDLL, windows.Handle(a.dll.file.Fd())))
 	s, err := a.startInProcessSession()
 	must(t, err)
 	defer s.Close()
@@ -555,12 +894,13 @@ func TestWintunRegistrarDeviceFileGuardNegativeControl(t *testing.T) {
 			"baseline_clean": true, "owned_file_witnesses": len(guard.files), "device_handles": len(offenders),
 			"native_directory": uint64(directory), "directory_excluded": !directoryFound, "unreadable": unreadable,
 			"registered_device": uint64(device), "actual_device_detected": found})
-		if typeErr != nil || kind != "File" || unreadable != 0 || !found || directoryFound {
+		if typeErr != nil || kind != "File" || unreadable != 0 || len(offenders) != 1 || !found || directoryFound {
 			t.Fatalf("guard did not distinguish the registered device %#x from directory %#x: kind=%q error=%v offenders=%v unreadable=%d", device, directory, kind, typeErr, offenders, unreadable)
 		}
 	}()
 	must(t, s.Close())
 	guard.assertNone(t)
+	report(t, map[string]any{"test": "device_file_guard_post_close", "arch": runtime.GOARCH, "clean": true, "separate_dll_excluded": true})
 }
 
 // ---- session loss: distinct identity, clean teardown, no rebuild ----

@@ -33,6 +33,9 @@ func TestMain(m *testing.M) {
 			os.Exit(runRegistrarCrasher())
 		}
 	}
+	if code, handled := runDeviceGuardFixture(m); handled {
+		os.Exit(code)
+	}
 	os.Exit(m.Run())
 }
 
