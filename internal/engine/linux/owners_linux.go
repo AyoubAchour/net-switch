@@ -10,6 +10,7 @@ import (
 	"hash/maphash"
 	"io"
 	"io/fs"
+	"log"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -211,6 +212,9 @@ func (o *Owners) Warm(ctx context.Context) error {
 	}
 	if !reserved {
 		r := prepareDescriptorTable(o.budget)
+		if r.Err != nil {
+			log.Printf("prepare owner descriptor table: target=%d limit=%d before=%d after=%d: %v; continuing with on-demand growth", r.Target, r.Limit, r.Before, r.After, r.Err)
+		}
 		o.mu.Lock()
 		o.descriptors = &r
 		o.mu.Unlock()

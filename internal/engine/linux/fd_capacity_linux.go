@@ -14,7 +14,7 @@ import (
 // The kernel grows a descriptor table only when it allocates a descriptor at
 // or beyond the table's end. Growth of a table shared by several threads waits
 // for an RCU grace period, and every allocation racing it waits for the resize.
-// The first SYN burst used to pay that inside a deadline-bound owner lookup:
+// Traffic used to pay that inside a deadline-bound owner lookup:
 // proc's fd directory open was the descriptor that crossed 64, then 128, ...
 // Growing the table once before capture moves that wait to startup.
 //

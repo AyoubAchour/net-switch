@@ -210,8 +210,12 @@ func TestReservedDescriptorTableCrossesBoundaryWithoutGrowth(t *testing.T) {
 
 	// Checked immediately: nothing else in this process opens descriptors, so
 	// no background close can account for these.
-	requireClosed(t, "duplicate", r.Duplicate)
-	requireClosed(t, "source", r.Source)
+	if target > initial {
+		requireClosed(t, "duplicate", r.Duplicate)
+		requireClosed(t, "source", r.Source)
+	} else if r.Source != -1 || r.Duplicate != -1 {
+		t.Fatalf("already-sized table opened reservation descriptors: %+v", r)
+	}
 	if r.Err != nil {
 		t.Fatalf("reservation failed: %+v", r)
 	}
@@ -225,10 +229,10 @@ func TestReservedDescriptorTableCrossesBoundaryWithoutGrowth(t *testing.T) {
 	if err != nil || size != r.After || size < target {
 		t.Fatalf("table %d (reported %d) below target %d: %v", size, r.After, target, err)
 	}
-	if r.Duplicate < target-1 || r.Duplicate >= size {
+	if target > initial && (r.Duplicate < target-1 || r.Duplicate >= size) {
 		t.Fatalf("duplicate %d outside [%d, %d)", r.Duplicate, target-1, size)
 	}
-	if r.Source != free {
+	if target > initial && r.Source != free {
 		t.Fatalf("reservation source %d, lowest free was %d", r.Source, free)
 	}
 	if after := lowestFree(t); after != free {
@@ -299,6 +303,21 @@ func TestWarmReservesDescriptorTable(t *testing.T) {
 	t.Logf("Warm reserved %d entries for target %d", s.FDReserveAfter, target)
 }
 
+func TestDescriptorReservationAlreadySized(t *testing.T) {
+	if !freshDescriptorProcess(t, "TestDescriptorReservationAlreadySized") {
+		return
+	}
+	before := freshTableSize(t)
+	listed := openDescriptors(t)
+	r := reserveDescriptorTable(before)
+	if r.Err != nil || r.Before != before || r.After != before || r.Source != -1 || r.Duplicate != -1 {
+		t.Fatalf("already-sized reservation did work or failed: %+v", r)
+	}
+	if after := openDescriptors(t); !slices.Equal(after, listed) {
+		t.Fatalf("already-sized reservation changed open descriptors: %v -> %v", listed, after)
+	}
+}
+
 // descriptorTarget never asks past the soft limit, so a refusal is driven
 // here directly: the kernel rejects F_DUPFD at or above RLIMIT_NOFILE.
 func TestRefusedReservationIsReportedAndLeavesNothingOpen(t *testing.T) {
@@ -313,8 +332,14 @@ func TestRefusedReservationIsReportedAndLeavesNothingOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if before >= kernelDescriptorCeiling {
+		t.Skipf("table size %d leaves no larger refusable target", before)
+	}
 	listed := openDescriptors(t)
-	r := reserveDescriptorTable(int(limit.Cur) + 1)
+	// A rounded table can already exceed a small soft limit. Prove this
+	// attempt needs growth as well as exceeding the unchanged limit.
+	target := max(int(limit.Cur), before) + 1
+	r := reserveDescriptorTable(target)
 	if !errors.Is(r.Err, unix.EINVAL) || r.Duplicate != -1 {
 		t.Fatalf("refusal not reported: %+v", r)
 	}
