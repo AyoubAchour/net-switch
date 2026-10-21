@@ -17,8 +17,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Each case runs in a new process: its descriptor table starts at 64 entries
-// and nothing earlier in the test binary has grown it.
+// Each case runs in a new process so no earlier test has grown its table.
+// The normal binary starts at 64; the race runtime can grow it during init.
 func freshDescriptorProcess(t *testing.T, name string) bool {
 	t.Helper()
 	if os.Getenv("NETSWITCH_FD_CHILD") == name {
@@ -38,9 +38,10 @@ func freshDescriptorProcess(t *testing.T, name string) bool {
 func freshTableSize(t *testing.T) int {
 	t.Helper()
 	size, err := descriptorTableSize()
-	if err != nil || size != 64 {
+	if err != nil || size < 64 || size&(size-1) != 0 || (!raceInstrumented && size != 64) {
 		t.Fatalf("fresh-process FD table precondition: %d %v", size, err)
 	}
+	t.Logf("fresh-process FD table=%d race-instrumented=%t", size, raceInstrumented)
 	return size
 }
 
@@ -203,6 +204,9 @@ func TestReservedDescriptorTableCrossesBoundaryWithoutGrowth(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := descriptorTarget(flows.Defaults(), limit.Cur)
+	if limit.Cur > uint64(initial) && target <= initial {
+		t.Fatalf("fixture already grew to %d before reservation target %d", initial, target)
+	}
 	free := lowestFree(t)
 	listed := openDescriptors(t)
 
@@ -279,7 +283,7 @@ func TestWarmReservesDescriptorTable(t *testing.T) {
 	if !freshDescriptorProcess(t, "TestWarmReservesDescriptorTable") {
 		return
 	}
-	freshTableSize(t)
+	initial := freshTableSize(t)
 	var limit unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
 		t.Fatal(err)
@@ -291,12 +295,12 @@ func TestWarmReservesDescriptorTable(t *testing.T) {
 	}
 	s := o.Stats().(lookupStats)
 	target := descriptorTarget(flows.Defaults(), limit.Cur)
-	if s.FDReserveError != "" || s.FDReserveTarget != target || s.FDReserveLimit != limit.Cur || s.FDReserveBefore != 64 || s.FDReserveAfter < target || s.FDTableSize != s.FDReserveAfter {
+	if s.FDReserveError != "" || s.FDReserveTarget != target || s.FDReserveLimit != limit.Cur || s.FDReserveBefore != initial || s.FDReserveAfter < target || s.FDTableSize != s.FDReserveAfter {
 		t.Fatalf("Warm reservation stats: target=%d limit=%d before=%d after=%d table=%d error=%q; want target %d limit %d",
 			s.FDReserveTarget, s.FDReserveLimit, s.FDReserveBefore, s.FDReserveAfter, s.FDTableSize, s.FDReserveError, target, limit.Cur)
 	}
 	for _, fd := range openDescriptors(t) {
-		if fd >= 64 {
+		if fd >= initial {
 			t.Fatalf("Warm left descriptor %d open above the old boundary", fd)
 		}
 	}
