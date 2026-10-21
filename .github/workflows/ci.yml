@@ -142,6 +142,10 @@ jobs:
         with:
           node-version: '24.21.0'
           package-manager-cache: false
+      - name: Verify native pointer allocation with the pinned compiler
+        run: |
+          node scripts/check-windows-pointer-escapes.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build gateway and separately addressed probe process
         id: native-build
         run: |
