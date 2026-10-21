@@ -416,6 +416,19 @@ func describeSystem(r *harness.Report) {
 	}
 	r.System["arch"] = runtime.GOARCH
 	r.System["cpus"] = strconv.Itoa(runtime.NumCPU())
+	// Hosted runners of one label can land on different CPU models. Owner
+	// scan cost on one label split into two clusters (about 8.5 and 13 us
+	// per descriptor), so record which model ran.
+	if data, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			name, value, ok := strings.Cut(line, ":")
+			name = strings.TrimSpace(name)
+			if ok && (name == "model name" || name == "CPU part") {
+				r.System["cpu"] = strings.TrimSpace(value)
+				break
+			}
+		}
+	}
 	for key, env := range map[string]string{"runner": "RUNNER_NAME", "image": "ImageOS", "imageVersion": "ImageVersion"} {
 		if v := os.Getenv(env); v != "" {
 			r.System[key] = v
