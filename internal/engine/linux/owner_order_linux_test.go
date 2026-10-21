@@ -55,6 +55,22 @@ func TestHolderTimeoutBeforeScanKeepsSearchContext(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "uid=456 inode=123") || !strings.Contains(err.Error(), "pids=0 fds=0") {
 		t.Fatalf("early timeout lost the search context: %v", err)
 	}
+	if o.expiredBeforeHolderScan.Load() != 1 || o.holderTimeouts.Load() != 0 {
+		t.Fatal("expiry before scanning must not be counted as a scanner timeout")
+	}
+}
+
+func TestHolderCancellationBeforeScanKeepsCauseAndSearchContext(t *testing.T) {
+	o := newTestOwners(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := o.holders(ctx, socketRow{inode: 123, uid: 456})
+	if !errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "uid=456 inode=123 pids=0 fds=0") {
+		t.Fatalf("early cancellation lost its cause or search context: %v", err)
+	}
+	if o.expiredBeforeHolderScan.Load() != 1 || o.holderTimeouts.Load() != 0 {
+		t.Fatal("cancellation before scanning must not be counted as a scanner timeout")
+	}
 }
 
 func TestScopeRankingRetainsEveryCandidateAndStrongRecentHint(t *testing.T) {

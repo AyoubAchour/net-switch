@@ -108,8 +108,10 @@ In the mixed case an app holding both protocols can legitimately reach its
 8,192 combined cap before the total fills; that reason is also allowed, and
 is subtracted from unknown-overflow credit. Each cap reason must have a matching
 engine peak. Mixed per-app refusals additionally require a UDP-holding client
-app to hold exactly 8,192 combined TCP and UDP sockets. Engine peaks alone are
-not independent evidence. The TCP-only offer remains below every
+app to hold exactly 8,192 identified TCP and UDP sockets, as independently
+observed by servers on that app's non-main pinned line. Unknown-owner sockets
+on the main line never contribute to that per-app proof. Engine peaks alone
+are not independent evidence. The TCP-only offer remains below every
 app's cap and therefore accepts no per-app refusal.
 
 Decision counters include repeated SYNs. Therefore the proof subtracts **all

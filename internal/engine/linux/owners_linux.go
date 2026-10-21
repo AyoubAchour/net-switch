@@ -643,7 +643,11 @@ func (o *Owners) holders(ctx context.Context, r socketRow) (owner platform.Owner
 	expired := func() bool { return ctx.Err() != nil || (timed && !time.Now().Before(deadline)) }
 	if expired() {
 		o.expiredBeforeHolderScan.Add(1)
-		return platform.Owner{}, fmt.Errorf("attribution expired before holder scan: %w", context.DeadlineExceeded)
+		err := ctx.Err()
+		if err == nil {
+			err = context.DeadlineExceeded
+		}
+		return platform.Owner{}, fmt.Errorf("attribution expired before holder scan (uid=%d inode=%d pids=0 fds=0): %w", r.uid, r.inode, err)
 	}
 	requested := time.Now()
 	var timing lookupTiming
