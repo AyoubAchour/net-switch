@@ -232,6 +232,42 @@ func TestKernelUDPCrossDestinationICMPErrors(t *testing.T) {
 	}
 }
 
+// A line whose route is gone: the kernel refuses every send synchronously
+// with ENETUNREACH and queues no report, so the error queue can't prove the
+// error is this send's. The line's binding can: with it the send returns the
+// route error (the app's ICMP unreachable); without it, a counted route drop.
+func TestKernelUDPLostRouteIsUnreachableOnlyWithBindingProof(t *testing.T) {
+	kernelLoopback(t)
+	dst := netip.MustParseAddrPort("203.0.113.9:9")
+	s, notes := kernelUDPSocket(t, "127.0.0.1")
+	// Starting condition: the private namespace has no route to dst.
+	for range 2 {
+		if err := plainSend(s, []byte("x"), dst); err != unix.ENETUNREACH {
+			t.Fatalf("the namespace routes %s: %v", dst, err)
+		}
+	}
+	if n := queuedErrors(s); n != 0 {
+		t.Fatalf("a local route failure queued %d reports", n)
+	}
+	var counters routeCounters
+	lost := true
+	s.route, s.routeLost = &counters, func() bool { return lost }
+	if _, err := s.TryWriteTo([]byte("lost"), dst, false); !errors.Is(err, unix.ENETUNREACH) || errors.Is(err, platform.ErrDatagramDropped) {
+		t.Fatalf("ready path on a line without a route: %v", err)
+	}
+	if _, err := s.WriteTo([]byte("lost"), dst, false); !errors.Is(err, unix.ENETUNREACH) || errors.Is(err, platform.ErrDatagramDropped) {
+		t.Fatalf("blocking path on a line without a route: %v", err)
+	}
+	lost = false
+	if _, err := s.TryWriteTo([]byte("unproven"), dst, false); !errors.Is(err, platform.ErrDatagramDropped) {
+		t.Fatalf("a route error the binding doesn't confirm was attributed: %v", err)
+	}
+	if u, d := counters.unreachable.Load(), counters.dropped.Load(); u != 2 || d != 1 {
+		t.Fatalf("route outcomes: %d unreachable, %d dropped; want 2 and 1", u, d)
+	}
+	expectNoNotification(t, notes)
+}
+
 func icmpInDestUnreachs(t *testing.T) uint64 {
 	t.Helper()
 	b, err := os.ReadFile("/proc/net/snmp")

@@ -117,7 +117,8 @@ func (p *Platform) OpenUDPTo(ctx context.Context, id string, dst netip.AddrPort)
 		c.Close()
 		return nil, err
 	}
-	return &udpSocket{conn: c, raw: raw, v6: v6, errors: make(chan platform.DatagramError, 1), done: make(chan struct{})}, nil
+	routeLost := func() bool { _, err := p.binding(id, v6); return err != nil }
+	return &udpSocket{conn: c, raw: raw, v6: v6, errors: make(chan platform.DatagramError, 1), done: make(chan struct{}), routeLost: routeLost, route: &p.udpRoute}, nil
 }
 
 type udpSocket struct {
@@ -130,7 +131,27 @@ type udpSocket struct {
 	done             chan struct{}
 	handler          func(platform.DatagramError)
 	errorReady       atomic.Bool
+	// routeLost reports whether the socket's line binding has no usable
+	// route now; route counts how its route errors were settled.
+	routeLost func() bool
+	route     *routeCounters
 }
+
+// routeCounters count UDP sends that failed again with a route error after
+// the retry. Unreachable ones were returned because the line's binding had no
+// usable route; dropped ones were unproven and counted silently.
+type routeCounters struct {
+	unreachable, dropped atomic.Uint64
+}
+
+// Stats reports the platform's UDP route-error outcomes.
+func (p *Platform) Stats() any {
+	return struct{ UDPRouteUnreachable, UDPRouteDropped uint64 }{p.udpRoute.unreachable.Load(), p.udpRoute.dropped.Load()}
+}
+
+// errRouteDropped is a route error the line's binding doesn't confirm. The
+// shared UDP code counts it as an ordinary silent drop.
+var errRouteDropped = fmt.Errorf("unconfirmed UDP route error: %w", platform.ErrDatagramDropped)
 
 func (s *udpSocket) LocalAddr() netip.AddrPort { return s.conn.LocalAddr().(*net.UDPAddr).AddrPort() }
 func (s *udpSocket) Close() error              { s.once.Do(func() { close(s.done) }); return s.conn.Close() }
@@ -202,10 +223,17 @@ func (s *udpSocket) sendAttributed(dst netip.AddrPort, size int, send func() err
 			locked, drain.handler = true, s.handler
 		}
 		return s.drainLocked(&drain, errno, dst, size)
-	}, s.clearSocketError)
+	}, s.clearSocketError, s.routeLost)
 	if locked {
 		s.errorMu.Unlock()
 		drain.deliver()
+	}
+	if s.route != nil {
+		if err == errRouteDropped {
+			s.route.dropped.Add(1)
+		} else if errors.Is(err, unix.ENETUNREACH) || errors.Is(err, unix.EHOSTUNREACH) {
+			s.route.unreachable.Add(1)
+		}
 	}
 	return err
 }
@@ -378,8 +406,9 @@ var errorBuffers = sync.Pool{New: func() any { return new(errorScratch) }}
 // proof. Otherwise it is a counted silent drop, never a fabricated ICMP.
 //
 // explain runs one bounded error-queue pass for the send's errno and clear
-// consumes the latch. The send is retried at most once.
-func sendDatagram(send func() error, explain func(unix.Errno) errorEvidence, clear func()) error {
+// consumes the latch. The send is retried at most once. routeLost says
+// whether the socket's line binding has no usable route; nil means unknown.
+func sendDatagram(send func() error, explain func(unix.Errno) errorEvidence, clear func(), routeLost func() bool) error {
 	err := send()
 	errno, ok := latchedErrno(err)
 	if !ok {
@@ -395,7 +424,17 @@ func sendDatagram(send func() error, explain func(unix.Errno) errorEvidence, cle
 		return localSendError(err)
 	}
 	// A new ICMP may set sk_err even when its error-queue allocation fails.
-	// Absence of a quotation is not evidence of a local route failure.
+	// Absence of a quotation is not evidence of a local route failure. The
+	// line's binding is: with no usable route the kernel refuses every send
+	// with a route error, so a route error repeated right after the latch was
+	// cleared is this send's own. Return it, so the app gets its unreachable
+	// and fails fast instead of timing out. Without that proof it is a drop.
+	if errno == unix.ENETUNREACH || errno == unix.EHOSTUNREACH {
+		if routeLost != nil && routeLost() {
+			return errno
+		}
+		return errRouteDropped
+	}
 	if !first.empty || errno != unix.EMSGSIZE {
 		return platform.ErrDatagramDropped
 	}

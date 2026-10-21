@@ -68,6 +68,7 @@ type Platform struct {
 	monitorCancel        context.CancelFunc
 	monitorDone          chan struct{}
 	Owners               *Owners
+	udpRoute             routeCounters
 	// Callbacks run outside the platform lock.
 	LineDown       func(string)
 	AddressRemoved func(netip.Addr)

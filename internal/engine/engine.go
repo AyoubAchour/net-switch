@@ -304,6 +304,9 @@ func (e *Engine) Stats() any {
 	if owners, ok := e.deps.Owners.(interface{ Stats() any }); ok {
 		s["ownerLookup"] = owners.Stats()
 	}
+	if dialer, ok := e.deps.Dialer.(interface{ Stats() any }); ok {
+		s["dialer"] = dialer.Stats()
+	}
 	var memory runtime.MemStats
 	runtime.ReadMemStats(&memory)
 	s["heapBytes"] = memory.HeapAlloc

@@ -13,11 +13,12 @@ import (
 // sendScript replays send results and error-queue evidence in order, and
 // records how sendDatagram used them.
 type sendScript struct {
-	sends    []error
-	passes   []errorEvidence
-	calls    int
-	explains []unix.Errno
-	clears   int
+	sends     []error
+	passes    []errorEvidence
+	calls     int
+	explains  []unix.Errno
+	clears    int
+	routeLost bool // the line's binding has no usable route
 }
 
 func (s *sendScript) run(t *testing.T) error {
@@ -34,7 +35,35 @@ func (s *sendScript) run(t *testing.T) error {
 			t.Fatalf("error-queue pass %d was not scripted", len(s.explains))
 		}
 		return s.passes[len(s.explains)-1]
-	}, func() { s.clears++ })
+	}, func() { s.clears++ }, func() bool { return s.routeLost })
+}
+
+// A line that lost its route fails every send with a route error. Before the
+// error-queue attribution the app got an ICMP unreachable and failed fast;
+// with the binding as proof it still does. Without that proof the same
+// errors stay a counted drop, apart from other drops.
+func TestUDPSendRouteErrorOnLostLineIsUnreachable(t *testing.T) {
+	for _, errno := range []unix.Errno{unix.ENETUNREACH, unix.EHOSTUNREACH} {
+		for _, first := range []errorEvidence{{empty: true}, {empty: true, remote: true}, {remote: true}} {
+			s := sendScript{sends: []error{errno, errno}, passes: []errorEvidence{first}, routeLost: true}
+			if err := s.run(t); !errors.Is(err, errno) || errors.Is(err, platform.ErrDatagramDropped) || s.calls != 2 || s.clears != 1 {
+				t.Fatalf("%v repeated on a line without a route (%+v): calls=%d err=%v", errno, first, s.calls, err)
+			}
+			s = sendScript{sends: []error{errno, errno}, passes: []errorEvidence{first}}
+			if err := s.run(t); err != errRouteDropped || !errors.Is(err, platform.ErrDatagramDropped) {
+				t.Fatalf("unproven %v (%+v) was not the separately counted route drop: %v", errno, first, err)
+			}
+		}
+	}
+	// The binding proves only route errors, and only for the retry.
+	s := sendScript{sends: []error{unix.ENETUNREACH, nil}, passes: []errorEvidence{{empty: true}}, routeLost: true}
+	if err := s.run(t); err != nil || s.calls != 2 {
+		t.Fatalf("a send that succeeded on retry failed: %v", err)
+	}
+	s = sendScript{sends: []error{unix.ENETUNREACH, unix.ECONNREFUSED}, passes: []errorEvidence{{empty: true}}, routeLost: true}
+	if err := s.run(t); err != platform.ErrDatagramDropped {
+		t.Fatalf("a port unreachable became this send's on a lost line: %v", err)
+	}
 }
 
 func TestUDPSendRetriesPreviousDestinationErrorOnce(t *testing.T) {
