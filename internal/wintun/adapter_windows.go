@@ -341,8 +341,48 @@ func recoverAfterCrash(config Config) (int, error) {
 			return 0, err
 		}
 		if err := set.CallClassInstaller(windows.DIF_REMOVE, dev); err != nil {
+			// When the creator died, Windows may remove its software device
+			// between our enumeration and this call (seen on ARM64, run
+			// 39562669574). That is the state we want, but only if a fresh
+			// enumeration confirms no device with this GUID is left.
+			if errors.Is(err, windows.ERROR_NO_SUCH_DEVINST) {
+				if present, checkErr := wintunDeviceExists(guid); checkErr == nil && !present {
+					return 0, nil
+				} else if checkErr != nil {
+					err = errors.Join(err, checkErr)
+				}
+			}
 			return 0, fmt.Errorf("remove crashed Wintun device: %w", err)
 		}
 		return 1, nil
+	}
+}
+
+// wintunDeviceExists reports whether any Wintun device, present or not, is
+// registered with this NetCfgInstanceId.
+func wintunDeviceExists(guid windows.GUID) (bool, error) {
+	set, err := windows.SetupDiGetClassDevsEx(&netClass, "SWD\\Wintun", 0, 0, 0, "")
+	if err != nil {
+		return false, err
+	}
+	defer set.Close()
+	for i := 0; ; i++ {
+		dev, err := set.EnumDeviceInfo(i)
+		if errors.Is(err, windows.ERROR_NO_MORE_ITEMS) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		h, err := set.OpenDevRegKey(dev, windows.DICS_FLAG_GLOBAL, 0, windows.DIREG_DRV, windows.KEY_QUERY_VALUE)
+		if err != nil {
+			continue
+		}
+		key := registry.Key(h)
+		id, _, readErr := key.GetStringValue("NetCfgInstanceId")
+		key.Close()
+		if readErr == nil && strings.EqualFold(id, guid.String()) {
+			return true, nil
+		}
 	}
 }
