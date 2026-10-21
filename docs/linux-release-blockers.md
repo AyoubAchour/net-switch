@@ -14,27 +14,49 @@ The real numerator, denominator and threshold result remain in the JSON, console
 log and summary. Every declaration carries `release-blocker` status, including
 when a sample meets its threshold. No retry or excluded natural miss changes it.
 
-The current measurements below are from head `045842f`, ARM26 full run
-[39434095158](https://github.com/AyoubAchour/net-switch/actions/runs/39434095158).
-They describe the unchanged checks before the expanded classification. They
-are not final-head release qualification.
+The measurements below are from PR head `a2a85f4` (Go 1.27.3), Acceptance run
+[39540308747](https://github.com/AyoubAchour/net-switch/actions/runs/39540308747),
+on all four runners. Each cell is natural misses / lookups in the case's own
+non-injected window (pagination: identified rows of 300, 299 required). A
+threshold that a sample meets is still declared; a lucky run clears nothing.
 
-| Case | Natural misses / lookups, or identified rows | Original attribution check |
-| --- | ---: | --- |
-| overload.udp-sessions-per-app | 9 / 10,004 misses | Met |
-| overload.udp-sessions-total | 120 / 16,390 misses | Failed |
-| overload.tcp-connection-storm | 82 / 9,004 misses | Failed |
-| overload.tcp-handshakes-in-flight | 58 / 11,331 misses | Failed |
-| overload.tcp-flows-total | 1,025 / 65,536 misses | Failed |
-| overload.tcp-buffer-budget | 3 / 64 misses | Failed |
-| overload.rejection-notices-per-app | 0 / 12,000 misses | Met |
-| overload.rejection-notices-total | 121 / 25,600 misses | Met |
-| overload.timewait-cap | 0 / 5,060 misses | Met |
-| overload.udp-pending-bytes | 0 / 4 misses | Met |
-| overload.unknown-owner-limits | 0 / 3 misses | Met |
-| overload.tun-write-queue | 0 / 4 misses | Met |
-| overload.memory-at-limit | 11 / 86 misses | Failed |
-| protocol.flows-pagination | 298 / 300 identified; requires 299 | Failed |
+| Case | Ubuntu 24 x64 | Ubuntu 26 x64 | Ubuntu 24 ARM64 | Ubuntu 26 ARM64 |
+| --- | ---: | ---: | ---: | ---: |
+| overload.udp-sessions-per-app | 10 / 10,004 | 27 / 10,004 | 0 / 10,004 | 2 / 10,004 |
+| overload.udp-sessions-total | 112 / 16,388 | 434 / 16,388 | 49 / 16,388 | 74 / 16,388 |
+| overload.tcp-connection-storm | 1,247 / 12,604 | 1,888 / 12,304 | 241 / 12,604 | 533 / 12,879 |
+| overload.tcp-handshakes-in-flight | 381 / 10,063 | 777 / 11,922 | 206 / 12,735 | 238 / 13,191 |
+| overload.tcp-flows-total | 16,559 / 80,047 | 22,886 / 80,101 | 4,579 / 68,067 | 5,870 / 69,358 |
+| overload.tcp-buffer-budget | 21 / 64 | 52 / 64 | 5 / 64 | 2 / 64 |
+| overload.rejection-notices-per-app | 0 / 12,000 | 0 / 12,000 | 0 / 12,000 | 0 / 12,000 |
+| overload.rejection-notices-total | 264 / 25,600 | 689 / 25,600 | 160 / 25,600 | 96 / 25,600 |
+| overload.timewait-cap | 0 / 5,060 | 0 / 5,060 | 0 / 5,060 | 0 / 5,060 |
+| overload.udp-pending-bytes | 0 / 4 | 0 / 4 | 0 / 4 | 0 / 4 |
+| overload.unknown-owner-limits | 0 / 3 | 0 / 3 | 0 / 3 | 0 / 3 |
+| overload.tun-write-queue | 0 / 4 | 0 / 4 | 0 / 4 | 0 / 4 |
+| overload.memory-at-limit | 40 / 86 | 59 / 86 | 22 / 86 | 28 / 86 |
+| protocol.flows-pagination | 299 | 297 | 299 | 300 |
+| capacity.mixed-caps, held of 65,536 | 65,536 | 62,782 | 65,536 | 65,536 |
+
+Held exact caps on the same run: TCP total held 65,536 on three runners and
+59,263 on Ubuntu 26 x64. Its 6,273 shortfall, and the 2,754 mixed shortfall,
+were each wholly classified as unknown-overflow refusals. That is the only kind
+of shortfall the catalogue allows; any other would have failed the job. UDP
+total, mixed UDP, UDP per app and the TCP storm's identified 8,192 were exact
+on every runner. Each runner ran 85 cases: 70 passed and 15 declared release
+blockers, with no hard failures. The manual gate
+([39545430881](https://github.com/AyoubAchour/net-switch/actions/runs/39545430881))
+refused exactly these 15 entries.
+
+These checks stayed hard on every runner and passed:
+- **TIME_WAIT probes:** all 50 alpha and 10 bravo post-burst probes were
+  identified, with no misses in 5,060 lookups.
+- **Live heap:** the largest forced-GC live heap was 411,046,496 B, against
+  the 483,183,820 B limit.
+- **Held sessions (§5.9):** an echo through every held UDP session in the
+  per-app, total and mixed cases had a p99 of 2.2–7.1 ms (the limit is
+  250 ms). Each full sweep took 0.29–0.82 s (the limit is 30 s).
+The held-session check isn't an attribution check and isn't in the catalogue.
 
 Deliberately injected misses remain separately reported: 132/132 in pending
 bytes, 3,000/3,000 in unknown-owner limits and 131/131 in memory pressure.
