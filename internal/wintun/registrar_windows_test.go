@@ -262,6 +262,15 @@ func classifyGuardFile(t *testing.T, h windows.Handle, dllID *guardFileID) (kind
 		} else {
 			t.Logf("device-file disk handle=%#x standard=%+v has no cached pinned DLL identity", h, info)
 		}
+		// Diagnostic only: neither a name nor a name-query failure can excuse
+		// this unmatched disk file or change its already-failing verdict.
+		var name string
+		nameErr := deviceGuardQuery(t, h, "unrecognized disk ObjectNameInformation", func() error {
+			var queryErr error
+			name, queryErr = diagnosticDeviceFileName(h)
+			return queryErr
+		})
+		t.Logf("device-file unmatched disk handle=%#x nativeName=%q nameError=%v old_pass=false new_pass=false", h, name, nameErr)
 		return kind, oldKind, nil
 	}
 	if fileType != windows.FILE_TYPE_CHAR && fileType != windows.FILE_TYPE_UNKNOWN {
