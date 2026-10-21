@@ -191,12 +191,14 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 			if !portLimit(limit) {
 				t.Fatalf("native pair limit was not established: %v", limit)
 			}
+			space := diagnoseUDPPortSpace(context.Background())
 			memory, memoryErr := processMemory()
 			evidence, _ := json.Marshal(map[string]any{"readyUDP": native, "heldPairs": len(apps),
 				"uniquePorts": len(ports), "echoedDatagrams": len(apps) * 2, "phase": phase,
 				"family": "ipv4", "source": source, "interfaceIndex": index,
 				"appBind": "wildcard port zero, connected", "engineBind": "specific source port zero, IP_UNICAST_IF",
 				"engineOptions": options,
+				"portSpace":     space.Probe,
 				"error":         limit.Error(), "processMemory": memory, "memoryError": memoryErr})
 			t.Logf("WINDOWS NATIVE UDP PAIRED CAPACITY %s", evidence)
 		})
