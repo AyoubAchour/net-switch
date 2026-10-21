@@ -514,6 +514,17 @@ jobs:
         with:
           go-version: ${{ steps.pins.outputs.go_version }}
           cache: false
+      - name: Build and identify the release registrar executable
+        run: |
+          go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o dist/registrar-release/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go version -m dist/registrar-release/netswitch-engine.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $engine = (Resolve-Path dist/registrar-release/netswitch-engine.exe).Path
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant()
+          "Release registrar $engine from $env:GITHUB_SHA, SHA-256 $hash"
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE=$engine" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Compile the native test executable
         run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
       - uses: ./.github/actions/cache-pinned-archive
@@ -523,11 +534,18 @@ jobs:
         run: ./scripts/prepare-wintun-tests.ps1
       - name: Ring ABI, parser, cancellation, corruption recovery and parallel UDP
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.run=TestPauseClassification|TestPerformanceMedian|TestRing|TestPinnedDLL|TestWintun(PauseMonitor|SessionDelay|ParallelUDP|RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|BatchCost)$'
+      - name: Registrar ownership, loss and release-engine footprint
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=12m' '-test.run=^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine))$'
       - name: Single-packet ping-pong, 200000 round trips per implementation
         if: ${{ !cancelled() }}
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPingPong$'
       - name: Bulk UDP and TCP throughput and latency comparison
         if: ${{ !cancelled() }}
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPerformance$'
+      - name: Matched release registrar versus former in-process registration
+        if: ${{ !cancelled() }}
+        env:
+          NETSWITCH_WINTUN_REFERENCE: inprocess
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPerformance$'
       - name: 1000 session cycles and forced crash cleanup, including phantom devices
         if: ${{ !cancelled() }}
@@ -557,7 +575,7 @@ jobs:
       - name: Race detector with real recovery and teardown
         if: ${{ !cancelled() && matrix.arch == 'x64' }}
         run: |
-          go test -race -c -o ./bin/wintun-race.test.exe ./internal/wintun
+          go test -race -tags=netswitch_handlecheck -c -o ./bin/wintun-race.test.exe ./internal/wintun
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./bin/wintun-race.test.exe '-test.v' '-test.timeout=5m' '-test.run=TestRing|TestWintun(RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|Lifetime)$'
 

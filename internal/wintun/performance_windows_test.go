@@ -405,6 +405,16 @@ func pairedRatios(ours, dll []float64) ([]float64, error) {
 // registration, isolating the registrar's cost from the DLL comparison.
 func TestWintunPerformance(t *testing.T) {
 	requireRunner(t)
+	if os.Getenv(productionEngineEnv) != "" {
+		// Keep every matched sample and threshold unchanged, while making the
+		// registration owner the exact release engine measured by the footprint
+		// test. The packet loop still runs through these same shared rings.
+		engine := productionEngine(t)
+		previous := registrarExecutable
+		registrarExecutable = func() (string, error) { return engine.Path, nil }
+		t.Cleanup(func() { registrarExecutable = previous })
+		report(t, map[string]any{"test": "performance_registrar_provenance", "engine": engine})
+	}
 	reference := "dll"
 	switch os.Getenv("NETSWITCH_WINTUN_REFERENCE") {
 	case "", "dll":
