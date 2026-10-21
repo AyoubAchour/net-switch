@@ -5,7 +5,7 @@ import { areaFor, changedFiles, classify, decide, groups } from './changes.mjs';
 const known = paths => classify(paths, new Set(paths));
 const enabled = result => groups.filter(group => result.outputs[group]).sort();
 const cases = {
-  docs: ['README.md', 'docs/design.md', 'tests/windows/README.md'],
+  docs: ['README.md', 'notes/design.md', 'tests/windows/README.md'],
   frozen: ['lib/engine.mjs', 'server.mjs', 'lib/tray.cs', 'helper/main.go', 'test/engine.test.mjs'],
   go_shared: ['internal/engine/stack/stack.go', 'cmd/netswitch/main.go', 'internal/platform/windows/meters.go'],
   go_windows: ['internal/wintun/ring_windows.go', 'internal/platform/windows/com_windows_test.go', 'cmd/netswitch/process_windows.go'],
@@ -51,7 +51,7 @@ test('new files run everything, including familiar code and documentation paths'
 });
 
 test('Markdown bundled in the installer is a product input', () => {
-  for (const path of ['THIRD_PARTY_NOTICES.md', 'docs/user-guide.md']) assert.equal(known([path]).full, true, path);
+  for (const path of ['THIRD_PARTY_NOTICES.md', 'docs/user-guide.md', 'docs/design.md', 'lib/README.md', 'ui/help.md', 'tools/help.md', 'licenses/notice.md']) assert.equal(known([path]).full, true, path);
 });
 
 test('deleted files use their original area and mixed deletions stay conservative', () => {
@@ -60,7 +60,7 @@ test('deleted files use their original area and mixed deletions stay conservativ
 });
 
 test('renames account for both source and destination and new destinations force full', () => {
-  const paths = ['internal/engine/old.go', 'docs/old.md'];
+  const paths = ['internal/engine/old.go', 'notes/old.md'];
   assert.equal(classify(paths, new Set([paths[0]])).full, true);
   assert.deepEqual(enabled(known(paths)), [...expected.go_shared].sort());
 });

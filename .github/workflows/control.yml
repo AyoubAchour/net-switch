@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# Label updates and new commits replace only the same PR's older run.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('control-pr-{0}', github.event.pull_request.number) || format('control-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # Picks the jobs a pull request needs from its changed files
   # (.github/ci/changes.mjs); pushes, manual runs and the ci:full label get
@@ -50,7 +55,7 @@ jobs:
 
   windows:
     needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.control != 'false') }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.control != 'false') }}
     name: Control / Windows ${{ matrix.arch }} / ${{ matrix.control }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
