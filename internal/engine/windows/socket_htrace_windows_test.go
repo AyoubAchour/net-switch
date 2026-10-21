@@ -86,6 +86,20 @@ func enableSocketTrace(t *testing.T) error {
 		unsafe.Offsetof(socketTraceQuery{}.Entry) != 16 {
 		return errors.New("ProcessHandleTracing layout differs from reference headers")
 	}
+	// Validate the sentinel without tracing first. Once CDB handles a native
+	// bad-reference exception, its continuation can change the observed return
+	// value (zero on the ARM64 runner); that value is no longer an API oracle.
+	invalid := windows.Handle(0x7ffffffc)
+	queryInvalid := func() uint32 {
+		var info [16]uint64
+		var length uint32
+		status, _, _ := windows.NewLazySystemDLL("ntdll.dll").NewProc("NtQueryObject").Call(
+			uintptr(invalid), 0, uintptr(unsafe.Pointer(&info[0])), unsafe.Sizeof(info), uintptr(unsafe.Pointer(&length)))
+		return uint32(status)
+	}
+	if status := queryInvalid(); status != 0xc0000008 {
+		return fmt.Errorf("untraced invalid-reference control returned NTSTATUS=%#x", status)
+	}
 	config := struct{ Flags, Slots uint32 }{Slots: socketTraceSlots}
 	if err := windows.NtSetInformationProcess(windows.CurrentProcess(), windows.ProcessHandleTracing,
 		unsafe.Pointer(&config), uint32(unsafe.Sizeof(config))); err != nil {
@@ -112,15 +126,11 @@ func enableSocketTrace(t *testing.T) error {
 	}
 	logSocketTrace(t, "control/event", entries)
 	// A READ-ONLY invalid reference, not a second close of a released value.
-	// Even if this sentinel unexpectedly exists, NtQueryObject cannot close
-	// or mutate it and the required STATUS_INVALID_HANDLE assertion fails.
-	invalid := windows.Handle(0x7ffffffc)
-	var info [16]uint64 // aligned OBJECT_BASIC_INFORMATION output storage
-	var length uint32
-	status, _, _ := windows.NewLazySystemDLL("ntdll.dll").NewProc("NtQueryObject").Call(
-		uintptr(invalid), 0, uintptr(unsafe.Pointer(&info[0])), unsafe.Sizeof(info), uintptr(unsafe.Pointer(&length)))
-	if uint32(status) != 0xc0000008 { // STATUS_INVALID_HANDLE
-		return fmt.Errorf("invalid-reference control returned NTSTATUS=%#x", uint32(status))
+	// The actual BADREF record is mandatory, including its PID/TID and stack.
+	// NtQueryObject cannot close or mutate a coincidentally valid sentinel.
+	status := queryInvalid()
+	if status != 0xc0000008 && status != 0 {
+		return fmt.Errorf("traced invalid-reference control returned NTSTATUS=%#x", status)
 	}
 	entries, err = querySocketTrace(invalid)
 	if err != nil {
@@ -130,6 +140,7 @@ func enableSocketTrace(t *testing.T) error {
 		return fmt.Errorf("OS trace control lacks BADREF: entries=%+v", entries)
 	}
 	logSocketTrace(t, "control/invalid-reference", entries)
+	t.Logf("SOCKET BADREF CALIBRATION untraced-status=0xc0000008 traced-status=%#x old-status-verdict=%t; traced proof requires the native BADREF record and debugger exception", status, status == 0xc0000008)
 	all, err := querySocketTrace(0)
 	if err != nil || !traceHas(all, h, tid, 1) || !traceHas(all, h, tid, 2) || !traceHas(all, invalid, tid, 3) {
 		return fmt.Errorf("all-handles trace control lost known records: total=%d error=%v", len(all), err)
