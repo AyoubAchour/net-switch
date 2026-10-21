@@ -145,12 +145,14 @@ func (p *readiness) stats() map[string]any {
 	defer p.mu.Unlock()
 	ports := make([]uint16, 0, len(p.watches))
 	// A local port number alone can name a new connection to another peer
-	// while the released one is in TIME_WAIT; endpoints carry the peer too.
-	endpoints := make([]string, 0, len(p.watches))
+	// while the released one is in TIME_WAIT, so the ports are also grouped
+	// by peer. Grouped, not one string per watch: at capacity the stats reply
+	// must stay under the control channel's 1 MiB cap (run 39597923669).
+	peers := map[string][]uint16{}
 	normal, skipped, inherited := 0, 0, 0
 	for _, watch := range p.watches {
 		ports = append(ports, watch.localPort)
-		endpoints = append(endpoints, fmt.Sprintf("%d->%s", watch.localPort, watch.remote))
+		peers[watch.remote] = append(peers[watch.remote], watch.localPort)
 		if watch.skipSuccess {
 			skipped++
 		} else {
@@ -169,7 +171,7 @@ func (p *readiness) stats() map[string]any {
 		queryError = p.policy.err.Error()
 	}
 	return map[string]any{
-		"sockets": len(p.watches), "ports": ports, "endpoints": endpoints, "blockedWriters": len(p.writers),
+		"sockets": len(p.watches), "ports": ports, "peers": peers, "blockedWriters": len(p.writers),
 		"completionThread": p.thread.Load(), "closes": closes, "closedCount": p.closedCount,
 		"completionPolicy": p.policy.reason, "allowSkipCompletionOnSuccess": p.policy.allowSkip,
 		"protocolCatalogEntries": p.policy.entries, "nonIFSProvider": p.policy.nonIFS,

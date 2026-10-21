@@ -62,8 +62,8 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
   // Each released connection's peer, so a retained watch is matched by the
   // whole connection, not by a local port number Windows may give a new
   // connection to another peer while the old one is in TIME_WAIT.
-  const remoteByPort = new Map(egressGroups.flatMap((g) => g.ports.map((port) =>
-    [port, `${g.destination.includes(':') ? `[${g.destination}]` : g.destination}:${g.remotePort}`])));
+  const peerOf = (g) => `${g.destination.includes(':') ? `[${g.destination}]` : g.destination}:${g.remotePort}`;
+  const egressConnections = new Set(egressGroups.flatMap((g) => g.ports.map((port) => `${port}>${peerOf(g)}`)));
   assert(egress.size >= released.released, 'Native established socket precondition missing');
   const ranges = before.socketResources.configuration.filter((s) => s.DynamicPortRangeNumberOfPorts > 0);
   const closedPorts = new Set();
@@ -90,11 +90,10 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
     };
     const appStates = stateCounts(appPorts, '198.18.0.1'), engineStates = stateCounts(releasedEgress);
     const oldRetainedWatches = stats.nativeReadiness.ports.filter((port) => releasedEgress.has(port)).length;
-    const endpoints = stats.nativeReadiness.endpoints;
-    const retainedWatches = Array.isArray(endpoints) ? endpoints.filter((endpoint) => {
-      const at = endpoint.indexOf('->'), port = Number(endpoint.slice(0, at));
-      return releasedEgress.has(port) && endpoint.slice(at + 2) === remoteByPort.get(port);
-    }).length : oldRetainedWatches;
+    const peers = stats.nativeReadiness.peers;
+    const retainedWatches = peers ? Object.entries(peers).reduce((sum, [peer, ports]) =>
+      sum + ports.filter((port) => releasedEgress.has(port) && egressConnections.has(`${port}>${peer}`)).length, 0)
+      : oldRetainedWatches;
     for (const record of stats.nativeReadiness.closes) {
       if (record.sequence > before.nativeReadiness.closedCount && !record.error &&
           record.local.startsWith(`${egressGroups[0].source}:`)) {
