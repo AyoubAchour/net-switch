@@ -511,7 +511,12 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         const refusalsOf = async (phase, attempts) => {
           const refused = attempts.filter((item) => item.Error);
           if (!refused.length) return [];
-          const free = freeFrom(await engineStats().catch(() => ({})));
+          const stats = await engineStats().catch(() => ({}));
+          const free = freeFrom(stats);
+          // ECONNRESET here is the engine's own port unreachable after a failed
+          // outbound send; its Winsock error is in udpSendFailures.
+          console.log(`WINDOWS UDP RECOVERY SEND FAILURES ${JSON.stringify({ phase, refused: refused.length,
+            sendFailures: stats.udpSendFailures, udpOpenFailed: stats.udpOpenFailed, udpSocketExhaustions: stats.udpSocketExhaustions })}`);
           await delay(200);
           const retry = await clients[0].call('open', { ...target, count: refused.length }).catch((error) => ({ error: String(error), attempts: [] }));
           const retried = retry.attempts ?? [];
