@@ -250,7 +250,7 @@ type udpSocket struct {
 // bind to the line's source, then no ICMP-driven receive errors.
 func openUDP(a Adapter, local netip.AddrPort, pool *udpReadiness) (*udpSocket, error) {
 	v6 := local.Addr().Is6()
-	socket, err := newSocket(v6, windows.SOCK_DGRAM, 0, "UDP native socket open")
+	socket, err := newSocket(v6, windows.SOCK_DGRAM, "UDP native socket open")
 	if err != nil {
 		return nil, err
 	}

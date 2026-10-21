@@ -56,7 +56,7 @@ func (p *readiness) dial(ctx context.Context, a Adapter, source netip.Addr, remo
 	if err := ctx.Err(); err != nil {
 		return nil, fail(err)
 	}
-	socket, err := newSocket(v6, windows.SOCK_STREAM, 0, "TCP native socket open")
+	socket, err := newSocket(v6, windows.SOCK_STREAM, "TCP native socket open")
 	if err != nil {
 		return nil, fail(err)
 	}

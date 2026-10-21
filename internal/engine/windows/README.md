@@ -78,6 +78,10 @@ Microsoft documents that a socket descriptor is valid in every thread of its
 process. The second copy was the only place a "stale duplicate" appeared (the
 same kernel socket, reported unbound, refusing `SO_UPDATE_CONNECT_CONTEXT`).
 
+- **Creation:** `WSASocket` with protocol 0, exactly as Go called it. An explicit
+  `IPPROTO_UDP` selects the same catalog entry, yet held only 2,047 (ARM64) and
+  5,503 (x64) UDP flows at the real-TUN port limit, against about 7,950 with 0;
+  the cause inside Winsock is not known.
 - **UDP:** `WSASocket` (overlapped, not inheritable), Go's old family defaults
   (`IPV6_V6ONLY`, IPv4 `SO_BROADCAST`), the line's interface option, a bind to the
   line's source, `SIO_UDP_CONNRESET`/`SIO_UDP_NETRESET` off as Go set them, then
