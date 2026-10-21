@@ -83,6 +83,18 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					// On any early exit, close the File through its ownership
+					// record. A bare deferred file.Close let the registry keep
+					// the value live after the OS freed it, so the next subtest's
+					// reuse of that number tripped the ownership check (x64 job
+					// 119295233453: tcp4 failed at round 12, then tcp6 panicked on
+					// handle 564).
+					fileClosed := false
+					defer func() {
+						if !fileClosed {
+							fileOwner.CloseGo("transfer regression File close after failure", file.Close)
+						}
+					}()
 					source := fileOwner.Handle("transfer regression source identity")
 					staleBefore := staleDuplicates.Load()
 					h, err := duplicateForReadiness(file, fileOwner)
@@ -142,6 +154,7 @@ func TestNativeTransferWithoutReadinessKeepsEndpoint(t *testing.T) {
 						t.Fatal(err)
 					}
 					check("Go connection closed")
+					fileClosed = true
 					if err := fileOwner.CloseGo("transfer regression File close", file.Close); err != nil {
 						t.Fatal(err)
 					}

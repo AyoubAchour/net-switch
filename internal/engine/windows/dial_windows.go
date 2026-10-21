@@ -315,7 +315,9 @@ func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) 
 		optionErr = s.fragmentation(windows.Handle(fd), df)
 	})
 	if err != nil || optionErr != nil {
-		return 0, errors.Join(err, optionErr)
+		err = errors.Join(err, optionErr)
+		noteUDPSendFailure("first send fragmentation option", dst, err)
+		return 0, err
 	}
 	n, err := s.conn.WriteToUDPAddrPort(b, dst)
 	if errors.Is(err, windows.WSAENOBUFS) {
@@ -324,6 +326,7 @@ func (s *udpSocket) WriteTo(b []byte, dst netip.AddrPort, df bool) (int, error) 
 	if platform.IsTooBig(err) {
 		err = &platform.TooBig{MTU: s.pathMTU(dst.Addr())}
 	}
+	noteUDPSendFailure("first send", dst, err)
 	return n, err
 }
 

@@ -33,6 +33,7 @@ func (r *Runtime) Stats() any {
 	stats["socketResources"] = r.dialer.ports.stats()
 	stats["udpSocketExhaustions"] = r.dialer.udpExhaustions.Load()
 	stats["staleSocketDuplicates"] = staleDuplicates.Load()
+	stats["udpSendFailures"] = udpSendFailureStats()
 	if failure := r.dialer.udpFailure.Load(); failure != nil {
 		stats["udpAllocationFailure"] = failure
 	}

@@ -124,6 +124,7 @@ func (s *udpSocket) TryWriteTo(b []byte, destination netip.AddrPort, df bool) (i
 		return 0, errors.New("invalid UDP destination")
 	}
 	if err := s.fragmentation(s.handle.Handle("UDP fragmentation option"), df); err != nil {
+		noteUDPSendFailure("nonblocking send fragmentation option", destination, err)
 		return 0, err
 	}
 	// Use a full sockaddr allocation. x/sys's WSASendto convenience wrapper
@@ -166,5 +167,6 @@ func (s *udpSocket) TryWriteTo(b []byte, destination netip.AddrPort, df bool) (i
 	if platform.IsTooBig(err) {
 		return 0, &platform.TooBig{MTU: s.pathMTU(destination.Addr())}
 	}
+	noteUDPSendFailure("nonblocking send", destination, err)
 	return int(sent), err
 }
