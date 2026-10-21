@@ -6,8 +6,10 @@ import path from 'node:path';
 assert.equal(process.env.GITHUB_ACTIONS, 'true', 'Socket tracing is hosted-only');
 assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted', 'Socket tracing is hosted-only');
 assert.equal(process.env.NETSWITCH_SOCKET_DIAGNOSTICS, '1');
-const debuggerExe = path.join(process.env['ProgramFiles(x86)'], 'Windows Kits', '10', 'Debuggers', 'x64', 'cdb.exe');
+assert(['x64', 'arm64'].includes(process.arch), `Unsupported diagnostic architecture ${process.arch}`);
+const debuggerExe = path.join(process.env['ProgramFiles(x86)'], 'Windows Kits', '10', 'Debuggers', process.arch, 'cdb.exe');
 await access(debuggerExe);
+console.log(`SOCKET DEBUGGER ${JSON.stringify({ architecture: process.arch, path: debuggerExe })}`);
 const executable = path.resolve('dist/windows-test/socket-diagnostics.exe');
 await access(executable);
 
