@@ -34,9 +34,10 @@ const httpAdmissionQueue = 1024
 // httpLookupBatch connections wait, so a fast churn cannot fill the queue
 // and push the owner out: lookups then run back to back, each serving at
 // least that many connections. Either way another user's churn costs at
-// most twenty snapshots a second or one per httpLookupBatch connections.
+// most forty snapshots a second or one per httpLookupBatch connections, and
+// an owner connection right after another waits at most the interval.
 const (
-	httpLookupInterval = 50 * time.Millisecond
+	httpLookupInterval = 25 * time.Millisecond
 	httpLookupBatch    = 128
 )
 
