@@ -469,10 +469,37 @@ export async function largeUDPReplies({ server, harness, directory, line }) {
       try { await app.call('close'); } catch (error) { closeError = error; } finally { app.child.stdin.end(); }
     }
     await harness.control('udp-capacity-close', {});
-    await until(async () => {
-      const value = await stats();
-      return value.flows.UDP <= before.flows.UDP && value.flows.UDPReadBytes === 0 && value.flows.UDPReplyBytes === 0;
-    }, 'large reply sessions and output leases released', 3000);
+    // This app's own sessions are the ones to its target. The old check
+    // compared the engine's total UDP count with the count before, so any
+    // other process's UDP through the TUN failed it (ARM64 run 39559172829:
+    // 17 of 18 gone, one session from elsewhere left). Keep its verdict.
+    const targets = new Set([`${target.host}:${target.port}`, `[${target.host6}]:${target.port}`]);
+    const udpFlows = async () => {
+      const records = [];
+      let cursor = '';
+      do {
+        const page = await server.api('engine-command', { method: 'flows', fields: { cursor } });
+        records.push(...page.flows.filter((flow) => flow.protocol === 'udp'));
+        cursor = page.cursor ?? '';
+      } while (cursor);
+      return records;
+    };
+    let last;
+    const started = performance.now();
+    try {
+      await until(async () => {
+        const [value, records] = await Promise.all([stats(), udpFlows()]);
+        last = { value, records };
+        return records.every((flow) => !targets.has(flow.destination)) &&
+          value.flows.UDPReadBytes === 0 && value.flows.UDPReplyBytes === 0;
+      }, 'large reply sessions and output leases released', 3000);
+    } finally {
+      const own = last?.records.filter((flow) => targets.has(flow.destination)) ?? null;
+      console.log(`WINDOWS LARGE UDP RELEASE ${JSON.stringify({ ms: performance.now() - started,
+        ownRemaining: own?.length ?? null, otherSessions: last?.records.filter((flow) => !targets.has(flow.destination)) ?? null,
+        totalUDP: last?.value.flows.UDP ?? null, totalBefore: before.flows.UDP,
+        oldTotalCountWouldPass: last ? last.value.flows.UDP <= before.flows.UDP : null })}`);
+    }
     if (closeError) throw closeError;
   }
 }
