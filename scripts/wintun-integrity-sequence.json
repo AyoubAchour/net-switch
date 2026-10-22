@@ -1,5 +1,9 @@
 [
   {
+    "name": "proof", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 1200, "diagnostic": true,
+    "args": ["-test.run=^TestWintunIntegrityProof$"]
+  },
+  {
     "name": "ring-recovery", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 480,
     "args": ["-test.run=TestPauseClassification|TestPerformanceMedian|TestRing|TestPinnedDLL|TestWintun(PauseMonitor|SessionDelay|ParallelUDP|RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|BatchCost)$"]
   },

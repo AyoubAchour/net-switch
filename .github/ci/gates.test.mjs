@@ -18,7 +18,7 @@ const expected = {
     'go1-windows': 'go_windows', 'go1-linux': 'go_linux', wintun: 'wintun', linux: 'node',
     'linux-helper': 'helper', 'test-node-22': 'node', 'test-node-24': 'node', installer: 'installer', arm64: 'node',
     'control-security': 'investigation', 'testisp-reproduction': 'investigation', 'golist-oracle': 'oracle',
-    'wintun-integrity-x64': 'investigation', 'wintun-integrity-arm64': 'investigation',
+    'wintun-integrity': 'investigation',
   },
   control: { windows: 'control' },
   'linux-acceptance': { linux: 'acceptance', 'release-gate': 'manual', 'trace-analysis': 'manual' },
@@ -46,7 +46,7 @@ function shouldRun(file, group, s) {
   if (group === 'investigation') {
     // Either option replaces the default TestISP investigation.
     if (s.event !== 'workflow_dispatch') return false;
-    if (s.job.startsWith('wintun-integrity-')) return Boolean(s.inputs.wintun_integrity) && (s.inputs.wintun_integrity_arch === 'both' || s.job === `wintun-integrity-${s.inputs.wintun_integrity_arch}`);
+    if (s.job === 'wintun-integrity') return Boolean(s.inputs.wintun_integrity);
     if (s.inputs.wintun_integrity) return false;
     return s.job === 'control-security' ? s.inputs.control_security : !s.inputs.control_security && !s.inputs.regular_jobs;
   }

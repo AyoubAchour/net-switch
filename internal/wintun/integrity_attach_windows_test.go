@@ -6,7 +6,7 @@ import "testing"
 
 func attachIntegrityRings(t *testing.T, d *integrityDiagnostic) func() {
 	t.Helper()
-	h := &integrityRingObserver{observe: d.native}
+	h := &integrityRingObserver{observe: d.native, send: d.selected("ours_send")}
 	if !integrityRingHook.CompareAndSwap(nil, h) {
 		t.Fatal("integrity observer already installed; fixtures must be serial")
 	}

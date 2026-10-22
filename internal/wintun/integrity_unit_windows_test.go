@@ -92,7 +92,7 @@ func TestIntegritySequenceBoundaries(t *testing.T) {
 	if err := d.err(); err != nil {
 		t.Fatal(err)
 	}
-	if got := c.history(); len(got) != 10 || got[9].Offset != 128 || !got[9].TCPChecksum || !got[9].IPChecksum {
+	if got := c.history(); len(got) != 10 || got[9].Offset != 128 || got[9].ChecksumChecked {
 		t.Fatalf("bad sequence/checksum metadata: %+v", got)
 	}
 	if integrityOffset(100, 100, true) != 0 || integrityOffset(100, 100, false) != -1 {
@@ -175,8 +175,8 @@ func TestIntegrityStreamSubstitutionAndHostOffset(t *testing.T) {
 func TestIntegrityMissingAndReusedIdentity(t *testing.T) {
 	d := newIntegrityDiagnostic()
 	d.packet("stack_ingress", integrityTestPacket(false, 51000, 101, 0, 24, []byte{1}))
-	if d.err() == nil {
-		t.Fatal("accepted bytes without SYN")
+	if d.err() != nil || d.unregisteredPayload["stack_ingress"] != 1 {
+		t.Fatal("foreign payload treated as a missing active connection")
 	}
 	d = newIntegrityDiagnostic()
 	first := integrityTestHandshake(d, 51000, 100, 200, 257)
@@ -193,9 +193,123 @@ func TestIntegrityMissingAndReusedIdentity(t *testing.T) {
 	d = newIntegrityDiagnostic()
 	for i := 0; i <= integrityConnectionLimit; i++ {
 		d.packet("dll_receive", integrityTestPacket(false, uint16(51000+i), 100, 0, 2, nil))
+		d.bind(netTestLocal(uint16(51000+i)), uint64(i+1), "bounded")
 	}
 	if len(d.connections) != integrityConnectionLimit || d.err() == nil {
 		t.Fatal("connection bound not enforced")
+	}
+}
+
+func TestIntegrityLatePreviousFixtureAndMidflight(t *testing.T) {
+	d := newIntegrityDiagnostic()
+	// Round-2 evidence: 62320 belonged to the preceding DLL fixture, not
+	// this fixture's host sockets. Its late payload is not lost active evidence.
+	c := integrityTestHandshake(d, 62321, 100, 200, 257)
+	d.packet("ours_receive", integrityTestPacket(false, 62320, 3563722830, 70873961, 24, integrityTestBody(2312, 0, 128)))
+	d.packet("late_syn_data", integrityTestPacket(false, 62320, 3563722829, 0, 2, integrityTestBody(2312, 0, 128)))
+	d.packet("ours_receive", integrityTestPacket(false, 62321, 101, 201, 24, integrityTestBody(257, 0, 128)))
+	if d.err() != nil || c.Coverage["ours_receive"].Bytes != 128 || d.unregisteredPayload["ours_receive"] != 1 {
+		t.Fatal("late fixture data poisoned the current transfer")
+	}
+	// Independent host registration still works when the observer missed both
+	// SYNs; the first observed packet need not start at stream offset zero.
+	d = newIntegrityDiagnostic()
+	reference := integrityTestBody(513, 0, 16384)
+	c = d.bind(netTestLocal(51000), 513, "midflight", reference)
+	d.packet("stack_ingress", integrityTestPacket(false, 51000, 101+4096, 201, 24, bytes.Clone(reference[4096:4224])))
+	d.packet("stack_output", integrityTestPacket(true, 51000, 201+8192, 101, 24, bytes.Clone(reference[8192:8320])))
+	if !c.ClientKnown || !c.ServerKnown || c.ClientISN != 100 || c.ServerISN != 200 || d.err() != nil {
+		t.Fatalf("midflight: %+v %v", c, d.err())
+	}
+	// Late/retransmitted SYNs must not reset inferred offsets or lose the bind.
+	for range 2 {
+		d.packet("stack_ingress", integrityTestPacket(false, 51000, 100, 0, 2, nil))
+	}
+	if len(d.connections) != 1 || d.connections[0].ID != 513 {
+		t.Fatal("late SYN replaced bound identity")
+	}
+	d.complete(c)
+	if !errors.Is(d.err(), errDiagnosticIncomplete) || errors.Is(d.err(), errPayloadIntegrity) {
+		t.Fatalf("partial coverage mislabeled: %v", d.err())
+	}
+}
+
+func TestIntegritySYNACKWithoutSYNAndLateSYNPressure(t *testing.T) {
+	d := newIntegrityDiagnostic()
+	d.packet("stack_output", integrityTestPacket(true, 51000, 200, 101, 18, nil))
+	c := d.bind(netTestLocal(51000), 257, "synack")
+	if c.ClientISN != 100 || c.ServerISN != 200 || !c.ClientKnown || !c.ServerKnown {
+		t.Fatal("SYNACK did not recover handshake")
+	}
+	for i := range 100 {
+		d.packet("dll_receive", integrityTestPacket(false, uint16(52000+i), uint32(i), 0, 2, nil))
+	}
+	if d.err() != nil || len(d.connections) != integrityConnectionLimit {
+		t.Fatal("late unbound SYNs exhausted active evidence")
+	}
+	d.packet("dll_receive", integrityTestPacket(false, 51000, 101, 201, 24, integrityTestBody(257, 0, 128)))
+	if c.Coverage["dll_receive"].Bytes != 128 {
+		t.Fatal("lost bound identity under SYN pressure")
+	}
+}
+
+func TestIntegrityBindBeforeLateHandshake(t *testing.T) {
+	for _, syn := range []bool{false, true} {
+		d := newIntegrityDiagnostic()
+		c := d.bind(netTestLocal(51000), 257, "bound before capture", integrityTestBody(257, 0, 16384))
+		if syn {
+			d.packet("dll_receive", integrityTestPacket(false, 51000, 100, 0, 2, nil))
+		}
+		d.packet("stack_output", integrityTestPacket(true, 51000, 200, 101, 18, nil))
+		d.packet("dll_receive", integrityTestPacket(false, 51000, 101, 201, 24, integrityTestBody(257, 0, 128)))
+		if len(d.connections) != 1 || c.Coverage["dll_receive"].Bytes != 128 || d.err() != nil {
+			t.Fatalf("late handshake forked identity: %v", d.err())
+		}
+	}
+}
+
+func TestIntegrityFastHostFirstDifference(t *testing.T) {
+	d := newIntegrityDiagnostic()
+	d.boundary = "receive"
+	c := integrityTestHandshake(d, 51000, 100, 200, 257)
+	c.reference = integrityTestBody(257, 0, 8192)
+	body := bytes.Clone(c.reference)
+	body[4111] ^= 32
+	r := &integrityReader{reader: bytes.NewReader(body), d: d, stage: "host_receive", connection: c, fastReference: c.reference}
+	buf := make([]byte, 1023)
+	for {
+		_, err := r.Read(buf)
+		if err != nil {
+			break
+		}
+	}
+	if f := c.Failures["host_receive"]; f.Offset != 4111 || r.offset != 8192 || integrityVerdict(d.err()) != "integrity_failure" {
+		t.Fatalf("fast host check lost offset: %+v", f)
+	}
+}
+
+func TestIntegrityFastOracleAndSeparateVerdicts(t *testing.T) {
+	d := newIntegrityDiagnostic()
+	d.boundary = "receive"
+	c := integrityTestHandshake(d, 51000, 100, 200, 257)
+	c.reference = integrityTestBody(257, 0, 65536)
+	for _, offset := range []int{0, 1, 15, 16, 4095, 8193} {
+		p := integrityTestPacket(false, 51000, 101+uint32(offset), 201, 24, bytes.Clone(c.reference[offset:offset+9000]))
+		d.native("dll_receive", p, bytes.Clone(p))
+	}
+	if d.err() != nil {
+		t.Fatal(d.err())
+	}
+	d.complete(c)
+	if integrityVerdict(d.err()) != "diagnostic_incomplete" || len(c.Failures) != 0 {
+		t.Fatalf("%v", d.err())
+	}
+	c.reference = integrityTestBody(257, 0, 65536)
+	bad := bytes.Clone(c.reference[8193 : 8193+9000])
+	bad[7] ^= 64
+	d.packet("dll_receive", integrityTestPacket(false, 51000, 101+8193, 201, 24, bad))
+	if c.Failures["dll_receive"].Offset != 8200 || integrityVerdict(d.err()) != "integrity_failure" {
+		t.Fatalf("mismatch lost behind incomplete: %v", d.err())
 	}
 }
 
@@ -382,6 +496,7 @@ func TestPerformanceInvalidSamples(t *testing.T) {
 func BenchmarkIntegrityPayloadCheck(b *testing.B) {
 	body := integrityTestBody(257, 0, 1<<20)
 	c := &integrityConnection{ID: 257, Failures: make(map[string]integrityFailure), Coverage: make(map[string]integrityCoverage)}
+	c.reference = bytes.Clone(body) // Different allocation: no pointer-equality shortcut.
 	b.SetBytes(int64(len(body)))
 	b.ResetTimer()
 	for range b.N {
@@ -389,5 +504,22 @@ func BenchmarkIntegrityPayloadCheck(b *testing.B) {
 	}
 	if len(c.Failures) != 0 {
 		b.Fatal(c.Failures)
+	}
+}
+
+func BenchmarkIntegrityNativePacket(b *testing.B) {
+	d := newIntegrityDiagnostic()
+	d.boundary = "receive"
+	c := integrityTestHandshake(d, 51000, 100, 200, 257)
+	c.reference = integrityTestBody(257, 0, 8192)
+	native := integrityTestPacket(false, 51000, 101, 201, 24, c.reference)
+	copied := bytes.Clone(native)
+	b.SetBytes(8192)
+	b.ResetTimer()
+	for range b.N {
+		d.native("dll_receive", native, copied)
+	}
+	if d.err() != nil {
+		b.Fatal(d.err())
 	}
 }

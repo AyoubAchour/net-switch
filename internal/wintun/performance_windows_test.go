@@ -37,6 +37,15 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 			t.Fatal("integrity diagnostic requires -tags=wintun_integrity")
 		}
 		f.integrity = newIntegrityDiagnostic()
+		f.integrity.boundary = os.Getenv("NETSWITCH_WINTUN_INTEGRITY_BOUNDARY")
+		if f.integrity.boundary == "" {
+			f.integrity.boundary = "receive"
+		}
+		switch f.integrity.boundary {
+		case "receive", "ingress", "echo", "output", "send", "host", "all":
+		default:
+			t.Fatal("unknown integrity boundary")
+		}
 		f.integrity.emit = func(c *integrityConnection, stage string, failure integrityFailure) {
 			reportIntegrityFailure(t, c, stage, failure)
 		}
@@ -77,10 +86,18 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 			}
 			for i := 0; i < n; i++ {
 				p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(bytes.Clone(bufs[i][:sizes[i]]))})
-				if integrityHooksEnabled && f.integrity != nil {
-					v := p.ToView()
-					f.integrity.packet("stack_ingress", v.AsSlice())
-					v.Release()
+				if integrityHooksEnabled && f.integrity != nil && f.integrity.selected("stack_ingress") {
+					// MakeWithData creates one owned contiguous view here. Borrow
+					// it synchronously instead of cloning the whole packet again.
+					views, skip := p.AsViewList()
+					first := views.Front()
+					if first != nil && first.Next() == nil && skip <= len(first.AsSlice()) {
+						f.integrity.packet("stack_ingress", first.AsSlice()[skip:])
+					} else {
+						v := p.ToView()
+						f.integrity.packet("stack_ingress", v.AsSlice())
+						v.Release()
+					}
 				}
 				if s, ok := session.(*Session); ok {
 					p.RXChecksumValidated = s.RXChecksumVerified(bufs[i][:sizes[i]])
@@ -124,7 +141,7 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 				c.SetDeadline(time.Now().Add(30 * time.Second))
 				var n int64
 				var err error
-				if integrityHooksEnabled && f.integrity != nil {
+				if integrityHooksEnabled && f.integrity != nil && f.integrity.selected("echo_read") {
 					n, err = f.integrity.echo(c)
 				} else {
 					n, err = io.Copy(c, c)
@@ -164,6 +181,7 @@ func tcpTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float6
 	// Diagnostic payload generation is outside the timed region. Each stream
 	// keeps the original single large Write, with its own immutable content.
 	var contents [][]byte
+	var references [][]byte
 	var wants [][sha256.Size]byte
 	var transfer uint64
 	label := "transfer"
@@ -173,6 +191,7 @@ func tcpTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float6
 	if f.integrity != nil {
 		transfer = integrityTransferID.Add(1)
 		contents = make([][]byte, streams)
+		references = make([][]byte, streams)
 		wants = make([][sha256.Size]byte, streams)
 		for stream := range streams {
 			contents[stream] = make([]byte, size)
@@ -181,6 +200,7 @@ func tcpTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float6
 				contents[stream][i] = integrityByte(id, int64(i))
 			}
 			wants[stream] = sha256.Sum256(contents[stream])
+			references[stream] = bytes.Clone(contents[stream])
 		}
 	}
 	var wg sync.WaitGroup
@@ -219,7 +239,7 @@ func tcpTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float6
 			defer c.Close()
 			var identity *integrityConnection
 			if f.integrity != nil {
-				identity = f.integrity.bind(c.LocalAddr().String(), transfer<<8|uint64(i+1), fmt.Sprintf("repeat%s/%s/%s/transfer%d/streams%d", os.Getenv("NETSWITCH_WINTUN_INTEGRITY_REPEAT"), t.Name(), label, transfer, streams))
+				identity = f.integrity.bind(c.LocalAddr().String(), transfer<<8|uint64(i+1), fmt.Sprintf("repeat%s/%s/%s/transfer%d/streams%d", os.Getenv("NETSWITCH_WINTUN_INTEGRITY_REPEAT"), t.Name(), label, transfer, streams), references[i])
 			}
 			c.SetDeadline(time.Now().Add(30 * time.Second))
 			type writeResult struct {
@@ -233,12 +253,17 @@ func tcpTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float6
 			}()
 			digest := sha256.New()
 			var receiver io.Reader = c
+			var hostReader *integrityReader
 			if f.integrity != nil {
-				receiver = &integrityReader{reader: c, d: f.integrity, stage: "host_receive", local: c.LocalAddr().String(), connection: identity}
+				hostReader = &integrityReader{reader: c, d: f.integrity, stage: "host_receive", local: c.LocalAddr().String(), connection: identity}
+				if identity != nil {
+					hostReader.fastReference = references[i]
+				}
+				receiver = hostReader
 			}
 			received, err := io.CopyN(digest, receiver, size)
 			if f.integrity != nil {
-				f.integrity.hashes(identity, want[:], digest.Sum(nil))
+				f.integrity.hashes(identity, want[:], digest.Sum(nil), received, hostReader.reads)
 			}
 			if err != nil {
 				diagnose("read", c.LocalAddr().String(), received, err)
@@ -253,7 +278,7 @@ func tcpTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float6
 				return
 			}
 			if !bytes.Equal(digest.Sum(nil), want[:]) {
-				err := fmt.Errorf("TCP payload hash mismatch: local=%s stream=%d expected=%x actual=%x", c.LocalAddr(), i, want, digest.Sum(nil))
+				err := fmt.Errorf("%w: TCP payload hash mismatch: local=%s stream=%d expected=%x actual=%x", errPayloadIntegrity, c.LocalAddr(), i, want, digest.Sum(nil))
 				diagnose("hash", c.LocalAddr().String(), received, err)
 				failures <- err
 			}
@@ -564,7 +589,7 @@ func TestWintunPerformance(t *testing.T) {
 							if (t.Failed() || t.Skipped()) && sample.cause == nil {
 								sample.finish(0, fmt.Errorf("sample setup, execution or teardown failed; see subtest error"))
 							}
-							report(t, map[string]any{"test": "performance_sample", "diagnostic": diagnostic, "sample": sample})
+							report(t, map[string]any{"test": "performance_sample", "diagnostic": diagnostic, "sample": sample, "verdict": integrityVerdict(sample.cause)})
 						})
 						f := fixtureOnAdapter(t, mode, a)
 						if metric.tcp {

@@ -275,16 +275,33 @@ against the test-only in-process registration.
 
 ### TCP integrity investigation (hosted CI only)
 
-Dispatch `ci.yml` with `wintun_integrity=true`, `wintun_integrity_arch=both`
-(or `x64` / `arm64`), `wintun_integrity_shards=20` (or `1` / `5`),
-`wintun_integrity_scenario=isolated` or `full`, and
-`wintun_integrity_repeats=50`. Each selected architecture gets that many
-independent hosted runners, with fail-fast disabled. Dispatch both scenarios
-for 80 jobs at 20 shards. Only the selected diagnostic jobs run unless
-`regular_jobs` is also explicitly set.
+First dispatch `ci.yml` with `wintun_integrity=true`,
+`wintun_integrity_arch=both`, `wintun_integrity_shards=2`, and
+`wintun_integrity_scenario=proof`: **four jobs total**. Both architectures share
+one matrix with `max-parallel: 10`; it is not a separate cap per architecture.
+The defaults select a two-shard proof. Do not widen exposure until it passes.
+Only diagnostic jobs run unless `regular_jobs` is explicitly set.
 It builds with `-tags=wintun_integrity` and opts in at runtime with
 `NETSWITCH_WINTUN_INTEGRITY=1`. Normal binaries compile out the ring observers;
 normal performance runs keep the original payload, warm-ups and gate.
+
+The proof measures each of six boundary choices on both implementations using
+three fixed matched clean/instrumented pairs, alternating which runs first.
+Clean means the original workload in the same binary with observers disabled.
+Every configuration must retain at least 80% of clean throughput (median of
+the three ratios). Failed/incomplete samples stay in place and prevent a ratio;
+there are no retries. Wall time and heap allocation/reservation are also logged.
+Precomputing independent payload oracles happens before the transfer timer,
+and adds up to 512 MiB for eight streams in addition to sender buffers. Thus a
+passing transfer-throughput check is not a claim of identical setup/memory cost.
+
+After qualification, `isolated` and `full` scenarios support `1`, `2`, `5` or
+`10` shards per selected architecture. `wintun_integrity_boundary` selects
+`receive` (default), `ingress`, `echo`, `output`, `send`, or `host`. Host SHA-256
+and first-difference checks always remain enabled. The explicitly expensive
+`all` option is for follow-up localization, not a qualified low-overhead mode.
+No individual sampled run claims to have checked its unselected boundaries;
+do not combine different transfers into a single causal trace.
 
 An isolated repeat runs all 12 positions of `tcp_8_MBps`: two serial 64 MiB
 warm-ups, then eight 64 MiB streams, for both the signed DLL and our session,
@@ -320,7 +337,18 @@ start, joined pumps and close. Our session stats include ring cursors,
 registrar identity and recovery counters; the DLL exposes counters only.
 These observations do not assert that unobservable kernel caches were reset.
 
-The diagnostic preserves each client tuple, server address and both ISNs.
+The host registers each tested tuple and its independent oracle before sending
+payload. Observed SYN/SYNACKs provide sequence bases; a SYNACK can recover a
+missed SYN. If observation starts mid-flight, a unique 32-byte oracle match can
+recover a sequence base without assuming the first offset is zero. Inferred
+bases are labelled `payload_oracle`; unseen earlier traffic is not certified.
+Late unbound SYN hints cannot evict bound transfers. Payload for an unregistered
+tuple is counted separately: round 2 demonstrated late payload from a previous
+fixture, rather than a missing SYN for a current transfer. A bound stream whose
+sequence/coverage cannot be resolved is **diagnostic incomplete**, not a byte
+integrity failure. Actual byte/hash mismatches take priority if both occur.
+
+The diagnostic records each client tuple, server address and known ISNs.
 SYN consumes one sequence number; modular offsets tolerate wrap,
 retransmissions and reordering. The payload encodes a transfer/stream identity
 and block offset over the original deterministic pattern. Warm-up identities
@@ -329,10 +357,14 @@ fragment or malformed TCP header invalidates the diagnostic rather than
 pretending the unobserved boundary was clean. Empty late ACK/RST packets from
 previous fixtures are counted separately.
 
-`WINTUN_RESULT` records check native receive and its private copy before
-release, stack ingress after packet-buffer creation, each echo read, stack
-output, native send and its source before publication, and host reads.
-Records include IP/TCP checksum validity independently of payload correctness.
+The selected `WINTUN_RESULT` boundary is native receive/copy before release,
+stack ingress after packet-buffer creation, echo reads, stack output, native
+send/source before publication, or host reads. Clean data uses fast exact byte
+equality against an immutable precomputed oracle; the sender gets separate
+storage. The native copy equality check avoids rechecking identical payload
+twice. Host equality runs without the global packet-tracking lock. Pattern
+regeneration and IP/TCP checksum calculation happen only on mismatch; packet
+records explicitly say whether their checksums were checked.
 Each connection/stage retains only its first failure (offset and up to 16
 expected/actual bytes), its preceding 64 packet records, and a rolling last 64.
 There are at most 16 connection records per fixture. Successful connections

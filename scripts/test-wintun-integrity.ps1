@@ -1,6 +1,6 @@
 param(
   [ValidateRange(1, 1000)][int]$Repeats = 50,
-  [ValidateSet('isolated', 'full')][string]$Scenario = 'isolated',
+  [ValidateSet('proof', 'isolated', 'full')][string]$Scenario = 'proof',
   [ValidateSet('x64', 'arm64')][string]$Arch = 'x64',
   [switch]$PlanOnly
 )
@@ -8,6 +8,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $Arch = $Arch.ToLowerInvariant()
 $phases = @(Get-Content (Join-Path $PSScriptRoot 'wintun-integrity-sequence.json') -Raw | ConvertFrom-Json)
+if ($Scenario -eq 'proof') {
+  $phases = @($phases | Where-Object name -eq 'proof')
+  $Repeats = 1 # The proof itself contains fixed matched samples; never retry it.
+} else {
+  $phases = @($phases | Where-Object name -ne 'proof')
+}
 if ($Scenario -eq 'isolated') {
   $phases = @($phases | Where-Object name -eq 'performance-dll')
   $phases[0].timeoutSeconds = 480
@@ -16,7 +22,7 @@ $phases = @($phases | Where-Object { -not $_.arch -or $_.arch -eq $Arch })
 $focus = if ($Scenario -eq 'isolated') { 'tcp_8_MBps' } else { '' }
 # Read-only plan/parity tests: no executable or adapter is used.
 if ($PlanOnly) {
-  [pscustomobject]@{ scenario = $Scenario; arch = $Arch; focus = $focus; phases = $phases } | ConvertTo-Json -Depth 8
+  [pscustomobject]@{ scenario = $Scenario; arch = $Arch; focus = $focus; repeats = $Repeats; phases = $phases } | ConvertTo-Json -Depth 8
   return
 }
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
@@ -62,7 +68,7 @@ try {
       }
       $remaining = [int][Math]::Floor($budgetSeconds - $clock.Elapsed.TotalSeconds - 15)
       if ($remaining -le 0) {
-        Write-Output "INTEGRITY_RUN_FAILED scenario=$Scenario repeat=$repeat phase=$name reason=budget_exhausted incomplete=true integrity-invalid comparison"
+        Write-Output "INTEGRITY_RUN_FAILED scenario=$Scenario repeat=$repeat phase=$name verdict=diagnostic_incomplete reason=budget_exhausted incomplete=true"
         exit 1
       }
       $seconds = [int][Math]::Min($phase.timeoutSeconds, $remaining)
@@ -86,7 +92,7 @@ try {
         $process.Kill($true) # This phase's tree only, on the disposable runner.
         $null = $process.WaitForExit(5000)
         $result = 124
-        Write-Output "INTEGRITY_PHASE_TIMEOUT scenario=$Scenario repeat=$repeat phase=$name seconds=$seconds incomplete=true"
+        Write-Output "INTEGRITY_PHASE_TIMEOUT scenario=$Scenario repeat=$repeat phase=$name verdict=diagnostic_timeout seconds=$seconds incomplete=true"
       } else {
         $process.WaitForExit()
         $result = $process.ExitCode
@@ -102,12 +108,16 @@ try {
       }
     }
     if ($failed -ne 0) {
-      Write-Output "INTEGRITY_RUN_FAILED scenario=$Scenario repeat=$repeat completed=$completed requested=$Repeats exit=$failed integrity-invalid comparison; no retry or replacement"
+      Write-Output "INTEGRITY_RUN_FAILED scenario=$Scenario repeat=$repeat completed=$completed requested=$Repeats exit=$failed verdict=test_failed; consult structured diagnostic verdicts; no retry or replacement"
       exit $failed
     }
     $completed++
     $lastSeconds = $clock.Elapsed.TotalSeconds - $cycleStart
-    Write-Output "INTEGRITY_RUN_COMPLETE scenario=$Scenario repeat=$repeat completed=$completed dll_tcp8_pairs=$($completed * 12) elapsed_seconds=$([int]$clock.Elapsed.TotalSeconds)"
+    Write-Output "INTEGRITY_RUN_COMPLETE scenario=$Scenario repeat=$repeat completed=$completed elapsed_seconds=$([int]$clock.Elapsed.TotalSeconds)"
+  }
+  if ($Scenario -eq 'proof') {
+    Write-Output "INTEGRITY_PROOF_COMPLETE shard=$env:INTEGRITY_SHARD verdict=qualified configurations=12 pairs_per_configuration=3 minimum_throughput_ratio=0.80"
+    return
   }
   $inprocessPairs = if ($Scenario -eq 'full') { $completed * 12 } else { 0 }
   $measuredStreams = $completed * $(if ($Scenario -eq 'full') { 432 } else { 192 })

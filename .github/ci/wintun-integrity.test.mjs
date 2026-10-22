@@ -7,7 +7,8 @@ import { evaluate, readWorkflow } from './workflows.mjs';
 
 const workflowText = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'utf8');
 const normal = readWorkflow(workflowText).jobs.get('wintun');
-const phases = JSON.parse(readFileSync(new URL('../../scripts/wintun-integrity-sequence.json', import.meta.url), 'utf8'));
+const manifest = JSON.parse(readFileSync(new URL('../../scripts/wintun-integrity-sequence.json', import.meta.url), 'utf8'));
+const phases = manifest.filter(phase => phase.name !== 'proof');
 const runner = fileURLToPath(new URL('../../scripts/test-wintun-integrity.ps1', import.meta.url));
 
 function assertParity(plan) {
@@ -51,19 +52,23 @@ test('the sequence guard rejects omitted or reordered state-producing phases', (
   assert.throws(() => assertParity(reordered));
 });
 
-test('20 independent shards are selected per architecture without fail-fast cancellation', () => {
+test('one matrix caps both architectures together at 10 and defaults to a small proof', () => {
   const expr = /shard: \$\{\{ fromJSON\((.*)\) \}\}/.exec(workflowText)?.[1];
   assert.ok(expr, 'shard expression');
-  for (const count of [1, 5, 20]) {
+  for (const count of [1, 2, 5, 10]) {
     const shards = JSON.parse(evaluate(expr, { inputs: { wintun_integrity_shards: String(count) } }));
     assert.deepEqual(shards, Array.from({length:count}, (_, i) => i+1));
   }
-  assert.match(workflowText, /strategy: &wintun-integrity-strategy\s+fail-fast: false\s+max-parallel: 20/);
-  assert.match(workflowText, /wintun-integrity-arm64:[\s\S]*?strategy: \*wintun-integrity-strategy/);
+  assert.match(workflowText, /wintun-integrity:[\s\S]*?strategy:\s+fail-fast: false\s+max-parallel: 10/);
+  assert.deepEqual([...readWorkflow(workflowText).jobs.keys()].filter(id => id.startsWith('wintun-integrity')), ['wintun-integrity']);
+  assert.match(workflowText, /wintun_integrity_scenario:[\s\S]*?default: proof/);
+  assert.match(workflowText, /wintun_integrity_shards:[\s\S]*?default: '2'/);
+  const runnerExpression = /runner: \$\{\{ fromJSON\((.*inputs.wintun_integrity_arch.*)\) \}\}/.exec(workflowText)?.[1];
+  assert.deepEqual(JSON.parse(evaluate(runnerExpression, {inputs:{wintun_integrity_arch:'both'}})), ['windows-latest', 'windows-11-arm']);
 });
 
 for (const arch of ['x64', 'arm64']) {
-  for (const scenario of ['isolated', 'full']) {
+  for (const scenario of ['proof', 'isolated', 'full']) {
     test(`PowerShell plan is read-only: ${scenario}/${arch}`, { skip: process.platform !== 'win32' }, () => {
       // No nested test runner, engine binary, network, adapter or fixture.
       const output = execFileSync('pwsh.exe', ['-NoProfile', '-File', runner, '-PlanOnly', '-Scenario', scenario, '-Arch', arch], {
@@ -73,7 +78,10 @@ for (const arch of ['x64', 'arm64']) {
       const plan = JSON.parse(output);
       assert.equal(plan.arch, arch);
       assert.equal(plan.scenario, scenario);
-      if (scenario === 'isolated') {
+      if (scenario === 'proof') {
+        assert.deepEqual(plan.phases.map(phase => phase.name), ['proof']);
+        assert.equal(plan.repeats, 1);
+      } else if (scenario === 'isolated') {
         assert.equal(plan.focus, 'tcp_8_MBps');
         assert.deepEqual(plan.phases.map(phase => phase.name), ['performance-dll']);
         assert.equal(plan.phases[0].timeoutSeconds, 480);

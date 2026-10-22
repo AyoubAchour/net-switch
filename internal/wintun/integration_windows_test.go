@@ -372,7 +372,7 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 			if size != 0 {
 				nativeCopy.Call(uintptr(unsafe.Pointer(&buffers[i][0])), p, uintptr(size))
 			}
-			if integrityHooksEnabled && s.integrity != nil {
+			if integrityHooksEnabled && s.integrity != nil && (s.integrity.selected("dll_receive") || integritySYN(buffers[i][:size])) {
 				s.integrity.nativeAddress("dll_receive", p, buffers[i][:size])
 			}
 			syscall.SyscallN(s.release, s.h, p)
@@ -433,7 +433,7 @@ func (s *dllSession) WriteBatch(packets [][]byte) (n int, err error) {
 			return n, e
 		}
 		nativeCopy.Call(p, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
-		if integrityHooksEnabled && s.integrity != nil {
+		if integrityHooksEnabled && s.integrity != nil && s.integrity.selected("dll_send") {
 			s.integrity.nativeAddress("dll_send", p, b)
 		}
 		syscall.SyscallN(s.send, s.h, p)

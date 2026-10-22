@@ -10,6 +10,7 @@ const integrityHooksEnabled = true
 
 type integrityRingObserver struct {
 	observe func(stage string, native, copied []byte)
+	send    bool
 }
 
 var integrityRingHook atomic.Pointer[integrityRingObserver]
@@ -18,7 +19,7 @@ type integrityRingPacket struct{ native, source []byte }
 type integrityRingBatch struct{ packets []integrityRingPacket }
 
 func (b *integrityRingBatch) add(native, source []byte) {
-	if integrityRingHook.Load() != nil {
+	if h := integrityRingHook.Load(); h != nil && h.send {
 		b.packets = append(b.packets, integrityRingPacket{native, source})
 	}
 }

@@ -33,15 +33,20 @@ on:
         options: [x64, arm64, both]
         default: x64
       wintun_integrity_scenario:
-        description: Isolated tcp_8 or the full normal Wintun session sequence
+        description: Qualify overhead first, or explicitly run corruption exposure
         type: choice
-        options: [isolated, full]
-        default: isolated
+        options: [proof, isolated, full]
+        default: proof
       wintun_integrity_shards:
         description: Independent hosted runners per selected architecture
         type: choice
-        options: ['1', '5', '20']
-        default: '20'
+        options: ['1', '2', '5', '10']
+        default: '2'
+      wintun_integrity_boundary:
+        description: Selected boundary for exposure (proof measures every single-boundary option)
+        type: choice
+        options: [receive, ingress, echo, output, send, host, all]
+        default: receive
       wintun_integrity_repeats:
         description: Maximum complete cases per runner within 45 minutes; never retry failures
         type: string
@@ -598,29 +603,31 @@ jobs:
     env: *go1-env
     steps: *go1-steps
 
-  wintun-integrity-x64:
-    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && (inputs.wintun_integrity_arch == 'x64' || inputs.wintun_integrity_arch == 'both')
-    name: TCP integrity / x64 / ${{ inputs.wintun_integrity_scenario }} / ${{ matrix.shard }}
-    runs-on: windows-latest
+  wintun-integrity:
+    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity
+    name: TCP integrity / ${{ matrix.runner }} / ${{ inputs.wintun_integrity_scenario }} / ${{ matrix.shard }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    strategy: &wintun-integrity-strategy
+    strategy:
       fail-fast: false
-      max-parallel: 20
+      max-parallel: 10
       matrix:
-        shard: ${{ fromJSON(inputs.wintun_integrity_shards == '1' && '[1]' || inputs.wintun_integrity_shards == '5' && '[1,2,3,4,5]' || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]') }}
-    env: &wintun-integrity-env
+        runner: ${{ fromJSON(inputs.wintun_integrity_arch == 'x64' && '["windows-latest"]' || inputs.wintun_integrity_arch == 'arm64' && '["windows-11-arm"]' || '["windows-latest","windows-11-arm"]') }}
+        shard: ${{ fromJSON(inputs.wintun_integrity_shards == '1' && '[1]' || inputs.wintun_integrity_shards == '2' && '[1,2]' || inputs.wintun_integrity_shards == '5' && '[1,2,3,4,5]' || '[1,2,3,4,5,6,7,8,9,10]') }}
+    env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '4'
       GOFLAGS: -mod=vendor -p=2
       NETSWITCH_WINTUN_CI: '1'
       NETSWITCH_WINTUN_INTEGRITY: '1'
+      NETSWITCH_WINTUN_INTEGRITY_BOUNDARY: ${{ inputs.wintun_integrity_boundary }}
       INTEGRITY_REPEATS: ${{ inputs.wintun_integrity_repeats }}
       INTEGRITY_SCENARIO: ${{ inputs.wintun_integrity_scenario }}
       INTEGRITY_SHARD: ${{ matrix.shard }}
     defaults:
       run:
         shell: pwsh
-    steps: &wintun-integrity-steps
+    steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
@@ -674,18 +681,6 @@ jobs:
           name: wintun-integrity-${{ runner.arch }}-${{ matrix.shard }}-profiles
           path: bin/wintun-*-cpu.pprof
           retention-days: 14
-
-  wintun-integrity-arm64:
-    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && (inputs.wintun_integrity_arch == 'arm64' || inputs.wintun_integrity_arch == 'both')
-    name: TCP integrity / ARM64 / ${{ inputs.wintun_integrity_scenario }} / ${{ matrix.shard }}
-    runs-on: windows-11-arm
-    timeout-minutes: 60
-    strategy: *wintun-integrity-strategy
-    env: *wintun-integrity-env
-    defaults:
-      run:
-        shell: pwsh
-    steps: *wintun-integrity-steps
 
   wintun:
     needs: changes
