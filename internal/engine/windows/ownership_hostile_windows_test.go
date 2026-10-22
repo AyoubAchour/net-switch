@@ -87,7 +87,7 @@ func holdHostileOwnershipDirectory(path string, denyRead bool) error {
 	// Check before any administrator creates the namespace, and again on
 	// every held-handle probe after legitimate startup has created it.
 	deniedNamespace := func() error {
-		_, err := openOwnershipNamespace()
+		_, err := openOwnershipNamespace(context.Background())
 		if !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 			return fmt.Errorf("Medium peer was not denied preparation namespace: %v", err)
 		}

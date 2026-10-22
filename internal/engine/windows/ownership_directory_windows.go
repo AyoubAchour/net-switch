@@ -53,7 +53,7 @@ func withOwnershipPreparation(ctx context.Context, prepare func() error) (err er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	namespace, err := openOwnershipNamespace()
+	namespace, err := openOwnershipNamespace(ctx)
 	if err != nil {
 		return fmt.Errorf("open ownership preparation namespace: %w", err)
 	}
@@ -93,7 +93,7 @@ func withOwnershipPreparation(ctx context.Context, prepare func() error) (err er
 	return prepare()
 }
 
-func openOwnershipNamespace() (winhandle.Owner, error) {
+func openOwnershipNamespace(ctx context.Context) (winhandle.Owner, error) {
 	kernel := windows.NewLazySystemDLL("kernel32.dll")
 	name, _ := windows.UTF16PtrFromString(ownershipPreparationNamespace)
 	boundary, _, err := kernel.NewProc("CreateBoundaryDescriptorW").Call(uintptr(unsafe.Pointer(name)), 0)
@@ -116,14 +116,53 @@ func openOwnershipNamespace() (winhandle.Owner, error) {
 	if err != nil {
 		return winhandle.Owner{}, err
 	}
-	h, _, err := kernel.NewProc("CreatePrivateNamespaceW").Call(uintptr(unsafe.Pointer(sa)), boundary, uintptr(unsafe.Pointer(name)))
-	if h == 0 && errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
-		h, _, err = kernel.NewProc("OpenPrivateNamespaceW").Call(boundary, uintptr(unsafe.Pointer(name)))
-	}
-	if h == 0 {
+	h, err := createOrOpenNamespace(ctx, func() (uintptr, error) {
+		h, _, err := kernel.NewProc("CreatePrivateNamespaceW").Call(uintptr(unsafe.Pointer(sa)), boundary, uintptr(unsafe.Pointer(name)))
+		return h, err
+	}, func() (uintptr, error) {
+		h, _, err := kernel.NewProc("OpenPrivateNamespaceW").Call(boundary, uintptr(unsafe.Pointer(name)))
+		return h, err
+	})
+	if err != nil {
 		return winhandle.Owner{}, err
 	}
 	return winhandle.Open(windows.Handle(h), "ownership namespace open"), nil
+}
+
+// namespaceAttempts bounds createOrOpenNamespace's rounds.
+const namespaceAttempts = 5
+
+// createOrOpenNamespace creates the private namespace, or opens it when it
+// already exists. Between the create's ERROR_ALREADY_EXISTS and the open,
+// the last other process holding the namespace can close it, and the open
+// then fails because the namespace is gone; creating again succeeds. So a
+// failed open starts another round, up to namespaceAttempts within ctx,
+// rather than failing startup. Windows does not document which error that
+// open returns, so every open failure but ERROR_ACCESS_DENIED (a caller
+// outside the boundary, which no retry changes) gets another round. Any
+// create error but ERROR_ALREADY_EXISTS is returned at once.
+func createOrOpenNamespace(ctx context.Context, create, open func() (uintptr, error)) (uintptr, error) {
+	var lastOpen error
+	for range namespaceAttempts {
+		if err := ctx.Err(); err != nil {
+			return 0, errors.Join(err, lastOpen)
+		}
+		h, err := create()
+		if h != 0 {
+			return h, nil
+		}
+		if !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return 0, err
+		}
+		if h, err = open(); h != 0 {
+			return h, nil
+		}
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return 0, err
+		}
+		lastOpen = err
+	}
+	return 0, fmt.Errorf("private namespace existed at each create and was gone at each open, %d times: %w", namespaceAttempts, lastOpen)
 }
 
 func waitOwnershipPreparation(ctx context.Context, wait func() (uint32, error)) error {
