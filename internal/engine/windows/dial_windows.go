@@ -30,6 +30,7 @@ type Dialer struct {
 	udp               *udpReadiness
 	ports             *portDiagnostics
 	udpExhaustions    atomic.Uint64
+	udpBinds          udpBindRetries
 	udpLastLog        atomic.Int64
 	udpFailureStarted atomic.Bool
 	udpFailure        atomic.Pointer[udpAllocationFailure]
@@ -301,7 +302,7 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 		network = "udp6"
 	}
 	local := netip.AddrPortFrom(source, 0)
-	s, err := openUDP(a, local, d.udp)
+	s, err := d.udpBinds.open(func() (*udpSocket, error) { return openUDP(a, local, d.udp) })
 	if err != nil {
 		err = &net.OpError{Op: "listen", Net: network, Addr: net.UDPAddrFromAddrPort(local), Err: err}
 		if portLimit(err) {

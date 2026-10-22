@@ -247,11 +247,13 @@ func capacityProbe() error {
 			result["sweepMS"] = float64(sweep) / float64(time.Millisecond)
 		case "release":
 			n := min(command.Count, len(held))
+			ports := make([]int, 0, n)
 			for _, s := range held[:n] {
+				ports = append(ports, s.conn.LocalAddr().(*net.UDPAddr).Port)
 				failure = errors.Join(failure, s.conn.Close())
 			}
 			held = held[n:]
-			result["released"] = n
+			result["released"], result["localPorts"] = n, ports
 		case "status":
 		case "close":
 			for _, s := range held {

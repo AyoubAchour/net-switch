@@ -1,13 +1,34 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { heldSweepLatency, heldUDPSweepGate, ledgerDigest, udpRecoveryGate, udpRecoveryVerdict } from '../tests/windows/udp-capacity.mjs';
+import { heldSweepLatency, heldUDPSweepGate, ledgerDigest, portRecoveryGate, recoveryWindowMS, udpControlGate, udpRecoveryVerdict }
+  from '../tests/windows/udp-capacity.mjs';
 
-test('UDP recovery gate counts a port-0 refusal as OS behaviour only with matching native evidence', () => {
+test('the amended recovery gate requires no leak, one re-attempt within the window and no final engine bind refusal', () => {
+  const refused = [{ call: 'connect', code: 'ENOBUFS' }, { call: 'wsarecv', code: 'ECONNRESET' }];
+  const base = { requested: 256, firstFailures: refused, reattempted: 2, reattemptFailures: [], elapsedMS: 300,
+    leak: { ok: true }, engineBinds: { firstRefusals: 3, finalFailures: 0 } };
+  const gate = (change) => portRecoveryGate({ ...base, ...change });
+  assert.equal(gate().newVerdict, 'pass');
+  assert.equal(gate().oldVerdict, 'fail', 'first-attempt refusals failed the old check');
+  assert.deepEqual(gate().reported.byCall, { 'connect ENOBUFS': 1, 'wsarecv ECONNRESET': 1 });
+  assert.equal(gate().reopened, 256);
+  assert.equal(gate({ reattemptFailures: [{ code: 'ENOBUFS' }] }).newVerdict, 'fail', 'a reopen still failing after its re-attempt');
+  assert.equal(gate({ reattempted: 1 }).newVerdict, 'fail', 'a refusal without its re-attempt');
+  assert.equal(gate({ reattempted: 3 }).newVerdict, 'fail', 'more re-attempts than refusals');
+  assert.equal(gate({ elapsedMS: recoveryWindowMS + 0.001 }).newVerdict, 'fail', 'outside the recovery window');
+  assert.equal(gate({ elapsedMS: recoveryWindowMS }).newVerdict, 'pass', 'the window is inclusive');
+  assert.equal(gate({ leak: undefined }).newVerdict, 'fail', 'no leak evidence');
+  assert.equal(gate({ engineBinds: { firstRefusals: 3, finalFailures: 1 } }).newVerdict, 'fail', 'an engine bind ended refused');
+  assert.equal(gate({ firstFailures: [], reattempted: 0, elapsedMS: 5000 }).newVerdict, 'pass', 'no refusal: no window to keep');
+  assert.equal(gate({ firstFailures: [], reattempted: 0 }).oldVerdict, 'pass');
+});
+
+test('the previous UDP control gate counts a port-0 refusal as OS behaviour only with matching native evidence', () => {
   const cycles = (refused) => [{ reopenAttempts: 2560, reopenRefused: refused }];
   const control = (first, automatic = first) => ({ attempts: 2560, firstRefusals: first, automaticRefusals: automatic });
   const app = [{ Error: 'ENOBUFS', NativeCall: 'connect' }];
-  const gate = (change) => udpRecoveryGate({ failures: app, engineCycles: cycles(3), control: control(9), ...change });
+  const gate = (change) => udpControlGate({ failures: app, engineCycles: cycles(3), control: control(9), ...change });
   assert.equal(gate().newVerdict, 'reported: Windows automatic port search, also refused in the native control');
   assert.equal(gate().oldVerdict, 'fail');
   assert.equal(gate({ control: control(0) }).newVerdict, 'fail', 'the native control never refused');
@@ -17,7 +38,7 @@ test('UDP recovery gate counts a port-0 refusal as OS behaviour only with matchi
   assert.equal(gate({ failures: [{ Error: 'ECONNRESET', NativeCall: 'wsarecv' }], exhaustions: 1 }).newVerdict,
     'reported: Windows automatic port search, also refused in the native control');
   assert.equal(gate({ contention: true, control: control(0) }).newVerdict, 'reported: another process took the ports');
-  assert.equal(udpRecoveryGate({ failures: [], control: control(0) }).newVerdict, 'pass');
+  assert.equal(udpControlGate({ failures: [], control: control(0) }).newVerdict, 'pass');
 });
 
 test('UDP recovery reports a port another process took, and fails everything else', () => {

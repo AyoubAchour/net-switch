@@ -47,12 +47,14 @@ async function openOne({ host, port, localPort, timeout = 1000 }) {
     return { socket, ms: performance.now() - started };
   } catch (error) {
     socket.destroy();
-    return { failure: { code: error.code ?? 'DEADLINE', message: error.message, ms: performance.now() - started } };
+    return { failure: { code: error.code ?? 'DEADLINE', call: error.syscall, message: error.message, ms: performance.now() - started } };
   }
 }
-process.on('message', async ({ id, command, host, ports, count, localPort = 45000, keep = false, timeout = 1000 }) => {
+process.on('message', async ({ id, command, host, ports, count, localPort = 45000, keep = false, timeout = 1000, all = false }) => {
   try {
     if (command === 'open') {
+      // Filling to the OS limit stops at the first refused batch; recovery
+      // (all) attempts every flow once, so each refusal is its own record.
       const failures = [];
       let opened = 0;
       for (let n = 0; n < count; n += 32) {
@@ -64,7 +66,7 @@ process.on('message', async ({ id, command, host, ports, count, localPort = 4500
             opened++;
           }
         }));
-        if (failures.length) break;
+        if (failures.length && !all) break;
       }
       process.send({ id, result: { ...status(), opened, failures } });
     } else if (command === 'probe') {

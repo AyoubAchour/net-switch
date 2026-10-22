@@ -35,9 +35,17 @@ func TestReturnedPortsBindWithoutReuse(t *testing.T) {
 	var groups []struct {
 		Source string   `json:"source"`
 		Ports  []uint16 `json:"ports"`
+		// Protocol is "tcp" (the default) or "udp".
+		Protocol string `json:"protocol"`
 	}
 	if err := json.Unmarshal([]byte(input), &groups); err != nil {
 		t.Fatal(err)
+	}
+	udp := len(groups) > 0 && groups[0].Protocol == "udp"
+	for _, group := range groups {
+		if (group.Protocol == "udp") != udp {
+			t.Fatal("one returned-port check per protocol")
+		}
 	}
 	var handles []winhandle.Owner
 	var occupied []tcpStateGroup
@@ -55,6 +63,23 @@ func TestReturnedPortsBindWithoutReuse(t *testing.T) {
 	}
 	var snapshot []tcpStateGroup
 	refresh := func() {
+		if udp {
+			// UDP rows carry source, PID and ports only. As for TCP, a row
+			// holding the port on any address counts as another owner.
+			state, _, err := nativeUDPSnapshot()
+			if err != nil {
+				t.Fatalf("native UDP state before returned-port bind: %v", err)
+			}
+			encoded, err := json.Marshal(state["groups"])
+			snapshot = nil
+			if err == nil {
+				err = json.Unmarshal(encoded, &snapshot)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
 		state := nativeSocketState()
 		if err := state["error"]; err != nil {
 			t.Fatalf("native state before returned-port bind: %v", err)
@@ -106,18 +131,24 @@ func TestReturnedPortsBindWithoutReuse(t *testing.T) {
 			if otherOwner() {
 				continue
 			}
-			h, err := windows.Socket(windows.AF_INET, windows.SOCK_STREAM, windows.IPPROTO_TCP)
+			kind, protocol, network := windows.SOCK_STREAM, windows.IPPROTO_TCP, "tcp4"
+			if udp {
+				kind, protocol, network = windows.SOCK_DGRAM, windows.IPPROTO_UDP, "udp4"
+			}
+			h, err := windows.Socket(windows.AF_INET, kind, protocol)
 			if err != nil {
 				t.Fatal(err)
 			}
 			owner := winhandle.Open(h, "returned-port probe open")
 			handles = append(handles, owner)
-			if err := bindSocket(Adapter{Index4: index}, false)("tcp4", "", nativeBindHandle{owner}); err != nil {
+			if err := bindSocket(Adapter{Index4: index}, false)(network, "", nativeBindHandle{owner}); err != nil {
 				t.Fatal(err)
 			}
 			// Do not use address reuse to bypass a live or TIME_WAIT owner.
-			if err := windows.SetsockoptInt(owner.Handle("returned-port reuse disabled"), windows.SOL_SOCKET, 0x3007, 0); err != nil { // SO_REUSE_UNICASTPORT.
-				t.Fatal(err)
+			if !udp {
+				if err := windows.SetsockoptInt(owner.Handle("returned-port reuse disabled"), windows.SOL_SOCKET, 0x3007, 0); err != nil { // SO_REUSE_UNICASTPORT.
+					t.Fatal(err)
+				}
 			}
 			if err := windows.SetsockoptInt(owner.Handle("returned-port exclusive bind"), windows.SOL_SOCKET, ^windows.SO_REUSEADDR, 1); err != nil { // SO_EXCLUSIVEADDRUSE.
 				t.Fatal(err)
@@ -132,10 +163,24 @@ func TestReturnedPortsBindWithoutReuse(t *testing.T) {
 			bound++
 		}
 	}
-	if checked != 1024 || bound+len(occupied) != checked {
-		t.Fatalf("expected every one of 512 app and 512 engine ports accounted, checked=%d bound=%d occupied=%d", checked, bound, len(occupied))
+	// TCP recovery releases exactly 512 app and 512 engine ports. UDP's
+	// engine side is every engine port that left the table after the release
+	// (at least 512), so its count is the supplied total.
+	want := 1024
+	if udp {
+		want = 0
+		for _, group := range groups {
+			want += len(group.Ports)
+		}
 	}
-	evidence, _ := json.Marshal(map[string]any{"checked": checked, "bound": bound, "reoccupied": occupied,
+	if checked != want || bound+len(occupied) != checked {
+		t.Fatalf("expected every released app and engine port accounted, want=%d checked=%d bound=%d occupied=%d", want, checked, bound, len(occupied))
+	}
+	protocolName := "tcp"
+	if udp {
+		protocolName = "udp"
+	}
+	evidence, _ := json.Marshal(map[string]any{"protocol": protocolName, "checked": checked, "bound": bound, "reoccupied": occupied,
 		"oldAll1024BindCheckWouldPass": bound == checked})
 	t.Logf("WINDOWS RETURNED PORT BIND %s", evidence)
 	t.Logf("all %d currently available ports bound concurrently through their source interfaces, without connecting, retries or abortive close", bound)

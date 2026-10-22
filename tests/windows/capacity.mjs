@@ -7,7 +7,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hostedOnly, run, until } from './testisp/harness.mjs';
-import { holdUDPCapacity, largeUDPReplies, nativeUDPCapacity, udpRecoveryCycles } from './udp-capacity.mjs';
+import { holdUDPCapacity, largeUDPReplies, nativeUDPCapacity, portRecoveryGate, udpRecoveryCycles } from './udp-capacity.mjs';
 import { captureHeap } from './heap-profile.mjs';
 
 async function nativeRefusalBaseline(host) {
@@ -191,10 +191,30 @@ export async function capacity({ server, harness, directory, line }) {
         fields: { opId: randomUUID(), selector: { ids } } }));
     }
     console.log(`WINDOWS CAPACITY PREPARATION ${JSON.stringify(preparation)}`);
+    // None of our test apps' flows may remain. Windows' own background flows
+    // (NetBIOS from System, svchost) can reopen at any time (acceptance x64
+    // job 119647370936), so they are recorded, never waited for. Ours are the
+    // apps started from this checkout, the case's directory, or this Node.
+    const ourPrefixes = [path.resolve('.'), directory, process.execPath].map((value) => value.toLowerCase());
+    const ours = (flow) => ourPrefixes.some((prefix) => (flow.app?.path ?? '').toLowerCase().startsWith(prefix));
+    const listFlows = async () => {
+      const flows = [];
+      let next = '';
+      do {
+        const page = await server.api('engine-command', { method: 'flows', fields: { cursor: next } });
+        flows.push(...page.flows);
+        next = page.cursor ?? '';
+      } while (next);
+      return flows;
+    };
     const before = await until(async () => {
+      const flows = await listFlows();
+      if (flows.some(ours)) return false;
       const stats = await engineStats();
-      return stats.flows.Flows === 0 && stats;
-    }, 'no ordinary flows before capacity measurement', 30_000);
+      preparation.foreignFlows = flows.map((flow) => ({ protocol: flow.protocol, destination: flow.destination, app: flow.app?.path }));
+      return stats;
+    }, 'no flows of our test apps before capacity measurement', 30_000);
+    console.log(`WINDOWS CAPACITY FOREIGN FLOWS ${JSON.stringify(preparation.foreignFlows)}`);
     // The controller needs a port too. Establish one durable connection before
     // pressure; fetch's four-second idle eviction otherwise makes inspection
     // itself fail with ENOBUFS. No automatic reconnect is allowed.
@@ -346,12 +366,26 @@ export async function capacity({ server, harness, directory, line }) {
         { source: portReturn.egressSource, ports: portReturn.releasedEgress },
       ]) }, timeout: 30_000 });
     portReturn.nativeBindEvidence = returnedPortProbe.stdout;
+    // SYSTEM-DESIGN 5.9 amended: every one of the 256 is attempted; each
+    // refused first attempt gets one explicit re-attempt, and with any
+    // refusal the whole reopen takes at most the recovery window. The bind
+    // probe above is the no-leak check (it fails on any unbindable port).
+    const portsBefore = (await engineStats()).socketResources?.exhaustions ?? 0;
     const recoveryStarted = performance.now();
-    const recovered = await children[0].call('open', { ...target, count: 256, timeout: refusalLimitMs });
+    const recovered = await children[0].call('open', { ...target, count: 256, timeout: refusalLimitMs, all: true });
+    const reattempt = recovered.failures.length
+      ? await children[0].call('open', { ...target, count: recovered.failures.length, timeout: refusalLimitMs, all: true })
+      : null;
     const recoveryMs = performance.now() - recoveryStarted;
-    Object.assign(progress, { recovered, recoveryMs });
-    assert.equal(recovered.opened, 256, 'Capacity did not return after ports were freed');
-    assert.equal(recovered.failures.length, 0, JSON.stringify(recovered.failures));
+    const tcpEngineRefusals = ((await engineStats()).socketResources?.exhaustions ?? 0) - portsBefore;
+    const tcpRecovery = portRecoveryGate({ requested: 256,
+      firstFailures: recovered.failures.map((item) => ({ call: item.call, code: item.code })),
+      reattempted: reattempt ? recovered.failures.length : 0, reattemptFailures: reattempt?.failures ?? [], elapsedMS: recoveryMs,
+      leak: { ok: true }, // run() above rejects when the bind probe fails
+      engineBinds: { firstRefusals: tcpEngineRefusals, finalFailures: tcpEngineRefusals } });
+    Object.assign(progress, { recovered, reattempt, recoveryMs, tcpRecovery });
+    console.log(`WINDOWS TCP RECOVERY VERDICT ${JSON.stringify(tcpRecovery)}`);
+    assert.equal(tcpRecovery.newVerdict, 'pass', `Capacity did not return after ports were freed: ${JSON.stringify({ tcpRecovery, recovered, reattempt })}`);
     await udpHold.recover();
     const verifiedAfter = await Promise.all(children.map((app) => app.call('verify')));
     assert(verifiedAfter.every((s) => s.held === s.live && s.lost === 0), JSON.stringify(verifiedAfter));

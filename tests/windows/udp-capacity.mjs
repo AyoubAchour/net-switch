@@ -89,6 +89,20 @@ export async function nativeRecoveryControl(binding) {
   return control;
 }
 
+// The no-leak check (SYSTEM-DESIGN 5.9 amended): every released port binds
+// explicitly through its source interface, without reuse options, unless the
+// native table shows another owner took it first (recorded). Any other bind
+// failure fails the probe, and run() rejects.
+export async function returnedPortsBind(groups) {
+  const result = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
+    ['-test.v', '-test.run=^TestReturnedPortsBindWithoutReuse$', '-test.timeout=60s'],
+    { env: { NETSWITCH_RETURNED_PORTS: JSON.stringify(groups) }, timeout: 60_000 });
+  const marker = 'WINDOWS RETURNED PORT BIND ';
+  const line = result.stdout.split(/\r?\n/).find((value) => value.includes(marker));
+  assert(line, `Returned-port bind probe printed no result: ${result.stdout.slice(-2000)}`);
+  return { ok: true, ...JSON.parse(line.slice(line.indexOf(marker) + marker.length)), output: result.stdout };
+}
+
 // Release/reopen cycles for the UDP recovery rates (SYSTEM-DESIGN 5.9 open
 // question): the same count natively and through the engine, in one job.
 export const udpRecoveryCycles = Number(process.env.NETSWITCH_UDP_RECOVERY_CYCLES ?? 10);
@@ -122,10 +136,42 @@ export function udpRecoveryVerdict({ failures, portSpace, othersBefore, othersAf
     grownByOthers, portErrors, poolFull, available: pool?.available ?? null };
 }
 
-// The UDP recovery gate (SYSTEM-DESIGN 5.9 resolution, 2026-10-22). Windows'
-// automatic port search (port 0) can refuse with WSAENOBUFS while free ports
-// exist, for plain Go sockets too. A first-attempt refusal is reported, not
-// counted, only when all of these hold:
+// The recovery gate, TCP and UDP (SYSTEM-DESIGN 5.9, amended 2026-10-22,
+// later). It tests that the engine never starves or leaks ports:
+//   - no leak: every released port was explicitly bindable after release
+//     (leak.ok, from the returned-port bind probe);
+//   - recovery: every reopen succeeded, refused first attempts after exactly
+//     one explicit re-attempt each, and with any refusal the whole reopen and
+//     its re-attempts took at most recoveryWindowMS (an upper bound for each
+//     reopen);
+//   - the engine's own binds: none ended refused after its fresh attempts
+//     (the recovery pool is required to have room before the reopen).
+// First-attempt refusals are reported, not counted, by refusing call and
+// error. oldVerdict is the first-attempt-only check.
+export const recoveryWindowMS = 1000;
+
+export function portRecoveryGate({ requested, firstFailures, reattempted = 0, reattemptFailures = [], elapsedMS, leak, engineBinds }) {
+  const firstOK = requested - firstFailures.length;
+  const reopened = firstOK + reattempted - reattemptFailures.length;
+  const recovery = reattempted === firstFailures.length && reopened === requested
+    && (firstFailures.length === 0 || elapsedMS <= recoveryWindowMS);
+  const noLeak = leak?.ok === true;
+  const binds = (engineBinds?.finalFailures ?? 0) === 0;
+  const byCall = {};
+  for (const item of firstFailures) {
+    const key = `${item.call || 'unknown'} ${item.code}`;
+    byCall[key] = (byCall[key] ?? 0) + 1;
+  }
+  return { oldVerdict: firstFailures.length ? 'fail' : 'pass', newVerdict: noLeak && recovery && binds ? 'pass' : 'fail',
+    checks: { noLeak, recovery, engineBinds: binds }, requested, reopenedFirst: firstOK, reopened, reattempted,
+    reattemptFailures: reattemptFailures.length, elapsedMS, windowMS: recoveryWindowMS,
+    reported: { firstRefusals: firstFailures.length, byCall, engineBinds: engineBinds ?? null } };
+}
+
+// The previous UDP gate (SYSTEM-DESIGN 5.9 resolution, 2026-10-22), now
+// reported only. Windows' automatic port search (port 0) can refuse with
+// WSAENOBUFS while free ports exist, for plain Go sockets too. A
+// first-attempt refusal was reported, not counted, only when all of these hold:
 //   - each failure is that refusal: the app's own connect got ENOBUFS, or
 //     the app got ECONNRESET because the engine's own bind was refused (its
 //     socket-exhaustion count rose by at least as many);
@@ -134,8 +180,8 @@ export function udpRecoveryVerdict({ failures, portSpace, othersBefore, othersAf
 //   - the engine's first-refusal rate over its cycles in the job is at most
 //     the control's.
 // "Another process took the ports" (contention) stays reported as before.
-// Anything else fails. oldVerdict is the strict check this replaces.
-export function udpRecoveryGate({ failures, contention = false, exhaustions = 0, engineCycles = [], control }) {
+// Anything else failed.
+export function udpControlGate({ failures, contention = false, exhaustions = 0, engineCycles = [], control }) {
   const engineAttempts = engineCycles.reduce((n, cycle) => n + (cycle.reopenAttempts ?? 0), 0);
   const engineFirst = engineCycles.reduce((n, cycle) => n + (cycle.reopenRefused ?? 0), 0);
   const engineRate = engineAttempts ? engineFirst / engineAttempts : 0;
@@ -504,21 +550,27 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
       }
       return free;
     };
-    const refusalsOf = async (phase, attempts) => {
+    // Each refused first attempt gets exactly one explicit re-attempt, made
+    // at once (SYSTEM-DESIGN 5.9 amended). elapsedMS runs from the start of
+    // the reopen (startedAt) to the end of the re-attempts.
+    const refusalsOf = async (phase, attempts, startedAt) => {
       const refused = attempts.filter((item) => item.Error);
-      if (!refused.length) return [];
+      if (!refused.length) return { refusals: [], reattemptFailures: [], elapsedMS: performance.now() - startedAt };
+      const retry = await clients[0].call('open', { ...target, count: refused.length }).catch((error) => ({ error: String(error), attempts: [] }));
+      const elapsedMS = performance.now() - startedAt;
+      const retried = retry.attempts ?? [];
+      held += retried.filter((item) => !item.Error).length;
       const stats = await engineStats().catch(() => ({}));
       const free = await freeFrom(stats);
       // ECONNRESET here is the engine's own port unreachable after a failed
       // outbound send; its Winsock error is in udpSendFailures.
       console.log(`WINDOWS UDP RECOVERY SEND FAILURES ${JSON.stringify({ phase, refused: refused.length,
-        sendFailures: stats.udpSendFailures, udpOpenFailed: stats.udpOpenFailed, udpSocketExhaustions: stats.udpSocketExhaustions })}`);
-      await delay(200);
-      const retry = await clients[0].call('open', { ...target, count: refused.length }).catch((error) => ({ error: String(error), attempts: [] }));
-      const retried = retry.attempts ?? [];
-      held += retried.filter((item) => !item.Error).length;
-      return refused.map((item, i) => ({ phase, code: item.Error, errno: item.NativeCode, call: item.NativeCall,
-        freeAfterBatch: free, retryAfter200msOK: retried[i] ? !retried[i].Error : false, retryCode: retried[i]?.Error || retry.error }));
+        sendFailures: stats.udpSendFailures, udpOpenFailed: stats.udpOpenFailed, udpSocketExhaustions: stats.udpSocketExhaustions,
+        udpBindRetries: stats.udpBindRetries })}`);
+      const refusals = refused.map((item, i) => ({ phase, code: item.Error, errno: item.NativeCode, call: item.NativeCall,
+        freeAfterBatch: free, reattemptOK: retried[i] ? !retried[i].Error : false, reattemptCode: retried[i]?.Error || retry.error,
+        withinMS: elapsedMS }));
+      return { refusals, reattemptFailures: refusals.filter((item) => !item.reattemptOK), elapsedMS };
     };
     // Evidence only, never gated: release 512, wait for the reconciliation,
     // reopen 256, restore 256, count times; then print one rate line.
@@ -532,12 +584,14 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         const reconciled = await until(async () => (await engineStats()).flows.UDP <= cycleBefore.flows.UDP - freed.released,
           'UDP sessions released before an evidence cycle', 3000).then(() => true, () => false);
         const freeBeforeReopen = await freeFrom(await engineStats());
+        const reopenStarted = performance.now();
         const reopened = await clients[0].call('open', { ...target, count: 256 });
         held += reopened.attempts.filter((item) => !item.Error).length;
-        const reopenRefusals = await refusalsOf('reopen', reopened.attempts);
+        const { refusals: reopenRefusals } = await refusalsOf('reopen', reopened.attempts, reopenStarted);
+        const restoreStarted = performance.now();
         const restored = await clients[0].call('open', { ...target, count: 256 });
         held += restored.attempts.filter((item) => !item.Error).length;
-        const restoreRefusals = await refusalsOf('restore', restored.attempts);
+        const { refusals: restoreRefusals } = await refusalsOf('restore', restored.attempts, restoreStarted);
         cycles.push({ releasedPairs: freed.released, reconciled, freeBeforeReopen, reopenAttempts: 256, reopenRefused: reopenRefusals.length,
           restoreAttempts: 256, restoreRefused: restoreRefusals.length, refusals: [...reopenRefusals, ...restoreRefusals] });
       }
@@ -574,6 +628,21 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
           return stats.flows.UDP <= before.flows.UDP - 512 && stats;
         }, 'UDP native ports and sessions released by the one-second reconciliation', 3000);
         const preReopen = othersBeforeReopen(await engineStats().catch(() => ({})));
+        // No leak (SYSTEM-DESIGN 5.9 amended): the engine ports that left its
+        // table with the release (at least 512) and the app's 512 released
+        // ports must each bind explicitly before anything reopens.
+        const egress = native.recoveryControl?.source;
+        const enginePorts = (stats) => new Set((stats.nativeUDPState?.groups ?? [])
+          .filter((group) => group.pid === enginePID && group.source === egress).flatMap((group) => group.ports));
+        const afterRelease = enginePorts(reconciled);
+        const engineReleased = [...enginePorts(before)].filter((port) => !afterRelease.has(port));
+        assert(egress && engineReleased.length >= 512,
+          `The engine kept released UDP ports: ${engineReleased.length} of 512 left its table at ${egress}`);
+        assert.equal(released.localPorts?.length, 512, 'The UDP client did not report its released ports');
+        const leak = await returnedPortsBind([{ protocol: 'udp', source: '198.18.0.1', ports: released.localPorts },
+          { protocol: 'udp', source: egress, ports: engineReleased }]);
+        delete leak.output;
+        console.log(`WINDOWS UDP RETURNED PORT BIND ${JSON.stringify(leak)}`);
         // Like TCP recovery, release 512 and reopen 256. Reopening all 512
         // put the pool back exactly at the OS limit, so any transient socket
         // elsewhere failed one reopen (ARM64 run 39614744644: app-side
@@ -585,11 +654,16 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         const availableBefore = poolBefore.families?.find((item) => item.family === family)?.available;
         console.log(`WINDOWS UDP RECOVERY POOL ${JSON.stringify({ released: 512, reopen, availableBefore, state: poolBefore.state })}`);
         assert(availableBefore >= 2 * reopen, `Released UDP ports did not return to the pool: ${availableBefore} free before reopening ${reopen}`);
+        const bindsBefore = (await engineStats()).udpBindRetries;
+        const reopenStarted = performance.now();
         const returned = await clients[0].call('open', { ...target, count: reopen });
         const failures = returned.attempts.filter((item) => item.Error);
+        held += reopen - failures.length;
+        const reattempt = await refusalsOf('reopen', returned.attempts, reopenStarted);
+        const bindsAfter = (await engineStats()).udpBindRetries;
         if (failures.length) {
           // Evidence only: who held the dynamic ports when a re-open failed
-          // (ARM64 853e295: 1 of 512 app-side ENOBUFS). The check is unchanged.
+          // (ARM64 853e295: 1 of 512 app-side ENOBUFS).
           const [portSpace, stats] = await Promise.all([
             udpPortSpaceAtFailure().catch((error) => ({ error: String(error) })),
             engineStats().catch((error) => ({ error: String(error) })),
@@ -611,31 +685,38 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
             console.log(`WINDOWS UDP RECOVERY CONTENTION REPORTED ${JSON.stringify({ failures: failures.length, ...verdict })}`);
           }
         }
-        held += reopen - failures.length;
-        // The rate evidence (SYSTEM-DESIGN 5.9 open question): this gated
-        // cycle plus evidence-only cycles of the same shape, here with the TCP
-        // corner held. The matched comparison with the native control is the
-        // UDP-only set run before any TCP load (evidenceCycles). Retries are
-        // separate attempts and never change the gated verdict below.
+        // The rate evidence: this gated cycle plus evidence-only cycles of the
+        // same shape, here with the TCP corner held. The matched comparison
+        // with the native control is the UDP-only set run before any TCP load
+        // (evidenceCycles).
         const gated = { gated: true, freeBeforeReopen: availableBefore, reopenAttempts: reopen, reopenRefused: failures.length,
-          refusals: await refusalsOf('reopen', returned.attempts) };
+          refusals: reattempt.refusals };
         evidence.recoveryCycles = await evidenceCycles(udpRecoveryCycles - 1, 'engine, TCP corner held', [gated]);
-        // The gate (SYSTEM-DESIGN 5.9 resolution): the first cycle's reopens,
-        // first attempts only. A refusal is OS behaviour, reported and not
-        // counted, only when the native control in this job, at this address
-        // and occupancy (TCP corner held), also showed it, and the engine's
-        // first-refusal rate across its TCP-held cycles is at most the
-        // control's. The UDP-only pair is reported beside it.
+        // The gate (SYSTEM-DESIGN 5.9 amended): no leak, every reopen within
+        // the window after at most one explicit re-attempt, and no engine bind
+        // ending refused while the pool had room (required above). First
+        // refusals are reported beside the native control's figures; the
+        // previous control rule is reported, not applied.
+        const delta = (key) => (bindsAfter?.[key] ?? 0) - (bindsBefore?.[key] ?? 0);
+        const engineBinds = { firstRefusals: delta('firstRefusals'), freshAttempts: delta('freshAttempts'),
+          recoveredOnFreshAttempt: (bindsAfter?.recoveredOnFreshAttempt ?? []).map((n, i) => n - (bindsBefore?.recoveredOnFreshAttempt?.[i] ?? 0)),
+          finalFailures: delta('finalFailures') };
+        const gate = portRecoveryGate({ requested: reopen, firstFailures: failures.map((item) => ({ call: item.NativeCall, code: item.Error })),
+          reattempted: reattempt.refusals.length, reattemptFailures: reattempt.reattemptFailures, elapsedMS: reattempt.elapsedMS,
+          leak, engineBinds });
+        gate.reported.nativeControl = { udpOnly: { attempts: native.recoveryControl.attempts, firstRefusals: native.recoveryControl.firstRefusals },
+          tcpHeld: { attempts: native.recoveryControl.tcpHeld.attempts, firstRefusals: native.recoveryControl.tcpHeld.firstRefusals } };
+        gate.reported.engineCycles = { attempts: evidence.recoveryCycles.reduce((n, cycle) => n + cycle.reopenAttempts, 0),
+          firstRefusals: evidence.recoveryCycles.reduce((n, cycle) => n + cycle.reopenRefused, 0),
+          reattemptFailures: evidence.recoveryCycles.flatMap((cycle) => cycle.refusals).filter((item) => !item.reattemptOK).length };
         const exhaustions = failures.length ? (evidence.recoveryFailure?.socketExhaustions ?? 0) - (before.udpSocketExhaustions ?? 0) : 0;
-        const gate = udpRecoveryGate({ failures, contention: evidence.recoveryFailure?.newVerdict === 'reported', exhaustions,
-          engineCycles: evidence.recoveryCycles, control: native.recoveryControl.tcpHeld });
-        gate.udpOnly = udpRecoveryGate({ failures, engineCycles: evidence.matchedCycles ?? [], control: native.recoveryControl });
+        gate.previousControlRule = udpControlGate({ failures, contention: evidence.recoveryFailure?.newVerdict === 'reported', exhaustions,
+          engineCycles: evidence.recoveryCycles, control: native.recoveryControl.tcpHeld }).newVerdict;
+        gate.engineBindsWholeCase = bindsAfter;
         evidence.recoveryGate = gate;
-        console.log(`WINDOWS UDP RECOVERY VERDICT ${JSON.stringify({ reopened: reopen - failures.length, failed: failures.length, ...gate })}`);
-        if (gate.newVerdict === 'fail') {
-          assert.equal(failures.length, 0, `UDP capacity did not recover on first attempts: ${JSON.stringify(failures)}`);
-        }
-        evidence.recovery = { released, reconciled, returned, reopen, availableBefore, ms: performance.now() - started, verified: await verify('after-recovery') };
+        console.log(`WINDOWS UDP RECOVERY VERDICT ${JSON.stringify(gate)}`);
+        assert.equal(gate.newVerdict, 'pass', `UDP capacity did not recover: ${JSON.stringify({ checks: gate.checks, failures, reattempt })}`);
+        evidence.recovery = { released, reconciled, returned, reattempt, reopen, availableBefore, ms: performance.now() - started, verified: await verify('after-recovery') };
       },
     };
   } catch (error) {
