@@ -70,8 +70,9 @@ type Platform struct {
 	Owners               *Owners
 	udpRoute             routeCounters
 	// Callbacks run outside the platform lock.
-	LineDown       func(string)
-	AddressRemoved func(netip.Addr)
+	LineDown func(string)
+	// AddressRemoved gets the line and the address it lost.
+	AddressRemoved func(line string, addr netip.Addr)
 	Fatal          func(error)
 	WrapTun        func(platform.TunDevice) platform.TunDevice
 }
@@ -558,7 +559,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			}
 			for _, a := range addrs {
 				ip, ok := netip.AddrFromSlice(a.IP)
-				if ok && a.Flags&unix.IFA_F_TENTATIVE == 0 && (!p.ipv4Only || ip.Is4() || ip.Is4In6()) {
+				if ok && usableAddress(a.Flags, ip, p.ipv4Only) {
 					l.Addresses = append(l.Addresses, ip.Unmap())
 				}
 			}
@@ -803,19 +804,9 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 		}
 		err := p.reconcileRetry(ctx)
 		var down []string
-		var removed []netip.Addr
+		var removed []lineAddress
 		if err == nil {
-			for id, before := range old {
-				after := p.lines[id]
-				if before.Up && (!after.Up || before.Index != after.Index) {
-					down = append(down, id)
-				}
-				for _, a := range before.Addresses {
-					if !slices.Contains(after.Addresses, a) {
-						removed = append(removed, a)
-					}
-				}
-			}
+			down, removed = lineChanges(old, p.lines)
 		}
 		if err != nil {
 			p.bindings.Store(nil)
@@ -834,10 +825,45 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 		}
 		for _, a := range removed {
 			if p.AddressRemoved != nil {
-				p.AddressRemoved(a)
+				p.AddressRemoved(a.Line, a.Address)
 			}
 		}
 	}
+}
+
+// lineAddress is one local address of one line.
+type lineAddress struct {
+	Line    string
+	Address netip.Addr
+}
+
+// lineChanges compares two reconciled line states: the lines that went down
+// or moved to another interface, and each address a line no longer has, with
+// the line that lost it. Two routers commonly hand out the same 192.168.1.x,
+// so an address alone does not name a line (SYSTEM-DESIGN 5.7).
+func lineChanges(old, current map[string]lineState) (down []string, removed []lineAddress) {
+	for id, before := range old {
+		after := current[id]
+		if before.Up && (!after.Up || before.Index != after.Index) {
+			down = append(down, id)
+		}
+		for _, a := range before.Addresses {
+			if !slices.Contains(after.Addresses, a) {
+				removed = append(removed, lineAddress{id, a})
+			}
+		}
+	}
+	return down, removed
+}
+
+// usableAddress says whether a netlink address belongs in a line's addresses.
+// A tentative IPv6 address (duplicate detection still running) does not. A
+// deprecated one (IFA_F_DEPRECATED: its preferred lifetime ended, its valid
+// lifetime not) stays: existing flows keep using it (RFC 4862 5.5.4), and
+// the kernel already avoids it for new sources (RFC 6724 rule 3), so it is
+// never reported removed until it is actually gone.
+func usableAddress(flags int, ip netip.Addr, ipv4Only bool) bool {
+	return flags&unix.IFA_F_TENTATIVE == 0 && (!ipv4Only || ip.Is4() || ip.Is4In6())
 }
 func (p *Platform) Quiesce() {
 	p.routeMu.Lock()
