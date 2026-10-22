@@ -1,27 +1,110 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { heldSweepLatency, heldUDPSweepGate, ledgerDigest, portRecoveryGate, recoveryWindowMS, udpControlGate, udpRecoveryVerdict }
-  from '../tests/windows/udp-capacity.mjs';
+import { engineBindDelta, flowReconciliation, heldSweepLatency, heldUDPSweepGate, ledgerDigest, portRecoveryGate, recoveryWindowMS,
+  reopenTimings, udpControlGate, udpRecoveryVerdict } from '../tests/windows/udp-capacity.mjs';
 
-test('the amended recovery gate requires no leak, one re-attempt within the window and no final engine bind refusal', () => {
+// 256 reopens: 254 first-attempt successes of 20 ms, and the given extras.
+const reopens = (...extra) => [...Array.from({ length: 256 - extra.length }, () => ({ ms: 20, reattempted: false, ok: true })), ...extra];
+
+test('the amended recovery gate requires no leak, one re-attempt, every reopen within the window and no final engine bind refusal', () => {
   const refused = [{ call: 'connect', code: 'ENOBUFS' }, { call: 'wsarecv', code: 'ECONNRESET' }];
-  const base = { requested: 256, firstFailures: refused, reattempted: 2, reattemptFailures: [], elapsedMS: 300,
+  const retried = (ms = 300, ok = true) => ({ ms, reattempted: true, ok });
+  const base = { requested: 256, firstFailures: refused, reopens: reopens(retried(), retried()), elapsedMS: 300,
     leak: { ok: true }, engineBinds: { firstRefusals: 3, finalFailures: 0 } };
   const gate = (change) => portRecoveryGate({ ...base, ...change });
   assert.equal(gate().newVerdict, 'pass');
   assert.equal(gate().oldVerdict, 'fail', 'first-attempt refusals failed the old check');
   assert.deepEqual(gate().reported.byCall, { 'connect ENOBUFS': 1, 'wsarecv ECONNRESET': 1 });
   assert.equal(gate().reopened, 256);
-  assert.equal(gate({ reattemptFailures: [{ code: 'ENOBUFS' }] }).newVerdict, 'fail', 'a reopen still failing after its re-attempt');
-  assert.equal(gate({ reattempted: 1 }).newVerdict, 'fail', 'a refusal without its re-attempt');
-  assert.equal(gate({ reattempted: 3 }).newVerdict, 'fail', 'more re-attempts than refusals');
-  assert.equal(gate({ elapsedMS: recoveryWindowMS + 0.001 }).newVerdict, 'fail', 'outside the recovery window');
-  assert.equal(gate({ elapsedMS: recoveryWindowMS }).newVerdict, 'pass', 'the window is inclusive');
+  assert.equal(gate({ reopens: reopens(retried(), retried(300, false)) }).newVerdict, 'fail', 'a reopen still failing after its re-attempt');
+  assert.equal(gate({ reopens: reopens(retried(), { ms: null, reattempted: false, ok: false }) }).newVerdict, 'fail', 'a refusal without its re-attempt');
+  assert.equal(gate({ reopens: reopens(retried(), retried(), retried()) }).newVerdict, 'fail', 'more re-attempts than refusals');
+  assert.equal(gate({ reopens: reopens(retried(), retried(recoveryWindowMS + 0.001)) }).newVerdict, 'fail',
+    're-attempt path: a re-attempted reopen outside the window from its original start');
+  assert.equal(gate({ reopens: reopens(retried(), retried(recoveryWindowMS)) }).newVerdict, 'pass', 'the window is inclusive');
+  assert.equal(gate({ reopens: reopens(retried()) }).newVerdict, 'fail', 'fewer reopens than requested');
   assert.equal(gate({ leak: undefined }).newVerdict, 'fail', 'no leak evidence');
   assert.equal(gate({ engineBinds: { firstRefusals: 3, finalFailures: 1 } }).newVerdict, 'fail', 'an engine bind ended refused');
-  assert.equal(gate({ firstFailures: [], reattempted: 0, elapsedMS: 5000 }).newVerdict, 'pass', 'no refusal: no window to keep');
-  assert.equal(gate({ firstFailures: [], reattempted: 0 }).oldVerdict, 'pass');
+  // Review of PR #46: with no refusal the old gate skipped the window, so a
+  // 1.5 s (or 5 s) reopen passed. Every reopen is timed now.
+  const noRefusal = { firstFailures: [], reopens: reopens() };
+  assert.equal(gate(noRefusal).newVerdict, 'pass');
+  assert.equal(gate(noRefusal).oldVerdict, 'pass');
+  assert.equal(gate({ ...noRefusal, reopens: reopens({ ms: 1500, reattempted: false, ok: true }) }).newVerdict, 'fail',
+    'no-refusal path: one first-attempt success over the window');
+  assert.equal(gate({ ...noRefusal, reopens: reopens({ ms: 5000, reattempted: false, ok: true }) }).newVerdict, 'fail',
+    'no-refusal path: the 5 s reopen the old test let pass');
+  assert.equal(gate({ ...noRefusal, reopens: reopens({ ms: 1500, reattempted: false, ok: true }) }).slowReopens, 1);
+});
+
+test('reopen timings time each reopen alone and a re-attempt from its original start', () => {
+  // Two batches of the same reopen call: the first at 0-20 ms, the second at
+  // 900-930 ms. One first attempt failed at 905 ms; its re-attempt ran
+  // 1,000-1,050 ms.
+  const first = [{ startMS: 0, endMS: 20, ok: true }, { startMS: 900, endMS: 930, ok: true }, { startMS: 900, endMS: 905, ok: false }];
+  const timed = reopenTimings(first, [{ startMS: 1000, endMS: 1050, ok: true }]);
+  assert.deepEqual(timed, [{ ms: 20, reattempted: false, ok: true }, { ms: 30, reattempted: false, ok: true }, { ms: 150, reattempted: true, ok: true }],
+    'the second batch is not charged the first batch\'s wait, and the re-attempt keeps its original start');
+  assert.deepEqual(reopenTimings(first), [{ ms: 20, reattempted: false, ok: true }, { ms: 30, reattempted: false, ok: true },
+    { ms: null, reattempted: false, ok: false }], 'a refusal with no re-attempt stays a failed reopen');
+  const gate = portRecoveryGate({ requested: 3, firstFailures: [{ call: 'connect', code: 'ENOBUFS' }],
+    reopens: reopenTimings(first, [{ startMS: 1950, endMS: 1960, ok: true }]), leak: { ok: true }, engineBinds: { finalFailures: 0 } });
+  assert.equal(gate.newVerdict, 'fail', 'a re-attempt ending 1,060 ms after its original start misses the window');
+});
+
+test('engine bind deltas count the protocol under recovery and list final refusals with their flows', () => {
+  const retries = (first, final) => ({ firstRefusals: first, freshAttempts: first * 2, recoveredOnFreshAttempt: [first, 0, 0, 0], finalFailures: final });
+  const refusal = (id) => ({ protocol: 'tcp', kind: 'flow', app: `C:\\apps\\${id}.exe`, destination: '198.19.128.2:25000' });
+  const before = { tcpDialRetries: retries(10, 2), udpBindRetries: retries(5, 1), finalPortRefusals: { count: 3, recent: [refusal('a'), refusal('b'), refusal('c')] } };
+  const after = { tcpDialRetries: retries(13, 3), udpBindRetries: retries(9, 4), finalPortRefusals: { count: 7, recent: [refusal('a'), refusal('b'), refusal('c'), refusal('d'), refusal('e'), refusal('f'), refusal('g')] } };
+  const tcp = engineBindDelta(before, after, 'tcp');
+  assert.equal(tcp.firstRefusals, 3);
+  assert.equal(tcp.finalFailures, 1, 'only TCP final failures are the TCP gate input');
+  assert.equal(tcp.otherProtocolFinalFailures, 3);
+  assert.deepEqual(tcp.finalRefusals.map((item) => item.app), ['C:\\apps\\d.exe', 'C:\\apps\\e.exe', 'C:\\apps\\f.exe', 'C:\\apps\\g.exe']);
+  assert.deepEqual(tcp.tcp.recoveredOnFreshAttempt, [3, 0, 0, 0]);
+  assert.equal(engineBindDelta(before, after, 'udp').finalFailures, 3);
+  assert.deepEqual(engineBindDelta(after, after, 'tcp').finalRefusals, [], 'no new final refusal lists none');
+  const gate = (engineBinds) => portRecoveryGate({ requested: 256, firstFailures: [], reopens: reopens(), leak: { ok: true }, engineBinds }).newVerdict;
+  assert.equal(gate(engineBindDelta(before, { ...after, tcpDialRetries: retries(13, 2) }, 'tcp')), 'pass', 'first refusals alone never fail the gate');
+  assert.equal(gate(tcp), 'fail', 'a TCP dial that ended refused fails the TCP gate');
+});
+
+test('flow reconciliation fails a counter-only leak and a stale-record leak', () => {
+  const peer = { host: '198.19.128.2', ports: [25000, 25001] };
+  const tcp = (id, app = 'C:\\case\\capacity-app-0.exe') => ({ id, protocol: 'tcp', app: { path: app }, destination: `${peer.host}:25000` });
+  const udp = (id) => ({ id, protocol: 'udp', app: { path: 'C:\\case\\udp-capacity-app-1.exe' }, destination: '198.19.128.2:26000' });
+  const background = [{ id: 900, protocol: 'udp', app: { path: 'c:\\windows\\system32\\svchost.exe' }, destination: '10.1.0.1:53' },
+    { id: 901, protocol: 'tcp', handshake: true, unresolved: true, destination: '172.183.7.194:443' }];
+  // As in capacity.mjs.
+  const tcpCohort = (flow) => /[\\/]capacity-app-\d+\.exe$/i.test(flow.app?.path ?? '') && peer.ports.some((port) => flow.destination === `${peer.host}:${port}`);
+  const udpCohort = (flow) => flow.protocol === 'udp' && flow.destination === '198.19.128.2:26000';
+  const records = [...Array.from({ length: 100 }, (_, i) => tcp(i)), ...Array.from({ length: 50 }, (_, i) => udp(100 + i)), ...background];
+  const counted = { flows: records.length, udp: 51, handshakes: 1 };
+  const reconcile = (change) => flowReconciliation({ records, counted, tcpCohort, udpCohort, clientsTCP: 100, peerTCP: 100, clientsUDP: 50, ...change });
+  const exact = reconcile();
+  assert.equal(exact.pass, true, JSON.stringify(exact.checks));
+  assert.equal(exact.background.length, 2, 'background flows are enumerated');
+  // Counter-only leak: 100 admission charges with no record behind them.
+  const counterLeak = reconcile({ counted: { ...counted, flows: counted.flows + 100 } });
+  assert.equal(counterLeak.pass, false);
+  assert.equal(counterLeak.checks.countersMatchRecords, false);
+  assert.equal(counterLeak.checks.gaugesEqualCohortsAndBackground, false);
+  // Stale-record leak: 100 records (and their charges) whose connections are
+  // gone at the clients and at the peer.
+  const stale = [...records, ...Array.from({ length: 100 }, (_, i) => tcp(1000 + i))];
+  const recordLeak = reconcile({ records: stale, counted: { ...counted, flows: stale.length } });
+  assert.equal(recordLeak.pass, false);
+  assert.equal(recordLeak.checks.tcpEqualsClients, false);
+  assert.equal(recordLeak.checks.tcpEqualsPeer, false);
+  assert.equal(recordLeak.checks.countersMatchRecords, true, 'the table agrees with itself; only the independent counts catch it');
+  // The old check, Flows >= held TCP with UDP inside Flows, passed both leaks.
+  assert(counted.flows + 100 >= 100 && stale.length >= 100);
+  assert.equal(reconcile({ peerTCP: 99 }).checks.tcpEqualsPeer, false, 'a connection lost at the peer');
+  assert.equal(reconcile({ counted: { ...counted, udp: 52 } }).pass, false, 'a leaked UDP charge');
+  assert.equal(reconcile({ counted: { ...counted, handshakes: 0 } }).pass, false, 'a handshake counted without its record');
+  assert.equal(reconcile({ counted: undefined }).pass, false, 'no counts from the engine');
 });
 
 test('the previous UDP control gate counts a port-0 refusal as OS behaviour only with matching native evidence', () => {

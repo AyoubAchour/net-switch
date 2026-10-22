@@ -23,8 +23,11 @@ type capacityResponder struct {
 	listeners        []net.Listener
 	connections      []net.Conn
 	accepted, echoed int
-	closed           bool
-	workers          sync.WaitGroup
+	// live counts accepted connections whose engine side has not closed:
+	// the peer's own count, independent of the engine and the clients.
+	live    int
+	closed  bool
+	workers sync.WaitGroup
 }
 
 func (c *capacityResponder) open(s *stack.Stack) error {
@@ -48,10 +51,16 @@ func (c *capacityResponder) open(s *stack.Stack) error {
 					return
 				}
 				c.accepted++
+				c.live++
 				c.connections = append(c.connections, conn)
 				c.mu.Unlock()
 				c.workers.Go(func() {
-					defer conn.Close()
+					defer func() {
+						conn.Close()
+						c.mu.Lock()
+						c.live--
+						c.mu.Unlock()
+					}()
 					var value [1]byte
 					first := true
 					for {
@@ -126,7 +135,7 @@ func (g *gateway) installCapacity(mux *http.ServeMux) {
 		}
 		responder.mu.Lock()
 		defer responder.mu.Unlock()
-		reply := map[string]any{"accepted": responder.accepted, "echoed": responder.echoed}
+		reply := map[string]any{"accepted": responder.accepted, "echoed": responder.echoed, "live": responder.live}
 		if ports := g.probePorts.Load(); ports != nil {
 			reply["probeRelay"] = ports.stats()
 		}

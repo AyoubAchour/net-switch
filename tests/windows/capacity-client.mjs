@@ -44,10 +44,12 @@ async function openOne({ host, port, localPort, timeout = 1000 }) {
     });
     await echo(socket, 0x71);
     socket.on('error', () => {}); // Close below records loss of an admitted flow.
-    return { socket, ms: performance.now() - started };
+    const ended = performance.now();
+    return { socket, ms: ended - started, startMS: started, endMS: ended };
   } catch (error) {
     socket.destroy();
-    return { failure: { code: error.code ?? 'DEADLINE', call: error.syscall, message: error.message, ms: performance.now() - started } };
+    const ended = performance.now();
+    return { failure: { code: error.code ?? 'DEADLINE', call: error.syscall, message: error.message, ms: ended - started, startMS: started, endMS: ended } };
   }
 }
 process.on('message', async ({ id, command, host, ports, count, localPort = 45000, keep = false, timeout = 1000, all = false }) => {
@@ -55,20 +57,25 @@ process.on('message', async ({ id, command, host, ports, count, localPort = 4500
     if (command === 'open') {
       // Filling to the OS limit stops at the first refused batch; recovery
       // (all) attempts every flow once, so each refusal is its own record.
-      const failures = [];
+      // Each attempt's own start and end on this process's clock, so a
+      // reopen is timed alone and a re-attempt from its original start.
+      const failures = [], attempts = [];
       let opened = 0;
       for (let n = 0; n < count; n += 32) {
         await Promise.all(Array.from({ length: Math.min(32, count - n) }, async (_, k) => {
-          const { socket, failure } = await openOne({ host, port: ports[(sockets.length + k) % ports.length], timeout });
-          if (failure) failures.push(failure);
-          else {
+          const { socket, failure, startMS, endMS } = await openOne({ host, port: ports[(sockets.length + k) % ports.length], timeout });
+          if (failure) {
+            failures.push(failure);
+            attempts.push({ startMS: failure.startMS, endMS: failure.endMS, ok: false });
+          } else {
             hold(socket);
             opened++;
+            attempts.push({ startMS, endMS, ok: true });
           }
         }));
         if (failures.length && !all) break;
       }
-      process.send({ id, result: { ...status(), opened, failures } });
+      process.send({ id, result: { ...status(), opened, failures, attempts } });
     } else if (command === 'probe') {
       // A fixed app-side port outside the dynamic pool lets this SYN reach
       // the engine even when an ordinary app cannot allocate another port.

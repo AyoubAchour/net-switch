@@ -143,7 +143,11 @@ func capacityProbe() error {
 			type attempt struct {
 				Token, Local, Remote, SHA256, Error string
 				MS                                  float64
-				ReplyBytes                          int
+				// StartMS and EndMS bound the whole attempt (open, exchange
+				// or failure) on this process's monotonic clock, so a
+				// re-attempt can be timed from the original start.
+				StartMS, EndMS float64
+				ReplyBytes     int
 				FailedAt                            time.Time `json:",omitzero"`
 				NativeError, NativeCall             string    `json:",omitempty"`
 				NativeCode                          uint32    `json:",omitempty"`
@@ -159,6 +163,9 @@ func capacityProbe() error {
 					binary.BigEndian.PutUint32(token[4:], serial)
 					attempts[i].Token = hex.EncodeToString(token)
 					workers.Go(func() {
+						clockMS := func() float64 { return float64(winclock.Now().Microseconds()) / 1000 }
+						attempts[i].StartMS = clockMS()
+						defer func() { attempts[i].EndMS = clockMS() }()
 						conn, err := net.DialUDP(network, nil, peer)
 						if err == nil {
 							err = enableUDPRefusal(conn)

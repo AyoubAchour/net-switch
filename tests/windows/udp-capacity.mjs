@@ -140,21 +140,22 @@ export function udpRecoveryVerdict({ failures, portSpace, othersBefore, othersAf
 // later). It tests that the engine never starves or leaks ports:
 //   - no leak: every released port was explicitly bindable after release
 //     (leak.ok, from the returned-port bind probe);
-//   - recovery: every reopen succeeded, refused first attempts after exactly
-//     one explicit re-attempt each, and with any refusal the whole reopen and
-//     its re-attempts took at most recoveryWindowMS (an upper bound for each
-//     reopen);
-//   - the engine's own binds: none ended refused after its fresh attempts
-//     (the recovery pool is required to have room before the reopen).
+//   - recovery: every reopen succeeded within recoveryWindowMS, timed on its
+//     own from the start of its first attempt to the end of its last, with
+//     exactly one explicit re-attempt for each refused first attempt (the
+//     re-attempt keeps the original start);
+//   - the engine's own binds: none ended refused after its fresh attempts,
+//     for either protocol (the recovery pool is required to have room).
 // First-attempt refusals are reported, not counted, by refusing call and
-// error. oldVerdict is the first-attempt-only check.
+// error. oldVerdict is the first-attempt-only check. reopens is one record per
+// requested reopen: { ms, reattempted, ok } (see reopenTimings).
 export const recoveryWindowMS = 1000;
 
-export function portRecoveryGate({ requested, firstFailures, reattempted = 0, reattemptFailures = [], elapsedMS, leak, engineBinds }) {
-  const firstOK = requested - firstFailures.length;
-  const reopened = firstOK + reattempted - reattemptFailures.length;
-  const recovery = reattempted === firstFailures.length && reopened === requested
-    && (firstFailures.length === 0 || elapsedMS <= recoveryWindowMS);
+export function portRecoveryGate({ requested, firstFailures, reopens, elapsedMS, leak, engineBinds }) {
+  const reattempted = reopens.filter((item) => item.reattempted).length;
+  const reopened = reopens.filter((item) => item.ok).length;
+  const slow = reopens.filter((item) => !(Number.isFinite(item.ms) && item.ms <= recoveryWindowMS));
+  const recovery = reopens.length === requested && reattempted === firstFailures.length && reopened === requested && slow.length === 0;
   const noLeak = leak?.ok === true;
   const binds = (engineBinds?.finalFailures ?? 0) === 0;
   const byCall = {};
@@ -163,9 +164,78 @@ export function portRecoveryGate({ requested, firstFailures, reattempted = 0, re
     byCall[key] = (byCall[key] ?? 0) + 1;
   }
   return { oldVerdict: firstFailures.length ? 'fail' : 'pass', newVerdict: noLeak && recovery && binds ? 'pass' : 'fail',
-    checks: { noLeak, recovery, engineBinds: binds }, requested, reopenedFirst: firstOK, reopened, reattempted,
-    reattemptFailures: reattemptFailures.length, elapsedMS, windowMS: recoveryWindowMS,
+    checks: { noLeak, recovery, engineBinds: binds }, requested, reopenedFirst: requested - firstFailures.length, reopened, reattempted,
+    reattemptFailures: reopens.filter((item) => item.reattempted && !item.ok).length,
+    slowestMS: Math.max(0, ...reopens.map((item) => (Number.isFinite(item.ms) ? item.ms : Infinity))), slowReopens: slow.length, elapsedMS, windowMS: recoveryWindowMS,
     reported: { firstRefusals: firstFailures.length, byCall, engineBinds: engineBinds ?? null } };
+}
+
+// The engine's own binds across a recovery window, per protocol, from two
+// stats reads: first refusals and fresh attempts (reported), final failures,
+// and the final refusals listed with their flows. The gate counts the final
+// failures of the protocol under recovery, whose pool is known to have room;
+// the other protocol's are reported with their flows (its pool can be held at
+// the OS limit by the same case). A raw engine-wide first-refusal count is
+// never a gate input.
+export function engineBindDelta(before, after, protocol) {
+  const one = (key) => {
+    const b = before?.[key] ?? {}, a = after?.[key] ?? {};
+    const d = (k) => (a[k] ?? 0) - (b[k] ?? 0);
+    return { firstRefusals: d('firstRefusals'), freshAttempts: d('freshAttempts'),
+      recoveredOnFreshAttempt: (a.recoveredOnFreshAttempt ?? []).map((n, i) => n - (b.recoveredOnFreshAttempt?.[i] ?? 0)),
+      finalFailures: d('finalFailures') };
+  };
+  const udp = one('udpBindRetries'), tcp = one('tcpDialRetries');
+  const seen = (after?.finalPortRefusals?.count ?? 0) - (before?.finalPortRefusals?.count ?? 0);
+  const recent = after?.finalPortRefusals?.recent ?? [];
+  const finalRefusals = seen > 0 ? recent.slice(-Math.min(seen, recent.length)) : [];
+  const own = protocol === 'tcp' ? tcp : udp;
+  return { protocol, firstRefusals: own.firstRefusals, finalFailures: own.finalFailures, tcp, udp,
+    finalRefusals, finalRefusalsSeen: seen, otherProtocolFinalFailures: (protocol === 'tcp' ? udp : tcp).finalFailures };
+}
+
+// One record per reopen from the attempts' own clock (one client process, so
+// one clock): a first-attempt success is timed alone; each refused first
+// attempt is paired, in start order, with one re-attempt and timed from its
+// own start to the re-attempt's end. Reopens are interchangeable, so any
+// one-to-one pairing is honest, and no reopen inherits a later batch's wait.
+// Attempts are { startMS, endMS, ok }.
+export function reopenTimings(first, retried = []) {
+  const byStart = (a, b) => a.startMS - b.startMS;
+  const reopens = first.filter((item) => item.ok).map((item) => ({ ms: item.endMS - item.startMS, reattempted: false, ok: true }));
+  const refused = first.filter((item) => !item.ok).sort(byStart), again = [...retried].sort(byStart);
+  refused.forEach((item, i) => {
+    const retry = again[i];
+    reopens.push({ ms: retry ? retry.endMS - item.startMS : null, reattempted: Boolean(retry), ok: Boolean(retry?.ok) });
+  });
+  return reopens;
+}
+
+// Exact flow accounting at a plateau (SYSTEM-DESIGN 5.9: the engine's count
+// equals the independently held flows). records and counted come from one
+// full flows listing (flows {all: true}); counted is the table's own count
+// read under the same lock. The TCP cohort must equal both the clients' held
+// connections and the peer's live ones, the UDP cohort the held sessions, and
+// the gauges the cohorts plus the enumerated background flows. A counter that
+// leaks without a record fails countersMatchRecords; a record that outlives
+// its connection fails the cohort checks.
+export function flowReconciliation({ records, counted, tcpCohort, udpCohort, clientsTCP, peerTCP, clientsUDP }) {
+  const tcp = records.filter((flow) => flow.protocol === 'tcp' && tcpCohort(flow));
+  const udp = records.filter((flow) => flow.protocol === 'udp' && udpCohort(flow));
+  const background = records.filter((flow) => !tcp.includes(flow) && !udp.includes(flow));
+  const listedUDP = records.filter((flow) => flow.protocol === 'udp').length;
+  const listedHandshakes = records.filter((flow) => flow.handshake).length;
+  const checks = {
+    countersMatchRecords: counted?.flows === records.length && counted?.udp === listedUDP && counted?.handshakes === listedHandshakes,
+    gaugesEqualCohortsAndBackground: counted?.flows === tcp.length + udp.length + background.length,
+    tcpEqualsClients: tcp.length === clientsTCP,
+    tcpEqualsPeer: tcp.length === peerTCP,
+    udpEqualsClients: udp.length === clientsUDP,
+  };
+  return { pass: Object.values(checks).every(Boolean), checks, counted: counted ?? null, listed: records.length,
+    tcp: tcp.length, udp: udp.length, clientsTCP, peerTCP, clientsUDP,
+    background: background.map((flow) => ({ id: flow.id, protocol: flow.protocol, app: flow.app?.path ?? '', destination: flow.destination,
+      unresolved: Boolean(flow.unresolved), handshake: Boolean(flow.handshake), closing: Boolean(flow.closing) })) };
 }
 
 // The previous UDP gate (SYSTEM-DESIGN 5.9 resolution, 2026-10-22), now
@@ -582,7 +652,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     // the reopen (startedAt) to the end of the re-attempts.
     const refusalsOf = async (phase, attempts, startedAt) => {
       const refused = attempts.filter((item) => item.Error);
-      if (!refused.length) return { refusals: [], reattemptFailures: [], elapsedMS: performance.now() - startedAt };
+      if (!refused.length) return { refusals: [], reattemptFailures: [], elapsedMS: performance.now() - startedAt, retried: [] };
       const retry = await clients[0].call('open', { ...target, count: refused.length }).catch((error) => ({ error: String(error), attempts: [] }));
       const elapsedMS = performance.now() - startedAt;
       const retried = retry.attempts ?? [];
@@ -597,7 +667,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
       const refusals = refused.map((item, i) => ({ phase, code: item.Error, errno: item.NativeCode, call: item.NativeCall,
         freeAfterBatch: free, reattemptOK: retried[i] ? !retried[i].Error : false, reattemptCode: retried[i]?.Error || retry.error,
         withinMS: elapsedMS }));
-      return { refusals, reattemptFailures: refusals.filter((item) => !item.reattemptOK), elapsedMS };
+      return { refusals, reattemptFailures: refusals.filter((item) => !item.reattemptOK), elapsedMS, retried };
     };
     // Evidence only, never gated: release 512, wait for the reconciliation,
     // reopen 256, restore 256, count times; then print one rate line.
@@ -629,6 +699,8 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     };
     return {
       checkStats, verify, close,
+      // The held UDP sessions as engine flows, for exact reconciliation.
+      cohort: (flow) => flow.protocol === 'udp' && flow.destination === `${target.host}:${target.port}`,
       // The matched comparison with the native control: same cycles, UDP
       // held at the limit, no TCP load, so only the engine differs.
       evidenceCycles: (count) => evidenceCycles(count, 'engine, UDP only'),
@@ -681,13 +753,14 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         const availableBefore = poolBefore.families?.find((item) => item.family === family)?.available;
         console.log(`WINDOWS UDP RECOVERY POOL ${JSON.stringify({ released: 512, reopen, availableBefore, state: poolBefore.state })}`);
         assert(availableBefore >= 2 * reopen, `Released UDP ports did not return to the pool: ${availableBefore} free before reopening ${reopen}`);
-        const bindsBefore = (await engineStats()).udpBindRetries;
+        const retriesBefore = await engineStats();
         const reopenStarted = performance.now();
         const returned = await clients[0].call('open', { ...target, count: reopen });
         const failures = returned.attempts.filter((item) => item.Error);
         held += reopen - failures.length;
         const reattempt = await refusalsOf('reopen', returned.attempts, reopenStarted);
-        const bindsAfter = (await engineStats()).udpBindRetries;
+        const retriesAfter = await engineStats();
+        const bindsAfter = retriesAfter.udpBindRetries;
         if (failures.length) {
           // Evidence only: who held the dynamic ports when a re-open failed
           // (ARM64 853e295: 1 of 512 app-side ENOBUFS).
@@ -724,12 +797,10 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         // ending refused while the pool had room (required above). First
         // refusals are reported beside the native control's figures; the
         // previous control rule is reported, not applied.
-        const delta = (key) => (bindsAfter?.[key] ?? 0) - (bindsBefore?.[key] ?? 0);
-        const engineBinds = { firstRefusals: delta('firstRefusals'), freshAttempts: delta('freshAttempts'),
-          recoveredOnFreshAttempt: (bindsAfter?.recoveredOnFreshAttempt ?? []).map((n, i) => n - (bindsBefore?.recoveredOnFreshAttempt?.[i] ?? 0)),
-          finalFailures: delta('finalFailures') };
+        const engineBinds = engineBindDelta(retriesBefore, retriesAfter, 'udp');
+        const timing = (item) => ({ startMS: item.StartMS, endMS: item.EndMS, ok: !item.Error });
         const gate = portRecoveryGate({ requested: reopen, firstFailures: failures.map((item) => ({ call: item.NativeCall, code: item.Error })),
-          reattempted: reattempt.refusals.length, reattemptFailures: reattempt.reattemptFailures, elapsedMS: reattempt.elapsedMS,
+          reopens: reopenTimings(returned.attempts.map(timing), reattempt.retried.map(timing)), elapsedMS: reattempt.elapsedMS,
           leak, engineBinds });
         gate.reported.nativeControl = { udpOnly: { attempts: native.recoveryControl.attempts, firstRefusals: native.recoveryControl.firstRefusals },
           tcpHeld: { attempts: native.recoveryControl.tcpHeld.attempts, firstRefusals: native.recoveryControl.tcpHeld.firstRefusals } };

@@ -7,7 +7,8 @@ import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { hostedOnly, run, until } from './testisp/harness.mjs';
-import { holdUDPCapacity, largeUDPReplies, nativeUDPCapacity, portRecoveryGate, udpRecoveryCycles } from './udp-capacity.mjs';
+import { engineBindDelta, flowReconciliation, holdUDPCapacity, largeUDPReplies, nativeUDPCapacity, portRecoveryGate, reopenTimings,
+  udpRecoveryCycles } from './udp-capacity.mjs';
 import { captureHeap } from './heap-profile.mjs';
 
 async function nativeRefusalBaseline(host) {
@@ -207,6 +208,45 @@ export async function capacity({ server, harness, directory, line }) {
       } while (next);
       return flows;
     };
+    // Every admitted flow, unresolved ones included, with the table's own
+    // counts from the same snapshot (first page).
+    const listAllFlows = async () => {
+      const records = [];
+      let counted, next = '';
+      do {
+        const page = await server.api('engine-command', { method: 'flows', fields: { cursor: next, all: true } });
+        if (!next) counted = page.counted;
+        records.push(...page.flows);
+        next = page.cursor ?? '';
+      } while (next);
+      return { records, counted };
+    };
+    // Our TCP cohort: the capacity apps' connections to the peer.
+    const capacityApp = /[\\/]capacity-app-\d+\.exe$/i;
+    const tcpCohort = (flow) => capacityApp.test(flow.app?.path ?? '') && target.ports.some((port) => flow.destination === `${target.host}:${port}`);
+    // Exact accounting (SYSTEM-DESIGN 5.9; review of PR #46): the peer's live
+    // connections, the engine's TCP cohort and the clients' held connections
+    // agree, the UDP cohort equals the held sessions, and the table's counts
+    // equal its records. Reads are sequential; ours are still at a plateau.
+    const reconcile = async (label) => {
+      const states = await Promise.all(children.map((app) => app.call('status')));
+      const clientsTCP = states.reduce((n, s) => n + s.live + (s.survival?.live ? 1 : 0), 0);
+      const peerTCP = (await harness.control('capacity')).live;
+      const { records, counted } = await listAllFlows();
+      const result = { label, ...flowReconciliation({ records, counted, tcpCohort, udpCohort: udpHold.cohort,
+        clientsTCP, peerTCP, clientsUDP: udpHold.held }) };
+      // Handshakes in progress, from the same listing: ours must be none.
+      // Windows' own connections can sit in the handshake state for minutes
+      // (acceptance ARM64 job 119697112090), so they are reported with their
+      // owner, resolution and age, not counted. An unresolved handshake to our
+      // peer is counted as ours.
+      const now = Date.now();
+      const handshakes = records.filter((flow) => flow.handshake).map((flow) => ({ id: flow.id, app: flow.app?.path ?? '',
+        resolved: !flow.unresolved, source: flow.source, destination: flow.destination, line: flow.line ?? '', ageMS: now - Date.parse(flow.start) }));
+      result.ourHandshakes = handshakes.filter((flow) => (flow.resolved ? ours({ app: { path: flow.app } }) : flow.destination.startsWith(`${target.host}:`)));
+      result.foreignHandshakes = handshakes.filter((flow) => !result.ourHandshakes.includes(flow));
+      return result;
+    };
     const before = await until(async () => {
       const flows = await listFlows();
       if (flows.some(ours)) return false;
@@ -341,19 +381,16 @@ export async function capacity({ server, harness, directory, line }) {
       const stats = await engineStats();
       udpHold.checkStats(stats);
       assert(stats.flows.Flows >= held, 'The engine lost a held flow');
-      // No handshake of ours may be in progress. Windows' own connections
-      // can sit in the handshake state for minutes (acceptance ARM64 job
-      // 119697112090), so they are reported with their state, not counted.
-      // An unresolved handshake to our target is counted as ours.
-      assert(Array.isArray(stats.handshakeFlows), 'The engine did not report its handshake flows');
-      const handshakes = stats.handshakeFlows;
-      const ourHandshakes = handshakes.filter((flow) => ours(flow) || (!flow.resolved && flow.destination.startsWith(`${target.host}:`)));
-      const foreign = handshakes.filter((flow) => !ourHandshakes.includes(flow));
-      if (foreign.length) {
-        progress.foreignHandshakes = foreign;
-        console.log(`WINDOWS CAPACITY FOREIGN HANDSHAKES ${JSON.stringify(foreign)}`);
+      const reconciled = await reconcile(`plateau-${n + 1}`);
+      (progress.reconciliation ??= []).push(reconciled);
+      console.log(`WINDOWS CAPACITY RECONCILIATION ${JSON.stringify(reconciled)}`);
+      if (reconciled.foreignHandshakes.length) {
+        progress.foreignHandshakes = reconciled.foreignHandshakes;
+        console.log(`WINDOWS CAPACITY FOREIGN HANDSHAKES ${JSON.stringify(reconciled.foreignHandshakes)}`);
       }
-      assert.equal(ourHandshakes.length, 0, `A test app's handshake is in progress: ${JSON.stringify(ourHandshakes)}`);
+      assert.equal(reconciled.ourHandshakes.length, 0, `A test app's handshake is in progress: ${JSON.stringify(reconciled.ourHandshakes)}`);
+      assert(reconciled.pass, `Engine flow accounting does not match the held connections: ${JSON.stringify({ ...reconciled, background: undefined })}`);
+      assert.equal(reconciled.tcp, held, 'The engine TCP cohort differs from the held count');
       assert(stats.processMemory?.privateBytes > 0 && stats.processMemory?.workingSetBytes > 0,
         `Windows process memory was not measured: ${JSON.stringify(stats)}`);
       samples.push(stats);
@@ -379,22 +416,30 @@ export async function capacity({ server, harness, directory, line }) {
       ]) }, timeout: 30_000 });
     portReturn.nativeBindEvidence = returnedPortProbe.stdout;
     // SYSTEM-DESIGN 5.9 amended: every one of the 256 is attempted; each
-    // refused first attempt gets one explicit re-attempt, and with any
-    // refusal the whole reopen takes at most the recovery window. The bind
-    // probe above is the no-leak check (it fails on any unbindable port).
-    const portsBefore = (await engineStats()).socketResources?.exhaustions ?? 0;
+    // refused first attempt gets one explicit re-attempt, and every reopen,
+    // timed on its own (a re-attempt from its original start), takes at most
+    // the recovery window. The bind probe above is the no-leak check (it
+    // fails on any unbindable port). The engine-bind check reads the TCP
+    // dials that ended refused after their fresh attempts, each listed with
+    // its flow; first refusals are reported, never counted.
+    const retriesBefore = await engineStats();
     const recoveryStarted = performance.now();
     const recovered = await children[0].call('open', { ...target, count: 256, timeout: refusalLimitMs, all: true });
     const reattempt = recovered.failures.length
       ? await children[0].call('open', { ...target, count: recovered.failures.length, timeout: refusalLimitMs, all: true })
       : null;
     const recoveryMs = performance.now() - recoveryStarted;
-    const tcpEngineRefusals = ((await engineStats()).socketResources?.exhaustions ?? 0) - portsBefore;
+    const retriesAfter = await engineStats();
     const tcpRecovery = portRecoveryGate({ requested: 256,
       firstFailures: recovered.failures.map((item) => ({ call: item.call, code: item.code })),
-      reattempted: reattempt ? recovered.failures.length : 0, reattemptFailures: reattempt?.failures ?? [], elapsedMS: recoveryMs,
+      reopens: reopenTimings(recovered.attempts, reattempt?.attempts ?? []), elapsedMS: recoveryMs,
       leak: { ok: true }, // run() above rejects when the bind probe fails
-      engineBinds: { firstRefusals: tcpEngineRefusals, finalFailures: tcpEngineRefusals } });
+      engineBinds: engineBindDelta(retriesBefore, retriesAfter, 'tcp') });
+    // The same job's only native reopen control is UDP's (nativeRecoveryControl,
+    // with and without the TCP pool held); no native TCP reopen control runs.
+    tcpRecovery.reported.nativeControl = { tcpReopen: null, udpReopenTCPHeld: nativeUDP.recoveryControl?.tcpHeld
+      ? { attempts: nativeUDP.recoveryControl.tcpHeld.attempts, firstRefusals: nativeUDP.recoveryControl.tcpHeld.firstRefusals } : null };
+    tcpRecovery.reported.engineExhaustionsWholeEngine = (retriesAfter.socketResources?.exhaustions ?? 0) - (retriesBefore.socketResources?.exhaustions ?? 0);
     Object.assign(progress, { recovered, reattempt, recoveryMs, tcpRecovery });
     console.log(`WINDOWS TCP RECOVERY VERDICT ${JSON.stringify(tcpRecovery)}`);
     assert.equal(tcpRecovery.newVerdict, 'pass', `Capacity did not return after ports were freed: ${JSON.stringify({ tcpRecovery, recovered, reattempt })}`);
@@ -402,11 +447,25 @@ export async function capacity({ server, harness, directory, line }) {
     const verifiedAfter = await Promise.all(children.map((app) => app.call('verify')));
     assert(verifiedAfter.every((s) => s.held === s.live && s.lost === 0), JSON.stringify(verifiedAfter));
     assert.equal(verifiedAfter.reduce((total, s) => total + s.live, 1), held - 512 + 256);
+    // After release and recovery the engine and the peer converge on the
+    // clients' counts; a record or charge left behind never does.
+    let afterRecovery;
+    await until(async () => (afterRecovery = await reconcile('after-recovery')).pass, 'exact flow accounting after recovery', 15_000)
+      .catch(() => {});
+    progress.reconciliation.push(afterRecovery);
+    console.log(`WINDOWS CAPACITY RECONCILIATION ${JSON.stringify(afterRecovery)}`);
+    assert(afterRecovery.pass, `Engine flow accounting does not match after recovery: ${JSON.stringify({ ...afterRecovery, background: undefined })}`);
+    assert.equal(afterRecovery.tcp, held - 512 + 256, 'The engine TCP cohort differs from the held count after recovery');
+    const retriesWholeCase = await engineStats();
+    progress.portRetries = { tcpDialRetries: retriesWholeCase.tcpDialRetries, udpBindRetries: retriesWholeCase.udpBindRetries,
+      finalPortRefusals: retriesWholeCase.finalPortRefusals };
+    console.log(`WINDOWS PORT RETRIES ${JSON.stringify(progress.portRetries)}`);
     progress.recoveryHeap = await captureHeap(server, 'after-recovery', held - 512 + 256, udpHold.held, progress.baselineHeap);
     const engineAfter = await server.api('engine-command', { method: 'hello' });
     assert.equal(engineAfter.engineInstanceId, engineBefore.engineInstanceId, 'The engine restarted under port pressure');
     const last = samples.at(-1);
-    const evidence = { nativeSamples, layoutCapacity, floor, ordinaryHeld, held, firstLimit, extraAdmissions, refusals,
+    const evidence = { reconciliation: progress.reconciliation, portRetries: progress.portRetries, tcpRecovery,
+      nativeSamples, layoutCapacity, floor, ordinaryHeld, held, firstLimit, extraAdmissions, refusals,
       udp: progress.udp, largeUDP: progress.largeUDP,
       baselineHeap: progress.baselineHeap, heldHeap: progress.heldHeap, recoveryHeap: progress.recoveryHeap,
       oldRuntimeBudgetWouldPass: progress.oldRuntimeBudgetWouldPass && progress.udp.oldRuntimeBudgetWouldPass,
