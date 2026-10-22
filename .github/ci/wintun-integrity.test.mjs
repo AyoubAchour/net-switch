@@ -55,7 +55,7 @@ test('the sequence guard rejects omitted or reordered state-producing phases', (
 test('one matrix caps both architectures together at 10 and defaults to a small proof', () => {
   const expr = /shard: \$\{\{ fromJSON\((.*)\) \}\}/.exec(workflowText)?.[1];
   assert.ok(expr, 'shard expression');
-  for (const count of [1, 2, 5, 10]) {
+  for (const count of [1, 2, 5, 10, 20]) {
     const shards = JSON.parse(evaluate(expr, { inputs: { wintun_integrity_shards: String(count) } }));
     assert.deepEqual(shards, Array.from({length:count}, (_, i) => i+1));
   }
@@ -65,6 +65,36 @@ test('one matrix caps both architectures together at 10 and defaults to a small 
   assert.match(workflowText, /wintun_integrity_shards:[\s\S]*?default: '2'/);
   const runnerExpression = /runner: \$\{\{ fromJSON\((.*inputs.wintun_integrity_arch.*)\) \}\}/.exec(workflowText)?.[1];
   assert.deepEqual(JSON.parse(evaluate(runnerExpression, {inputs:{wintun_integrity_arch:'both'}})), ['windows-latest', 'windows-11-arm']);
+});
+
+test('hunt combines both scenarios and architectures under the single cap, interleaved by shard', () => {
+  const matrix = workflowText.split('  wintun-integrity:\n')[1].split('\n  wintun:')[0];
+  const inputs = {wintun_integrity_scenario:'hunt', wintun_integrity_arch:'both', wintun_integrity_shards:'20'};
+  const dimension = name => {
+    const expression = new RegExp(`${name}: \\$\\{\\{ fromJSON\\((.*)\\) \\}\\}`).exec(matrix)?.[1];
+    assert.ok(expression, name);
+    return JSON.parse(evaluate(expression, {inputs}));
+  };
+  const jobs = dimension('shard').flatMap(shard => dimension('scenario').flatMap(scenario => dimension('runner').map(runner => ({shard,scenario,runner}))));
+  assert.equal(jobs.length, 80);
+  for (const scenario of ['isolated','full']) for (const runner of ['windows-latest','windows-11-arm']) {
+    assert.equal(jobs.filter(job => job.scenario === scenario && job.runner === runner).length, 20);
+  }
+  assert.ok(matrix.indexOf('\n        shard:') < matrix.indexOf('\n        scenario:'));
+  assert.ok(matrix.indexOf('\n        scenario:') < matrix.indexOf('\n        runner:'));
+  assert.match(matrix, /INTEGRITY_SCENARIO: \$\{\{ matrix\.scenario \}\}/);
+  assert.match(matrix, /runner\.arch == 'X64' && matrix\.scenario == 'full'/);
+  assert.match(matrix, /always\(\) && matrix\.scenario == 'full'/);
+});
+
+test('rotation selects only qualified single boundaries and leaves explicit selections unchanged', {skip:process.platform !== 'win32'}, () => {
+  for (const [shard, expected, requested = 'rotate'] of [[1,'receive'],[6,'host'],[7,'receive'],[20,'ingress'],[20,'output','output']]) {
+    const plan = JSON.parse(execFileSync('pwsh.exe', ['-NoProfile','-File',runner,'-PlanOnly','-Scenario','isolated'], {
+      encoding:'utf8',windowsHide:true,timeout:15000,
+      env:{...process.env,GITHUB_ACTIONS:'false',NETSWITCH_WINTUN_CI:'0',NETSWITCH_WINTUN_INTEGRITY:'0',NETSWITCH_WINTUN_INTEGRITY_BOUNDARY:requested,INTEGRITY_SHARD:String(shard)},
+    }));
+    assert.equal(plan.boundary, expected);
+  }
 });
 
 for (const arch of ['x64', 'arm64']) {

@@ -20,9 +20,21 @@ if ($Scenario -eq 'isolated') {
 }
 $phases = @($phases | Where-Object { -not $_.arch -or $_.arch -eq $Arch })
 $focus = if ($Scenario -eq 'isolated') { 'tcp_8_MBps' } else { '' }
+$boundary = $env:NETSWITCH_WINTUN_INTEGRITY_BOUNDARY
+if (-not $boundary) { $boundary = 'receive' }
+if ($boundary -eq 'rotate') {
+  $shard = 0
+  if (-not [int]::TryParse($env:INTEGRITY_SHARD, [ref]$shard) -or $shard -lt 1 -or $shard -gt 20) {
+    throw 'Boundary rotation requires an integer INTEGRITY_SHARD between 1 and 20.'
+  }
+  $boundary = @('receive', 'ingress', 'echo', 'output', 'send', 'host')[($shard - 1) % 6]
+}
+if ($boundary -notin @('receive', 'ingress', 'echo', 'output', 'send', 'host', 'all')) {
+  throw "Unknown integrity boundary: $boundary"
+}
 # Read-only plan/parity tests: no executable or adapter is used.
 if ($PlanOnly) {
-  [pscustomobject]@{ scenario = $Scenario; arch = $Arch; focus = $focus; repeats = $Repeats; phases = $phases } | ConvertTo-Json -Depth 8
+  [pscustomobject]@{ scenario = $Scenario; arch = $Arch; focus = $focus; boundary = $boundary; repeats = $Repeats; phases = $phases } | ConvertTo-Json -Depth 8
   return
 }
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
@@ -40,12 +52,14 @@ $completed = 0
 $lastSeconds = 0
 $budgetSeconds = 45 * 60
 $keys = @('NETSWITCH_WINTUN_CI', 'NETSWITCH_WINTUN_INTEGRITY', 'NETSWITCH_WINTUN_INTEGRITY_TRACE',
+  'NETSWITCH_WINTUN_INTEGRITY_BOUNDARY',
   'NETSWITCH_WINTUN_INTEGRITY_FOCUS', 'NETSWITCH_WINTUN_INTEGRITY_REPEAT',
   'NETSWITCH_WINTUN_INTEGRITY_SCENARIO', 'NETSWITCH_WINTUN_INTEGRITY_PHASE',
   'NETSWITCH_WINTUN_REFERENCE', 'NETSWITCH_WINTUN_PROFILE')
 $saved = @{}
 foreach ($key in $keys) { $saved[$key] = [Environment]::GetEnvironmentVariable($key, 'Process') }
 try {
+  $env:NETSWITCH_WINTUN_INTEGRITY_BOUNDARY = $boundary
   $env:NETSWITCH_WINTUN_INTEGRITY_TRACE = '1'
   $env:NETSWITCH_WINTUN_INTEGRITY_SCENARIO = $Scenario
   for ($repeat = 1; $repeat -le $Repeats; $repeat++) {
@@ -57,7 +71,7 @@ try {
     $env:NETSWITCH_WINTUN_INTEGRITY_REPEAT = [string]$repeat
     $failed = 0
     $outcomes = @{}
-    Write-Output "INTEGRITY_RUN_START scenario=$Scenario repeat=$repeat requested=$Repeats shard=$env:INTEGRITY_SHARD commit=$env:GITHUB_SHA arch=$Arch diagnostic=true"
+    Write-Output "INTEGRITY_RUN_START scenario=$Scenario boundary=$boundary repeat=$repeat requested=$Repeats shard=$env:INTEGRITY_SHARD commit=$env:GITHUB_SHA arch=$Arch diagnostic=true"
     foreach ($phase in $phases) {
       $name = $phase.name
       if (($failed -ne 0 -and -not $phase.runAfterFailure) -or
@@ -121,7 +135,7 @@ try {
   }
   $inprocessPairs = if ($Scenario -eq 'full') { $completed * 12 } else { 0 }
   $measuredStreams = $completed * $(if ($Scenario -eq 'full') { 432 } else { 192 })
-  Write-Output "INTEGRITY_EXPOSURE scenario=$Scenario shard=$env:INTEGRITY_SHARD completed=$completed requested=$Repeats dll_tcp8_pairs=$($completed * 12) inprocess_tcp8_pairs=$inprocessPairs measured_tcp_streams=$measuredStreams budget_limited=$($completed -lt $Repeats) diagnostic=true"
+  Write-Output "INTEGRITY_EXPOSURE scenario=$Scenario boundary=$boundary shard=$env:INTEGRITY_SHARD completed=$completed requested=$Repeats dll_tcp8_pairs=$($completed * 12) inprocess_tcp8_pairs=$inprocessPairs measured_tcp_streams=$measuredStreams budget_limited=$($completed -lt $Repeats) diagnostic=true"
 } finally {
   foreach ($key in $keys) { [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process') }
 }

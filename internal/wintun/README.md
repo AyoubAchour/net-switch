@@ -295,11 +295,19 @@ Precomputing independent payload oracles happens before the transfer timer,
 and adds up to 512 MiB for eight streams in addition to sender buffers. Thus a
 passing transfer-throughput check is not a claim of identical setup/memory cost.
 
-After qualification, `isolated` and `full` scenarios support `1`, `2`, `5` or
-`10` shards per selected architecture. `wintun_integrity_boundary` selects
+After qualification, `isolated` and `full` scenarios support `1`, `2`, `5`,
+`10` or `20` shards per selected architecture. Select `hunt` to put **both
+scenarios in the same matrix** with the same shared ten-job cap; do not launch
+two separate ten-concurrency dispatches. Matrix order interleaves architectures
+and scenarios for each shard so every kind starts in the first wave.
+`wintun_integrity_boundary` selects
 `receive` (default), `ingress`, `echo`, `output`, `send`, or `host`. Host SHA-256
 and first-difference checks always remain enabled. The explicitly expensive
 `all` option is for follow-up localization, not a qualified low-overhead mode.
+`rotate` assigns the six qualified single-boundary choices by shard, repeating
+receive/ingress/echo/output/send/host. With 20 shards, receive and ingress each
+get four jobs per architecture/scenario; each other boundary gets three.
+The chosen boundary is fixed within a job and included in its exposure summary.
 No individual sampled run claims to have checked its unselected boundaries;
 do not combine different transfers into a single causal trace.
 

@@ -35,17 +35,17 @@ on:
       wintun_integrity_scenario:
         description: Qualify overhead first, or explicitly run corruption exposure
         type: choice
-        options: [proof, isolated, full]
+        options: [proof, isolated, full, hunt]
         default: proof
       wintun_integrity_shards:
         description: Independent hosted runners per selected architecture
         type: choice
-        options: ['1', '2', '5', '10']
+        options: ['1', '2', '5', '10', '20']
         default: '2'
       wintun_integrity_boundary:
         description: Selected boundary for exposure (proof measures every single-boundary option)
         type: choice
-        options: [receive, ingress, echo, output, send, host, all]
+        options: [receive, ingress, echo, output, send, host, rotate, all]
         default: receive
       wintun_integrity_repeats:
         description: Maximum complete cases per runner within 45 minutes; never retry failures
@@ -605,15 +605,18 @@ jobs:
 
   wintun-integrity:
     if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity
-    name: TCP integrity / ${{ matrix.runner }} / ${{ inputs.wintun_integrity_scenario }} / ${{ matrix.shard }}
+    name: TCP integrity / ${{ matrix.runner }} / ${{ matrix.scenario }} / ${{ matrix.shard }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       max-parallel: 10
       matrix:
+        # Interleave scenario/architecture per shard so every kind starts in
+        # the first wave. A hunt is ONE matrix, not two independent caps.
+        shard: ${{ fromJSON(inputs.wintun_integrity_shards == '1' && '[1]' || inputs.wintun_integrity_shards == '2' && '[1,2]' || inputs.wintun_integrity_shards == '5' && '[1,2,3,4,5]' || inputs.wintun_integrity_shards == '10' && '[1,2,3,4,5,6,7,8,9,10]' || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]') }}
+        scenario: ${{ fromJSON(inputs.wintun_integrity_scenario == 'hunt' && '["isolated","full"]' || inputs.wintun_integrity_scenario == 'full' && '["full"]' || inputs.wintun_integrity_scenario == 'isolated' && '["isolated"]' || '["proof"]') }}
         runner: ${{ fromJSON(inputs.wintun_integrity_arch == 'x64' && '["windows-latest"]' || inputs.wintun_integrity_arch == 'arm64' && '["windows-11-arm"]' || '["windows-latest","windows-11-arm"]') }}
-        shard: ${{ fromJSON(inputs.wintun_integrity_shards == '1' && '[1]' || inputs.wintun_integrity_shards == '2' && '[1,2]' || inputs.wintun_integrity_shards == '5' && '[1,2,3,4,5]' || '[1,2,3,4,5,6,7,8,9,10]') }}
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '4'
@@ -622,7 +625,7 @@ jobs:
       NETSWITCH_WINTUN_INTEGRITY: '1'
       NETSWITCH_WINTUN_INTEGRITY_BOUNDARY: ${{ inputs.wintun_integrity_boundary }}
       INTEGRITY_REPEATS: ${{ inputs.wintun_integrity_repeats }}
-      INTEGRITY_SCENARIO: ${{ inputs.wintun_integrity_scenario }}
+      INTEGRITY_SCENARIO: ${{ matrix.scenario }}
       INTEGRITY_SHARD: ${{ matrix.shard }}
     defaults:
       run:
@@ -665,7 +668,7 @@ jobs:
         if: runner.arch == 'X64'
         run: go test -race -tags=wintun_integrity -count=1 -v -run '^Test(Integrity|Performance)' ./internal/wintun
       - name: Build the normal race/handlecheck binary for the full sequence
-        if: runner.arch == 'X64' && inputs.wintun_integrity_scenario == 'full'
+        if: runner.arch == 'X64' && matrix.scenario == 'full'
         run: go test -race -tags=netswitch_handlecheck -c -o ./bin/wintun-race.test.exe ./internal/wintun
       - uses: ./.github/actions/cache-pinned-archive
         with:
@@ -675,10 +678,10 @@ jobs:
       - name: Repeat complete matched cases without retrying or replacing failures
         run: ./scripts/test-wintun-integrity.ps1 -Repeats $env:INTEGRITY_REPEATS -Scenario $env:INTEGRITY_SCENARIO -Arch $env:RUNNER_ARCH
       - name: Keep full-sequence CPU profiles
-        if: always() && inputs.wintun_integrity_scenario == 'full'
+        if: always() && matrix.scenario == 'full'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: wintun-integrity-${{ runner.arch }}-${{ matrix.shard }}-profiles
+          name: wintun-integrity-${{ runner.arch }}-${{ matrix.scenario }}-${{ matrix.shard }}-profiles
           path: bin/wintun-*-cpu.pprof
           retention-days: 14
 
