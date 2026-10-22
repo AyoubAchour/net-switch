@@ -23,6 +23,8 @@ func TestPortRetriesAreBoundedAndCounted(t *testing.T) {
 	tcpBindRefused := os.NewSyscallError("bind", windows.WSAENOBUFS)
 	tcpConnectRefused := os.NewSyscallError("connectex", windows.WSAEADDRINUSE)
 	denied := os.NewSyscallError("bind", windows.WSAEACCES)
+	peerRefused := os.NewSyscallError("connectex", windows.WSAECONNREFUSED)
+	cancelled := context.Canceled
 	// script returns the given errors in order, then success.
 	script := func(calls *int, errs ...error) func() (*udpSocket, error) {
 		return func() (*udpSocket, error) {
@@ -43,29 +45,34 @@ func TestPortRetriesAreBoundedAndCounted(t *testing.T) {
 	} {
 		for _, refused := range protocol.refused {
 			for _, tc := range []struct {
-				name                string
-				errs                []error
-				calls               int
-				first, fresh, final uint64
-				recovered           []uint64
-				wantErr             error
+				name                       string
+				errs                       []error
+				calls                      int
+				first, fresh, final, other uint64
+				recovered                  []uint64
+				wantErr                    error
 			}{
-				{"first attempt", nil, 1, 0, 0, 0, []uint64{0, 0, 0, 0}, nil},
-				{"other error is not retried", []error{denied}, 1, 0, 0, 0, []uint64{0, 0, 0, 0}, windows.WSAEACCES},
-				{"second fresh attempt", []error{refused, refused}, 3, 1, 2, 0, []uint64{0, 1, 0, 0}, nil},
-				{"every attempt refused", []error{refused, refused, refused, refused, refused, refused}, 5, 1, 4, 1, []uint64{0, 0, 0, 0}, refused},
-				{"other error after a refusal ends it", []error{refused, denied}, 2, 1, 1, 1, []uint64{0, 0, 0, 0}, windows.WSAEACCES},
+				{"first attempt", nil, 1, 0, 0, 0, 0, []uint64{0, 0, 0, 0}, nil},
+				{"other error is not retried", []error{denied}, 1, 0, 0, 0, 0, []uint64{0, 0, 0, 0}, windows.WSAEACCES},
+				{"second fresh attempt", []error{refused, refused}, 3, 1, 2, 0, 0, []uint64{0, 1, 0, 0}, nil},
+				{"every attempt refused", []error{refused, refused, refused, refused, refused, refused}, 5, 1, 4, 1, 0, []uint64{0, 0, 0, 0}, refused},
+				// Review of 822789db: a fresh attempt that gets a port and then
+				// fails otherwise is not a final refusal; the gate never sees it.
+				{"other error after a refusal ends it", []error{refused, denied}, 2, 1, 1, 0, 1, []uint64{0, 0, 0, 0}, windows.WSAEACCES},
+				{"connection refused after a refusal", []error{refused, refused, peerRefused}, 3, 1, 2, 0, 1, []uint64{0, 0, 0, 0}, windows.WSAECONNREFUSED},
+				{"cancelled after a refusal", []error{refused, cancelled}, 2, 1, 1, 0, 1, []uint64{0, 0, 0, 0}, context.Canceled},
 			} {
 				t.Run(protocol.name+"/"+refused.Error()+"/"+tc.name, func(t *testing.T) {
 					var r portRetries
 					calls := 0
-					s, attempts, err := retryOpen(&r, protocol.retryable, script(&calls, tc.errs...))
+					s, outcome, err := retryOpen(&r, protocol.retryable, script(&calls, tc.errs...))
 					if tc.wantErr == nil && (err != nil || s == nil) || tc.wantErr != nil && (!errors.Is(err, tc.wantErr) || s != nil) {
 						t.Fatalf("open = %v, %v; want error %v", s, err, tc.wantErr)
 					}
 					stats := r.stats()
-					if calls != tc.calls || attempts != calls || stats["firstRefusals"] != tc.first || stats["freshAttempts"] != tc.fresh || stats["finalFailures"] != tc.final {
-						t.Fatalf("calls %d attempts %d stats %v", calls, attempts, stats)
+					if calls != tc.calls || outcome.Attempts != calls || outcome.Refused != (tc.final == 1) || stats["firstRefusals"] != tc.first ||
+						stats["freshAttempts"] != tc.fresh || stats["finalFailures"] != tc.final || stats["otherFailures"] != tc.other {
+						t.Fatalf("calls %d outcome %+v stats %v", calls, outcome, stats)
 					}
 					for i, want := range tc.recovered {
 						if got := stats["recoveredOnFreshAttempt"].([]uint64)[i]; got != want {
@@ -84,21 +91,37 @@ func TestPortRetriesAreBoundedAndCounted(t *testing.T) {
 			t.Fatalf("calls %d err %v", calls, err)
 		}
 	})
-	t.Run("time window", func(t *testing.T) {
-		var r portRetries
-		calls := 0
-		_, _, err := retryOpen(&r, portLimit, func() (*udpSocket, error) {
-			calls++
-			if calls > 1 {
-				time.Sleep(freshWindow)
+	// The window is read on an injected clock: a fresh attempt that ends
+	// 10 ms or more after the first refusal is the last one, however coarse
+	// Go's own clock is; one ending 1 ns sooner is not.
+	for _, tc := range []struct {
+		name    string
+		elapsed time.Duration
+		calls   int
+		ended   uint64
+	}{
+		{"window passed", freshWindow, 2, 1},
+		{"window passed by more than a tick", freshWindow + 15625*time.Microsecond, 2, 1},
+		{"window not yet passed", freshWindow - time.Nanosecond, 1 + freshAttempts, 0},
+	} {
+		t.Run("time window/"+tc.name, func(t *testing.T) {
+			clock := 5 * time.Second
+			r := portRetries{now: func() time.Duration { return clock }}
+			calls := 0
+			_, outcome, err := retryOpen(&r, portLimit, func() (*udpSocket, error) {
+				calls++
+				if calls == 2 {
+					clock += tc.elapsed // the first fresh attempt ends this late
+				}
+				return nil, tcpBindRefused
+			})
+			stats := r.stats()
+			if !errors.Is(err, windows.WSAENOBUFS) || calls != tc.calls || outcome.Attempts != calls || !outcome.Refused ||
+				stats["windowEnded"] != tc.ended || stats["finalFailures"] != uint64(1) {
+				t.Fatalf("calls %d outcome %+v err %v stats %v", calls, outcome, err, stats)
 			}
-			return nil, tcpBindRefused
 		})
-		stats := r.stats()
-		if !errors.Is(err, windows.WSAENOBUFS) || calls != 2 || stats["windowEnded"] != uint64(1) || stats["finalFailures"] != uint64(1) {
-			t.Fatalf("calls %d err %v stats %v", calls, err, stats)
-		}
-	})
+	}
 }
 
 // The relay dial path end to end with injected refusals: attempts stop at the
@@ -144,6 +167,25 @@ func TestTCPDialRetriesStopAtTheBoundAndRecordTheFlow(t *testing.T) {
 	if calls != 3 || stats["firstRefusals"] != uint64(2) || stats["finalFailures"] != uint64(1) ||
 		stats["recoveredOnFreshAttempt"].([]uint64)[1] != 1 || d.refusals.stats()["count"] != uint64(1) {
 		t.Fatalf("%d calls, stats %v", calls, stats)
+	}
+
+	// A fresh attempt that gets its port and is then refused by the peer is
+	// not a final port refusal: neither counted for the gate nor recorded.
+	calls = 0
+	d.nativeDial = func(context.Context, Adapter, netip.Addr, netip.AddrPort) (*readySocket, error) {
+		calls++
+		if calls == 1 {
+			return nil, refused
+		}
+		return nil, os.NewSyscallError("connectex", windows.WSAECONNREFUSED)
+	}
+	if _, err := d.DialFlowTCP(context.Background(), "line-1", remote, flow); !errors.Is(err, windows.WSAECONNREFUSED) {
+		t.Fatalf("dial = %v, want the peer's refusal", err)
+	}
+	stats = d.tcpRetries.stats()
+	if calls != 2 || stats["firstRefusals"] != uint64(3) || stats["finalFailures"] != uint64(1) || stats["otherFailures"] != uint64(1) ||
+		d.refusals.stats()["count"] != uint64(1) {
+		t.Fatalf("%d calls, stats %v, %v refusals recorded", calls, stats, d.refusals.stats()["count"])
 	}
 }
 

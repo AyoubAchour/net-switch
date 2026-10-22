@@ -181,9 +181,11 @@ export function engineBindDelta(before, after, protocol) {
   const one = (key) => {
     const b = before?.[key] ?? {}, a = after?.[key] ?? {};
     const d = (k) => (a[k] ?? 0) - (b[k] ?? 0);
+    // otherFailures: a fresh attempt got its port, then failed otherwise
+    // (peer refused, timeout, cancel); reported, never a port refusal.
     return { firstRefusals: d('firstRefusals'), freshAttempts: d('freshAttempts'),
       recoveredOnFreshAttempt: (a.recoveredOnFreshAttempt ?? []).map((n, i) => n - (b.recoveredOnFreshAttempt?.[i] ?? 0)),
-      finalFailures: d('finalFailures') };
+      finalFailures: d('finalFailures'), otherFailures: d('otherFailures') };
   };
   const udp = one('udpBindRetries'), tcp = one('tcpDialRetries');
   const seen = (after?.finalPortRefusals?.count ?? 0) - (before?.finalPortRefusals?.count ?? 0);

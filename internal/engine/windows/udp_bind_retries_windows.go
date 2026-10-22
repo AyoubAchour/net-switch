@@ -13,6 +13,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"golang.org/x/sys/windows"
 )
 
@@ -35,11 +36,26 @@ type portRetries struct {
 	firstRefusals atomic.Uint64
 	freshAttempts atomic.Uint64
 	// recoveredOn[i] counts opens that succeeded on fresh attempt i+1.
-	recoveredOn   [freshAttempts]atomic.Uint64
+	recoveredOn [freshAttempts]atomic.Uint64
+	// finalFailures counts opens that ended refused by the port choice after
+	// their fresh attempts: the hard gate's input, one per final refusal
+	// recorded. otherFailures counts opens whose fresh attempt got a port and
+	// then failed otherwise (refused by the peer, timed out, cancelled).
 	finalFailures atomic.Uint64
+	otherFailures atomic.Uint64
 	// windowEnded counts refusals whose fresh attempts stopped at the time
 	// window before reaching freshAttempts.
 	windowEnded atomic.Uint64
+	// now reads the window's clock; nil is winclock.Now. Go's own clock on
+	// Windows moves by timer ticks (up to 15.6 ms), coarser than the window.
+	now func() time.Duration
+}
+
+// retryOutcome is how one open ended: how many attempts it made, and
+// whether it ended refused by the automatic port choice (a final refusal).
+type retryOutcome struct {
+	Attempts int
+	Refused  bool
 }
 
 // udpPortRefusal is the UDP bind's refusal, as measured (WSAENOBUFS). A TCP
@@ -48,34 +64,45 @@ type portRetries struct {
 func udpPortRefusal(err error) bool { return errors.Is(err, windows.WSAENOBUFS) }
 
 // retryOpen runs one open: the first attempt, then, only after a refusal of
-// the automatic port choice (retryable), up to freshAttempts fresh ones within
-// freshWindow. Any other error ends the open at once. attempts is how many
-// were made.
-func retryOpen[T any](r *portRetries, retryable func(error) bool, attempt func() (T, error)) (result T, attempts int, err error) {
-	result, err = attempt()
-	attempts = 1
+// the automatic port choice (retryable), up to freshAttempts fresh ones; none
+// starts once freshWindow has passed since the first refusal, on the precise
+// clock. Any other error ends the open at once. The outcome is a final
+// refusal exactly when the last error is retryable, the same test the
+// callers' records use, so the gated count and the records agree.
+func retryOpen[T any](r *portRetries, retryable func(error) bool, attempt func() (T, error)) (T, retryOutcome, error) {
+	result, err := attempt()
+	outcome := retryOutcome{Attempts: 1}
 	if err == nil || !retryable(err) {
-		return result, attempts, err
+		return result, outcome, err
+	}
+	now := r.now
+	if now == nil {
+		now = winclock.Now
 	}
 	r.firstRefusals.Add(1)
-	refused := time.Now()
+	refused := now()
 	for n := range freshAttempts {
-		if time.Since(refused) >= freshWindow {
+		if now()-refused >= freshWindow {
 			r.windowEnded.Add(1)
 			break
 		}
 		r.freshAttempts.Add(1)
-		attempts++
+		outcome.Attempts++
 		if result, err = attempt(); err == nil {
 			r.recoveredOn[n].Add(1)
-			return result, attempts, nil
+			return result, outcome, nil
 		}
 		if !retryable(err) {
 			break
 		}
 	}
-	r.finalFailures.Add(1)
-	return result, attempts, err
+	if retryable(err) {
+		outcome.Refused = true
+		r.finalFailures.Add(1)
+	} else {
+		r.otherFailures.Add(1)
+	}
+	return result, outcome, err
 }
 
 func (r *portRetries) stats() map[string]any {
@@ -84,7 +111,7 @@ func (r *portRetries) stats() map[string]any {
 		recovered[i] = r.recoveredOn[i].Load()
 	}
 	return map[string]any{"firstRefusals": r.firstRefusals.Load(), "freshAttempts": r.freshAttempts.Load(),
-		"recoveredOnFreshAttempt": recovered, "finalFailures": r.finalFailures.Load(),
+		"recoveredOnFreshAttempt": recovered, "finalFailures": r.finalFailures.Load(), "otherFailures": r.otherFailures.Load(),
 		"windowEnded": r.windowEnded.Load(), "maxFreshAttempts": freshAttempts, "windowMS": freshWindow.Milliseconds()}
 }
 

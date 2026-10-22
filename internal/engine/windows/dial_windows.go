@@ -185,16 +185,16 @@ func (d *Dialer) DialFlowTCP(ctx context.Context, line string, remote netip.Addr
 		return nil, err
 	}
 	note, started := d.startDial(line, remote)
-	c, attempts, err := retryOpen(&d.tcpRetries, portLimit, func() (*readySocket, error) { return native(ctx, a, source, remote) })
+	c, outcome, err := retryOpen(&d.tcpRetries, portLimit, func() (*readySocket, error) { return native(ctx, a, source, remote) })
 	var conn net.Conn
 	if c != nil {
 		conn = c
 	}
 	d.finishDial(note, started, conn, err)
 	if err != nil {
-		if portLimit(err) {
+		if outcome.Refused {
 			flow.Destination = remote
-			d.refusals.record("tcp", "flow", line, netip.AddrPortFrom(source, 0), flow, attempts, err)
+			d.refusals.record("tcp", "flow", line, netip.AddrPortFrom(source, 0), flow, outcome.Attempts, err)
 		}
 		d.ports.observe(err)
 		return nil, err
@@ -219,11 +219,11 @@ func (d *Dialer) dialProbe(ctx context.Context, line string, remote netip.AddrPo
 		Control: bindSocket(a, remote.Addr().Is6()), KeepAlive: 30 * time.Second}
 	note, started := d.startDial(line, remote)
 	// A probe is the engine's own TCP dial too: the same fresh attempts.
-	c, attempts, err := retryOpen(&d.tcpRetries, portLimit, func() (net.Conn, error) { return dial.DialContext(ctx, network, remote.String()) })
+	c, outcome, err := retryOpen(&d.tcpRetries, portLimit, func() (net.Conn, error) { return dial.DialContext(ctx, network, remote.String()) })
 	d.finishDial(note, started, c, err)
 	if err != nil {
-		if portLimit(err) {
-			d.refusals.record("tcp", "probe", line, netip.AddrPortFrom(source, 0), platform.FlowIdentity{Destination: remote}, attempts, err)
+		if outcome.Refused {
+			d.refusals.record("tcp", "probe", line, netip.AddrPortFrom(source, 0), platform.FlowIdentity{Destination: remote}, outcome.Attempts, err)
 		}
 		d.ports.observe(err)
 		return nil, err
@@ -332,10 +332,10 @@ func (d *Dialer) OpenFlowUDP(ctx context.Context, line string, v6 bool, flow pla
 		network = "udp6"
 	}
 	local := netip.AddrPortFrom(source, 0)
-	s, attempts, err := retryOpen(&d.udpRetries, udpPortRefusal, func() (*udpSocket, error) { return openUDP(a, local, d.udp) })
+	s, outcome, err := retryOpen(&d.udpRetries, udpPortRefusal, func() (*udpSocket, error) { return openUDP(a, local, d.udp) })
 	if err != nil {
-		if udpPortRefusal(err) {
-			d.refusals.record("udp", "flow", line, local, flow, attempts, err)
+		if outcome.Refused {
+			d.refusals.record("udp", "flow", line, local, flow, outcome.Attempts, err)
 		}
 		err = &net.OpError{Op: "listen", Net: network, Addr: net.UDPAddrFromAddrPort(local), Err: err}
 		if portLimit(err) {
