@@ -30,6 +30,10 @@ type Dependencies struct {
 	Dialer     platform.LineDialer
 	Owners     platform.OwnerLookup
 	Identities platform.UDPIdentity
+	// SilentSYNDiagnostics records SYNs answered with neither a dial nor a
+	// reset (stats tcpSilentSYN). Windows opts in; off, the TCP ingress path
+	// does no work for them.
+	SilentSYNDiagnostics bool
 }
 type Engine struct {
 	// OnTunError may hand a platform-specific terminal condition to the service.
@@ -107,6 +111,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 		device.BindIOContext(run)
 	}
 	e.tcp = ntcp.New(run, s, e.limits.Handshakes, e.Table, e.deps.Owners, e.deps.Dialer, link)
+	if e.deps.SilentSYNDiagnostics {
+		e.tcp.RecordSilentSYNs() // before the pumps below deliver any packet
+	}
 	e.udp = udp.New(run, s, e.Table, e.deps.Owners, e.deps.Identities, e.deps.Dialer, link, tun.MTU())
 	echo := newEcho(run, e.deps.Dialer, e.Table, link)
 	nat := e.udp
@@ -389,7 +396,9 @@ func (e *Engine) Stats() any {
 		s["tcpRejected"] = e.tcp.Rejected.Load()
 		s["tcpInvalid"] = e.tcp.Invalid.Load()
 		s["tcpDialFailed"] = e.tcp.DialFailed.Load()
-		s["tcpSilentSYN"] = e.tcp.SilentStats()
+		if silent := e.tcp.SilentStats(); silent != nil {
+			s["tcpSilentSYN"] = silent
+		}
 		s["tcpFlows"], s["tcpFlowsOmitted"] = e.tcp.Diagnostics(128)
 	}
 	if e.stack != nil {

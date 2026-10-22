@@ -170,7 +170,8 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 			err = joinShutdownError(err, closeDialer())
 		}
 	}()
-	e := engine.New(ctx, engine.Dependencies{OpenTun: routes.OpenTun, Routes: routes, Dialer: dialer, Owners: owners, Identities: owners},
+	e := engine.New(ctx, engine.Dependencies{OpenTun: routes.OpenTun, Routes: routes, Dialer: dialer, Owners: owners, Identities: owners,
+		SilentSYNDiagnostics: true},
 		flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncParent})
 	loss := newAdapterLoss()
 	e.OnTunError = loss.handle

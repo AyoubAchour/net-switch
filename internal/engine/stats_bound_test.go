@@ -73,8 +73,9 @@ func TestStatsReplyStaysBoundedAtEveryLimit(t *testing.T) {
 	l.Handshakes = 8192 // Linux's limit, the larger
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	// With every opt-in section on, as on Windows.
 	e := New(ctx, Dependencies{OpenTun: func(context.Context) (platform.TunDevice, error) { return testfake.NewTun(), nil },
-		Routes: &testfake.Routes{}, Dialer: testfake.Dialer{}, Owners: &testfake.Owners{}}, l, nil)
+		Routes: &testfake.Routes{}, Dialer: testfake.Dialer{}, Owners: &testfake.Owners{}, SilentSYNDiagnostics: true}, l, nil)
 	c := policy.Config{Lines: []platform.Line{{ID: strings.Repeat("L", 64)}}}
 	if _, err := e.Start(ctx, policy.Revision{N: 1, Hash: policy.Hash(c), Config: c}); err != nil {
 		t.Fatal(err)

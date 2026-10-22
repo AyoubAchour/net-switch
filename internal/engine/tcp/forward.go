@@ -42,10 +42,16 @@ type Forwarder struct {
 	flowDialer                    platform.FlowDialer // dialer, when it records refused flows
 	out                           flowapi.Output
 	Rejected, Invalid, DialFailed atomic.Uint64
-	// Diagnostics only: SYNs that get neither a dial nor a reset, noted after
-	// Handle releases f.mu. Admission and open add nothing for them.
-	silent silentSYNs
+	// Diagnostics only, opt-in by the platform (RecordSilentSYNs): SYNs that
+	// get neither a dial nor a reset, noted after Handle releases f.mu. Nil
+	// leaves Handle as it was before these diagnostics existed.
+	silent *silentSYNs
 }
+
+// RecordSilentSYNs turns on the silent-SYN diagnostics; Windows' capacity
+// diagnosis uses them. Call it before the first packet. Without it a
+// duplicate SYN costs no counter, clock read, lock or formatting.
+func (f *Forwarder) RecordSilentSYNs() { f.silent = &silentSYNs{} }
 
 // silentReason says why Handle returned a SYN as handled without a dial or
 // a reset.
@@ -94,8 +100,12 @@ func (s *silentSYNs) note(reason silentReason, t platform.Tuple) {
 }
 
 // SilentStats reports silently handled SYNs, how many are still pending, and
-// how many of those gVisor accepted but has not handed to open yet.
+// how many of those gVisor accepted but has not handed to open yet. Nil when
+// the diagnostics are off.
 func (f *Forwarder) SilentStats() map[string]any {
+	if f.silent == nil {
+		return nil
+	}
 	counts := make(map[string]uint64, len(silentReasons)-1)
 	for reason := silentLive; int(reason) < len(silentReasons); reason++ {
 		counts[silentReasons[reason]] = f.silent.counts[reason].Load()
@@ -164,12 +174,14 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		return false
 	}
 	silent := notSilent
-	defer func() {
-		// Runs after the deferred unlock below.
-		if silent != notSilent {
-			f.silent.note(silent, tuple(id))
-		}
-	}()
+	if f.silent != nil {
+		defer func() {
+			// Runs after the deferred unlock below.
+			if silent != notSilent {
+				f.silent.note(silent, tuple(id))
+			}
+		}()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c := f.connections[id]; c != nil {
