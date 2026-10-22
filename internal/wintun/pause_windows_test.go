@@ -501,7 +501,9 @@ func TestWintunSessionDelay(t *testing.T) {
 		if attempt.Samples[0] >= floor && attempt.Samples[1] >= floor {
 			break
 		}
-		t.Logf("pause sampler starved (test instrument, not the session; retrying): %s", entry)
+		if number < sessionDelayAttempts {
+			t.Logf("pause sampler starved (test instrument, not the session; retrying): %s", entry)
+		}
 	}
 	latency := qpcDuration(attempt.Start, attempt.End)
 	floor := sessionDelaySampleFloor(latency)
