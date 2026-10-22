@@ -78,11 +78,16 @@ type udpGenerationFailure struct {
 	Tuple                              platform.Tuple
 	StartedNS, CompletedNS, DeadlineNS int64
 	Stage, Error                       string
+	Errno                              int
 	Query                              *diagQueryTrace
 }
 
 func (o *Owners) recordUDPGenerationFailure(ctx context.Context, tuple platform.Tuple, stage string, started time.Time, err error) {
 	f := &udpGenerationFailure{Tuple: tuple, StartedNS: started.UnixNano(), CompletedNS: time.Now().UnixNano(), Stage: stage, Error: err.Error()}
+	var errno unix.Errno
+	if errors.As(err, &errno) {
+		f.Errno = int(errno)
+	}
 	if deadline, ok := ctx.Deadline(); ok {
 		f.DeadlineNS = deadline.UnixNano()
 	}

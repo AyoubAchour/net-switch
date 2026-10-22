@@ -4,6 +4,7 @@ package suite
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -15,12 +16,25 @@ import (
 	"github.com/AyoubAchour/net-switch/tests/linux/harness"
 )
 
+func TestCapacityMissingGenerationReportsQueryEvidence(t *testing.T) {
+	before := engine.Stats{Counters: map[string]uint64{}}
+	after := engine.Stats{
+		Counters:    map[string]uint64{"udpGenerationMissing": 1},
+		OwnerLookup: json.RawMessage(`{"UDPGenerationFailures":[{"Tuple":{"Source":"198.18.0.1:50469","Destination":"198.51.100.36:7001"},"Stage":"exact-query","Error":"context deadline exceeded","Errno":0,"Query":{"Stage":"context","StartedNS":7861197,"DeadlineNS":1000000,"SentNS":0,"ReplyErrno":0}}]}`),
+	}
+	report := runHardCheck(t, func(e *Env) {
+		e.capacityAccounting("udp-held", "udp", before, after, heldBase{}, 0, 0, 0, capacityTotal)
+	})
+	requireFailure(t, report, "every UDP setup obtained a socket generation (1 missing; UDPGenerationFailures=[tuple=198.18.0.1:50469->198.51.100.36:7001 stage=exact-query query-stage=context query-start-after-deadline=6.861197ms sent=false reply-errno=0 errno=0")
+}
+
 func runCapacityCheck(t *testing.T, run func(*Env)) *harness.Report {
 	t.Helper()
 	c := &harness.Case{ID: "capacity.mixed-caps", Title: "capacity evidence", Label: harness.Requires10, ReleaseBlocker: loadAttributionBlocker("capacity.mixed-caps")}
 	c.Run = func(check *harness.T) { run(&Env{T: check, deferAttribution: true}) }
 	return harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
 }
+
 // runHardCheck runs checks in a case with no declared release blocker, so a
 // fixture that makes no release assertion is not an incomplete declaration.
 func runHardCheck(t *testing.T, run func(*Env)) *harness.Report {

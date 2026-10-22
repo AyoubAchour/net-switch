@@ -104,9 +104,9 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 	var canceled chan struct{}
 	var stop func() bool
 	lateReply := false
-	// A lookup's native read deadline is already at most 8 ms. It needs no
-	// extra cancellation goroutine/channel; cancellation still finishes
-	// inside that budget. Longer dumps retain immediate cancellation.
+	// Short identity queries need no extra cancellation goroutine/channel;
+	// cancellation still finishes inside that budget. UDP generation queries
+	// use the longer outer setup budget and retain immediate cancellation.
 	if dump || !timed || time.Until(deadline) > 10*time.Millisecond {
 		canceled = make(chan struct{})
 		stop = context.AfterFunc(ctx, func() { f.SetReadDeadline(time.Now()); close(canceled) })

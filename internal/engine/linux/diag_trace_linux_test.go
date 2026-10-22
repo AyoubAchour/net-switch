@@ -47,7 +47,7 @@ type pendingDeadlineContext struct {
 func (c pendingDeadlineContext) Deadline() (time.Time, bool) { return c.deadline, true }
 func (c pendingDeadlineContext) Done() <-chan struct{}       { return c.done }
 
-func TestLateExactReplyCannotUseCachedIdentityBeforeContextTimerRuns(t *testing.T) {
+func TestUDPExpiredOuterDeadlineRejectsReadyCookieBeforeContextTimerRuns(t *testing.T) {
 	app, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero})
 	if err != nil {
 		t.Fatal(err)
@@ -71,8 +71,8 @@ func TestLateExactReplyCannotUseCachedIdentityBeforeContextTimerRuns(t *testing.
 	before := o.Stats().(lookupStats)
 	late := pendingDeadlineContext{Context: context.Background(), deadline: time.Now().Add(-time.Second), done: make(chan struct{})}
 	owner, err := o.UDPFor(late, tuple)
-	if !errors.Is(err, context.DeadlineExceeded) || owner.Generation != known.Generation || owner.PID != 0 || owner.AppID != "" || owner.Path != "" || late.Err() != nil {
-		t.Fatalf("absolute deadline allowed overdue cached identity or lost its cookie: %+v %v parentErr=%v", owner, err, late.Err())
+	if !errors.Is(err, context.DeadlineExceeded) || owner != (platform.Owner{}) || late.Err() != nil {
+		t.Fatalf("expired outer deadline allowed admission: %+v %v parentErr=%v", owner, err, late.Err())
 	}
 	after := o.Stats().(lookupStats)
 	if after.ExactRepliesAfterDeadline != before.ExactRepliesAfterDeadline+1 || after.ExpiredBeforeHolderScan != before.ExpiredBeforeHolderScan+1 || after.HolderTimeouts != before.HolderTimeouts {
@@ -185,7 +185,7 @@ func TestUDPGenerationFailureHistoryIsBounded(t *testing.T) {
 	defer cancel()
 	for i := range 20 {
 		tuple := platform.Tuple{Source: netip.AddrPortFrom(netip.MustParseAddr("127.0.0.1"), uint16(10000+i)), Destination: netip.MustParseAddrPort("192.0.2.1:443")}
-		o.recordUDPGenerationFailure(ctx, tuple, "exact-query", time.Now(), &diagQueryError{Trace: diagQueryTrace{Stage: "receive", Sequence: uint32(i)}, cause: context.DeadlineExceeded})
+		o.recordUDPGenerationFailure(ctx, tuple, "exact-query", time.Now(), &diagQueryError{Trace: diagQueryTrace{Stage: "receive", Sequence: uint32(i)}, cause: unix.ENOBUFS})
 	}
 	stats := o.Stats().(lookupStats)
 	if len(stats.UDPGenerationFailures) != 8 {
@@ -194,7 +194,7 @@ func TestUDPGenerationFailureHistoryIsBounded(t *testing.T) {
 	seen := map[uint16]bool{}
 	for _, failure := range stats.UDPGenerationFailures {
 		port := failure.Tuple.Source.Port()
-		if port < 10012 || port > 10019 || seen[port] || failure.Query == nil || failure.Query.Stage != "receive" || failure.DeadlineNS == 0 {
+		if port < 10012 || port > 10019 || seen[port] || failure.Query == nil || failure.Query.Stage != "receive" || failure.DeadlineNS == 0 || failure.Errno != int(unix.ENOBUFS) {
 			t.Fatalf("failure evidence was lost or retained past its bound: %+v", failure)
 		}
 		seen[port] = true
