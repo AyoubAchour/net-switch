@@ -308,7 +308,7 @@ export async function capacity({ server, harness, directory, line }) {
     progress.wrongLine = { unknownTCPAdmissions: unknownTCP(refusedStats) - unknownTCP(admissionsBefore),
       lookups: lookup(refusedStats).count - (lookup(admissionsBefore).count ?? 0),
       misses: lookup(refusedStats).misses - (lookup(admissionsBefore).misses ?? 0),
-      holds: lookup(refusedStats).tcpHolds, heldFound: lookup(refusedStats).tcpHeldFound,
+      holds: lookup(refusedStats).tcpHolds, heldFound: lookup(refusedStats).tcpHeldFound, holdReads: lookup(refusedStats).tcpHoldReads,
       lateIdentities: lookup(refusedStats).tcpLateIdentities, maxUS: lookup(refusedStats).maxUS,
       tcpReadMaxUS: lookup(refusedStats).tcpReadMaxUS, tcpReadBuckets: lookup(refusedStats).tcpReadBuckets,
       upperUS: lookup(refusedStats).upperUS, peakRows: lookup(refusedStats).tcpPeakRows, failures: lookup(refusedStats).failures };
@@ -341,7 +341,19 @@ export async function capacity({ server, harness, directory, line }) {
       const stats = await engineStats();
       udpHold.checkStats(stats);
       assert(stats.flows.Flows >= held, 'The engine lost a held flow');
-      assert.equal(stats.flows.Handshakes, 0);
+      // No handshake of ours may be in progress. Windows' own connections
+      // can sit in the handshake state for minutes (acceptance ARM64 job
+      // 119697112090), so they are reported with their state, not counted.
+      // An unresolved handshake to our target is counted as ours.
+      assert(Array.isArray(stats.handshakeFlows), 'The engine did not report its handshake flows');
+      const handshakes = stats.handshakeFlows;
+      const ourHandshakes = handshakes.filter((flow) => ours(flow) || (!flow.resolved && flow.destination.startsWith(`${target.host}:`)));
+      const foreign = handshakes.filter((flow) => !ourHandshakes.includes(flow));
+      if (foreign.length) {
+        progress.foreignHandshakes = foreign;
+        console.log(`WINDOWS CAPACITY FOREIGN HANDSHAKES ${JSON.stringify(foreign)}`);
+      }
+      assert.equal(ourHandshakes.length, 0, `A test app's handshake is in progress: ${JSON.stringify(ourHandshakes)}`);
       assert(stats.processMemory?.privateBytes > 0 && stats.processMemory?.workingSetBytes > 0,
         `Windows process memory was not measured: ${JSON.stringify(stats)}`);
       samples.push(stats);

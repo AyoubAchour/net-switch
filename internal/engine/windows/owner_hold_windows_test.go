@@ -105,32 +105,59 @@ func TestOwnerOverloadHold(t *testing.T) {
 			t.Fatalf("fast lookup: %+v %v after %v holds %d", owner, err, took, o.Stats().TCPHolds)
 		}
 	})
-	t.Run("a read that started before the SYN does not hold it", func(t *testing.T) {
+	// Spec 5.6, "No fresh read in flight at 50 ms": a lookup that joined a
+	// slow read started before its SYN gets one fresh read at its bound, and
+	// every SYN waiting at its bound shares that one read.
+	t.Run("a slow read from before the SYN gets one shared fresh read at 50 ms", func(t *testing.T) {
 		o := NewOwners()
 		var mu sync.Mutex
-		first := true
+		reads := 0
+		late := make([]platform.Tuple, 5)
+		for i := range late {
+			late[i] = platform.Tuple{Source: netip.AddrPortFrom(holdTuple.Source.Addr(), uint16(40001+i)), Destination: holdTuple.Destination}
+		}
 		slowTables(o, func() time.Duration {
 			mu.Lock()
 			defer mu.Unlock()
-			if first {
-				first = false
+			reads++
+			if reads == 1 {
 				return 200 * time.Millisecond
 			}
-			return 5 * time.Millisecond
-		}, func() []byte { return tcp4Table(pid, holdTuple) })
+			return 40 * time.Millisecond
+		}, func() []byte { return tcp4Table(pid, append([]platform.Tuple{holdTuple}, late...)...) })
 		early := make(chan error, 1)
 		go func() { _, err := o.TCP(context.Background(), holdTuple); early <- err }()
 		winclock.System.Wait(context.Background(), 20*time.Millisecond)
-		// This lookup joins the 200 ms read that started before it. At its
-		// 50 ms bound no read has started after it, so it becomes unknown at
-		// the normal bound; the earlier lookup is held for its own read.
-		late := platform.Tuple{Source: netip.MustParseAddrPort("10.0.0.2:40001"), Destination: holdTuple.Destination}
-		_, err, took := timedLookup(o, context.Background(), late)
-		if !errors.Is(err, context.DeadlineExceeded) || took > ownerLookupBound+30*time.Millisecond {
-			t.Fatalf("lookup joined to an older read: %v after %v", err, took)
+		// Each of these joins the 200 ms read that started before it. The
+		// first to reach its 50 ms bound starts a 40 ms read; the others,
+		// reaching theirs while it runs, join it.
+		type outcome struct {
+			owner platform.Owner
+			err   error
+			took  time.Duration
+		}
+		results := make(chan outcome, len(late))
+		for _, tuple := range late {
+			go func() {
+				owner, err, took := timedLookup(o, context.Background(), tuple)
+				results <- outcome{owner, err, took}
+			}()
+			winclock.System.Wait(context.Background(), 2*time.Millisecond)
+		}
+		for range late {
+			r := <-results
+			if r.err != nil || r.owner.PID != pid || r.took < ownerLookupBound || r.took >= ownerOverloadHold {
+				t.Fatalf("late SYN: %+v %v after %v", r.owner, r.err, r.took)
+			}
 		}
 		if err := <-early; err != nil {
 			t.Fatalf("the lookup whose own read was slow should have been held: %v", err)
+		}
+		stats := o.Stats()
+		mu.Lock()
+		defer mu.Unlock()
+		if stats.TCPHoldReads != 1 || reads != 2 || stats.TCPHeldFound != uint64(len(late))+1 {
+			t.Fatalf("fresh reads started %d, table reads %d, held found %d", stats.TCPHoldReads, reads, stats.TCPHeldFound)
 		}
 	})
 	t.Run("a found owner whose identity step crosses 50 ms is kept", func(t *testing.T) {

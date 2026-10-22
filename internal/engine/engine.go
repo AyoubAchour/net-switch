@@ -344,7 +344,7 @@ func cloneLines(lines []platform.Line) []platform.Line {
 func (e *Engine) Stats() any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	s := map[string]any{"flows": e.Table.Stats()}
+	s := map[string]any{"flows": e.Table.Stats(), "handshakeFlows": e.Table.HandshakeFlows()}
 	if tun, ok := e.tun.(interface{ Stats() any }); ok {
 		s["tunKernel"] = tun.Stats()
 	}

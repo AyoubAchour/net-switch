@@ -36,6 +36,8 @@ type Record struct {
 	Up      uint64 `json:"up"`
 	Down    uint64 `json:"down"`
 	Closing bool   `json:"closing"`
+	// Handshake: TCP, admitted, the app-side handshake not yet established.
+	Handshake bool `json:"handshake,omitempty"`
 }
 type Bytes struct {
 	Up   uint64 `json:"up"`
@@ -95,6 +97,10 @@ type Table struct {
 	replyPeakBytes       atomic.Int64
 	pendingPeakBytes     atomic.Int64
 	doubleReleases       atomic.Uint64
+
+	// handshaking holds the TCP tickets counted in gauges.Handshakes, so their
+	// detail is listed without scanning every flow (at most limits.Handshakes).
+	handshaking map[*ticket]struct{}
 }
 
 func New(l Limits, store StateStore) *Table {
@@ -208,6 +214,10 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	} else {
 		f.handshake = true
 		f.receive, f.send = 64<<10, 64<<10
+		if t.handshaking == nil {
+			t.handshaking = map[*ticket]struct{}{}
+		}
+		t.handshaking[f] = struct{}{}
 		t.gauges.Handshakes++
 		t.gauges.PeakHandshakes = max(t.gauges.PeakHandshakes, t.gauges.Handshakes)
 	}
@@ -245,7 +255,37 @@ type liveRecord struct {
 
 func (f *ticket) snapshotRecord() Record {
 	r := f.record
-	return Record{ID: r.ID, Epoch: r.Epoch, Point: r.Point, Start: time.Unix(0, r.Start), Owner: r.Owner, Protocol: r.Protocol, Source: r.Source, Destination: r.Destination, PhysicalSource: r.PhysicalSource, Decision: r.Decision, Up: f.up.Load(), Down: f.down.Load(), Closing: r.Closing}
+	return Record{ID: r.ID, Epoch: r.Epoch, Point: r.Point, Start: time.Unix(0, r.Start), Owner: r.Owner, Protocol: r.Protocol, Source: r.Source, Destination: r.Destination, PhysicalSource: r.PhysicalSource, Decision: r.Decision, Up: f.up.Load(), Down: f.down.Load(), Closing: r.Closing, Handshake: f.handshake}
+}
+
+// HandshakeFlow is one TCP flow counted in Handshakes: admitted, its app-side
+// handshake not yet established. Resolved is false while its owner lookup
+// runs; Owner and Line are then empty.
+type HandshakeFlow struct {
+	ID          uint64         `json:"id"`
+	Source      netip.AddrPort `json:"source"`
+	Destination netip.AddrPort `json:"destination"`
+	Owner       platform.Owner `json:"app"`
+	Resolved    bool           `json:"resolved"`
+	Line        string         `json:"line,omitempty"`
+	Closing     bool           `json:"closing,omitempty"`
+	AgeMS       int64          `json:"ageMs"`
+}
+
+// HandshakeFlows lists every flow counted in Handshakes, oldest first. There
+// are at most limits.Handshakes of them, so the list is never truncated.
+func (t *Table) HandshakeFlows() []HandshakeFlow {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := t.now().UnixNano()
+	list := make([]HandshakeFlow, 0, len(t.handshaking))
+	for f := range t.handshaking {
+		r := f.record
+		list = append(list, HandshakeFlow{ID: r.ID, Source: r.Source, Destination: r.Destination, Owner: r.Owner, Resolved: f.resolved,
+			Line: r.Line, Closing: r.Closing || f.closed, AgeMS: (now - r.Start) / int64(time.Millisecond)})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
+	return list
 }
 
 func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
@@ -423,6 +463,7 @@ func (f *ticket) retireLocked() {
 	t.gauges.Flows--
 	if f.handshake {
 		t.gauges.Handshakes--
+		delete(t.handshaking, f)
 		f.handshake = false
 	}
 	udp := f.record.Protocol == "udp"
@@ -460,6 +501,7 @@ func (f *ticket) Established(source netip.Addr) {
 	f.record.PhysicalSource = source
 	if f.handshake {
 		t.gauges.Handshakes--
+		delete(t.handshaking, f)
 		f.handshake = false
 	}
 }

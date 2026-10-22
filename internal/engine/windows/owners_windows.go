@@ -150,6 +150,7 @@ type LookupHistogram struct {
 	TCPParallelPeak    int             `json:"tcpParallelPeak"`   // most reads in flight for one family
 	TCPHolds           uint64          `json:"tcpHolds"`          // lookups held past 50 ms for a fresh read
 	TCPHeldFound       uint64          `json:"tcpHeldFound"`      // held lookups that found the owner
+	TCPHoldReads       uint64          `json:"tcpHoldReads"`      // fresh reads started at a 50 ms bound, shared by every waiting SYN
 	TCPLateIdentities  uint64          `json:"tcpLateIdentities"` // found rows whose identity step ended past 50 ms
 	TCPReadMaxUS       uint64          `json:"tcpReadMaxUS"`      // slowest native TCP read
 	TCPReadBuckets     []uint64        `json:"tcpReadBuckets"`    // native TCP reads alone, not lookups
@@ -178,6 +179,7 @@ type Owners struct {
 	tcpRetries                                                    atomic.Uint64
 	tcpPeakRows                                                   atomic.Uint64
 	tcpHolds, tcpHeldFound, tcpReadMaxUS, tcpLateIdentities       atomic.Uint64
+	tcpHoldReads                                                  atomic.Uint64
 	tcpReadHist                                                   [len(lookupBounds)]atomic.Uint64
 	failures                                                      [16]lookupFailure
 	failureCount                                                  uint64
@@ -228,7 +230,7 @@ func (o *Owners) Stats() LookupHistogram {
 	h.TCPRefreshes, h.TCPReadNanos, h.TCPIndexNanos, h.CacheMissRefreshes = o.tcpRefreshes.Load(), o.tcpReadNanos.Load(), o.tcpIndexNanos.Load(), o.cacheMissRefreshes.Load()
 	h.TCPPeakRows = o.tcpPeakRows.Load()
 	h.TCPHolds, h.TCPHeldFound, h.TCPReadMaxUS = o.tcpHolds.Load(), o.tcpHeldFound.Load(), o.tcpReadMaxUS.Load()
-	h.TCPLateIdentities = o.tcpLateIdentities.Load()
+	h.TCPLateIdentities, h.TCPHoldReads = o.tcpLateIdentities.Load(), o.tcpHoldReads.Load()
 	h.TCPReadBuckets = make([]uint64, len(lookupBounds))
 	for i := range h.TCPReadBuckets {
 		h.TCPReadBuckets[i] = o.tcpReadHist[i].Load()
@@ -363,9 +365,9 @@ func freshSnapshot(s *ownerSnapshot, after, now time.Duration) bool {
 // tcpSnapshot returns a snapshot of one family that started after `after`.
 // normal ends at the lookup's 50 ms bound and ctx at the overload hold. When
 // normal ends first, the wait continues only for a read that started after
-// arrived (the SYN's arrival) and after `after`, and the result says it was
-// held. holding means an earlier step already held, so normal no longer
-// applies.
+// arrived (the SYN's arrival) and after `after`, starting one if none is in
+// flight, and the result says it was held. holding means an earlier step
+// already held, so normal no longer applies.
 func (o *Owners) tcpSnapshot(ctx, normal context.Context, after, arrived time.Duration, family int, holding bool) (ownerSnapshot, bool, error) {
 	start := winclock.Now()
 	defer measureStage(&o.snapshotHist, start)
@@ -411,7 +413,17 @@ func (o *Owners) tcpSnapshot(ctx, normal context.Context, after, arrived time.Du
 				// after the SYN, and the hold's total still bounds the wait.
 				fresh := o.tcpReads[family].since(threshold)
 				if fresh == nil {
-					return ownerSnapshot{}, holding, normal.Err()
+					// Spec 5.6, "No fresh read in flight at 50 ms": the only
+					// read running started before the SYN (x64 capacity run
+					// 39731427882 sent 4 pinned SYNs out the default line).
+					// Start one fresh read; every SYN waiting at its bound
+					// shares it (join returns it while it is queued or
+					// running), so overload never multiplies table reads.
+					var started bool
+					fresh, started = o.tcpReads[family].joinStarted(threshold-1, run)
+					if started {
+						o.tcpHoldReads.Add(1)
+					}
 				}
 				o.tcpHolds.Add(1)
 				pending, bound, holding, after = fresh, nil, true, threshold-1

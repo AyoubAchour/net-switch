@@ -48,6 +48,13 @@ type tableReads[S any] struct {
 
 // join returns a read that starts, or started, after `after`.
 func (q *tableReads[S]) join(after time.Duration, run func(*tableRead[S])) *tableRead[S] {
+	r, _ := q.joinStarted(after, run)
+	return r
+}
+
+// joinStarted is join, and also reports whether this call created the read
+// (started now or queued) rather than joining one already running or queued.
+func (q *tableReads[S]) joinStarted(after time.Duration, run func(*tableRead[S])) (*tableRead[S], bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	var newest, latest *tableRead[S]
@@ -63,21 +70,21 @@ func (q *tableReads[S]) join(after time.Duration, run func(*tableRead[S])) *tabl
 		}
 	}
 	if newest != nil {
-		return newest
+		return newest, false
 	}
 	if q.queued != nil {
-		return q.queued // it starts later than this call, so it covers it
+		return q.queued, false // it starts later than this call, so it covers it
 	}
 	r := &tableRead[S]{done: make(chan struct{})}
 	free := q.free()
 	if free < 0 {
 		q.queued = r // starts in the first slot that frees
-		return r
+		return r, true
 	}
 	gap := q.typical / ownerParallelReads
 	if latest == nil || gap <= 0 {
 		q.start(r, free, run)
-		return r
+		return r, true
 	}
 	if wait := latest.at + gap - winclock.Now(); wait > 0 {
 		// Too soon after the latest start: queue it for the stagger point,
@@ -93,10 +100,10 @@ func (q *tableReads[S]) join(after time.Duration, run func(*tableRead[S])) *tabl
 				}
 			}
 		})
-		return r
+		return r, true
 	}
 	q.start(r, free, run)
-	return r
+	return r, true
 }
 
 // since returns the newest running read that started at or after instant,
