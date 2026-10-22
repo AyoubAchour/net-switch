@@ -81,11 +81,99 @@ func TestUDPGenerationSurvivesIdentityExpiryBeforeQuery(t *testing.T) {
 				t.Fatalf("cookie recovery sent %d queries, want exactly one", requests)
 			}
 			stats := o.Stats().(lookupStats)
-			if stats.UDPIdentityExpiredGeneration != 1 || stats.Timeout != 1 || len(stats.UDPGenerationFailures) != 0 {
+			if stats.UDPIdentityExpiredGeneration != 1 || stats.UDPGenerationQueryAfterIdentityDeadline != 1 || stats.UDPLateIdentityDiscarded != 0 || stats.Timeout != 1 || len(stats.UDPGenerationFailures) != 0 {
 				t.Fatalf("recovered cookie must be a distinct timeout, not a generation failure: %+v", stats)
+			}
+			snapshot, err := o.Snapshot(outer, []netip.AddrPort{tuple.Source})
+			if err != nil || snapshot[tuple.Source] != owner {
+				t.Fatalf("reconciliation changed the recovered unknown identity: %+v %v", snapshot, err)
 			}
 			t.Logf("identity expired before query; one exact request returned SO_COOKIE=%s, unknown owner, recovery count=1", cookie)
 		})
+	}
+}
+
+func TestUDPIdentityExpiryAfterResolutionKeepsReconciliationUnknown(t *testing.T) {
+	app, knownTuple, cookie := generationSocket(t, 0)
+	o := newTestOwners(t)
+	outer, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	rows, err := o.query(outer, unix.AF_INET, unix.IPPROTO_UDP, knownTuple.Source, knownTuple.Destination)
+	if err != nil || len(rows) != 1 || rows[0].generation() != cookie {
+		t.Fatalf("real socket query: %+v %v", rows, err)
+	}
+	known, err := o.holders(outer, rows[0])
+	if err != nil || known.PID != uint32(os.Getpid()) || known.AppID == "" {
+		t.Fatalf("fixture must warm a real known holder: %+v %v", known, err)
+	}
+	// One wildcard socket can back different local source addresses. Losing
+	// its holder cache globally would close this already-known sibling too.
+	unknownTuple := knownTuple
+	unknownTuple.Source = netip.AddrPortFrom(netip.MustParseAddr("127.0.0.2"), knownTuple.Source.Port())
+	var paused bool
+	o.afterUDPOwnerResolution = func(identity context.Context, result platform.Owner) {
+		if result != known || lookupContextError(identity) != nil || len(o.cachedHolders(rows[0].cookie)) == 0 {
+			t.Fatalf("fixture must resolve and cache identity before expiry: %+v child=%v", result, lookupContextError(identity))
+		}
+		// This is exactly the pre-fix disagreement: SnapshotAt already sees
+		// a known holder, but the final lookup deadline will discard identity.
+		before, err := o.Snapshot(outer, []netip.AddrPort{knownTuple.Source, unknownTuple.Source})
+		if err != nil || before[unknownTuple.Source] != known {
+			t.Fatalf("fixture lacks the pre-fix positive snapshot: %+v %v", before, err)
+		}
+		<-identity.Done()
+		paused = true
+	}
+	unknown, err := o.UDPFor(outer, unknownTuple)
+	if !paused || !errors.Is(err, context.DeadlineExceeded) || unknown != (platform.Owner{Generation: cookie}) || outer.Err() != nil {
+		t.Fatalf("late identity was not discarded under a live setup context: %+v %v", unknown, err)
+	}
+	o.afterUDPOwnerResolution = nil
+	snapshot, err := o.Snapshot(outer, []netip.AddrPort{knownTuple.Source, unknownTuple.Source})
+	if err != nil || snapshot[unknownTuple.Source] != unknown || snapshot[knownTuple.Source] != known {
+		t.Fatalf("reconciliation would close a live session: unknown=%+v known=%+v snapshot=%+v err=%v", unknown, known, snapshot, err)
+	}
+	stats := o.Stats().(lookupStats)
+	if stats.Timeout != 1 || stats.HolderTimeouts != 0 || stats.ExpiredBeforeHolderScan != 0 || stats.UDPIdentityExpiredGeneration != 1 || stats.UDPGenerationQueryAfterIdentityDeadline != 0 || stats.UDPLateIdentityDiscarded != 1 {
+		t.Fatalf("late publication was confused with a late query or holder timeout: %+v", stats)
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = o.Snapshot(outer, []netip.AddrPort{knownTuple.Source, unknownTuple.Source})
+	if err != nil || len(snapshot) != 0 || o.udpWasUnknown(unknownTuple.Source, rows[0].cookie) {
+		t.Fatalf("unknown admission hid socket destruction or retained dead state: %+v %v", snapshot, err)
+	}
+	t.Log("real cached identity expired before publication; reconciliation retained both known and unknown siblings, then detected socket closure")
+}
+
+func TestUDPUnknownAdmissionPrunesOnlyUnreferencedResults(t *testing.T) {
+	o := newTestOwners(t)
+	first := netip.MustParseAddrPort("127.0.0.1:40000")
+	second := netip.MustParseAddrPort("127.0.0.2:40000")
+	const cookie = 123
+	o.recordUDPUnknown(first, cookie, true)
+	cutoff := time.Now()
+	o.recordUDPUnknown(second, cookie, true)
+	if !o.udpWasUnknown(first, cookie) || !o.udpWasUnknown(second, cookie) {
+		t.Fatal("fixture must begin with both unknown records")
+	}
+	live := map[uint64]bool{cookie: true}
+	referenced := map[netip.AddrPort]bool{first: true}
+	o.pruneCookies(live, referenced, cutoff)
+	if !o.udpWasUnknown(second, cookie) {
+		t.Fatal("snapshot dropped a lookup completed after enumeration")
+	}
+	o.pruneCookies(live, referenced, time.Now().Add(time.Second))
+	if !o.udpWasUnknown(first, cookie) || o.udpWasUnknown(second, cookie) {
+		t.Fatal("pruning must retain the referenced source, not an unreferenced alias of its cookie")
+	}
+	if o.udpWasUnknown(first, cookie+1) {
+		t.Fatal("a rebound socket inherited the old unknown decision")
+	}
+	o.recordUDPUnknown(first, cookie, false)
+	if o.udpWasUnknown(first, cookie) {
+		t.Fatal("a new known setup inherited the previous unknown decision")
 	}
 }
 
@@ -145,6 +233,11 @@ func TestUDPGenerationCloseRebindAfterIdentityExpiry(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].generation() != oldCookie {
 		t.Fatalf("original cookie must first be queried: %+v %v", rows, err)
 	}
+	o.afterUDPIdentityContext = func(identity context.Context) { <-identity.Done() }
+	previous, err := o.UDPFor(outer, tuple)
+	if !errors.Is(err, context.DeadlineExceeded) || previous != (platform.Owner{Generation: oldCookie}) || !o.udpWasUnknown(tuple.Source, rows[0].cookie) {
+		t.Fatalf("fixture must first record a live unknown admission: %+v %v", previous, err)
+	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +245,10 @@ func TestUDPGenerationCloseRebindAfterIdentityExpiry(t *testing.T) {
 	if rebound != tuple || newCookie == oldCookie {
 		t.Fatalf("fixture did not replace the socket at the same tuple: old=%s new=%s tuple=%+v", oldCookie, newCookie, rebound)
 	}
-	o.afterUDPIdentityContext = func(identity context.Context) { <-identity.Done() }
+	snapshot, err := o.Snapshot(outer, []netip.AddrPort{tuple.Source})
+	if err != nil || snapshot[tuple.Source].Generation != newCookie || snapshot[tuple.Source].Generation == previous.Generation {
+		t.Fatalf("unknown admission hid a real close/rebind: %+v %v", snapshot, err)
+	}
 	owner, err := o.UDPFor(outer, tuple)
 	if !errors.Is(err, context.DeadlineExceeded) || owner != (platform.Owner{Generation: newCookie}) {
 		t.Fatalf("rebound socket inherited stale generation: %+v %v; old=%s new=%s", owner, err, oldCookie, newCookie)

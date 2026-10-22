@@ -74,13 +74,17 @@ var diagDumpBuffers = sync.Pool{New: func() any { b := make([]byte, 64<<10); ret
 var diagSequence atomic.Uint32
 
 func diag(ctx context.Context, family, protocol int, local, remote netip.AddrPort, dump bool) ([]socketRow, error) {
-	return diagQuery(ctx, family, protocol, local, remote, dump, nil)
+	return diagQuery(ctx, family, protocol, local, remote, dump, nil, nil)
 }
 
 // Only completed exact queries are reusable. Interrupted dumps, cancellation,
 // malformed messages and errors discard the descriptor with all pending data.
-func diagQuery(ctx context.Context, family, protocol int, local, remote netip.AddrPort, dump bool, pool *diagPool) (rows []socketRow, err error) {
-	trace := diagQueryTrace{Stage: "context", StartedNS: time.Now().UnixNano()}
+func diagQuery(ctx context.Context, family, protocol int, local, remote netip.AddrPort, dump bool, pool *diagPool, started *time.Time) (rows []socketRow, err error) {
+	now := time.Now()
+	if started != nil {
+		*started = now
+	}
+	trace := diagQueryTrace{Stage: "context", StartedNS: now.UnixNano()}
 	if deadline, ok := ctx.Deadline(); ok {
 		trace.DeadlineNS = deadline.UnixNano()
 	}
