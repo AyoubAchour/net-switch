@@ -79,10 +79,10 @@ type udpEngineHalves struct {
 	// an I/O completion port with Go's notification modes, the one remaining
 	// difference from a Go-created socket.
 	completionPort windows.Handle
-	line      Adapter
-	source    netip.Addr
-	config    net.ListenConfig
-	pool      *udpReadiness
+	line           Adapter
+	source         netip.Addr
+	config         net.ListenConfig
+	pool           *udpReadiness
 }
 
 func newUDPEngineHalves(ready bool, index uint32, source string, pool *udpReadiness) udpEngineHalves {
