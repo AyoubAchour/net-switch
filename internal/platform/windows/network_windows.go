@@ -246,7 +246,10 @@ func readNetwork() (networkLine, error) {
 			defaults = append(defaults, route)
 		}
 	}
-	ssids := readSSIDs()
+	ssids, ssidErr := readSSIDs()
+	if ssidErr != nil {
+		fmt.Fprintf(os.Stderr, "read Wi-Fi name without location access (unavailable names left null): %v\n", ssidErr)
+	}
 	hidden, err := hiddenAdapters()
 	if err != nil {
 		return line, fmt.Errorf("read adapter visibility: %w", err)

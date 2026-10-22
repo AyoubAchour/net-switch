@@ -11,7 +11,7 @@ import (
 
 func TestNetworkWindowsLayouts(t *testing.T) {
 	// Windows x64 and ARM64 both align pointers and uint64 fields to 8 bytes.
-	// These are the SDK offsets used by iphlpapi and the prefix read from wlanapi.
+	// These are the SDK offsets used by iphlpapi.
 	checks := []struct{ got, want uintptr }{
 		{unsafe.Sizeof(uintptr(0)), 8},
 		{unsafe.Alignof(windows.MibIfRow2{}), 8},
@@ -20,13 +20,6 @@ func TestNetworkWindowsLayouts(t *testing.T) {
 		{unsafe.Sizeof(windows.MibIpForwardRow2{}), 104},
 		{unsafe.Offsetof(windows.MibIpForwardTable2{}.Table), 8},
 		{unsafe.Offsetof(windows.MibIpInterfaceRow{}.Metric), 148},
-		{unsafe.Offsetof(wlanInterfaceList{}.Interfaces), 8},
-		{unsafe.Sizeof(wlanInterface{}), 532},
-		{unsafe.Alignof(wlanInterface{}), 4},
-		{unsafe.Offsetof(wlanInterface{}.State), 528},
-		{unsafe.Offsetof(wlanConnection{}.SSIDLength), 520},
-		{unsafe.Offsetof(wlanConnection{}.SSID), 524},
-		{unsafe.Sizeof(wlanConnection{}), 556},
 	}
 	for _, c := range checks {
 		if c.got != c.want {

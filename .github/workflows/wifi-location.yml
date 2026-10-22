@@ -1,0 +1,49 @@
+name: Wi-Fi name privacy
+
+on:
+  pull_request:
+    paths: ['internal/platform/windows/**', 'tests/windows/wifi-location.ps1', '.github/workflows/wifi-location.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  privacy:
+    name: Wi-Fi privacy / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Pure parsing, null, lifetime and forbidden API regressions
+        run: |
+          go test -v -count=1 -run 'TestSSID' ./internal/platform/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build distinct binary identities for the reader and positive control
+        id: probes
+        run: |
+          $probeDir = Join-Path $env:RUNNER_TEMP ('wifi-location-' + [Guid]::NewGuid().ToString('N'))
+          go test -c -o "$probeDir/locationfree.test.exe" ./internal/platform/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o "$probeDir/legacy.test.exe" ./internal/platform/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "directory=$probeDir" >> $env:GITHUB_OUTPUT
+      - name: Observe location accounting, including the old opcode-7 positive control
+        run: ./tests/windows/wifi-location.ps1 -ProbeDirectory '${{ steps.probes.outputs.directory }}'
