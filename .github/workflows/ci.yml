@@ -438,7 +438,10 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.regular_jobs) && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.go_windows != 'false') }}
     name: Go 1.0 / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    # Normal runs take 40-42 minutes, most of it the 1000x repeat steps. At 45
+    # minutes a runner a few minutes slower than usual cancelled a green run
+    # mid-test, which reads as a hang in whichever test was running.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -485,8 +488,8 @@ jobs:
           NETSWITCH_OWNERSHIP_DIRECTORY_CI: '1'
         run: go test -count=1 -v -timeout=3m -run '^TestOwnershipLockHostileDirectoryStartupAndRecovery$' ./internal/engine/windows
       - name: Deterministic gVisor dispatch regression
-        run: go test -mod=mod ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1 gvisor.dev/gvisor/pkg/tcpip/transport/tcp
-      - run: go test -v ./internal/... ./cmd/... ./tests/...
+        run: go test -mod=mod ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1 -timeout=5m gvisor.dev/gvisor/pkg/tcpip/transport/tcp
+      - run: go test -v -timeout=10m ./internal/... ./cmd/... ./tests/...
       - run: go build ./internal/... ./cmd/... ./tests/...
       - name: Install pinned govulncheck
         run: go install -mod=mod golang.org/x/vuln/cmd/govulncheck@v1.9.0
@@ -501,7 +504,7 @@ jobs:
         run: |
           go -C tests/quicfixture mod verify
           go -C tests/quicfixture vet ./...
-          go -C tests/quicfixture test -count=1 -v ./...
+          go -C tests/quicfixture test -count=1 -v -timeout=2m ./...
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: runner.os == 'Linux'
         with:
@@ -514,27 +517,27 @@ jobs:
           node tests/differential/run.mjs ./bin/differential
       - name: Race detector
         if: matrix.name == 'Linux x64' || matrix.name == 'Linux ARM64' || matrix.name == 'Windows x64'
-        run: go test -race -v ./internal/... ./cmd/... ./tests/...
+        run: go test -race -v -timeout=15m ./internal/... ./cmd/... ./tests/...
       - name: Record the complete TIME_WAIT acceptance gate under race detection
         if: matrix.name != 'Windows ARM64'
-        run: go test -race -v -count=1 -run 'TimeWait|Close|PacketOrderPerTuple' ./internal/engine/stack
+        run: go test -race -v -count=1 -timeout=5m -run 'TimeWait|Close|PacketOrderPerTuple' ./internal/engine/stack
       # Sustained default-limit load and full heap sampling run once, separately
       # from the race suite so timing and memory measurements stay meaningful.
       - name: Sustain 1000 successful connections per second at default limits
         env:
           NETSWITCH_TIMEWAIT_GATE: '1'
-        run: go test -v -count=1 -run '^Test(TimeWait(ThousandPerSecondSuccess|SameTupleUnderLoad)|CloseAtCapUnderLoad|CloseRetainedOverflowLoad)$' ./internal/engine/stack
+        run: go test -v -count=1 -timeout=5m -run '^Test(TimeWait(ThousandPerSecondSuccess|SameTupleUnderLoad)|CloseAtCapUnderLoad|CloseRetainedOverflowLoad)$' ./internal/engine/stack
       - name: Measure other-flow latency during a closing 100 MB download
-        run: go test -run '^$' -bench '^BenchmarkCloseDownloadOtherFlow$' -benchtime=3x -count=1 ./internal/engine/stack
+        run: go test -run '^$' -bench '^BenchmarkCloseDownloadOtherFlow$' -benchtime=3x -count=1 -timeout=5m ./internal/engine/stack
       - name: Measure SYN admission at total and handshake caps with 65536 flows
-        run: go test -run '^$' -bench '^BenchmarkSYNAtCapacity$' -benchtime=1000x -count=1 ./internal/engine/tcp
+        run: go test -run '^$' -bench '^BenchmarkSYNAtCapacity$' -benchtime=1000x -count=1 -timeout=5m ./internal/engine/tcp
       - name: Prove every close path fails without admission release
         if: matrix.name == 'Linux x64'
         run: node scripts/prove-close-release.mjs
       - name: Measure retained TIME_WAIT memory after payload buffers drain
         env:
           NETSWITCH_TIMEWAIT_PROFILE: timewait.pprof
-        run: go test -v -count=1 -memprofilerate=1 -run '^TestTimeWaitEndpointMemory$' ./internal/engine/stack
+        run: go test -v -count=1 -memprofilerate=1 -timeout=5m -run '^TestTimeWaitEndpointMemory$' ./internal/engine/stack
       - name: Keep the TIME_WAIT heap profile
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -547,7 +550,7 @@ jobs:
       - name: Check 1000 close repeats in one process without race instrumentation
         run: node scripts/repeat-close-tests.mjs --batches=1 --count=1000
       - name: Repeat endpoint setup deduplication and cancellation 1000 times
-        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
+        run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -timeout=2m -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths
         if: matrix.name == 'Linux x64'
         run: |

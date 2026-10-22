@@ -61,9 +61,14 @@ export function rssKiB(pid, files = { readFileSync, readdirSync }, seen = new Se
   }
 }
 
+// A batch of 1000 repetitions without race instrumentation legitimately takes
+// about 4 minutes on Windows, so 5 minutes cancelled slow runners on a step
+// that was not hung. A real hang still fails inside the job's time limit.
+const batchTimeout = '10m';
+
 async function batch(index, batches, count, race) {
   const results = new Results();
-  const args = ['test', '-json', '-failfast', `-count=${count}`, '-timeout=5m', '-run', `^(${parents.join('|')})$`, './internal/engine/stack'];
+  const args = ['test', '-json', '-failfast', `-count=${count}`, `-timeout=${batchTimeout}`, '-run', `^(${parents.join('|')})$`, './internal/engine/stack'];
   if (race) args.splice(1, 0, '-race');
   console.log(`CLOSE REPEAT batch ${index}/${batches}: ${count} repetitions; race=${race}`);
   const child = spawn(process.env.GO_BINARY || 'go', args, { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
