@@ -275,21 +275,50 @@ against the test-only in-process registration.
 
 ### TCP integrity investigation (hosted CI only)
 
-Dispatch `ci.yml` with `wintun_integrity=true`, `wintun_integrity_arch=x64`
-(then `arm64` after reviewing x64), and `wintun_integrity_repeats=50`. Only
-the selected diagnostic job runs unless `regular_jobs` is also explicitly set.
+Dispatch `ci.yml` with `wintun_integrity=true`, `wintun_integrity_arch=both`
+(or `x64` / `arm64`), `wintun_integrity_shards=20` (or `1` / `5`),
+`wintun_integrity_scenario=isolated` or `full`, and
+`wintun_integrity_repeats=50`. Each selected architecture gets that many
+independent hosted runners, with fail-fast disabled. Dispatch both scenarios
+for 80 jobs at 20 shards. Only the selected diagnostic jobs run unless
+`regular_jobs` is also explicitly set.
 It builds with `-tags=wintun_integrity` and opts in at runtime with
 `NETSWITCH_WINTUN_INTEGRITY=1`. Normal binaries compile out the ring observers;
 normal performance runs keep the original payload, warm-ups and gate.
 
-Each repeat runs all 12 positions of `tcp_8_MBps`: two serial 64 MiB warm-ups,
-then eight 64 MiB streams, for both the signed DLL and our session, alternating
-which mode runs first. The release registrar remains uninstrumented. The
-runner starts repeats for up to 37 minutes and allows eight minutes for the
-last complete case. `INTEGRITY_EXPOSURE` reports the actual count if the time
-budget stops it early. An unsuccessful case stops the job; no sample or pair
-is retried, dropped or replaced. Instrumented rates are labelled diagnostic
-and never enter the clean performance gate.
+An isolated repeat runs all 12 positions of `tcp_8_MBps`: two serial 64 MiB
+warm-ups, then eight 64 MiB streams, for both the signed DLL and our session,
+alternating which mode runs first. A full repeat replays the normal Wintun
+job: ring/recovery tests, registrar tests, ping-pong, the **entire five-metric
+performance test**, its in-process-reference comparison, lifetime/crash,
+both CPU profiles, fuzzing, and x64 race/handle checks. The manifest is checked
+against the normal job's selectors and ordering. Its normal failure-dependent
+steps remain failure-dependent; later `!cancelled()` phases still execute.
+
+Each phase gets a fresh process, as in the original job. Each performance
+pair shares one adapter across all metrics and modes; each fixture starts a
+fresh session and stack. TCP warm-ups and measurement share that fixture's
+stack. This restores UDP and single-stream TCP activity before eight-stream
+TCP without inventing adapter reuse across unrelated tests. Kernel/host state
+can carry across phases and repeats on the same runner; the runner adds no
+driver reset or extra GC. The release registrar remains uninstrumented.
+
+There is a 45-minute execution budget inside each 60-minute job. A new repeat
+starts only with room for a complete case; native process-tree deadlines also
+bound builds/tools. A case that overruns fails explicitly as incomplete. The
+full performance timeout is 20 minutes for diagnostic overhead; the original
+per-transfer deadlines, sizes and warm-up counts stay unchanged. Profile
+phases use their original 24 transfers with payload diagnostics off.
+`INTEGRITY_EXPOSURE` reports completed DLL and in-process TCP-eight pair counts
+separately, plus measured TCP streams (excluding warm-ups and CPU profiles).
+An unsuccessful cycle stops repetition; no sample or pair is retried, dropped
+or replaced. Instrumented rates never enter the clean performance gate.
+
+Opt-in lifecycle records identify process, phase, shard, repeat, test path,
+adapter GUID and session. They record adapter creation/close and session
+start, joined pumps and close. Our session stats include ring cursors,
+registrar identity and recovery counters; the DLL exposes counters only.
+These observations do not assert that unobservable kernel caches were reset.
 
 The diagnostic preserves each client tuple, server address and both ISNs.
 SYN consumes one sequence number; modular offsets tolerate wrap,

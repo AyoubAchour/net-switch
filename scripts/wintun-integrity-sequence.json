@@ -1,0 +1,57 @@
+[
+  {
+    "name": "ring-recovery", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 480,
+    "args": ["-test.run=TestPauseClassification|TestPerformanceMedian|TestRing|TestPinnedDLL|TestWintun(PauseMonitor|SessionDelay|ParallelUDP|RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|BatchCost)$"]
+  },
+  {
+    "name": "registrar", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 720,
+    "args": ["-test.run=^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine|SurpriseRemovalReleasesCrossProcessRegistration|EngineCrashReleasesRealRegistration))$"]
+  },
+  {
+    "name": "ping-pong", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 600, "runAfterFailure": true,
+    "args": ["-test.run=^TestWintunPingPong$"]
+  },
+  {
+    "name": "performance-dll", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 1200,
+    "runAfterFailure": true, "diagnostic": true, "reference": "dll",
+    "args": ["-test.run=^TestWintunPerformance$"]
+  },
+  {
+    "name": "performance-inprocess", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 1200,
+    "runAfterFailure": true, "diagnostic": true, "reference": "inprocess",
+    "args": ["-test.run=^TestWintunPerformance$"]
+  },
+  {
+    "name": "lifetime-crash", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 300, "runAfterFailure": true,
+    "args": ["-test.run=^TestWintun(Lifetime|Crash)$"]
+  },
+  {
+    "name": "profile-dll", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 300,
+    "runAfterFailure": true, "profile": "dll",
+    "args": ["-test.run=^TestWintunProfile$", "-test.cpuprofile=bin/wintun-dll-cpu.pprof"]
+  },
+  {
+    "name": "pprof-dll", "program": "go", "kind": "tool", "timeoutSeconds": 60,
+    "requiresSuccess": "profile-dll", "runAfterFailure": true,
+    "args": ["tool", "pprof", "-top", "-nodecount=25", "./bin/wintun.test.exe", "bin/wintun-dll-cpu.pprof"]
+  },
+  {
+    "name": "profile-ours", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 300,
+    "requiresSuccess": "pprof-dll", "runAfterFailure": true, "profile": "ours",
+    "args": ["-test.run=^TestWintunProfile$", "-test.cpuprofile=bin/wintun-ours-cpu.pprof"]
+  },
+  {
+    "name": "pprof-ours", "program": "go", "kind": "tool", "timeoutSeconds": 60,
+    "requiresSuccess": "profile-ours", "runAfterFailure": true,
+    "args": ["tool", "pprof", "-top", "-nodecount=25", "./bin/wintun.test.exe", "bin/wintun-ours-cpu.pprof"]
+  },
+  {
+    "name": "fuzz", "program": "go", "kind": "go-test", "timeoutSeconds": 120, "runAfterFailure": true, "ci": "0",
+    "args": ["test", "-run", "^$", "-fuzz", "^FuzzRingEntry$", "-fuzztime", "30s", "-parallel", "2", "./internal/wintun"]
+  },
+  {
+    "name": "race-recovery", "program": "./bin/wintun-race.test.exe", "kind": "test", "timeoutSeconds": 300,
+    "runAfterFailure": true, "arch": "x64",
+    "args": ["-test.run=TestRing|TestWintun(RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|Lifetime)$"]
+  }
+]

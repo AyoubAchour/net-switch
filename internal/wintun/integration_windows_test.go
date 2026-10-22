@@ -49,6 +49,9 @@ func must(t *testing.T, err error) {
 }
 func report(t *testing.T, value any) {
 	t.Helper()
+	if integrityHooksEnabled && os.Getenv("NETSWITCH_WINTUN_INTEGRITY_TRACE") == "1" {
+		integrityReportContext(t, value)
+	}
 	b, err := json.Marshal(value)
 	must(t, err)
 	t.Logf("WINTUN_RESULT %s", b)
@@ -163,7 +166,12 @@ func newAdapter(t *testing.T, capacity uint32) *Adapter {
 	must(t, err)
 	a, err := Create(Config{Name: "NsRingCI", GUID: guid.String(), Capacity: capacity})
 	must(t, err)
-	t.Cleanup(func() { must(t, a.Close()) })
+	integrityAdapterState(t, a, "created", nil)
+	t.Cleanup(func() {
+		err := a.Close()
+		integrityAdapterState(t, a, "closed", err)
+		must(t, err)
+	})
 	command(t, "netsh.exe", "interface", "ipv4", "set", "interface", "NsRingCI", "dadtransmits=0", "store=active")
 	command(t, "netsh.exe", "interface", "ipv4", "set", "address", "name=NsRingCI", "source=static", "address=198.19.240.1", "mask=255.255.255.252", "gateway=none", "store=active")
 	command(t, "netsh.exe", "interface", "ipv4", "set", "subinterface", "NsRingCI", "mtu=9000", "store=active")
@@ -195,8 +203,15 @@ func fixtureOnAdapter(t *testing.T, mode string, adapter *Adapter) *fixture {
 	t.Helper()
 	f := &fixture{a: adapter}
 	f.io = startIO(t, f.a, mode)
+	integrityFixtureState(t, f, mode, "started", nil)
 	f.startEcho(t)
-	t.Cleanup(func() { f.stopEcho(); must(t, f.io.Close()) })
+	t.Cleanup(func() {
+		f.stopEcho()
+		integrityFixtureState(t, f, mode, "pumps_joined", nil)
+		err := f.io.Close()
+		integrityFixtureState(t, f, mode, "closed", err)
+		must(t, err)
+	})
 	// Let Windows finish link/address activation. These are warm-up packets,
 	// explicitly outside the measured sample.
 	c := udpSocket(t)
