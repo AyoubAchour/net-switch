@@ -273,5 +273,64 @@ query-remove, creator death; a parked reader with no write traffic must wake and
 `NETSWITCH_WINTUN_REFERENCE=inprocess` runs the unchanged performance gate
 against the test-only in-process registration.
 
+### TCP integrity investigation (hosted CI only)
+
+Dispatch `ci.yml` with `wintun_integrity=true`, `wintun_integrity_arch=x64`
+(then `arm64` after reviewing x64), and `wintun_integrity_repeats=50`. Only
+the selected diagnostic job runs unless `regular_jobs` is also explicitly set.
+It builds with `-tags=wintun_integrity` and opts in at runtime with
+`NETSWITCH_WINTUN_INTEGRITY=1`. Normal binaries compile out the ring observers;
+normal performance runs keep the original payload, warm-ups and gate.
+
+Each repeat runs all 12 positions of `tcp_8_MBps`: two serial 64 MiB warm-ups,
+then eight 64 MiB streams, for both the signed DLL and our session, alternating
+which mode runs first. The release registrar remains uninstrumented. The
+runner starts repeats for up to 37 minutes and allows eight minutes for the
+last complete case. `INTEGRITY_EXPOSURE` reports the actual count if the time
+budget stops it early. An unsuccessful case stops the job; no sample or pair
+is retried, dropped or replaced. Instrumented rates are labelled diagnostic
+and never enter the clean performance gate.
+
+The diagnostic preserves each client tuple, server address and both ISNs.
+SYN consumes one sequence number; modular offsets tolerate wrap,
+retransmissions and reordering. The payload encodes a transfer/stream identity
+and block offset over the original deterministic pattern. Warm-up identities
+remain distinct. An unknown payload identity, ambiguous reused sequence range,
+fragment or malformed TCP header invalidates the diagnostic rather than
+pretending the unobserved boundary was clean. Empty late ACK/RST packets from
+previous fixtures are counted separately.
+
+`WINTUN_RESULT` records check native receive and its private copy before
+release, stack ingress after packet-buffer creation, each echo read, stack
+output, native send and its source before publication, and host reads.
+Records include IP/TCP checksum validity independently of payload correctness.
+Each connection/stage retains only its first failure (offset and up to 16
+expected/actual bytes), its preceding 64 packet records, and a rolling last 64.
+There are at most 16 connection records per fixture. Successful connections
+emit identities, byte/packet counts and host hashes; failed connections also
+emit bounded history immediately on separate JSON lines, so a later timeout
+cannot erase the first bad boundary. Byte counts include retransmits.
+Native slices are never retained or accessed after release/publication.
+
+Read the first-failure records in path order, comparing the same identity and
+offset. Bad native receive narrows the issue to the host/driver/DLL receive
+side. Good native receive but bad copy identifies the wrapper. Good ingress
+with a bad echo read implicates receive/reassembly; a good echo read with bad
+output implicates sending/queueing. Good reserved send bytes with a bad host
+stream narrows it to the driver/host receive side. These observations alone do
+not prove which closed-source component is at fault, and missing coverage must
+not be called clean. A passing diagnostic does not clear the rare corruption.
+
+Samples now carry status, nullable value, original error, pair, mode and metric.
+All pair positions are reported. Any invalid sample yields an
+`integrity-invalid comparison` with its original transfer error, and no ratio
+is returned until every position is valid.
+
+The boundary ordering was checked against the
+[Wintun API contract](https://git.zx2c4.com/wintun/tree/api/wintun.h) and
+[session implementation](https://git.zx2c4.com/wintun/tree/api/session.c), and
+the vendored gVisor/gonet and local Link ownership paths. No upstream source
+was copied into this diagnostic.
+
 - [Windows high-resolution timing](https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps)
 - [Process handle snapshot ABI reference](https://github.com/winsiderss/phnt/blob/master/ntpsapi.h)

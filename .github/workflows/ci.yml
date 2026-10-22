@@ -23,6 +23,19 @@ on:
         description: Capture Windows packet/drop events on three runners per architecture
         type: boolean
         default: false
+      wintun_integrity:
+        description: Run only the opt-in TCP payload boundary diagnostic (not performance gating)
+        type: boolean
+        default: false
+      wintun_integrity_arch:
+        description: Start with x64; dispatch ARM64 after reviewing x64 evidence
+        type: choice
+        options: [x64, arm64]
+        default: x64
+      wintun_integrity_repeats:
+        description: Maximum complete 12-pair runs within 45 minutes; stop on first failed run
+        type: string
+        default: '50'
 
 permissions:
   contents: read
@@ -104,7 +117,7 @@ jobs:
 
   control-security:
     name: Control security / Windows x64
-    if: github.event_name == 'workflow_dispatch' && inputs.control_security
+    if: github.event_name == 'workflow_dispatch' && inputs.control_security && !inputs.wintun_integrity
     runs-on: windows-latest
     timeout-minutes: 10
     env:
@@ -127,7 +140,7 @@ jobs:
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.control_security && !inputs.regular_jobs
+    if: github.event_name == 'workflow_dispatch' && !inputs.control_security && !inputs.regular_jobs && !inputs.wintun_integrity
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -574,6 +587,72 @@ jobs:
             runner: ubuntu-24.04-arm
     env: *go1-env
     steps: *go1-steps
+
+  wintun-integrity-x64:
+    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && inputs.wintun_integrity_arch == 'x64'
+    name: TCP integrity diagnostic / x64
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env: &wintun-integrity-env
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+      NETSWITCH_WINTUN_INTEGRITY: '1'
+      NETSWITCH_WINTUN_INTEGRITY_FOCUS: tcp_8_MBps
+      INTEGRITY_REPEATS: ${{ inputs.wintun_integrity_repeats }}
+    defaults:
+      run:
+        shell: pwsh
+    steps: &wintun-integrity-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Read the pinned Go version
+        id: pins
+        run: |
+          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+          "go_version=$($pins.go.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ steps.pins.outputs.go_version }}
+          cache: false
+      - name: Compile explicitly instrumented test binary and verify diagnostic logic
+        run: |
+          go test -tags=wintun_integrity -c -o ./bin/wintun.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./bin/wintun.test.exe '-test.v' '-test.run=^Test(Integrity|Performance)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and identify the uninstrumented release registrar
+        run: |
+          go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o dist/registrar-release/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $engine = (Resolve-Path dist/registrar-release/netswitch-engine.exe).Path
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant()
+          "Release registrar from $env:GITHUB_SHA, SHA-256 $hash"
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE=$engine" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Race-check the pure diagnostic on x64
+        if: runner.arch == 'X64'
+        run: go test -race -tags=wintun_integrity -count=1 -v -run '^Test(Integrity|Performance)' ./internal/wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - name: Fetch the pinned signed DLL unchanged
+        run: ./scripts/prepare-wintun-tests.ps1
+      - name: Repeat complete matched cases without retrying or replacing failures
+        run: ./scripts/test-wintun-integrity.ps1 -Repeats $env:INTEGRITY_REPEATS
+
+  wintun-integrity-arm64:
+    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && inputs.wintun_integrity_arch == 'arm64'
+    name: TCP integrity diagnostic / ARM64
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    env: *wintun-integrity-env
+    defaults:
+      run:
+        shell: pwsh
+    steps: *wintun-integrity-steps
 
   wintun:
     needs: changes

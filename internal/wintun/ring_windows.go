@@ -313,6 +313,9 @@ func (r *rings) read(buffers [][]byte, sizes []int) (int, error) {
 			copy(buffers[i], packet)
 			// Validate a private copy before releasing any driver memory.
 			p := buffers[i][:len(packet)]
+			if integrityHooksEnabled {
+				observeRingReceive(packet, p)
+			}
 			if binary.LittleEndian.Uint32(r.send.data()[head:head+4]) != uint32(len(packet)) {
 				return i, corrupt(r.send, "Send", "packet length changed", head, tail)
 			}
@@ -412,6 +415,7 @@ func validIP(p []byte) bool {
 }
 
 func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
+	var inspection integrityRingBatch
 	head := r.receive.load(0)
 	if head == ^uint32(0) {
 		return 0, len(packets), ErrDisconnected
@@ -434,10 +438,16 @@ func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
 		data := r.receive.data()
 		binary.LittleEndian.PutUint32(data[tail:tail+4], uint32(len(p)))
 		copy(data[tail+4:], p)
+		if integrityHooksEnabled {
+			inspection.add(data[tail+4:tail+4+uint32(len(p))], p)
+		}
 		tail = (tail + size) & (capacity - 1)
 		written++
 	}
 	if written != 0 {
+		if integrityHooksEnabled {
+			inspection.publish()
+		}
 		r.tail = tail
 		r.receive.store(4, tail)
 		// Never consult Receive.Alertable. An auto-reset event retains this

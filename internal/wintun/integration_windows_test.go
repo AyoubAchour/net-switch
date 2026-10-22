@@ -134,6 +134,7 @@ type batchIO interface {
 }
 
 type fixture struct {
+	integrity *integrityDiagnostic
 	a         *Adapter
 	io        batchIO
 	stopEcho  func()
@@ -274,6 +275,7 @@ func (f *fixture) startEcho(t *testing.T) {
 // DLL sessions exist only in tests as the signed-release comparison. Native
 // copies avoid manufacturing Go pointers from the DLL's integer return values.
 type dllSession struct {
+	integrity                             *integrityDiagnostic
 	mu                                    sync.RWMutex
 	readMu, writeMu                       sync.Mutex
 	h                                     uintptr
@@ -355,6 +357,9 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 			if size != 0 {
 				nativeCopy.Call(uintptr(unsafe.Pointer(&buffers[i][0])), p, uintptr(size))
 			}
+			if integrityHooksEnabled && s.integrity != nil {
+				s.integrity.nativeAddress("dll_receive", p, buffers[i][:size])
+			}
 			syscall.SyscallN(s.release, s.h, p)
 			sizes[i] = int(size)
 			if i == len(buffers)-1 {
@@ -413,6 +418,9 @@ func (s *dllSession) WriteBatch(packets [][]byte) (n int, err error) {
 			return n, e
 		}
 		nativeCopy.Call(p, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
+		if integrityHooksEnabled && s.integrity != nil {
+			s.integrity.nativeAddress("dll_send", p, b)
+		}
 		syscall.SyscallN(s.send, s.h, p)
 		n++
 	}
