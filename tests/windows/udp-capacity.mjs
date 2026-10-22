@@ -20,19 +20,21 @@ export async function nativeUDPCapacity(binding) {
   // The Go pair variant also runs the native control for UDP recovery: the
   // engine run's release/reopen cycle with the engine out of the path.
   const paired = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
-    ['-test.v', '-test.run=^TestNativeUDPPairedCapacity$', '-test.timeout=6m'],
+    ['-test.v', '-test.run=^TestNativeUDPPairedCapacity$', '-test.timeout=10m'],
     { env: { NETSWITCH_PORT_GATE: '1', NETSWITCH_UDP_BASELINE_SOURCE: binding.address,
       NETSWITCH_UDP_BASELINE_INDEX: String(binding.index), NETSWITCH_UDP_RECOVERY_CYCLES: String(udpRecoveryCycles) },
-    timeout: 360_000 });
+    timeout: 600_000 });
   const cyclesMarker = 'WINDOWS NATIVE UDP RECOVERY CYCLES ';
   // Two native controls: plain sockets, and engine halves through the
   // engine's readiness path (native duplicate and event registration).
   const nativeRecovery = paired.stdout.split(/\r?\n/).filter((value) => value.includes(cyclesMarker))
     .map((value) => JSON.parse(value.slice(value.indexOf(cyclesMarker) + cyclesMarker.length)));
-  assert(udpRecoveryCycles === 0 || (nativeRecovery.length === 3 && nativeRecovery.every((item) => item.cycles?.length === udpRecoveryCycles)),
+  // Four with cycles: plain Go, plain Go under TCP load, the engine's native
+  // socket registered for readiness, and the same socket not registered.
+  assert(udpRecoveryCycles === 0 || (nativeRecovery.length === 4 && nativeRecovery.every((item) => item.cycles?.length === udpRecoveryCycles)),
     `Native UDP recovery controls did not run: ${paired.stdout.slice(-2000)}`);
   for (const item of nativeRecovery) {
-    const path = item.readyUDP ? 'native, readiness path' : item.tcpLoad ? `native, TCP corner held (${item.tcpLoad} TCP clients)` : 'native';
+    const path = item.readyUDP ? `native, ${item.engineSocket}` : item.tcpLoad ? `native, TCP corner held (${item.tcpLoad} TCP clients)` : 'native';
     console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path, cycles: item.cycles.length,
       attempts: item.reopenAttempts, refused: item.reopenRefused,
       restoreRefused: item.cycles.reduce((n, cycle) => n + cycle.restoreRefused, 0),
@@ -41,7 +43,8 @@ export async function nativeUDPCapacity(binding) {
   const pairMarker = 'WINDOWS NATIVE UDP PAIRED CAPACITY ';
   const pairs = paired.stdout.split(/\r?\n/).filter((value) => value.includes(pairMarker))
     .map((value) => JSON.parse(value.slice(value.indexOf(pairMarker) + pairMarker.length)));
-  assert.equal(pairs.length, 2, 'Both Go and ReadyUDP matched baselines must run');
+  // Go and ReadyUDP always; the unregistered Constructor variant with cycles.
+  assert.equal(pairs.length, udpRecoveryCycles > 0 ? 3 : 2, 'The Go and ReadyUDP matched baselines must run');
   for (const sample of pairs) {
     assert.equal(sample.source, binding.address);
     assert.equal(sample.interfaceIndex, binding.index);

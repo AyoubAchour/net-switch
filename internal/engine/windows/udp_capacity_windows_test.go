@@ -69,11 +69,15 @@ func udpPairBinding(t *testing.T) (uint32, string, net.IP) {
 // the engine's own native constructor plus readiness registration, as
 // production sessions are.
 type udpEngineHalves struct {
-	ready  bool
-	line   Adapter
-	source netip.Addr
-	config net.ListenConfig
-	pool   *udpReadiness
+	ready bool
+	// unwatched leaves the engine's native socket out of readiness
+	// registration (WSAEventSelect), to tell the constructor apart from the
+	// registration when one of them changes Windows' refusal rate.
+	unwatched bool
+	line      Adapter
+	source    netip.Addr
+	config    net.ListenConfig
+	pool      *udpReadiness
 }
 
 func newUDPEngineHalves(ready bool, index uint32, source string, pool *udpReadiness) udpEngineHalves {
@@ -94,6 +98,9 @@ func (h udpEngineHalves) openReady(wake func()) (*udpSocket, *udpWatch, error) {
 	s, err := openUDP(h.line, netip.AddrPortFrom(h.source, 0), h.pool)
 	if err != nil {
 		return nil, nil, err
+	}
+	if h.unwatched {
+		return s, nil, nil
 	}
 	watch, err := s.Watch(wake)
 	if err != nil {
@@ -118,6 +125,9 @@ func (h udpEngineHalves) open() (io.Closer, error) {
 }
 
 func (h udpEngineHalves) kind() string {
+	if h.ready && h.unwatched {
+		return "engine native constructor, no Watch"
+	}
 	if h.ready {
 		return "engine native constructor, Watch"
 	}
@@ -130,8 +140,12 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 		t.Skip("native UDP pair isolation belongs to the hosted capacity fixture")
 	}
 	index, source, peerSource := udpPairBinding(t)
-	for _, native := range []bool{false, true} {
-		t.Run(map[bool]string{false: "Go", true: "ReadyUDP"}[native], func(t *testing.T) {
+	for _, variant := range []string{"Go", "ReadyUDP", "Constructor"} {
+		native, unwatched := variant != "Go", variant == "Constructor"
+		if unwatched && udpRecoveryCycleCount() == 0 {
+			continue // only the recovery control needs this split
+		}
+		t.Run(variant, func(t *testing.T) {
 			peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: peerSource})
 			if err != nil {
 				t.Fatal(err)
@@ -158,6 +172,7 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 			}()
 			wake := make(chan struct{}, 1)
 			halves := newUDPEngineHalves(native, index, source, pool)
+			halves.unwatched = unwatched
 			ports := map[uint16]bool{}
 			payload := []byte("native UDP pairs")
 			var received [64]byte
@@ -246,6 +261,18 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 					t.Fatalf("native app receive: %d %v", n, err)
 				}
 				destination := peer.LocalAddr().(*net.UDPAddr).AddrPort()
+				if unwatched {
+					// The native socket's own pre-Watch blocking path.
+					if _, err := engine.WriteTo(payload, destination, false); err != nil {
+						t.Fatal(err)
+					}
+					echo()
+					n, source, err := engine.ReadFrom(received[:])
+					if err != nil || source != destination || !bytes.Equal(received[:n], payload) {
+						t.Fatalf("unwatched native engine receive: %d %s %v", n, source, err)
+					}
+					continue
+				}
 				if native {
 					if err := watch.Arm(true, false); err != nil {
 						t.Fatal(err)
