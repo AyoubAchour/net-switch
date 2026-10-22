@@ -79,10 +79,14 @@ type udpEngineHalves struct {
 	// an I/O completion port with Go's notification modes, the one remaining
 	// difference from a Go-created socket.
 	completionPort windows.Handle
-	line           Adapter
-	source         netip.Addr
-	config         net.ListenConfig
-	pool           *udpReadiness
+	// custom, when set, opens every engine half instead (the option matrix);
+	// label names it in the evidence.
+	custom func() (io.Closer, error)
+	label  string
+	line   Adapter
+	source netip.Addr
+	config net.ListenConfig
+	pool   *udpReadiness
 }
 
 func newUDPEngineHalves(ready bool, index uint32, source string, pool *udpReadiness) udpEngineHalves {
@@ -125,6 +129,9 @@ func (h udpEngineHalves) openReady(wake func()) (*udpSocket, *udpWatch, error) {
 }
 
 func (h udpEngineHalves) open() (io.Closer, error) {
+	if h.custom != nil {
+		return h.custom()
+	}
 	if h.ready {
 		s, _, err := h.openReady(func() {})
 		if err != nil {
@@ -140,6 +147,9 @@ func (h udpEngineHalves) open() (io.Closer, error) {
 }
 
 func (h udpEngineHalves) kind() string {
+	if h.label != "" {
+		return h.label
+	}
 	if h.ready && h.unwatched && h.completionPort != 0 {
 		return "engine native constructor, no Watch, on a completion port like Go"
 	}

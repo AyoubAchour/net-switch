@@ -10,6 +10,10 @@ on:
         type: choice
         options: [ARM64, x64]
         default: ARM64
+      udpMatrix:
+        description: Only run the UDP option matrix (native controls at TestISP's address, one process per variant)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,7 +42,7 @@ jobs:
     if: ${{ !endsWith(github.ref, '-health') }}
     name: Windows engine / ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'x64' || 'ARM64' }}
     runs-on: ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'windows-latest' || 'windows-11-arm' }}
-    timeout-minutes: 40
+    timeout-minutes: ${{ inputs.udpMatrix && 120 || 40 }}
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
@@ -93,7 +97,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Native and shared engine regressions
-        if: ${{ !endsWith(github.ref, '-lifecycle') }}
+        if: ${{ !endsWith(github.ref, '-lifecycle') && !inputs.udpMatrix }}
         run: |
           if ($env:FOCUS_NATIVE_ONLY -eq 'true') {
             go test -count=1 -v ./internal/engine/windows ./internal/engine/udp ./internal/engine/flows ./internal/winclock ./internal/winlock ./internal/winhandle ./internal/journal
@@ -102,7 +106,7 @@ jobs:
           }
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Windows race checks
-        if: ${{ !cancelled() && (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && (steps.build.outcome == 'success' || env.FOCUS_NATIVE_ONLY == 'true') }}
+        if: ${{ !cancelled() && !inputs.udpMatrix && (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && (steps.build.outcome == 'success' || env.FOCUS_NATIVE_ONLY == 'true') }}
         run: |
           go test -race -count=1 -v ./internal/engine ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp ./internal/engine/flows ./internal/winclock ./internal/winlock ./internal/winhandle ./internal/journal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -135,15 +139,20 @@ jobs:
         run: |
           node tests/windows/udp-quote-profile.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: UDP option matrix at TestISP's address, one process per variant
+        if: ${{ !cancelled() && inputs.udpMatrix && steps.build.outcome == 'success' }}
+        run: |
+          node tests/windows/udp-control-matrix.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Owner-table class and read time at 13,700–14,800 TCP rows
-        if: ${{ !cancelled() && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.udpMatrix && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
         env:
           NETSWITCH_OWNER_READ_GATE: '1'
         run: |
           go test -count=1 -v -timeout=10m -run '^TestOwner(ConnectionsClassKeepsSynSent|ReadTimeAtPortLimit|OverloadHold)$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Measure real held flows without waiting for unrelated cases
-        if: ${{ !cancelled() && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.udpMatrix && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
         env:
           NETSWITCH_ENGINE_TEST_TRACE: '1'
           NETSWITCH_ENGINE_HEAP_CAPTURE: '1'
