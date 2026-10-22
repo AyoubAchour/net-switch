@@ -476,8 +476,10 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         const cycleBefore = await engineStats();
         const freed = await clients[0].call('release', { count: 512 });
         held -= freed.released;
-        await until(async () => (await engineStats()).flows.UDP <= cycleBefore.flows.UDP - freed.released,
-          'UDP sessions released before an evidence cycle', 3000);
+        // Evidence only: a slow reconciliation is recorded, never fatal here
+        // (the gated recovery keeps its own strict wait).
+        const reconciled = await until(async () => (await engineStats()).flows.UDP <= cycleBefore.flows.UDP - freed.released,
+          'UDP sessions released before an evidence cycle', 3000).then(() => true, () => false);
         const freeBeforeReopen = await freeFrom(await engineStats());
         const reopened = await clients[0].call('open', { ...target, count: 256 });
         held += reopened.attempts.filter((item) => !item.Error).length;
@@ -485,7 +487,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         const restored = await clients[0].call('open', { ...target, count: 256 });
         held += restored.attempts.filter((item) => !item.Error).length;
         const restoreRefusals = await refusalsOf('restore', restored.attempts);
-        cycles.push({ releasedPairs: freed.released, freeBeforeReopen, reopenAttempts: 256, reopenRefused: reopenRefusals.length,
+        cycles.push({ releasedPairs: freed.released, reconciled, freeBeforeReopen, reopenAttempts: 256, reopenRefused: reopenRefusals.length,
           restoreAttempts: 256, restoreRefused: restoreRefusals.length, refusals: [...reopenRefusals, ...restoreRefusals] });
       }
       console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path: label, cycles: cycles.length,
