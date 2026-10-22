@@ -14,6 +14,10 @@ on:
         description: Only run the UDP option matrix (native controls at TestISP's address, one process per variant)
         type: boolean
         default: false
+      udpMatrixVariants:
+        description: Comma-separated UDP matrix variants (empty runs the full list)
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -141,6 +145,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: UDP option matrix at TestISP's address, one process per variant
         if: ${{ !cancelled() && inputs.udpMatrix && steps.build.outcome == 'success' }}
+        env:
+          NETSWITCH_UDP_CONTROL_VARIANTS: ${{ inputs.udpMatrixVariants }}
         run: |
           node tests/windows/udp-control-matrix.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -5,11 +5,13 @@ package winengine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/netip"
 	"os"
+	"strings"
 	"testing"
 	"unsafe"
 
@@ -105,15 +107,94 @@ func openControlUDP(o controlOptions, line Adapter, local netip.AddrPort, port w
 	return &controlSocket{h: h}, nil
 }
 
-// controlProvider names the provider behind a socket, for the evidence.
+// controlProvider names the provider behind a socket, with its full
+// SO_PROTOCOL_INFOW identity, for the evidence.
 func controlProvider(h windows.Handle) string {
 	info := new(windows.WSAProtocolInfo)
 	size := int32(unsafe.Sizeof(*info))
 	if err := windows.Getsockopt(h, windows.SOL_SOCKET, soProtocolInfoW, (*byte)(unsafe.Pointer(info)), &size); err != nil {
 		return "unknown: " + err.Error()
 	}
-	return fmt.Sprintf("%s (catalog %d, protocol %d, IFS %t)", windows.UTF16ToString(info.ProtocolName[:]),
-		info.CatalogEntryId, info.Protocol, info.ServiceFlags1&windows.XP1_IFS_HANDLES != 0)
+	chain := info.ProtocolChain.ChainEntries[:max(0, min(int(info.ProtocolChain.ChainLen), len(info.ProtocolChain.ChainEntries)))]
+	return fmt.Sprintf("%s (provider %s, catalog %d, chain %d %v, protocol %d, service %#x/%#x/%#x/%#x, provider flags %#x, IFS %t)",
+		windows.UTF16ToString(info.ProtocolName[:]), info.ProviderId.String(), info.CatalogEntryId,
+		info.ProtocolChain.ChainLen, chain, info.Protocol, info.ServiceFlags1, info.ServiceFlags2, info.ServiceFlags3,
+		info.ServiceFlags4, info.ProviderFlags, info.ServiceFlags1&windows.XP1_IFS_HANDLES != 0)
+}
+
+// inRangePorts hands out ports inside the dynamic UDP range that were free in
+// one native table read and are not excluded: the "explicit" variants bind
+// these instead of asking Windows for port 0. A port taken since the read is
+// skipped (EADDRINUSE), never counted as a refusal.
+type inRangePorts struct {
+	t     *testing.T
+	space *udpPortSpace
+	free  []int
+}
+
+func (p *inRangePorts) refresh() {
+	p.free = p.free[:0]
+	if p.space == nil || p.space.Probe == nil || len(p.space.Probe.families) == 0 || p.space.Probe.families[0].DynamicRange == nil {
+		return
+	}
+	family := p.space.Probe.families[0]
+	_, used, err := nativeUDPSnapshot()
+	if err != nil {
+		return
+	}
+	inUse := make(map[int]bool, len(used[0]))
+	for _, port := range used[0] {
+		inUse[int(port)] = true
+	}
+	for port := family.DynamicRange.Start; port <= family.DynamicRange.End; port++ {
+		excluded := false
+		for _, r := range family.ExcludedRanges {
+			excluded = excluded || (port >= r.Start && port <= r.End)
+		}
+		if !excluded && !inUse[port] {
+			p.free = append(p.free, port)
+		}
+	}
+}
+
+// bind tries free in-range ports until one binds; only a non-EADDRINUSE error
+// is returned (that is the refusal being measured).
+func (p *inRangePorts) bind(open func(port int) (io.Closer, error)) (io.Closer, error) {
+	for len(p.free) > 0 {
+		port := p.free[0]
+		p.free = p.free[1:]
+		c, err := open(port)
+		if err == nil {
+			return c, nil
+		}
+		if !errors.Is(err, windows.WSAEADDRINUSE) {
+			return nil, err
+		}
+	}
+	p.refresh()
+	if len(p.free) == 0 {
+		return nil, fmt.Errorf("explicit in-range bind: %w", windows.WSAENOBUFS)
+	}
+	return p.bind(open)
+}
+
+// explicitHalves makes both halves of every pair bind a recorded free port
+// inside the dynamic range instead of asking Windows for port 0.
+func explicitHalves(halves *udpEngineHalves, ports *inRangePorts, engine func(port int) (io.Closer, error)) {
+	halves.custom = func() (io.Closer, error) { return ports.bind(engine) }
+	halves.app = func(peer *net.UDPAddr) (*net.UDPConn, error) {
+		c, err := ports.bind(func(p int) (io.Closer, error) {
+			conn, err := net.DialUDP("udp4", &net.UDPAddr{Port: p}, peer)
+			if err != nil {
+				return nil, err
+			}
+			return conn, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		return c.(*net.UDPConn), nil
+	}
 }
 
 func TestUDPControlVariant(t *testing.T) {
@@ -141,20 +222,55 @@ func TestUDPControlVariant(t *testing.T) {
 	defer windows.CloseHandle(port)
 	halves := newUDPEngineHalves(true, index, source, pool)
 	provider := ""
-	switch name {
+	// explicit, set for the ":explicit" variants, takes over both halves for
+	// the recovery cycles after an ordinary automatic fill.
+	var explicit func(space *udpPortSpace)
+	base, explicitMode := name, false
+	if before, ok := strings.CutSuffix(name, ":explicit"); ok {
+		base, explicitMode = before, true
+	}
+	switch base {
 	case "go":
 		halves = newUDPEngineHalves(false, index, source, pool)
 		halves.label = "plain Go socket"
+	case "go+fionbio":
+		// Go's own socket and overlapped I/O, plus only FIONBIO after bind.
+		goHalves := newUDPEngineHalves(false, index, source, pool)
+		halves = goHalves
+		halves.label = "plain Go socket + FIONBIO only"
+		halves.custom = func() (io.Closer, error) {
+			conn, err := goHalves.openGo()
+			if err != nil {
+				return nil, err
+			}
+			raw, err := conn.SyscallConn()
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
+			var ioctlErr error
+			if err := raw.Control(func(fd uintptr) {
+				on := new(uint32)
+				*on = 1
+				if code, _, callErr := ioctlsocketProc.Call(fd, fionbio, uintptr(unsafe.Pointer(on))); int32(code) != 0 {
+					ioctlErr = os.NewSyscallError("ioctlsocket FIONBIO", callErr)
+				}
+			}); err != nil || ioctlErr != nil {
+				conn.Close()
+				return nil, errors.Join(err, ioctlErr)
+			}
+			return conn, nil
+		}
 	case "production":
 		halves.unwatched, halves.label = true, "production constructor, not registered"
 	case "production+watch":
 		halves.label = "production constructor, registered (Watch)"
 	default:
-		options, ok := controlVariants[name]
+		options, ok := controlVariants[base]
 		if !ok {
 			t.Fatalf("unknown variant %q", name)
 		}
-		halves.label = "native " + name
+		halves.label = "native " + base
 		halves.custom = func() (io.Closer, error) {
 			s, err := openControlUDP(options, line, local, port)
 			if err != nil {
@@ -165,6 +281,31 @@ func TestUDPControlVariant(t *testing.T) {
 			}
 			return s, nil
 		}
+		if explicitMode {
+			explicit = func(space *udpPortSpace) {
+				explicitHalves(&halves, &inRangePorts{t: t, space: space}, func(p int) (io.Closer, error) {
+					return openControlUDP(options, line, netip.AddrPortFrom(local.Addr(), uint16(p)), port)
+				})
+			}
+		}
+	}
+	if explicitMode && base == "go" {
+		goHalves := halves
+		explicit = func(space *udpPortSpace) {
+			explicitHalves(&halves, &inRangePorts{t: t, space: space}, func(p int) (io.Closer, error) {
+				packet, err := goHalves.config.ListenPacket(context.Background(), "udp4", netip.AddrPortFrom(local.Addr(), uint16(p)).String())
+				if err != nil {
+					return nil, err
+				}
+				return packet.(*net.UDPConn), nil
+			})
+		}
+	}
+	if explicitMode && explicit == nil {
+		t.Fatalf("variant %q has no explicit-port form", name)
+	}
+	if explicitMode {
+		halves.label += ", explicit in-range ports in the cycles"
 	}
 	peer, err := net.ListenUDP("udp4", &net.UDPAddr{IP: peerSource})
 	if err != nil {
@@ -211,6 +352,9 @@ func TestUDPControlVariant(t *testing.T) {
 	}
 	space := diagnoseUDPPortSpace(context.Background())
 	held := len(apps)
+	if explicit != nil {
+		explicit(space)
+	}
 	nativeUDPRecoveryCycles(t, cycles, halves, &apps, &engines, peer, source, space)
 	evidence, _ := json.Marshal(map[string]any{"variant": name, "socket": halves.kind(), "provider": provider,
 		"heldPairs": held, "limit": limit.Error(), "source": source})

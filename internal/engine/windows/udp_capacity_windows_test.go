@@ -82,6 +82,9 @@ type udpEngineHalves struct {
 	// custom, when set, opens every engine half instead (the option matrix);
 	// label names it in the evidence.
 	custom func() (io.Closer, error)
+	// app, when set, opens every app half in the recovery cycles instead of
+	// an automatic-port DialUDP (the explicit in-range port variants).
+	app    func(peer *net.UDPAddr) (*net.UDPConn, error)
 	label  string
 	line   Adapter
 	source netip.Addr

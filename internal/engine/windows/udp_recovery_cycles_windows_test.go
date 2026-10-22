@@ -180,7 +180,11 @@ func nativeUDPRecoveryCyclesWith(t *testing.T, cycles int, halves udpEngineHalve
 	openPair := func(cycle *udpRecoveryCycle, phase string) {
 		attempt := func(half string) (func(), error) {
 			if half == "app connect" {
-				app, err := net.DialUDP("udp4", nil, destination)
+				dial := func(peer *net.UDPAddr) (*net.UDPConn, error) { return net.DialUDP("udp4", nil, peer) }
+				if halves.app != nil {
+					dial = halves.app
+				}
+				app, err := dial(destination)
 				if err != nil {
 					return nil, err
 				}

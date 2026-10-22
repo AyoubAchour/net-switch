@@ -10,8 +10,19 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { hostedOnly, run, startHarness } from './testisp/harness.mjs';
 
 hostedOnly();
-const variants = ['go', 'raw', 'raw+broadcast', 'raw+unicastif', 'raw+resetsoff', 'raw+fionbio', 'raw+iocp',
-  'raw+protocol17', 'all', 'all+protocol17', 'golike', 'production', 'production+watch'];
+const requested = (process.env.NETSWITCH_UDP_CONTROL_VARIANTS ?? '').split(',').map((v) => v.trim()).filter(Boolean);
+const variants = requested.length ? requested : ['go', 'raw', 'raw+broadcast', 'raw+unicastif', 'raw+resetsoff', 'raw+fionbio',
+  'raw+iocp', 'raw+protocol17', 'all', 'all+protocol17', 'golike', 'production', 'production+watch'];
+const rounds = Number(process.env.NETSWITCH_UDP_CONTROL_ROUNDS ?? 2);
+// A fresh random order every round, logged, so run order cannot skew a rate.
+const shuffled = () => {
+  const order = [...variants];
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  return order;
+};
 const cycles = Number(process.env.NETSWITCH_UDP_RECOVERY_CYCLES ?? 10);
 const pauseMs = 20_000;
 const directory = path.resolve('dist/windows-udp-matrix');
@@ -19,7 +30,9 @@ await mkdir(directory, { recursive: true });
 const harness = await startHarness(path.join(directory, 'testisp'));
 const totals = {};
 try {
-  for (const order of [variants, [...variants].reverse()]) {
+  for (let round = 1; round <= rounds; round++) {
+    const order = shuffled();
+    console.log(`WINDOWS UDP CONTROL ORDER ${JSON.stringify({ round, order })}`);
     for (const variant of order) {
       await delay(pauseMs);
       const result = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
