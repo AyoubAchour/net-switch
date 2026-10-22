@@ -24,6 +24,27 @@ import (
 
 type bindingTable map[string]Adapter
 
+// lineCloser is the flow table's part in a line event.
+type lineCloser interface {
+	CloseFlows(flows.Selector, uint64) (flows.CloseResult, error)
+	CloseLineSource(line string, source netip.Addr) flows.CloseResult
+}
+
+// closeLost closes what a binding change took away (SYSTEM-DESIGN 5.7): every
+// flow of a line that went down or moved, and, on a line still up, the flows
+// using an address no longer valid on it. Only that line's flows close, by
+// line and source together; deprecation alone closes nothing.
+func closeLost(table lineCloser, old, current bindingTable) {
+	for _, line := range lostLines(old, current) {
+		table.CloseFlows(flows.Selector{Line: line}, 0)
+	}
+	for line, addresses := range lostSources(old, current) {
+		for _, addr := range addresses {
+			table.CloseLineSource(line, addr)
+		}
+	}
+}
+
 func (r *Routes) StopPhase(name string) func() {
 	return r.timings.begin("engine.stop." + name)
 }
@@ -264,17 +285,8 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 		old := r.bindings.Load()
 		if err == nil {
 			r.bindings.Store(&b)
-			for id, previous := range *old {
-				current, ok := b[id]
-				if (!ok || !current.Up || current.LUID != previous.LUID) && r.Table != nil {
-					r.Table.CloseFlows(flows.Selector{Line: id}, 0)
-				} else if r.Table != nil {
-					for _, addr := range previous.Addresses {
-						if !slices.Contains(current.Addresses, addr) {
-							r.Table.CloseFlows(flows.Selector{Source: addr}, 0)
-						}
-					}
-				}
+			if r.Table != nil {
+				closeLost(r.Table, *old, b)
 			}
 		}
 		// A down Wintun adapter is not a removed adapter. Its session remains
