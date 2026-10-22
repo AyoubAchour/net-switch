@@ -46,6 +46,44 @@ var (
 	getExitCodeThread    = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetExitCodeThread")
 )
 
+// processThreads lists the IDs of this process's running threads. A handle
+// diff alone can miss a new thread: Wintun job 119624723115 saw the handles a
+// new Go M creates (two events, a wait timer, a wait completion packet) but no
+// new thread handle, most likely because the M's duplicated thread handle
+// reused a value closed after the baseline. Thread IDs do not depend on
+// handle values.
+func processThreads(t *testing.T) map[uint32]bool {
+	t.Helper()
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(snapshot)
+	self := windows.GetCurrentProcessId()
+	threads := map[uint32]bool{}
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	for err = windows.Thread32First(snapshot, &entry); err == nil; err = windows.Thread32Next(snapshot, &entry) {
+		if entry.OwnerProcessID == self {
+			threads[entry.ThreadID] = true
+		}
+	}
+	if !errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+		t.Fatal(err)
+	}
+	return threads
+}
+
+// newThreadIDs counts threads in after that were not running before.
+func newThreadIDs(before, after map[uint32]bool) int {
+	n := 0
+	for id := range after {
+		if !before[id] {
+			n++
+		}
+	}
+	return n
+}
+
 // newLiveThreads counts handles in after but not before that are threads of
 // this process which are still running.
 func newLiveThreads(t *testing.T, before, after map[windows.Handle]bool) int {
@@ -148,6 +186,7 @@ func TestWintunRegistrarStartupCloseErrors(t *testing.T) {
 			}
 			warmRuntimeThreads()
 			before := handleSnapshot(t)
+			beforeThreads := processThreads(t)
 			r, err := allocateRings(MinCapacity)
 			must(t, err)
 			defer r.close()
@@ -185,8 +224,9 @@ func TestWintunRegistrarStartupCloseErrors(t *testing.T) {
 			// thread, two events, two high-resolution timers and one wait
 			// completion packet. Attribute at most two new events to each
 			// new handle that is a live thread of this process; any other
-			// event, and every other kind, is still a leak.
-			threads := newLiveThreads(t, before, after)
+			// event, and every other kind, is still a leak. New threads are
+			// counted both by handle and by thread ID; the larger count wins.
+			threads := max(newLiveThreads(t, before, after), newThreadIDs(beforeThreads, processThreads(t)))
 			events := kinds["Event"]
 			if threadEvents := min(events, 2*threads); threadEvents != 0 {
 				t.Logf("new events attributed to %d new live thread(s) of this process: %d of %d old_pass=false", threads, threadEvents, events)
