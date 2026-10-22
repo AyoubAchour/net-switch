@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -60,13 +61,30 @@ func TestOwnerOverloadHold(t *testing.T) {
 	pid := uint32(os.Getpid())
 	t.Run("a slow fresh read is waited for and finds the owner", func(t *testing.T) {
 		o := NewOwners()
-		slowTables(o, func() time.Duration { return 120 * time.Millisecond }, func() []byte { return tcp4Table(pid, holdTuple) })
+		rows := tcp4Table(pid, holdTuple)
+		// The read stays in flight until the lookup holds it at the 50 ms
+		// bound, then returns the row. A fixed sleep is not robust here: on a
+		// loaded runner the read goroutine can start late and a 120 ms sleep
+		// can end after the 250 ms hold (Windows ARM64 main run 39823164511),
+		// failing a correct hold. Waiting for the hold that is waiting for
+		// this read keeps the read slow without adding scheduling delay on top
+		// of the bound the lookup must stay inside.
+		o.readTCP = func(_ context.Context, family uint32, _ *[]uint64) ([]byte, error) {
+			started := winclock.Now()
+			for o.tcpHolds.Load() == 0 && winclock.Since(started) < 2*ownerOverloadHold {
+				runtime.Gosched()
+			}
+			if family == windows.AF_INET6 {
+				return []byte{0, 0, 0, 0}, nil
+			}
+			return rows, nil
+		}
 		owner, err, took := timedLookup(o, context.Background(), holdTuple)
 		if err != nil || owner.PID != pid {
 			t.Fatalf("held lookup: %+v %v after %v", owner, err, took)
 		}
 		stats := o.Stats()
-		if took < 100*time.Millisecond || took >= ownerOverloadHold || stats.TCPHolds != 1 || stats.TCPHeldFound != 1 {
+		if took < ownerLookupBound || took >= ownerOverloadHold || stats.TCPHolds != 1 || stats.TCPHeldFound != 1 {
 			t.Fatalf("took %v holds %d found %d", took, stats.TCPHolds, stats.TCPHeldFound)
 		}
 	})
