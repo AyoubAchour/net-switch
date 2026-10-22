@@ -82,6 +82,13 @@ func TestTunErrorHandoffAndGenericFatalPaths(t *testing.T) {
 					t.Fatal("failure callback missing")
 				}
 				if mode == "handled" {
+					e.mu.Lock() // join the handoff callback before observing its published state
+					state, _ := e.LiveState()
+					lastError := e.LastError()
+					e.mu.Unlock()
+					if state != "stopping" || lastError == "" {
+						t.Fatal("accepted adapter loss still looked healthy", state, lastError)
+					}
 					if e.Table.Applied() == nil {
 						t.Fatal("platform handoff ran generic cleanup")
 					}

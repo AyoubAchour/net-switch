@@ -114,6 +114,30 @@ func TestStartRollbackAndDisconnectLifetime(t *testing.T) {
 	}
 }
 
+func TestNativeErrorStatusSurvivesStopUntilTheNextStart(t *testing.T) {
+	routes := &testfake.Routes{Fail: "capture"}
+	e := New(context.Background(), Dependencies{OpenTun: func(context.Context) (platform.TunDevice, error) { return testfake.NewTun(), nil }, Routes: routes, Dialer: testfake.Dialer{}, Owners: &testfake.Owners{}}, flows.Defaults(), nil)
+	defer e.Stop(context.Background())
+	config := policy.Config{Lines: []platform.Line{{ID: "A"}}}
+	r := policy.Revision{N: 1, Hash: policy.Hash(config), Config: config}
+	if _, err := e.Start(context.Background(), r); err == nil {
+		t.Fatal("capture fixture did not fail")
+	}
+	if err := e.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := e.LiveState(); state != "error" || e.LastError() == "" {
+		t.Fatal("successful cleanup hid the failure", state, e.LastError())
+	}
+	routes.Fail = ""
+	if _, err := e.Start(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := e.LiveState(); state != "on" || e.LastError() != "" {
+		t.Fatal("new start retained stale failure", state, e.LastError())
+	}
+}
+
 type batchTun struct {
 	*testfake.Tun
 	batches chan []string

@@ -51,7 +51,7 @@ func TestTotalsProtocolFencesAndDeliversAllPages(t *testing.T) {
 	start := req("start")
 	start.Revision = &rev
 	call(t, s, start)
-	for i := range 130 {
+	for i := range 300 {
 		f, err := base.table.Begin("tcp", platform.Tuple{Source: netip.MustParseAddrPort("198.18.0.2:4000"), Destination: netip.MustParseAddrPort("203.0.113.1:443")})
 		if err != nil {
 			t.Fatal(err)
@@ -71,9 +71,10 @@ func TestTotalsProtocolFencesAndDeliversAllPages(t *testing.T) {
 			t.Fatal("escaped identities exceed reply bound", len(b), err)
 		}
 		var page struct {
-			Apps   map[string]any `json:"apps"`
-			Lines  map[string]any `json:"lines"`
-			Cursor string         `json:"cursor"`
+			Apps    map[string]any `json:"apps"`
+			Lines   map[string]any `json:"lines"`
+			Cursor  string         `json:"cursor"`
+			Receipt string         `json:"receipt"`
 		}
 		body, _ := json.Marshal(reply.Result)
 		if err := json.Unmarshal(body, &page); err != nil {
@@ -83,6 +84,10 @@ func TestTotalsProtocolFencesAndDeliversAllPages(t *testing.T) {
 		lines += len(page.Lines)
 		pages++
 		if page.Cursor == "" {
+			ack := req("ackTotals")
+			ack.Receipt, ack.OpID = page.Receipt, "read-accounting"
+			call(t, s, ack)
+			call(t, s, ack) // the same receipt operation is safe after its reply was lost
 			break
 		}
 		request.Cursor = page.Cursor
@@ -92,7 +97,7 @@ func TestTotalsProtocolFencesAndDeliversAllPages(t *testing.T) {
 			t.Fatal("old snapshot cursor bypassed fencing")
 		}
 	}
-	if apps != 130 || lines != 1 || pages != 3 {
+	if apps != 300 || lines != 1 || pages < 2 {
 		t.Fatal("totals were truncated", apps, lines, pages)
 	}
 }

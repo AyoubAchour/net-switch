@@ -128,7 +128,7 @@ func (s *Server) handle(ctx context.Context, r Request, c *connection) Reply {
 }
 func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, error) {
 	switch r.Method {
-	case "attach", "start", "apply", "stop", "closeFlows", "adapterForgetLane":
+	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "adapterForgetLane":
 		// A new controller cannot overtake an accepted mutation. Renewals
 		// remain independent of adapter file/HTTP work and disk flushes.
 		s.mutation.Lock()
@@ -141,7 +141,7 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 	}
 	if r.Method == "hello" {
 		status := s.status()
-		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": status.Applied, "status": status, "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks", "terminal-stop", "status", "paged-totals"}}
+		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": status.Applied, "status": status, "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks", "terminal-stop", "status", "paged-totals", "totals-ack"}}
 		s.mu.Unlock()
 		if adapter, ok := s.runtime.(AdapterRuntime); ok {
 			v["capabilities"] = []string{"singbox-adapter-v1", "revisions", "lease"}
@@ -266,7 +266,9 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		}
 		return s.table.Page(r.Cursor)
 	case "totals":
-		return s.table.PageTotals(r.Cursor)
+		page, err := s.table.PageTotals(r.Cursor)
+		page.Instance = s.Instance
+		return page, err
 	case "stats":
 		var data any = s.table.Stats()
 		if runtime, ok := s.runtime.(interface{ Stats() any }); ok {
@@ -275,7 +277,7 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		return map[string]any{"engine": boundStats(data), "eventsDropped": s.EventsDropped.Load()}, nil
 	case "predict":
 		return s.table.Predict(r.App)
-	case "closeFlows":
+	case "closeFlows", "ackTotals":
 		// Mutations stay under the lease lock. Unlike probes these never wait
 		// on network I/O, so attach and expiry cannot race a closure.
 		if r.OpID == "" {
@@ -292,7 +294,13 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		if err := s.makeRoom(); err != nil {
 			return nil, err
 		}
-		result, err := s.table.CloseFlows(r.Selector, r.StartedBefore)
+		var result any
+		var err error
+		if r.Method == "ackTotals" {
+			result, err = s.table.AckTotals(r.Receipt)
+		} else {
+			result, err = s.table.CloseFlows(r.Selector, r.StartedBefore)
+		}
 		done := make(chan struct{})
 		close(done)
 		s.operations[key] = &operation{hash: h, result: result, err: err, done: done}

@@ -184,14 +184,18 @@ async function sample() {
   return latest;
 }
 async function readTotals() {
+  const readInstance = instance;
   const out = { apps: Object.create(null), lines: Object.create(null) };
   const seen = new Set();
   const deadline = Date.now() + 10_000;
-  let cursor = '', count;
+  let cursor = '', count, receipt;
   do {
     assert(Date.now() < deadline, 'Totals snapshot deadline');
     const page = await command('totals', { cursor }, Math.max(1, deadline - Date.now()));
+    assert.equal(page.engineInstanceId, readInstance, 'Totals crossed an engine restart');
     count ??= page.count;
+    receipt ??= page.receipt;
+    assert.equal(page.receipt, receipt, 'Totals receipt changed');
     assert.equal(page.count, count, 'Totals snapshot changed');
     for (const kind of ['apps', 'lines']) {
       for (const [id, bytes] of Object.entries(page[kind])) {
@@ -206,6 +210,8 @@ async function readTotals() {
     }
   } while (cursor);
   assert.equal(Object.keys(out.apps).length + Object.keys(out.lines).length, count, 'Incomplete totals snapshot');
+  assert.equal(instance, readInstance, 'Engine changed before totals acknowledgement');
+  await command('ackTotals', { receipt, opId: `ack-${receipt}` });
   return out;
 }
 async function state() {

@@ -157,7 +157,7 @@ func Query(name string) (Status, error) {
 			out.ExitKnown = true
 		}
 	}
-	return out, err
+	return nativeOutcome(name, out), err
 }
 func Start(ctx context.Context, name string) error {
 	s, err := open(name, windows.SERVICE_START|windows.SERVICE_QUERY_STATUS)
@@ -278,6 +278,12 @@ func Install(c Config) error {
 			return err
 		}
 		if entry.name == Engine {
+			if c.Native {
+				if err := setNativeState(c.Data); err != nil {
+					s.Close()
+					return err
+				}
+			}
 			// Administrators retain configuration/deletion for the installer,
 			// but only SYSTEM receives start/stop rights.
 			err = setDACL(s.Handle, "D:P(A;;GA;;;SY)(A;;0xF0007;;;BA)(A;;LC;;;AU)")

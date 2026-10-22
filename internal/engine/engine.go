@@ -63,8 +63,16 @@ type Engine struct {
 }
 
 type liveState struct {
-	status  string
-	started time.Time
+	status    string
+	started   time.Time
+	lastError string
+}
+
+func (e *Engine) LastError() string {
+	if s := e.live.Load(); s != nil {
+		return s.lastError
+	}
+	return ""
 }
 
 // LiveState is independent of the engine mutation lock. Status and lease
@@ -93,14 +101,17 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 		return policy.Applied{}, err
 	}
 	e.live.Store(&liveState{status: "starting"})
+	e.lastError = nil
 	debug.SetMemoryLimit(512 << 20)
 	tun, err := e.deps.OpenTun(ctx)
 	if err != nil {
-		e.live.Store(&liveState{status: "off"})
+		e.lastError = err
+		e.live.Store(&liveState{status: "error", lastError: Clip(err.Error(), 4096)})
 		return policy.Applied{}, err
 	}
 	e.tun = tun
 	rollback := func(err error) (policy.Applied, error) {
+		e.lastError = err
 		cleanup := e.stopLocked(context.WithoutCancel(ctx))
 		return policy.Applied{}, errors.Join(err, cleanup)
 	}
@@ -230,6 +241,7 @@ func (e *Engine) fail(link *ns.Link, err error) {
 			return
 		}
 		if e.OnTunError != nil && e.OnTunError(err) {
+			e.live.Store(&liveState{status: "stopping", lastError: Clip(err.Error(), 4096)})
 			return
 		}
 		e.lastError = err
@@ -281,7 +293,8 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return e.stopLocked(ctx)
 }
 func (e *Engine) stopLocked(ctx context.Context) error {
-	e.live.Store(&liveState{status: "stopping"})
+	lastError := e.LastError()
+	e.live.Store(&liveState{status: "stopping", lastError: lastError})
 	phase := func(string) func() { return func() {} }
 	if timing, ok := e.deps.Routes.(interface{ StopPhase(string) func() }); ok {
 		phase = timing.StopPhase
@@ -363,9 +376,13 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	err := errors.Join(cleanup, joinTun())
 	status := "off"
 	if err != nil {
-		status = "error"
+		e.lastError = errors.Join(e.lastError, err)
 	}
-	e.live.Store(&liveState{status: status})
+	if e.lastError != nil {
+		status = "error"
+		lastError = Clip(e.lastError.Error(), 4096)
+	}
+	e.live.Store(&liveState{status: status, lastError: lastError})
 	return err
 }
 

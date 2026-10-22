@@ -15,15 +15,22 @@ type Config struct {
 	Directory string
 	Data      string
 	Owner     string
+	Native    bool
 }
 type Status struct {
 	PID     uint32 `json:"pid"`
 	Running bool   `json:"running"`
 	Stopped bool   `json:"stopped"`
-	// ExitCode is meaningful only when ExitKnown and Stopped are both true.
-	// A signal/SCM infrastructure failure never masquerades as engine exit 3.
-	ExitCode  uint32 `json:"exitCode,omitempty"`
-	ExitKnown bool   `json:"exitKnown,omitempty"`
+	// Native ExitKnown requires the main outcome AND instance-matched recovery.
+	// The raw main result remains separately visible for diagnosis. A successful
+	// main exit is never proof that SCM/ExecStopPost cleanup succeeded.
+	ExitCode      uint32 `json:"exitCode,omitempty"`
+	ExitKnown     bool   `json:"exitKnown,omitempty"`
+	MainExitCode  uint32 `json:"mainExitCode,omitempty"`
+	MainExitKnown bool   `json:"mainExitKnown,omitempty"`
+	Cleanup       string `json:"cleanup,omitempty"`
+	LastError     string `json:"lastError,omitempty"`
+	ManagerResult string `json:"managerResult,omitempty"`
 }
 
 // ExitCode accepts only a direct, completed outcome. In particular, joining

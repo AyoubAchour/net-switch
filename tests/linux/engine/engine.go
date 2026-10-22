@@ -269,11 +269,13 @@ type Bytes struct {
 	Up, Down int64
 }
 
-// Totals are cumulative bytes per app key and per line, including flows
-// closed since the last poll (5.10).
+// Totals are cumulative within each app/line generation, including flows closed
+// since the last poll. A consumed idle identity may reappear in a new generation.
 type Totals struct {
-	PerApp  map[string]Bytes
-	PerLine map[LineID]Bytes
+	PerApp          map[string]Bytes
+	PerLine         map[LineID]Bytes
+	AppGenerations  map[string]string
+	LineGenerations map[LineID]string
 }
 
 // ProbeResult is probe's answer (4.5).

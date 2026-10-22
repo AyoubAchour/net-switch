@@ -169,7 +169,7 @@ func Ctl(args []string) error {
 				return err
 			}
 		}
-		return service.Install(service.Config{Directory: *dir, Data: *data, Owner: owner.User})
+		return service.Install(service.Config{Directory: *dir, Data: *data, Owner: owner.User, Native: nativeEngineBuild})
 	case "cleanup", "recover":
 		if !Administrator() {
 			return errors.New("cleanup requires an administrator")

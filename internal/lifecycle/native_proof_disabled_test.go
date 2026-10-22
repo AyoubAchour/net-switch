@@ -11,7 +11,7 @@ import (
 func TestProductNativeHostHasNoFaultInterposer(t *testing.T) {
 	var options host.Options
 	configureNativeProof(t.TempDir(), &options)
-	if options.WrapTun != nil {
+	if options.WrapTun != nil || options.Configure != nil {
 		t.Fatal("product builds must not interpose forwarding faults")
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/AyoubAchour/net-switch/internal/journal"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
 )
@@ -139,6 +140,26 @@ func Recover(dir string) error {
 	return r.Close()
 }
 
+func RecoverReported(ctx context.Context, dir string, begin func() (func(error) error, error)) error {
+	state, err := StateDirectory(dir)
+	if err != nil {
+		return err
+	}
+	closeState := sync.OnceValue(state.Close)
+	defer closeState()
+	return host.Recover(ctx, OwnershipLock{}, func(lock journal.Locker) error {
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return errors.Join(err, closeState())
+		}
+		r, err := NewRoutes(newDiskJournal(filepath.Join(dir, "engine-journal.json")), lock, hex.EncodeToString(nonce[:]))
+		if err != nil {
+			return errors.Join(err, closeState())
+		}
+		return errors.Join(r.Close(), closeState())
+	}, begin)
+}
+
 func Serve(parent context.Context, dir string, standalone bool) (err error) {
 	return ServeHosted(parent, dir, standalone, host.Options{})
 }
@@ -224,6 +245,9 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 	// NewRoutes receives the instance before any OS object can be created.
 	server.Instance = routes.Instance
 	routes.Table = e.Table
+	if options.Configure != nil {
+		options.Configure(server, e.Table)
+	}
 	fatal := make(chan error, 1)
 	fail := func(err error) {
 		select {

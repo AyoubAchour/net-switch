@@ -20,6 +20,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/AyoubAchour/net-switch/internal/journal"
 	"golang.org/x/sys/unix"
 )
 
@@ -61,6 +62,16 @@ func checkSocketDirectory(path string) error {
 
 func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *engine.Engine, *protocol.Server)) error {
 	return ServeHosted(parent, socket, dir, host.Options{}, hooks)
+}
+
+func RecoverReported(ctx context.Context, dir string, begin func() (func(error) error, error)) error {
+	return host.Recover(ctx, fileLock{filepath.Join(dir, "engine.lock")}, func(lock journal.Locker) error {
+		p, err := newPlatform(ctx, dir, lock)
+		if err != nil {
+			return err
+		}
+		return p.Close()
+	}, begin)
 }
 
 func ServeHosted(parent context.Context, socket, dir string, options host.Options, hooks func(*Platform, *engine.Engine, *protocol.Server)) (err error) {
@@ -110,6 +121,9 @@ func ServeHosted(parent context.Context, socket, dir string, options host.Option
 	e.OnFatal = p.Fatal
 	srv.OnCleanupFailure = func(err error) { p.Fatal(fmt.Errorf("control cleanup failed: %w", err)) }
 	p.LineDown, p.AddressRemoved = lineEvents(e.Table)
+	if options.Configure != nil {
+		options.Configure(srv, e.Table)
+	}
 	if hooks != nil {
 		hooks(p, e, srv)
 	}

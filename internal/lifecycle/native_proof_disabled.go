@@ -5,3 +5,5 @@ package lifecycle
 import "github.com/AyoubAchour/net-switch/internal/engine/host"
 
 func configureNativeProof(string, *host.Options) {}
+func nativeProofExit(string) error               { return nil }
+func nativeProofRecovery(string) error           { return nil }

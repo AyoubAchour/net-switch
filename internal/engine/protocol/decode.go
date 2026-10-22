@@ -21,6 +21,7 @@ type Request struct {
 	Epoch    uint64           `json:"epoch"`
 	Revision *policy.Revision `json:"revision,omitempty"`
 	Cursor   string           `json:"cursor,omitempty"`
+	Receipt  string           `json:"receipt,omitempty"`
 	// All asks flows for every admitted flow, unresolved ones included.
 	All           bool            `json:"all,omitempty"`
 	OpID          string          `json:"opId,omitempty"`
@@ -57,7 +58,7 @@ func Decode(b []byte) (Request, error) {
 	if d.Decode(&extra) != io.EOF {
 		return r, errors.New("trailing JSON")
 	}
-	if r.ID == "" || len(r.ID) > 128 || len(r.OpID) > 128 || len(r.Cursor) > 128 || len(r.App) > 512 || len(r.Line) > 64 || len(r.Operator) > 256 {
+	if r.ID == "" || len(r.ID) > 128 || len(r.OpID) > 128 || len(r.Cursor) > 128 || len(r.Receipt) > 128 || len(r.App) > 512 || len(r.Line) > 64 || len(r.Operator) > 256 {
 		return r, errors.New("invalid request fields")
 	}
 	return r, nil

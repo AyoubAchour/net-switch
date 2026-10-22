@@ -353,6 +353,19 @@ func tokenPeer(token windows.Token, pid uint32) (Peer, error) {
 	return Peer{User: user.User.Sid.String(), PID: pid, Session: session}, nil
 }
 func Dial(ctx context.Context, e Endpoint) (*Conn, error) {
+	return dial(ctx, e, true)
+}
+
+// DialNativeEngine keeps the SCM process-identity check, but the native JSON
+// transport has no M2 impersonation primer. A zero byte would corrupt hello.
+func DialNativeEngine(ctx context.Context, e Endpoint) (*Conn, error) {
+	if e.Kind != "engine" {
+		return nil, errors.New("native dial is only for the engine endpoint")
+	}
+	return dial(ctx, e, false)
+}
+
+func dial(ctx context.Context, e Endpoint, primer bool) (*Conn, error) {
 	name, err := windows.UTF16PtrFromString(e.Path)
 	if err != nil {
 		return nil, err
@@ -406,12 +419,14 @@ func Dial(ctx context.Context, e Endpoint) (*Conn, error) {
 	}
 	trusted = true
 	f := os.NewFile(uintptr(h), e.Path)
-	stop := context.AfterFunc(ctx, func() { f.Close() })
-	_, err = f.Write([]byte{0})
-	stop()
-	if err != nil {
-		f.Close()
-		return nil, err
+	if primer {
+		stop := context.AfterFunc(ctx, func() { f.Close() })
+		_, err = f.Write([]byte{0})
+		stop()
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
 	return &Conn{ReadWriteCloser: f, Peer: Peer{User: "S-1-5-18", PID: pid}}, nil
 }

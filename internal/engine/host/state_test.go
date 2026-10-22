@@ -115,3 +115,79 @@ func TestNativeStateRejectsCorruptAndStandInRecords(t *testing.T) {
 		}
 	}
 }
+
+func TestCommittedHistoryCannotGoBackwardsAfterLostCommitAcknowledgement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	failAfterWrite := false
+	save := func(r Record) error {
+		b, _ := json.Marshal(r)
+		if err := os.WriteFile(path, b, 0600); err != nil {
+			return err
+		}
+		if failAfterWrite {
+			return errors.New("directory sync failed after rename")
+		}
+		return nil
+	}
+	d, err := Open(path, "instance", save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveApplied(policy.Applied{N: 4, Hash: "four"}); err != nil {
+		t.Fatal(err)
+	}
+	failAfterWrite = true
+	if err := d.SaveApplied(policy.Applied{N: 5, Hash: "five"}); err == nil {
+		t.Fatal("failed sync acknowledged")
+	}
+	failAfterWrite = false
+	if err := d.SaveEpoch(1); err != nil {
+		t.Fatal(err)
+	}
+	r, err := ReadRecord(path)
+	if err != nil || r.N != 5 || r.Hash != "five" {
+		t.Fatal("epoch update rewound committed history", r, err)
+	}
+	if err := d.SaveApplied(policy.Applied{N: 4, Hash: "four"}); err == nil {
+		t.Fatal("lower history accepted")
+	}
+	if err := d.SaveApplied(policy.Applied{N: 5, Hash: "other"}); err == nil {
+		t.Fatal("same history revision changed hash")
+	}
+}
+
+func TestEpochRetryAfterReplacementWithoutAcknowledgement(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	failAfterWrite := false
+	d, err := Open(path, "instance", func(r Record) error {
+		b, _ := json.Marshal(r)
+		if err := os.WriteFile(path, b, 0600); err != nil {
+			return err
+		}
+		if failAfterWrite {
+			return errors.New("directory sync failed after rename")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SaveEpoch(1); err != nil {
+		t.Fatal(err)
+	}
+	failAfterWrite = true
+	if d.SaveEpoch(2) == nil {
+		t.Fatal("failed sync acknowledged")
+	}
+	failAfterWrite = false
+	if err := d.SaveEpoch(2); err != nil {
+		t.Fatal("unacknowledged epoch cannot be retried", err)
+	}
+	if d.SaveEpoch(2) == nil {
+		t.Fatal("acknowledged epoch reused")
+	}
+	r, err := ReadRecord(path)
+	if err != nil || r.Epoch != 2 {
+		t.Fatal(r, err)
+	}
+}

@@ -108,7 +108,7 @@ func Stop(ctx context.Context, name string) error { return systemctl(ctx, "stop"
 func Query(name string) (Status, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--property=MainPID,ActiveState,SubState,ExecMainCode,ExecMainStatus", unit(name))
+	cmd := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--property=MainPID,ActiveState,SubState,ExecMainCode,ExecMainStatus,Result", unit(name))
 	cmd.Env = ChildEnvironment()
 	b, err := cmd.Output()
 	if err != nil {
@@ -130,7 +130,8 @@ func Query(name string) (Status, error) {
 		}
 		out.ExitCode, out.ExitKnown = uint32(code), true
 	}
-	return out, err
+	out.ManagerResult = values["Result"]
+	return nativeOutcome(name, out), err
 }
 func SetOwner(string) error              { return nil }
 func ReportError(name string, err error) { fmt.Fprintf(os.Stderr, "%s: %v\n", name, err) }
@@ -155,6 +156,9 @@ func Install(c Config) error {
 		"netswitch.socket":         "[Unit]\nDescription=Net Switch local desktop socket\n[Socket]\nListenStream=/run/netswitch/desktop.sock\nSocketMode=0666\nDirectoryMode=0755\nRemoveOnStop=yes\n[Install]\nWantedBy=sockets.target\n",
 		"netswitch.service":        "[Unit]\nDescription=Net Switch Control\nRequires=netswitch.socket\nAfter=netswitch.socket\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch") + " service --data " + quoted(c.Data) + "\nRestart=on-failure\nRestartSec=1s\nRestartSteps=4\nRestartMaxDelaySec=60s\nKillMode=control-group\nTimeoutStopSec=40s\nCapabilityBoundingSet=" + readCapabilities + "\n" + common,
 		"netswitch-engine.service": "[Unit]\nDescription=Net Switch Engine\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch-engine") + " service --data " + quoted(c.Data) + "\nExecStopPost=" + run("netswitchctl") + " cleanup --engine --data " + quoted(c.Data) + "\nRestart=no\nKillMode=mixed\nTimeoutStopSec=30s\nCapabilityBoundingSet=" + readCapabilities + "\nDeviceAllow=/dev/net/tun rw\n" + common,
+	}
+	if c.Native {
+		units["netswitch-engine.service"] += nativeStateMetadata(c.Data)
 	}
 	if err := os.MkdirAll("/run/netswitch", 0755); err != nil {
 		return err

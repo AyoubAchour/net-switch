@@ -51,6 +51,7 @@ type Totals struct {
 	Lines map[string]Bytes `json:"lines"`
 }
 type Gauges struct {
+	AccountingApps, AccountingLines                               int
 	RefusedTCP, RefusedUDP                                        Refusals
 	PeakUnknown, PeakUnknownUDP                                   int
 	AdmittedUnknown, AdmittedUnknownUDP                           uint64
@@ -85,6 +86,8 @@ type Table struct {
 	flows                map[uint64]*ticket
 	apps                 map[string]counts
 	totals               Totals
+	accountingIDs        map[accountIdentity]uint64
+	nextAccounting       uint64
 	gauges               Gauges
 	snapshots            map[uint64]*snapshot
 	totalSnapshots       map[uint64]*totalsSnapshot
@@ -278,6 +281,10 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	if c.flows >= t.limits.PerApp || (udp && c.udp >= t.limits.UDPPerApp) || (unknown && (t.gauges.Unknown >= t.limits.Unknown || (udp && t.gauges.UnknownUDP >= t.limits.UnknownUDP))) {
 		t.refuseOwner(f.record.Protocol, owner.AppID)
 		return flowapi.Decision{}, ErrBudget
+	}
+	if !t.reserveAccounting(owner.AppID, d.Line) {
+		t.refusal(f.record.Protocol).Accounting++
+		return flowapi.Decision{}, ErrAccounting
 	}
 	c.flows++
 	t.gauges.PeakPerApp = max(t.gauges.PeakPerApp, c.flows)
@@ -592,6 +599,7 @@ func (t *Table) Stats() Gauges {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	g := t.gauges
+	g.AccountingApps, g.AccountingLines = len(t.totals.Apps), len(t.totals.Lines)
 	g.PendingBytes = t.pendingBytes.Load()
 	g.UDPReadBytes = t.udpReadBytes.Load()
 	g.UDPReplyBytes = t.replyBytes.Load()

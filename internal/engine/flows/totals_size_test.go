@@ -49,7 +49,7 @@ func TestTotalsMaximumCardinalityMeasurement(t *testing.T) {
 func checkTotalsPages(t *testing.T, f *Table, want Totals) {
 	t.Helper()
 	got := Totals{Apps: map[string]Bytes{}, Lines: map[string]Bytes{}}
-	cursor, pages, largest := "", 0, 0
+	cursor, receipt, pages, largest := "", "", 0, 0
 	for {
 		page, err := f.PageTotals(cursor)
 		if err != nil {
@@ -60,17 +60,18 @@ func checkTotalsPages(t *testing.T, f *Table, want Totals) {
 			t.Fatalf("totals page %d bytes: %v", len(b), err)
 		}
 		largest = max(largest, len(b)+1)
+		receipt = page.Receipt
 		for id, n := range page.Apps {
 			if _, exists := got.Apps[id]; exists {
 				t.Fatal("duplicate app", id)
 			}
-			got.Apps[id] = n
+			got.Apps[id] = n.Bytes
 		}
 		for id, n := range page.Lines {
 			if _, exists := got.Lines[id]; exists {
 				t.Fatal("duplicate line", id)
 			}
-			got.Lines[id] = n
+			got.Lines[id] = n.Bytes
 		}
 		pages++
 		if page.Cursor == "" {
@@ -83,6 +84,9 @@ func checkTotalsPages(t *testing.T, f *Table, want Totals) {
 	if string(a) != string(b) {
 		t.Fatal("paged accounting differs from the independently summed snapshot")
 	}
+	if _, err := f.AckTotals(receipt); err != nil {
+		t.Fatal(err)
+	}
 	if f.Stats().SnapshotBytes != 0 {
 		t.Fatal("completed totals snapshot retained its reservation")
 	}
@@ -91,8 +95,8 @@ func checkTotalsPages(t *testing.T, f *Table, want Totals) {
 
 func TestTotalsSnapshotStableAcrossCloseAndNewTraffic(t *testing.T) {
 	f := table(t, Defaults())
-	for i := range 80 {
-		x := admit(t, f, "tcp", fmt.Sprintf("app-%03d", i))
+	for i := range 1100 {
+		x := admit(t, f, "tcp", fmt.Sprintf("app-%04d%s", i, strings.Repeat("x", 500)))
 		x.Add(3, 7)
 		x.Close()
 	}
@@ -111,11 +115,14 @@ func TestTotalsSnapshotStableAcrossCloseAndNewTraffic(t *testing.T) {
 	if err != nil || last.Cursor != "" {
 		t.Fatal(last, err)
 	}
-	if last.Apps["zz-live"] != (Bytes{5, 11}) {
+	if last.Apps["zz-live"].Bytes != (Bytes{5, 11}) {
 		t.Fatal("frozen live counters changed", last.Apps)
 	}
 	if _, exists := last.Apps["zz-new"]; exists {
 		t.Fatal("late flow entered old snapshot")
+	}
+	if _, err := f.AckTotals(last.Receipt); err != nil {
+		t.Fatal(err)
 	}
 	checkTotalsPages(t, f, f.Totals())
 }
@@ -143,7 +150,7 @@ func TestTotalsSharesSnapshotBudgetAndExpiresWithoutLosingAccounting(t *testing.
 		t.Fatal("totals bypassed count budget", err)
 	}
 	now = now.Add(10 * time.Second)
-	if _, err := f.PageTotals(first.Cursor); err == nil {
+	if _, err := f.AckTotals(first.Receipt); err == nil {
 		t.Fatal("expired totals snapshot accepted")
 	}
 	if f.Stats().SnapshotBytes != 0 {
@@ -154,7 +161,7 @@ func TestTotalsSharesSnapshotBudgetAndExpiresWithoutLosingAccounting(t *testing.
 	if _, err := f.PageTotals(""); err != ErrBudget || f.Stats().SnapshotBytes != 0 {
 		t.Fatal("byte reservation failed", err)
 	}
-	if len(f.Totals().Apps) != 80 {
+	if len(f.Totals().Apps) != 0 {
 		t.Fatal("budget refusal truncated accounting")
 	}
 	for _, cursor := range []string{"1:2", "totals:1:-1", "totals:bad:0", "totals:1:99999999999999999999999"} {

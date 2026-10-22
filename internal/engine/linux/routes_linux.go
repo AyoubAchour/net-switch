@@ -95,6 +95,10 @@ type ownedObject struct {
 }
 
 func New(ctx context.Context, dir string) (*Platform, error) {
+	return newPlatform(ctx, dir, nil)
+}
+
+func newPlatform(ctx context.Context, dir string, ownership journal.Locker) (*Platform, error) {
 	// Route operations must not hold lifecycle cleanup indefinitely if netlink
 	// stops answering. The lookup socket has its own tighter per-flow deadline.
 	netlinkTimeoutOnce.Do(func() { _ = netlink.SetSocketTimeout(time.Second) })
@@ -127,7 +131,10 @@ func New(ctx context.Context, dir string) (*Platform, error) {
 		return nil, err
 	}
 	p := &Platform{ctx: ctx, Instance: hex.EncodeToString(nonce[:]), objects: &objects{boot: boot, netns: ns}, lines: map[string]lineState{}, owned: map[string]ownedObject{}}
-	j := &journal.Journal{Store: diskStore{filepath.Join(dir, "engine-journal.json")}, Lock: fileLock{filepath.Join(dir, "engine.lock")}, Kinds: map[string]journal.Object{}}
+	if ownership == nil {
+		ownership = fileLock{filepath.Join(dir, "engine.lock")}
+	}
+	j := &journal.Journal{Store: diskStore{filepath.Join(dir, "engine-journal.json")}, Lock: ownership, Kinds: map[string]journal.Object{}}
 	for _, kind := range []string{"tun", "address", "route", "rule", "binding"} {
 		j.Kinds[kind] = objectDriver{p.objects, kind}
 	}

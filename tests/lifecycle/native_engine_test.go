@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
@@ -25,9 +26,34 @@ import (
 )
 
 type nativeClient struct {
-	rpc      *lifecycle.RPC
-	instance string
-	epoch    uint64
+	rpc       *lifecycle.RPC
+	instance  string
+	epoch     uint64
+	stopLease func()
+}
+
+func (c *nativeClient) renewUntilStopped(every time.Duration) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	c.stopLease = func() { cancel(); <-done }
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(every)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				probe, stop := context.WithTimeout(ctx, 3*time.Second)
+				err := c.call(probe, "renew", nil, nil)
+				stop()
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
 }
 
 func (c *nativeClient) call(ctx context.Context, method string, fields map[string]any, out any) error {
@@ -40,9 +66,11 @@ func (c *nativeClient) call(ctx context.Context, method string, fields map[strin
 
 func attachNative(t *testing.T, ctx context.Context) (*nativeClient, protocol.Status) {
 	t.Helper()
-	conn, err := localipc.Dial(ctx, localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine})
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	conn, err := localipc.DialNativeEngine(ctx, localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("native engine dial", err)
 	}
 	c := &nativeClient{rpc: lifecycle.NewRPC(conn)}
 	t.Cleanup(func() { c.rpc.Close() })
@@ -52,9 +80,9 @@ func attachNative(t *testing.T, ctx context.Context) (*nativeClient, protocol.St
 		Capabilities []string        `json:"capabilities"`
 	}
 	if err := c.rpc.Call(ctx, map[string]any{"method": "hello"}, &hello); err != nil {
-		t.Fatal(err)
+		t.Fatal("native engine hello", err)
 	}
-	for _, required := range []string{"status", "paged-totals", "terminal-stop"} {
+	for _, required := range []string{"status", "paged-totals", "totals-ack", "terminal-stop"} {
 		if !strings.Contains(" "+strings.Join(hello.Capabilities, " ")+" ", " "+required+" ") {
 			t.Fatal("wrong engine capabilities", hello.Capabilities)
 		}
@@ -64,9 +92,11 @@ func attachNative(t *testing.T, ctx context.Context) (*nativeClient, protocol.St
 		Epoch uint64 `json:"epoch"`
 	}
 	if err := c.call(ctx, "attach", nil, &attached); err != nil || attached.Epoch == 0 {
-		t.Fatal(attached, err)
+		t.Fatal("native engine attach", attached, err)
 	}
 	c.epoch = attached.Epoch
+	c.renewUntilStopped(5 * time.Second)
+	t.Cleanup(c.stopLease)
 	state, err := service.Query(service.Engine)
 	if err != nil || !state.Running || state.PID != uint32(hello.Status.PID) {
 		t.Fatal("protocol is not the installed SCM/systemd process", state, hello.Status, err)
@@ -84,8 +114,14 @@ func nativeMust(t *testing.T, c *nativeClient, method string, fields map[string]
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	if method == "stop" && c.stopLease != nil {
+		c.stopLease()
+	}
 	if err := c.call(ctx, method, fields, out); err != nil {
 		t.Fatalf("%s: %v", method, err)
+	}
+	if method == "stop" {
+		c.rpc.Close()
 	}
 }
 
@@ -99,6 +135,84 @@ func nativeEcho(t *testing.T, conn net.Conn, marker string) {
 	if err != nil || !strings.Contains(line, marker) {
 		t.Fatalf("echo %q: %q %v", marker, line, err)
 	}
+}
+
+func readNativeTotals(t *testing.T, c *nativeClient, between func()) flows.TotalsPage {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result := flows.TotalsPage{Apps: map[string]flows.Counter{}, Lines: map[string]flows.Counter{}, Count: -1}
+	cursor := ""
+	seen := map[string]bool{}
+	pages := 0
+	start := time.Now()
+	for {
+		var page flows.TotalsPage
+		if err := c.call(ctx, "totals", map[string]any{"cursor": cursor}, &page); err != nil {
+			t.Fatal("full native totals read", err)
+		}
+		if page.Instance != c.instance {
+			t.Fatal("totals crossed an engine restart")
+		}
+		if result.Count < 0 {
+			result.Count, result.Receipt = page.Count, page.Receipt
+		}
+		if result.Receipt == "" || page.Count != result.Count || page.Receipt != result.Receipt {
+			t.Fatal("native totals snapshot changed")
+		}
+		for id, n := range page.Apps {
+			if _, ok := result.Apps[id]; ok {
+				t.Fatal("duplicate app total")
+			}
+			result.Apps[id] = n
+		}
+		for id, n := range page.Lines {
+			if _, ok := result.Lines[id]; ok {
+				t.Fatal("duplicate line total")
+			}
+			result.Lines[id] = n
+		}
+		pages++
+		if page.Cursor == "" {
+			break
+		}
+		if seen[page.Cursor] || len(page.Apps)+len(page.Lines) == 0 {
+			t.Fatal("native totals made no progress")
+		}
+		seen[page.Cursor] = true
+		cursor = page.Cursor
+		if between != nil && pages%8 == 0 {
+			between()
+		}
+	}
+	if len(result.Apps)+len(result.Lines) != result.Count {
+		t.Fatal("native totals incomplete")
+	}
+	if time.Since(start) >= 10*time.Second {
+		t.Fatal("full native totals read exceeded snapshot lifetime")
+	}
+	t.Logf("NATIVE_TOTALS apps=%d lines=%d pages=%d elapsed=%s snapshot_lifetime=10s final_cursor=empty", len(result.Apps), len(result.Lines), pages, time.Since(start))
+	nativeMust(t, c, "ackTotals", map[string]any{"receipt": result.Receipt, "opId": "ack-" + result.Receipt}, nil)
+	return result
+}
+
+func observeNativeCounters(t *testing.T, c *nativeClient, phase string) {
+	t.Helper()
+	var reply struct {
+		Engine map[string]json.RawMessage `json:"engine"`
+	}
+	nativeMust(t, c, "stats", nil, &reply)
+	selected := map[string]json.RawMessage{}
+	for _, key := range []string{"flows", "wintun", "tunKernel", "tcpSegmentsSent", "tcpRetransmits", "tcpDialFailed", "tunDropped", "tunQueued", "transportDropped"} {
+		if value := reply.Engine[key]; len(value) > 0 {
+			selected[key] = value
+		}
+	}
+	b, err := json.Marshal(selected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("M4_PROGRESS phase=%s instance=%s counters=%s", phase, c.instance, b)
 }
 
 // Native services are qualified separately from the still-active M2 adapter.
@@ -141,6 +255,14 @@ func TestNativeEngineService(t *testing.T) {
 	t.Cleanup(func() {
 		stop, done := context.WithTimeout(context.Background(), 45*time.Second)
 		defer done()
+		if err := service.Stop(stop, service.Engine); err != nil {
+			t.Log("native cleanup stop", err)
+			force, finish := context.WithTimeout(context.Background(), 15*time.Second)
+			if err := service.ForceStop(force, service.Engine); err != nil {
+				t.Log("native cleanup force stop", err)
+			}
+			finish()
+		}
 		if err := service.Uninstall(stop); err != nil {
 			t.Error("native uninstall", err)
 		}
@@ -148,6 +270,10 @@ func TestNativeEngineService(t *testing.T) {
 			if b, err := os.ReadFile(filepath.Join(data, name)); err == nil {
 				t.Logf("NATIVE_EVIDENCE %s: %s", name, b)
 			}
+		}
+		if record, err := host.ReadRecord(filepath.Join(data, "engine-state.json")); err == nil {
+			outcome, err := host.ReadOutcome(data, record.Instance)
+			t.Logf("NATIVE_EVIDENCE cleanup: %+v read_error=%v", outcome, err)
 		}
 	})
 	fixture := prepareTUN(t, dir, data)
@@ -159,7 +285,9 @@ func TestNativeEngineService(t *testing.T) {
 		t.Logf("native start failed: %v status=%+v query=%v", startErr, status, queryErr)
 		killCtx, killCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer killCancel()
-		if err := service.ForceStop(killCtx, service.Engine); err != nil { t.Log("failed startup termination", err) }
+		if err := service.ForceStop(killCtx, service.Engine); err != nil {
+			t.Log("failed startup termination", err)
+		}
 		t.Fatal(startErr)
 	}
 	c, initial := attachNative(t, ctx)
@@ -223,6 +351,7 @@ func TestNativeEngineService(t *testing.T) {
 		t.Fatal("stale revision accepted")
 	}
 	old := c
+	old.stopLease()
 	c, status = attachNative(t, ctx)
 	if c.epoch <= old.epoch || c.instance != old.instance || status.Applied == nil || *status.Applied != applied {
 		t.Fatal("reattach lost loaded revision", status)
@@ -230,6 +359,7 @@ func TestNativeEngineService(t *testing.T) {
 	if old.call(ctx, "renew", nil, nil) == nil {
 		t.Fatal("old controller not fenced")
 	}
+	old.rpc.Close()
 	nativeEcho(t, conn, "native-after-reattach")
 	newer, err := fixture.dial(ctx, "tcp4", fixture.target)
 	if err != nil {
@@ -250,8 +380,7 @@ func TestNativeEngineService(t *testing.T) {
 		t.Fatal("closure retry changed result", replay, closed)
 	}
 	nativeEcho(t, newer, "newer-survived-closure-retry")
-	var totals flows.TotalsPage
-	nativeMust(t, c, "totals", nil, &totals)
+	totals := readNativeTotals(t, c, nil)
 	if totals.Lines["a1"].Up == 0 || totals.Lines["a1"].Down == 0 {
 		t.Fatal("closed-flow accounting missing", totals)
 	}
@@ -266,6 +395,17 @@ func TestNativeEngineService(t *testing.T) {
 			}
 		})
 	} else {
+		t.Run("totals-capacity-over-installed-transport", func(t *testing.T) {
+			var gauges flows.Gauges
+			nativeMust(t, c, "testFault", map[string]any{"fault": map[string]any{"kind": "totals-capacity"}}, &gauges)
+			if gauges.AccountingApps != flows.AccountingEntries || gauges.AccountingLines != flows.AccountingEntries {
+				t.Fatal("capacity fixture did not fill retained identities", gauges)
+			}
+			result := readNativeTotals(t, c, func() { nativeEcho(t, newer, "held-flow-during-full-totals-read") })
+			if len(result.Apps) != flows.AccountingEntries || len(result.Lines) != flows.AccountingEntries {
+				t.Fatal("full transport read lost accounting")
+			}
+		})
 		t.Run("forwarding-only-stall-observation", func(t *testing.T) { observeForwardingStall(t, c, newer, data, fixture) })
 	}
 	nativeMust(t, c, "stop", nil, nil)
@@ -308,41 +448,100 @@ func TestNativeEngineService(t *testing.T) {
 	}
 	defer direct.Close()
 	nativeEcho(t, direct, "native-cleanup-restored-direct-traffic")
-	if b, err := exec.CommandContext(ctx, ctl, "cleanup", "--engine", "--data", data).CombinedOutput(); err != nil {
-		t.Fatal("installed Ctl cleanup", err, string(b))
+	for _, automatic := range []bool{true, false} {
+		name := "service-crash-cleanup"
+		if !automatic {
+			name = "explicit-ctl-removes-real-leftovers"
+		}
+		t.Run(name, func(t *testing.T) {
+			if !automatic {
+				restore := pauseNativeRecovery(t)
+				defer restore()
+			}
+			if err := service.Start(ctx, service.Engine); err != nil {
+				t.Fatal(err)
+			}
+			crashed, _ := attachNative(t, ctx)
+			nativeMust(t, crashed, "start", map[string]any{"revision": rev}, nil)
+			held, err := fixture.dial(ctx, "tcp4", fixture.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer held.Close()
+			nativeEcho(t, held, "capture-before-service-crash")
+			assertNativeCapture(t, data, fixture)
+			assertNativeOwnedLeftovers(t, data, crashed.instance)
+			s, err := service.Query(service.Engine)
+			if err != nil || !s.Running {
+				t.Fatal(s, err)
+			}
+			killUnreset(t, s.PID)
+			crashed.stopLease()
+			wait(t, "native crash exits service", 15*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && s.Stopped })
+			// Windows recovery is an SCM command, Linux cleanup is ExecStopPost.
+			// Wait for its real object deletion, not just for the process to die.
+			if !automatic {
+				assertNativeOwnedLeftovers(t, data, crashed.instance)
+				if b, err := runNativeCleanup(ctx, ctl, data).CombinedOutput(); err != nil {
+					t.Fatal("explicit native cleanup", err, string(b))
+				}
+			}
+			waitNativeCleanup(t, fixture, data, crashed.instance)
+			var end service.Status
+			wait(t, "native crash recovery result", 10*time.Second, func() bool {
+				var err error
+				end, err = service.Query(service.Engine)
+				return err == nil && (end.Cleanup == "complete" || end.Cleanup == "failed")
+			})
+			if end.Cleanup != "complete" || end.ExitKnown && (end.ExitCode == 3 || end.ExitCode == 0) || end.MainExitKnown && (end.MainExitCode == 3 || end.MainExitCode == 0) {
+				t.Fatal("crash became a clean exit or adapter loss", end)
+			}
+			t.Logf("NATIVE_CRASH pid=%d instance=%s final_status=%+v cleanup_complete=true", s.PID, crashed.instance, end)
+		})
 	}
-	fixture.clean(t)
-	t.Run("service-crash-cleanup", func(t *testing.T) {
-		if err := service.Start(ctx, service.Engine); err != nil {
-			t.Fatal(err)
+	if faults {
+		for _, failCleanup := range []bool{false, true} {
+			t.Run(fmt.Sprintf("service-outcome-three-cleanup-fails-%t", failCleanup), func(t *testing.T) {
+				if err := os.WriteFile(filepath.Join(data, "fault-native-exit3"), []byte("armed"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				defer os.Remove(filepath.Join(data, "fault-native-exit3"))
+				if failCleanup {
+					if err := os.WriteFile(filepath.Join(data, "fault-native-recovery"), []byte("armed"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					defer os.Remove(filepath.Join(data, "fault-native-recovery"))
+				}
+				if err := service.Start(ctx, service.Engine); err != nil {
+					t.Fatal(err)
+				}
+				outcome, _ := attachNative(t, ctx)
+				nativeMust(t, outcome, "start", map[string]any{"revision": rev}, nil)
+				nativeMust(t, outcome, "stop", nil, nil)
+				var end service.Status
+				wait(t, "real manager and recovery outcome", 30*time.Second, func() bool {
+					var err error
+					end, err = service.Query(service.Engine)
+					return err == nil && end.Stopped && (end.Cleanup == "complete" || end.Cleanup == "failed")
+				})
+				if !end.MainExitKnown || end.MainExitCode != 3 || !end.ExitKnown {
+					t.Fatal("service manager lost native exit 3", end)
+				}
+				if failCleanup {
+					if end.ExitCode != 1 || end.Cleanup != "failed" || !strings.Contains(end.LastError, "hosted recovery failure") {
+						t.Fatal("failed cleanup was reported clean", end)
+					}
+				} else if end.ExitCode != 3 || end.Cleanup != "complete" {
+					t.Fatal("clean outcome did not survive real service manager", end)
+				}
+				t.Logf("NATIVE_MANAGER_OUTCOME %+v", end)
+			})
 		}
-		crashed, _ := attachNative(t, ctx)
-		nativeMust(t, crashed, "start", map[string]any{"revision": rev}, nil)
-		held, err := fixture.dial(ctx, "tcp4", fixture.target)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer held.Close()
-		nativeEcho(t, held, "capture-before-service-crash")
-		assertNativeCapture(t, data, fixture)
-		s, err := service.Query(service.Engine)
-		if err != nil || !s.Running {
-			t.Fatal(s, err)
-		}
-		killUnreset(t, s.PID)
-		wait(t, "native crash exits service", 15*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && s.Stopped })
-		// Windows recovery is an SCM command, Linux cleanup is ExecStopPost.
-		// Wait for its real object deletion, not just for the process to die.
-		waitNativeCleanup(t, fixture)
-		end, err := service.Query(service.Engine)
-		if err != nil || end.ExitKnown && end.ExitCode == 3 {
-			t.Fatal("crash became clean adapter loss", end, err)
-		}
-		t.Logf("NATIVE_CRASH pid=%d instance=%s final_status=%+v cleanup_complete=true", s.PID, crashed.instance, end)
-	})
+	}
 }
 
 func observeForwardingStall(t *testing.T, c *nativeClient, conn net.Conn, data string, fixture tunFixture) {
+	observeNativeCounters(t, c, "before-read-pump-stall")
 	if err := os.WriteFile(filepath.Join(data, "fault-native-forwarding"), []byte("armed"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -387,6 +586,7 @@ func observeForwardingStall(t *testing.T, c *nativeClient, conn net.Conn, data s
 		}
 	}
 	assertNativeCapture(t, data, fixture)
+	observeNativeCounters(t, c, "during-read-pump-stall")
 	t.Logf("M4_STALL kind=forwarding-only observed=%s ipc_replies=%d slowest_ipc_round=%s capture_still_present=true automatic_recovery=false", time.Since(start), responses, slowest)
 	if err := os.WriteFile(filepath.Join(data, "native-forwarding-release"), []byte("release"), 0600); err != nil {
 		t.Fatal(err)
@@ -397,6 +597,7 @@ func observeForwardingStall(t *testing.T, c *nativeClient, conn net.Conn, data s
 		t.Fatal("release did not resume the held flow", line, err)
 	}
 	nativeEcho(t, conn, "forwarding-resumed-without-new-instance")
+	observeNativeCounters(t, c, "after-read-pump-stall")
 }
 
 func observeWholeServiceStall(t *testing.T, c *nativeClient, fixture tunFixture, ctx context.Context) {
@@ -406,6 +607,8 @@ func observeWholeServiceStall(t *testing.T, c *nativeClient, fixture tunFixture,
 	}
 	defer conn.Close()
 	nativeEcho(t, conn, "before-whole-service-stall")
+	observeNativeCounters(t, c, "before-whole-service-stall")
+	c.stopLease()
 	nativeMust(t, c, "renew", nil, nil)
 	s, err := service.Query(service.Engine)
 	if err != nil || !s.Running {
@@ -425,6 +628,7 @@ func observeWholeServiceStall(t *testing.T, c *nativeClient, fixture tunFixture,
 	if err == nil {
 		t.Fatal("whole-service suspension left IPC responsive")
 	}
+	t.Log("M4_PROGRESS phase=whole-service-stall counters=unavailable (service suspended)")
 	if _, err := fmt.Fprint(conn, "ping whole-service-stalled\n"); err != nil {
 		t.Fatal(err)
 	}

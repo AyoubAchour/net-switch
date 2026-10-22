@@ -72,6 +72,10 @@ func (r *RPC) read() {
 			return
 		}
 		if reply.ID == "" {
+			if reply.Error != "" {
+				r.fail(rpcError(reply.Error))
+				return
+			}
 			continue
 		} // droppable events
 		r.mu.Lock()

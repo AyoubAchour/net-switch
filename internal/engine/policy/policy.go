@@ -179,6 +179,8 @@ func (p *Policy) Predict(app string) Prediction {
 }
 func (p *Policy) IPv6() bool { return p.config.IPv6 }
 
+func (p *Policy) HasLine(id string) bool { _, ok := p.config.Lanes[id]; return ok }
+
 // Addresses shares the compiled policy's immutable address list with tickets.
 func (p *Policy) Addresses(line string) []netip.Addr {
 	for _, l := range p.config.Lines {
