@@ -127,7 +127,14 @@ func nativeMust(t *testing.T, c *nativeClient, method string, fields map[string]
 
 func nativeEcho(t *testing.T, conn net.Conn, marker string) {
 	t.Helper()
-	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	nativeEchoDeadline(t, conn, marker, time.Now().Add(5*time.Second))
+}
+
+func nativeEchoDeadline(t *testing.T, conn net.Conn, marker string, deadline time.Time) {
+	t.Helper()
+	if err := conn.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fmt.Fprintf(conn, "ping %s\n", marker); err != nil {
 		t.Fatal(err)
 	}
@@ -398,12 +405,12 @@ func TestNativeEngineService(t *testing.T) {
 		})
 	} else {
 		t.Run("read-deadline-control-with-forwarding-live", func(t *testing.T) {
-			sample := nativeSocketObserver(t, newer)
-			quiet := &stalledTraffic{conn: newer, sent: time.Now(), sample: sample}
+			observer := nativeSocketObserver(t, newer)
+			quiet := &stalledTraffic{conn: newer, sent: time.Now(), sample: observer.sample}
 			for time.Since(quiet.sent) < 35*time.Second {
 				quiet.poll(t)
 			}
-			sample("read-deadline-control-end")
+			observer.sample("read-deadline-control-end")
 			t.Logf("M4_DEADLINE_CONTROL observed=%s poll_deadlines=%d flow=%s forwarding=live", time.Since(quiet.sent), quiet.polls, quiet.outcome())
 			nativeEcho(t, newer, "same-stream-after-deadline-control")
 		})
@@ -489,6 +496,7 @@ func TestNativeEngineService(t *testing.T) {
 			if err != nil || !s.Running {
 				t.Fatal(s, err)
 			}
+			recovery := newNativeRecoveryTimer()
 			killUnreset(t, s.PID)
 			crashed.stopLease()
 			wait(t, "native crash exits service", 15*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && s.Stopped })
@@ -496,6 +504,7 @@ func TestNativeEngineService(t *testing.T) {
 			// Wait for its real object deletion, not just for the process to die.
 			if !automatic {
 				assertNativeOwnedLeftovers(t, data, crashed.instance)
+				recovery = newNativeRecoveryTimer() // explicit cleanup has no detector
 				if b, err := runNativeCleanup(ctx, ctl, data).CombinedOutput(); err != nil {
 					t.Fatal("explicit native cleanup", err, string(b))
 				}
@@ -510,6 +519,7 @@ func TestNativeEngineService(t *testing.T) {
 			if end.Cleanup != "complete" || end.ExitKnown && (end.ExitCode == 3 || end.ExitCode == 0) || end.MainExitKnown && (end.MainExitCode == 3 || end.MainExitCode == 0) {
 				t.Fatal("crash became a clean exit or adapter loss", end)
 			}
+			nativeFreshFlow(t, fixture, ctx, name, recovery, 12*time.Second)
 			t.Logf("NATIVE_CRASH pid=%d instance=%s final_status=%+v cleanup_complete=true", s.PID, crashed.instance, end)
 		})
 	}
@@ -556,7 +566,8 @@ func TestNativeEngineService(t *testing.T) {
 
 func observeForwardingStall(t *testing.T, c *nativeClient, conn net.Conn, data string, fixture tunFixture) {
 	observeNativeCounters(t, c, "before-read-pump-stall")
-	sample := nativeSocketObserver(t, conn)
+	observer := nativeSocketObserver(t, conn)
+	sample := observer.sample
 	sample("before-read-pump-stall")
 	if err := os.WriteFile(filepath.Join(data, "fault-native-forwarding"), []byte("armed"), 0600); err != nil {
 		t.Fatal(err)
@@ -569,7 +580,7 @@ func observeForwardingStall(t *testing.T, c *nativeClient, conn net.Conn, data s
 		t.Fatal(err)
 	}
 	marker := "native-forward-stalled"
-	traffic := &stalledTraffic{conn: conn, sent: time.Now(), sample: sample}
+	traffic := &stalledTraffic{conn: conn, sent: time.Now(), sample: sample, verifyGiveUp: observer.verifyGiveUp}
 	if _, err := fmt.Fprintf(conn, "ping %s\n", marker); err != nil {
 		t.Fatal(err)
 	}
@@ -609,30 +620,23 @@ func observeForwardingStall(t *testing.T, c *nativeClient, conn net.Conn, data s
 	assertNativeCapture(t, c.instance, fixture)
 	observeNativeCounters(t, c, "during-read-pump-stall")
 	sample("before-read-pump-release")
-	t.Logf("M4_STALL kind=forwarding-only observed=%s since_send=%s ipc_replies=%d slowest_ipc_round=%s flow=%s poll_deadlines=%d capture_still_present=true automatic_recovery=false", time.Since(start), time.Since(traffic.sent), responses, slowest, traffic.outcome(), traffic.polls)
+	t.Logf("M4_STALL kind=forwarding-only observed=%s since_send=%s ipc_replies=%d slowest_ipc_round=%s flow=%s os_giveup_after=%s poll_deadlines=%d capture_still_present=true automatic_recovery=false", time.Since(start), time.Since(traffic.sent), responses, slowest, traffic.outcome(), traffic.giveUpTime(), traffic.polls)
+	recovery := newNativeRecoveryTimer()
 	if err := os.WriteFile(filepath.Join(data, "native-forwarding-release"), []byte("release"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Measure a fresh connection first; observing the old socket must not
+	// spend any of the recovery budget. No client timeout or retry is raised.
+	nativeFreshFlow(t, fixture, context.Background(), "read-pump-release", recovery, 10*time.Second)
+	observeNativeCounters(t, c, "after-fresh-flow-recovery")
+	conn.SetReadDeadline(time.Now().Add(time.Second))
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	sample("after-read-pump-release")
-	t.Logf("M4_FLOW phase=after-read-pump-release same_stream_resumed=%t reply=%q error=%v", err == nil && strings.Contains(line, marker), line, err)
-	if err != nil || !strings.Contains(line, marker) {
-		t.Error("release did not resume the held flow", line, err)
-	} else {
-		nativeEcho(t, conn, "forwarding-resumed-without-new-instance")
+	t.Logf("M4_FLOW phase=after-read-pump-release old_stream_reply_received=%t observation_budget=1s reply=%q error=%v", err == nil && strings.Contains(line, marker), line, err)
+	if err == nil && !strings.Contains(line, marker) {
+		t.Error("unexpected reply on old stream after release", line)
 	}
 	observeNativeCounters(t, c, "after-read-pump-stall")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	fresh, err := fixture.dial(ctx, "tcp4", fixture.target)
-	if err != nil {
-		t.Fatal("fresh connection after read pump release", err)
-	}
-	defer fresh.Close()
-	nativeEcho(t, fresh, "fresh-connection-after-read-pump-release")
-	observeNativeCounters(t, c, "after-fresh-flow-recovery")
-	t.Log("M4_FLOW phase=after-read-pump-release fresh_connection=passed (does not substitute for the original stream)")
 }
 
 func observeWholeServiceStall(t *testing.T, c *nativeClient, fixture tunFixture, ctx context.Context) {
@@ -643,7 +647,8 @@ func observeWholeServiceStall(t *testing.T, c *nativeClient, fixture tunFixture,
 	defer conn.Close()
 	nativeEcho(t, conn, "before-whole-service-stall")
 	observeNativeCounters(t, c, "before-whole-service-stall")
-	sample := nativeSocketObserver(t, conn)
+	observer := nativeSocketObserver(t, conn)
+	sample := observer.sample
 	sample("before-whole-service-stall")
 	if err := conn.SetDeadline(time.Time{}); err != nil {
 		t.Fatal(err)
@@ -672,7 +677,7 @@ func observeWholeServiceStall(t *testing.T, c *nativeClient, fixture tunFixture,
 	if err := conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	traffic := &stalledTraffic{conn: conn, sent: time.Now(), sample: sample}
+	traffic := &stalledTraffic{conn: conn, sent: time.Now(), sample: sample, verifyGiveUp: observer.verifyGiveUp}
 	if _, err := fmt.Fprint(conn, "ping whole-service-stalled\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -690,12 +695,18 @@ func observeWholeServiceStall(t *testing.T, c *nativeClient, fixture tunFixture,
 	}
 	assertNativeCapture(t, c.instance, fixture)
 	sample("before-whole-service-resume")
-	t.Logf("M4_STALL kind=whole-service observed=%s since_send=%s exceeds_lease=true service_pid=%d ipc_timeout=true flow=%s poll_deadlines=%d automatic_recovery=false", time.Since(start), time.Since(traffic.sent), s.PID, traffic.outcome(), traffic.polls)
+	t.Logf("M4_STALL kind=whole-service observed=%s since_send=%s exceeds_lease=true service_pid=%d ipc_timeout=true flow=%s os_giveup_after=%s poll_deadlines=%d automatic_recovery=false", time.Since(start), time.Since(traffic.sent), s.PID, traffic.outcome(), traffic.giveUpTime(), traffic.polls)
+	recovery := newNativeRecoveryTimer()
 	resumeNative(t, s.PID)
 	resumed = true
 	// No queued renewals: on wake the already-lapsed lease must clean up.
-	wait(t, "lease expiry after process resumes", 20*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && s.Stopped })
+	wait(t, "lease expiry after process resumes", 12*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && s.Stopped })
 	fixture.clean(t)
+	t.Logf("M4_RECOVERY phase=whole-service-resume capture_removed_after=%s origin=manual-resume", recovery.elapsed())
+	// The lease detector can run only after resume. Its cleanup/fresh-traffic
+	// tail must fit M2's 12-second termination/cleanup allowance; this does not
+	// claim an autonomous bound from the start of the suspended interval.
+	nativeFreshFlow(t, fixture, ctx, "whole-service-resume", recovery, 12*time.Second)
 	conn.SetReadDeadline(time.Now().Add(time.Second))
 	var b [1]byte
 	n, err := conn.Read(b[:])

@@ -2,8 +2,10 @@ package lifecycle_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"testing"
 	"time"
 	"unsafe"
@@ -27,6 +29,8 @@ type nativeTCPInfo struct {
 	_                                                                                   [3]byte
 }
 
+func nativeMeasurementNow() time.Duration { return winclock.Now() }
+
 func readNativeTCPInfo(conn *net.TCPConn) (nativeTCPInfo, error) {
 	var info nativeTCPInfo
 	raw, err := conn.SyscallConn()
@@ -48,7 +52,7 @@ func readNativeTCPInfo(conn *net.TCPConn) (nativeTCPInfo, error) {
 	return info, queryErr
 }
 
-func nativeSocketObserver(t *testing.T, conn net.Conn) func(string) {
+func nativeSocketObserver(t *testing.T, conn net.Conn) nativeSocketObservation {
 	t.Helper()
 	tcp, ok := conn.(*net.TCPConn)
 	if !ok {
@@ -108,7 +112,8 @@ func nativeSocketObserver(t *testing.T, conn net.Conn) func(string) {
 	b, _ := json.Marshal(options)
 	t.Logf("M4_TCP_OPTIONS unchanged=true values=%s", b)
 	started, lastGood := winclock.Now(), winclock.Now()
-	return func(phase string) {
+	baseline := last
+	return nativeSocketObservation{sample: func(phase string) {
 		start := winclock.Now()
 		info, err := readNativeTCPInfo(tcp)
 		if err == nil {
@@ -116,6 +121,52 @@ func nativeSocketObserver(t *testing.T, conn net.Conn) func(string) {
 		}
 		b, _ := json.Marshal(last)
 		t.Logf("M4_TCP phase=%s since_baseline=%s sample_cost=%s last_success_age=%s info=%s error=%v", phase, winclock.Since(started), winclock.Since(start), winclock.Since(lastGood), b, err)
+	}, verifyGiveUp: func(err error) error {
+		info, queryErr := readNativeTCPInfo(tcp)
+		if queryErr != nil {
+			return queryErr
+		}
+		return verifyNativeTCPGiveUp(err, baseline, info)
+	}}
+}
+
+func verifyNativeTCPGiveUp(err error, before, after nativeTCPInfo) error {
+	if !errors.Is(err, windows.WSAETIMEDOUT) {
+		return fmt.Errorf("not a native TCP timeout: %v", err)
+	}
+	if before.State != 4 || after.State != 0 || after.BytesInFlight == 0 || after.BytesRetransmitted <= before.BytesRetransmitted || after.TimeoutEpisodes <= before.TimeoutEpisodes {
+		return fmt.Errorf("TCP state did not prove retransmission exhaustion: before=%+v after=%+v", before, after)
+	}
+	return nil
+}
+
+func TestNativeStallGiveUpRequiresTCPExhaustion(t *testing.T) {
+	before := nativeTCPInfo{State: 4, BytesRetransmitted: 7, TimeoutEpisodes: 1}
+	after := nativeTCPInfo{State: 0, BytesInFlight: 28, BytesRetransmitted: 231, TimeoutEpisodes: 2}
+	for _, timeout := range []error{windows.WSAETIMEDOUT, &net.OpError{Op: "read", Err: os.NewSyscallError("wsarecv", windows.WSAETIMEDOUT)}} {
+		if err := verifyNativeTCPGiveUp(timeout, before, after); err != nil {
+			t.Fatal(err)
+		}
+	}
+	connecting := before
+	connecting.State = 2
+	if verifyNativeTCPGiveUp(windows.WSAETIMEDOUT, connecting, after) == nil {
+		t.Fatal("connect timeout accepted as a held flow")
+	}
+	for _, err := range []error{windows.WSAECONNRESET, windows.WSAECONNABORTED, errors.New("timeout"), nil} {
+		if verifyNativeTCPGiveUp(err, before, after) == nil {
+			t.Fatal("reset/abort/unknown accepted as OS give-up", err)
+		}
+	}
+	for _, change := range []func(*nativeTCPInfo){
+		func(v *nativeTCPInfo) { v.State = 4 }, func(v *nativeTCPInfo) { v.BytesInFlight = 0 },
+		func(v *nativeTCPInfo) { v.BytesRetransmitted = before.BytesRetransmitted }, func(v *nativeTCPInfo) { v.TimeoutEpisodes = before.TimeoutEpisodes },
+	} {
+		invalid := after
+		change(&invalid)
+		if verifyNativeTCPGiveUp(windows.WSAETIMEDOUT, before, invalid) == nil {
+			t.Fatal("missing TCP evidence accepted", invalid)
+		}
 	}
 }
 
