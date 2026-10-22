@@ -207,14 +207,15 @@ func SyncParent(string) error { return nil }
 type OwnershipLock struct{}
 
 // The lock is global across standalone state directories, but its name lives
-// in a verified SYSTEM/Administrators folder. Unlike a Global\ mutex, a standard
-// user cannot pre-create and hold it. Windows releases the byte lock on crash.
+// in a certified SYSTEM/Administrators folder resolved through protected HKLM.
+// A held hostile default is bypassed without changing the machine-wide lock.
+// Windows releases the byte lock on crash.
 func (OwnershipLock) Acquire(ctx context.Context) (func() error, error) {
 	root, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
 	if err != nil {
 		return nil, err
 	}
-	directory, err := StateDirectory(filepath.Join(root, "Net Switch Engine Ownership"))
+	directory, err := ownershipDirectory(ctx, filepath.Join(root, "Net Switch Engine Ownership"))
 	if err != nil {
 		return nil, err
 	}

@@ -25,6 +25,13 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, "CI required netswitch_handlecheck but it was not compiled")
 		os.Exit(1)
 	}
+	if mode := os.Getenv(ownershipFixtureEnv); mode != "" {
+		if err := ownershipDirectoryFixture(mode); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if name := os.Getenv("NETSWITCH_HEAP_EVENT_DENIED"); name != "" {
 		if err := deniedHeapEventClient(name); err != nil {
 			fmt.Fprintln(os.Stderr, err)
