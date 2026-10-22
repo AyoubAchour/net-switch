@@ -6,6 +6,17 @@ change behavior.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-22
+
+To update, use the update offer in Net Switch or download the installer below
+and run it: `x64` for Intel and AMD PCs, `arm64` for ARM64 PCs on Windows 11.
+
+- **Security update for the built-in Node.js.** Net Switch's service now runs
+  on Node.js 24.22.1 instead of 24.21.0, which fixes a flaw in how Node.js
+  unpacks compressed web responses. Another program on your PC could have used
+  it to attack the Net Switch service, which runs with administrator rights.
+  Nothing else changed.
+
 ## [0.3.1] - 2026-10-18
 
 To update, use the update offer in Net Switch or download the installer below
