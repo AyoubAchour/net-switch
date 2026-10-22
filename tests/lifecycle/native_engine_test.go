@@ -304,15 +304,19 @@ func TestNativeEngineService(t *testing.T) {
 	}
 	t.Run("installed-native-engine-denies-other-user", func(t *testing.T) {
 		other := newActor(t, "NSNativeOther")
-		t.Cleanup(other.close)
+		reused := newActor(t, "NSNativeOther")
+		if reused.id() != other.id() {
+			t.Fatal("account reuse changed identity")
+		}
 		self, err := os.Executable()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if b, err := other.command(self, "client", "engine-denied").CombinedOutput(); err != nil {
+		if b, err := reused.command(self, "client", "engine-denied").CombinedOutput(); err != nil {
 			t.Fatal("native service ACL", err, string(b))
 		}
 	})
+	assertActorRemoved(t, "NSNativeOther")
 	config := policy.Config{Lines: []platform.Line{{ID: "a1", Interface: fixture.line}}}
 	rev := policy.Revision{N: 1, Config: config, Hash: policy.Hash(config)}
 	var started policy.Applied

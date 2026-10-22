@@ -374,8 +374,6 @@ func TestRealServices(t *testing.T) {
 	}
 	owner, other := newActor(t, "NSLifecycleOwner"), newActor(t, "NSLifecycleOther")
 	realWTSOwner := ""
-	t.Cleanup(owner.close)
-	t.Cleanup(other.close)
 	if runtime.GOOS == "windows" {
 		if err := lifecycle.Save(filepath.Join(data, "fault-owner-sessions.json"), map[string]bool{owner.id(): true, other.id(): true}); err != nil {
 			t.Fatal(err)

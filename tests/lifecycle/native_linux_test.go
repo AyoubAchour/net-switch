@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -20,8 +21,10 @@ import (
 type linuxActor struct {
 	name, uid string
 	number    uint32
+	group     uint32
 	t         *testing.T
 	home      string
+	closed    bool
 }
 
 func (a *linuxActor) cleanup(fn func()) { a.t.Cleanup(fn) }
@@ -29,31 +32,115 @@ func (a *linuxActor) cleanup(fn func()) { a.t.Cleanup(fn) }
 func (a *linuxActor) id() string { return a.uid }
 func (a *linuxActor) command(exe string, args ...string) *exec.Cmd {
 	cmd := exec.Command(exe, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: a.number, Gid: a.number, NoSetGroups: false}}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: a.number, Gid: a.group, NoSetGroups: false}}
 	cmd.Env = append(os.Environ(), "HOME="+a.home, "USER="+a.name)
 	return cmd
 }
 func (a *linuxActor) close() {
-	_ = exec.Command("loginctl", "disable-linger", a.name).Run()
-	_ = exec.Command("userdel", a.name).Run()
+	if a.closed {
+		return
+	}
+	a.closed = true
+	u, err := checkedLinuxActor(a.name)
+	var missing user.UnknownUserError
+	if errors.As(err, &missing) {
+		return
+	}
+	if err != nil || (a.uid != "" && u.Uid != a.uid) {
+		a.t.Errorf("refuse disposable account cleanup for changed identity %s: %v", a.name, err)
+		return
+	}
+	// Disabling linger alone does not join the user manager's exit. Stop its
+	// service and slice before userdel, which refuses a UID with live processes.
+	for _, args := range [][]string{
+		{"loginctl", "disable-linger", a.name},
+		{"systemctl", "stop", "user@" + u.Uid + ".service", "user-" + u.Uid + ".slice"},
+		{"userdel", "--remove", a.name},
+	} {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		b, err := exec.CommandContext(ctx, args[0], args[1:]...).CombinedOutput()
+		cancel()
+		if err != nil {
+			a.t.Errorf("disposable account cleanup %v: %v: %s", args, err, b)
+			return
+		}
+	}
+	assertActorRemoved(a.t, a.name)
 }
 func newActor(t *testing.T, name string) actor {
 	t.Helper()
-	if b, err := exec.Command("useradd", "--create-home", name).CombinedOutput(); err != nil {
-		t.Fatal(err, string(b))
+	requireActorName(t, name)
+	a := &linuxActor{name: name, t: t}
+	_, err := user.Lookup(name)
+	var missing user.UnknownUserError
+	switch {
+	case errors.As(err, &missing):
+		if b, err := exec.Command("useradd", "--create-home", "--user-group", "--shell", "/bin/sh", "--comment", actorComment, name).CombinedOutput(); err != nil {
+			t.Fatal("create disposable account", err, string(b))
+		}
+		t.Cleanup(a.close) // owns the account even if any following setup fails
+	case err != nil:
+		t.Fatal("lookup disposable account", err)
+	default:
+		if _, err := checkedLinuxActor(name); err != nil {
+			t.Fatal("refuse existing account", err)
+		}
+		t.Cleanup(a.close)
+		t.Logf("ACTOR_REUSED name=%s verified_unprivileged=true", name)
 	}
+	u, err := checkedLinuxActor(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.uid, a.home = u.Uid, u.HomeDir
+	n, _ := strconv.ParseUint(u.Uid, 10, 32)
+	g, _ := strconv.ParseUint(u.Gid, 10, 32)
+	a.number, a.group = uint32(n), uint32(g)
+	// The engine ACL probe needs only a different UID. M2's session tests
+	// require linger, but starting a user manager here adds an unrelated lifetime.
+	if name != "NSNativeOther" {
+		if b, err := exec.Command("loginctl", "enable-linger", name).CombinedOutput(); err != nil {
+			t.Fatal(err, string(b))
+		}
+	}
+	return a
+}
+
+func checkedLinuxActor(name string) (*user.User, error) {
 	u, err := user.Lookup(name)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	if b, err := exec.Command("loginctl", "enable-linger", name).CombinedOutput(); err != nil {
-		t.Fatal(err, string(b))
+	uid, uidErr := strconv.ParseUint(u.Uid, 10, 32)
+	gid, gidErr := strconv.ParseUint(u.Gid, 10, 32)
+	if uidErr != nil || gidErr != nil || uid < 1000 || gid < 1000 || u.Username != name || u.Name != actorComment || u.HomeDir != "/home/"+name {
+		return nil, fmt.Errorf("%s is not the expected disposable unprivileged account", name)
 	}
-	n, err := strconv.ParseUint(u.Uid, 10, 32)
-	if err != nil {
-		t.Fatal(err)
+	group, err := user.LookupGroupId(u.Gid)
+	if err != nil || group.Name != name {
+		return nil, fmt.Errorf("%s has an unexpected primary group", name)
 	}
-	return &linuxActor{name: name, uid: u.Uid, number: uint32(n), home: u.HomeDir, t: t}
+	groups, err := u.GroupIds()
+	if err != nil || len(groups) != 1 || groups[0] != u.Gid {
+		return nil, fmt.Errorf("%s has unexpected supplementary groups", name)
+	}
+	b, err := exec.Command("passwd", "--status", name).Output()
+	fields := strings.Fields(string(b))
+	if err != nil || len(fields) < 2 || fields[0] != name || fields[1] != "L" {
+		return nil, fmt.Errorf("%s does not have the expected locked password", name)
+	}
+	return u, nil
+}
+
+func assertActorRemoved(t *testing.T, name string) {
+	t.Helper()
+	_, err := user.Lookup(name)
+	var missing user.UnknownUserError
+	if !errors.As(err, &missing) {
+		t.Errorf("disposable account %s remains after cleanup: %v", name, err)
+	} else {
+		t.Logf("ACTOR_REMOVED name=%s", name)
+	}
 }
 func testData() string { return "/var/lib/netswitch-lifecycle-ci" }
 func verifyPermissions(t *testing.T, owner, other actor) {
