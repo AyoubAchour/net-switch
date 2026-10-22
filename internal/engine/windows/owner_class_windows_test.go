@@ -197,9 +197,24 @@ func TestOwnerReadTimeAtPortLimit(t *testing.T) {
 			mu.Unlock()
 		}
 	}()
-	// Earlier tests' TIME_WAIT rows expire during a phase (x64 job
-	// 119321529600 fell from 13,622 to 13,469 rows), so top up to the middle
-	// of the range before each phase, not once.
+	// Earlier tests' TIME_WAIT rows expire in bursts during a phase: x64 job
+	// 119321529600 fell from 13,622 to 13,469 rows, and job 119667124286 lost
+	// 510 TIME_WAIT rows inside one busy chunk (13,592). Wait them out first
+	// (Windows keeps TIME_WAIT up to 120 s), so the rows measured are the
+	// fill's own held connections, which never expire.
+	drainStarted := time.Now()
+	for {
+		_, timeWait := nativeTCPRowCounts(t)
+		if timeWait <= 100 {
+			t.Logf("TIME_WAIT rows %d after %s", timeWait, time.Since(drainStarted).Round(time.Second))
+			break
+		}
+		if time.Since(drainStarted) > 250*time.Second {
+			t.Fatalf("TIME_WAIT rows did not drain: %d after %s", timeWait, time.Since(drainStarted).Round(time.Second))
+		}
+		time.Sleep(2 * time.Second)
+	}
+	// Top up to the middle of the range before each chunk, not once.
 	fill := func() {
 		rows, _ := nativeTCPRowCounts(t)
 		for pairs := 0; rows < 14250; pairs++ {

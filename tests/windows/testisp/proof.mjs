@@ -10,7 +10,12 @@ let harness, responder;
 async function check(name, fn) {
   const start = Date.now();
   try { const evidence = await fn(); results.push({ name, status: 'pass', ms: Date.now() - start, evidence }); console.log(`PASS ${name}: ${JSON.stringify(evidence)}`); }
-  catch (error) { results.push({ name, status: 'fail', ms: Date.now() - start, error: error.stack }); throw error; }
+  catch (error) {
+    results.push({ name, status: 'fail', ms: Date.now() - start, error: error.stack });
+    // A failed check names itself; the bare stack below did not (x64 job 119667481066).
+    console.error(`FAIL ${name}: ${error.message}`);
+    throw error;
+  }
 }
 try {
   harness = await startHarness(dir);

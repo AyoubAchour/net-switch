@@ -371,14 +371,41 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     evidence.clientPIDs = clients.map((app) => ({ pid: app.child.pid, executable: app.exe }));
     let held = 0;
     const failed = [], attempts = [];
+    // SYSTEM-DESIGN 5.9 amended: a refused first attempt while the pool still
+    // has room for its pair gets one explicit, reported re-attempt; the fill
+    // stops at a refusal only when the pool is full or the re-attempt fails.
+    // Acceptance x64 job 119667481104 stopped at 5,119 on one app connect
+    // ENOBUFS with 5,738 IPv4 dynamic ports free.
+    const family = target.host.includes(':') ? 'ipv6' : 'ipv4';
+    evidence.fillReattempts = [];
+    const admit = (app, result) => {
+      const refused = [];
+      for (const attempt of result.attempts) {
+        attempts.push(attempt);
+        if (attempt.Error) refused.push(attempt);
+        else { app.admissions.push(attempt); held++; }
+      }
+      return refused;
+    };
     while (!failed.length && held < 16384) {
       for (const app of clients) {
         const result = await app.call('open', { ...target, count: 128 });
-        for (const attempt of result.attempts) {
-          attempts.push(attempt);
-          if (attempt.Error) failed.push(attempt);
-          else { app.admissions.push(attempt); held++; }
+        let refused = admit(app, result);
+        if (refused.length) {
+          const space = await udpPortSpaceAtFailure().catch((error) => ({ error: String(error) }));
+          const available = space.families?.find((item) => item.family === family)?.available;
+          const room = space.state === 'complete' && available >= 2 * refused.length;
+          const record = { held, available, room, refused: refused.map((item) => ({ call: item.NativeCall, code: item.Error })) };
+          if (room) {
+            const retry = await app.call('open', { ...target, count: refused.length });
+            refused = admit(app, retry);
+            record.reattemptFailures = refused.map((item) => ({ call: item.NativeCall, code: item.Error }));
+          }
+          evidence.fillReattempts.push(record);
+          console.log(`WINDOWS UDP FILL REATTEMPT ${JSON.stringify(record)}`);
+          if (!room) evidence.portSpaceAtFailure = space;
         }
+        failed.push(...refused);
         assert(result.held <= 4096, 'UDP fixture exceeded the per-app cap');
         const stats = await engineStats();
         console.log(`WINDOWS UDP ADMISSION ${JSON.stringify({ held, flows: stats.flows, heapBytes: stats.heapBytes,
@@ -389,7 +416,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
           // Both halves allocate ports. Preserve the same-runner reservation
           // evidence even when the app fails before the engine sees a packet.
           Object.assign(evidence, { held, failed, attempts });
-          evidence.portSpaceAtFailure = await udpPortSpaceAtFailure().catch((error) => ({ error: String(error) }));
+          evidence.portSpaceAtFailure ??= await udpPortSpaceAtFailure().catch((error) => ({ error: String(error) }));
           console.log(`WINDOWS UDP PORT SPACE AT FAILURE ${JSON.stringify(evidence.portSpaceAtFailure)}`);
           break;
         }
