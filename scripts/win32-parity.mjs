@@ -16,8 +16,9 @@ import { enableAutostart, disableAutostart } from '../lib/autostart.mjs';
 import { AppInfo } from '../lib/appinfo.mjs';
 import { appKey } from '../lib/apps.mjs';
 import { InstalledApps } from '../lib/installed-apps.mjs';
-import { restoreMetrics, restoreMinimizeConnectionsPolicy } from '../lib/platform/windows-network.mjs';
-import { runPowerShellJson } from '../lib/ps.mjs';
+import { ADAPTERS_SCRIPT, restoreMetrics, restoreMinimizeConnectionsPolicy } from '../lib/platform/windows-network.mjs';
+import { prepareAdapters } from '../lib/network.mjs';
+import { oraclePowerShellJson, oracleRead } from '../tests/windows/parity-oracle.mjs';
 import { recordExecutable } from './server-under-test.mjs';
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true' || process.env.RUNNER_ENVIRONMENT !== 'github-hosted') {
@@ -43,12 +44,14 @@ async function check(name, fn) {
 const folder = await mkdtemp(path.join(tmpdir(), 'netswitch-win32-parity-'));
 try {
   await check('elevation and native architecture', async () => {
-    assert.equal(await native('elevated'), await windows.isElevated());
+    assert.equal(await native('elevated'), await oracleRead('windows.isElevated', () => windows.isElevated()));
     assert.equal(await native('architecture'), nativeArchitecture());
   });
-  let adapters;
+  let adapters = [];
   await check('adapter fields and default routes', async () => {
-    adapters = await windows.detectAdapters();
+    // Same ADAPTERS_SCRIPT and parser as windows.detectAdapters, but the first
+    // CIM scan on a fresh runner gets the harness deadline instead of 20 s.
+    adapters = prepareAdapters(await oraclePowerShellJson(ADAPTERS_SCRIPT, { command: 'windows.detectAdapters' }) ?? []);
     const current = await native('network');
     for (const previous of adapters) {
       const actual = current.adapters.find((a) => a.alias === previous.alias);
@@ -61,31 +64,33 @@ try {
     for (const route of before) assert(current.defaultRoutes.some((r) => r.gateway === route.gateway && r.interfaceAddress === route.interfaceAddress), JSON.stringify(route));
   });
   await check('Wi-Fi policy registry read, write and restore', async () => {
-    const before = await windows.readMinimizeConnectionsPolicy();
+    const readPolicy = () => oracleRead('windows.readMinimizeConnectionsPolicy', () => windows.readMinimizeConnectionsPolicy(), { timeoutMs: 10_000 });
+    const before = await readPolicy();
     assert.equal(await native('policy'), before);
     try {
       await native('policy-set', { value: 0 });
-      assert.equal(await windows.readMinimizeConnectionsPolicy(), 0);
+      assert.equal(await readPolicy(), 0);
       await native('policy-set', { value: before });
-      assert.equal(await windows.readMinimizeConnectionsPolicy(), before);
-    } finally { await restoreMinimizeConnectionsPolicy(before); }
+      assert.equal(await readPolicy(), before);
+    } finally { await oracleRead('restoreMinimizeConnectionsPolicy', () => restoreMinimizeConnectionsPolicy(before), { timeoutMs: 10_000 }); }
   });
   await check('metrics, active writes, persistent writes and restore', async () => {
     const adapter = adapters.find((a) => a.connected);
     assert(adapter, 'runner needs a connected adapter');
-    const before = await windows.readMetrics(adapter.alias);
+    const readMetrics = () => oracleRead('windows.readMetrics', () => windows.readMetrics(adapter.alias));
+    const before = await readMetrics();
     assert.deepEqual(await native('metrics', { alias: adapter.alias }), before);
     try {
       await native('metrics-set', { alias: adapter.alias, before, metric: 123 });
-      const active = await windows.readMetrics(adapter.alias);
+      const active = await readMetrics();
       assert(active.every((r) => r.metric === 123 && r.automatic === false));
-      const persistent = await runPowerShellJson(`$items = Get-NetIPInterface -InterfaceAlias $env:NETSWITCH_ALIAS -PolicyStore PersistentStore -ErrorAction Stop
-ConvertTo-Json -InputObject @($items | ForEach-Object { [pscustomobject]@{ family=[string]$_.AddressFamily; metric=[int]$_.InterfaceMetric; automatic=([string]$_.AutomaticMetric -eq 'Enabled') } }) -Compress`, { args: { ALIAS: adapter.alias } });
+      const persistent = await oraclePowerShellJson(`$items = Get-NetIPInterface -InterfaceAlias $env:NETSWITCH_ALIAS -PolicyStore PersistentStore -ErrorAction Stop
+ConvertTo-Json -InputObject @($items | ForEach-Object { [pscustomobject]@{ family=[string]$_.AddressFamily; metric=[int]$_.InterfaceMetric; automatic=([string]$_.AutomaticMetric -eq 'Enabled') } }) -Compress`, { command: 'Get-NetIPInterface persistent metrics', args: { ALIAS: adapter.alias } });
       assert.equal(persistent.length, before.length);
       assert(persistent.every((r) => r.metric === 123 && r.automatic === false), JSON.stringify(persistent));
       await native('metrics-restore', { alias: adapter.alias, metrics: before });
-      assert.deepEqual(await windows.readMetrics(adapter.alias), before);
-    } finally { await restoreMetrics(adapter.alias, before); }
+      assert.deepEqual(await readMetrics(), before);
+    } finally { await oracleRead('restoreMetrics', () => restoreMetrics(adapter.alias, before)); }
   });
   await check('machine folder ACL SDDL and inherited child ACLs', async () => {
     const old = path.join(folder, 'old'), current = path.join(folder, 'new');
@@ -95,7 +100,7 @@ ConvertTo-Json -InputObject @($items | ForEach-Object { [pscustomobject]@{ famil
     for (const p of [old, current]) { await mkdir(path.join(p, 'child'), { recursive: true }); await writeFile(path.join(p, 'child', 'record'), 'probe'); }
     await windows.protectMachineDir(old, path.join(folder, 'acl.log'));
     await native('protect-directory', { path: current });
-    const sddl = async (dir) => runPowerShellJson(`ConvertTo-Json -InputObject @((Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'child')).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'child\\record')).Sddl) -Compress`, { args: { DIR: dir } });
+    const sddl = async (dir) => oraclePowerShellJson(`ConvertTo-Json -InputObject @((Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'child')).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'child\\record')).Sddl) -Compress`, { command: 'Get-Acl SDDL', args: { DIR: dir } });
     assert.deepEqual(await sddl(current), await sddl(old));
     assert.equal(await readFile(path.join(current, 'child', 'record'), 'utf8'), 'probe');
   });
@@ -113,7 +118,7 @@ ConvertTo-Json -InputObject @($items | ForEach-Object { [pscustomobject]@{ famil
     } finally { await new Promise((resolve) => listener.close(resolve)); }
   });
   await check('Start-menu resolved app list', async () => {
-    const before = await new InstalledApps().list();
+    const before = await oracleRead('InstalledApps.list', () => new InstalledApps().list());
     const current = (await native('installed-apps')).map(({ name, path }) => ({ name, path }));
     const ordered = (items) => items.sort((a, b) => a.path.localeCompare(b.path));
     assert.deepEqual(ordered(current), ordered(before));
@@ -127,7 +132,7 @@ ConvertTo-Json -InputObject @($items | ForEach-Object { [pscustomobject]@{ famil
       assert.equal(item.name, old.name, item.path);
       assert.equal(Boolean(item.icon), Boolean(old.icon));
       if (!item.icon) continue;
-      const pixels = await runPowerShellJson(`Add-Type -AssemblyName System.Drawing
+      const pixels = await oraclePowerShellJson(`Add-Type -AssemblyName System.Drawing
 $result = foreach ($text in @($env:NETSWITCH_OLD, $env:NETSWITCH_NEW)) {
   $stream = New-Object IO.MemoryStream(,[Convert]::FromBase64String($text))
   $bitmap = New-Object Drawing.Bitmap($stream)
@@ -136,7 +141,7 @@ $result = foreach ($text in @($env:NETSWITCH_OLD, $env:NETSWITCH_NEW)) {
   [pscustomobject]@{ width=$bitmap.Width; height=$bitmap.Height; pixels=$all.ToArray() }
   $bitmap.Dispose(); $stream.Dispose()
 }
-ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { args: { OLD: old.icon, NEW: item.icon } });
+ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { command: 'icon pixels', args: { OLD: old.icon, NEW: item.icon } });
       assert.deepEqual(pixels[1], pixels[0], item.path);
     }
   });
@@ -148,8 +153,8 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { args: { OLD: old.i
       const [expected, actual] = await Promise.all([windows.portHolder(port), native('port-holder', { port })]);
       assert.deepEqual(actual, expected);
       const connected = once(listener, 'connection'); client = connect(port, '127.0.0.1'); [accepted] = await connected; accepted.on('error', () => {}); client.on('error', () => {}); await once(client, 'connect');
-      const tuple = await runPowerShellJson(`$c = Get-NetTCPConnection -LocalPort $env:NETSWITCH_PORT -RemotePort $env:NETSWITCH_REMOTE -State Established -ErrorAction Stop | Select-Object -First 1
-[pscustomobject]@{ local=[string]$c.LocalAddress; lport=[int]$c.LocalPort; remote=[string]$c.RemoteAddress; rport=[int]$c.RemotePort; pid=[int]$c.OwningProcess; created=$c.CreationTime.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress`, { args: { PORT: client.localPort, REMOTE: port } });
+      const tuple = await oraclePowerShellJson(`$c = Get-NetTCPConnection -LocalPort $env:NETSWITCH_PORT -RemotePort $env:NETSWITCH_REMOTE -State Established -ErrorAction Stop | Select-Object -First 1
+[pscustomobject]@{ local=[string]$c.LocalAddress; lport=[int]$c.LocalPort; remote=[string]$c.RemoteAddress; rport=[int]$c.RemotePort; pid=[int]$c.OwningProcess; created=$c.CreationTime.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress`, { command: 'Get-NetTCPConnection row', args: { PORT: client.localPort, REMOTE: port } });
       assert.equal((await native('close-tcp', { connections: [{ ...tuple, pid: tuple.pid + 1000000 }] })).gone, 1);
       const [precise] = await native('tcp-identity', { port: client.localPort });
       console.log(`TCP identity parity: ${JSON.stringify({ powerShell: tuple, native: precise })}`);
@@ -163,13 +168,13 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { args: { OLD: old.i
       const nativeResult = await native('close-tcp', { connections: [precise] });
       assert.deepEqual(nativeResult, { closed: 1, failed: 0, gone: 0, codes: [] });
       await closed;
-      assert.equal((await windows.closeTcpConnections([tuple])).gone, 1);
+      assert.equal((await oracleRead('windows.closeTcpConnections', () => windows.closeTcpConnections([tuple]), { timeoutMs: 30_000 })).gone, 1);
       accepted.destroy();
       const connectedAgain = once(listener, 'connection'); client = connect(port, '127.0.0.1'); [accepted] = await connectedAgain; accepted.on('error', () => {}); client.on('error', () => {}); await once(client, 'connect');
-      const oldTuple = await runPowerShellJson(`$c = Get-NetTCPConnection -LocalPort $env:NETSWITCH_PORT -RemotePort $env:NETSWITCH_REMOTE -State Established -ErrorAction Stop | Select-Object -First 1
-[pscustomobject]@{ local=[string]$c.LocalAddress; lport=[int]$c.LocalPort; remote=[string]$c.RemoteAddress; rport=[int]$c.RemotePort; pid=[int]$c.OwningProcess; created=$c.CreationTime.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress`, { args: { PORT: client.localPort, REMOTE: port } });
+      const oldTuple = await oraclePowerShellJson(`$c = Get-NetTCPConnection -LocalPort $env:NETSWITCH_PORT -RemotePort $env:NETSWITCH_REMOTE -State Established -ErrorAction Stop | Select-Object -First 1
+[pscustomobject]@{ local=[string]$c.LocalAddress; lport=[int]$c.LocalPort; remote=[string]$c.RemoteAddress; rport=[int]$c.RemotePort; pid=[int]$c.OwningProcess; created=$c.CreationTime.ToUniversalTime().ToString('o') } | ConvertTo-Json -Compress`, { command: 'Get-NetTCPConnection row', args: { PORT: client.localPort, REMOTE: port } });
       const oldClosed = new Promise((resolve) => client.once('close', resolve));
-      assert.deepEqual(await windows.closeTcpConnections([oldTuple]), nativeResult);
+      assert.deepEqual(await oracleRead('windows.closeTcpConnections', () => windows.closeTcpConnections([oldTuple]), { timeoutMs: 30_000 }), nativeResult);
       await oldClosed;
     } finally { client?.destroy(); accepted?.destroy(); await new Promise((resolve) => listener.close(resolve)); }
   });
@@ -179,12 +184,12 @@ ConvertTo-Json -InputObject @($result) -Compress -Depth 4`, { args: { OLD: old.i
     // Compare effective principals and the service-normalized settings/triggers
     // after registering each implementation, rather than requiring RunLevel's
     // optional LeastPrivilege spelling to survive that normalization.
-    const readTasks = () => runPowerShellJson(`$service=New-Object -ComObject Schedule.Service; $service.Connect(); $folder=$service.GetFolder('\\Net Switch')
+    const readTasks = () => oraclePowerShellJson(`$service=New-Object -ComObject Schedule.Service; $service.Connect(); $folder=$service.GetFolder('\\Net Switch')
 $result=foreach($name in 'Server','Sign-in') {
   $task=$folder.GetTask($name); $definition=$task.Definition; [xml]$xml=$task.Xml
   [pscustomobject]@{ name=$name; logon=[int]$definition.Principal.LogonType; level=[int]$definition.Principal.RunLevel; user=[string]$definition.Principal.UserId; description=[string]$definition.RegistrationInfo.Description; settings=$xml.Task.Settings.OuterXml; triggers=$xml.Task.Triggers.OuterXml; directory=[string]$definition.Actions.Item(1).WorkingDirectory; command=[string]$definition.Actions.Item(1).Path; arguments=[string]$definition.Actions.Item(1).Arguments }
 }
-ConvertTo-Json -InputObject @($result) -Compress`);
+ConvertTo-Json -InputObject @($result) -Compress`, { command: 'Task Scheduler tasks' });
     try {
       await enableAutostart({ ...args, nodePath: process.execPath });
       const baseline = await readTasks();
@@ -210,7 +215,7 @@ ConvertTo-Json -InputObject @($result) -Compress`);
     const parent = path.join(folder, 'linked-child');
     await mkdir(target); await mkdir(parent); await symlink(target, link, 'junction');
     await symlink(target, path.join(parent, 'nested-link'), 'junction');
-    const acl = () => runPowerShellJson(`(Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl | ConvertTo-Json -Compress`, { args: { DIR: target } });
+    const acl = () => oraclePowerShellJson(`(Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl | ConvertTo-Json -Compress`, { command: 'Get-Acl SDDL', args: { DIR: target } });
     const before = await acl();
     for (const root of [link, parent]) {
       await native('protect-directory', { path: root });
@@ -224,7 +229,7 @@ ConvertTo-Json -InputObject @($result) -Compress`);
     await mkdir(target);
     const record = path.join(target, 'record');
     await writeFile(record, 'outside startup recovery');
-    const acl = () => runPowerShellJson(`ConvertTo-Json -InputObject @((Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'record')).Sddl) -Compress`, { args: { DIR: target } });
+    const acl = () => oraclePowerShellJson(`ConvertTo-Json -InputObject @((Get-Acl -LiteralPath $env:NETSWITCH_DIR).Sddl, (Get-Acl -LiteralPath (Join-Path $env:NETSWITCH_DIR 'record')).Sddl) -Compress`, { command: 'Get-Acl SDDL', args: { DIR: target } });
     const before = await acl();
     for (const location of ['root', 'stage']) {
       for (const kind of ['junction', 'hardlink', 'children']) {
