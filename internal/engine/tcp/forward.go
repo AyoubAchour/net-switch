@@ -39,21 +39,41 @@ type Forwarder struct {
 	control                       flowapi.Controller
 	owners                        platform.OwnerLookup
 	dialer                        platform.LineDialer
+	flowDialer                    platform.FlowDialer // dialer, when it records refused flows
 	out                           flowapi.Output
 	Rejected, Invalid, DialFailed atomic.Uint64
-	// Diagnostics only: SYNs that get neither a dial nor a reset. Handle's
-	// own early returns are counted by reason; Forwarded minus Opened counts
-	// SYNs gVisor accepted but never handed to open (its in-flight dedup).
-	silent    silentSYNs
-	Forwarded atomic.Uint64
-	Opened    atomic.Uint64
+	// Diagnostics only: SYNs that get neither a dial nor a reset, noted after
+	// Handle releases f.mu. Admission and open add nothing for them.
+	silent silentSYNs
 }
 
-// silentSYNs records SYNs returned as handled without a dial or a reset.
+// silentReason says why Handle returned a SYN as handled without a dial or
+// a reset.
+type silentReason uint8
+
+const (
+	notSilent silentReason = iota
+	silentLive
+	silentPending
+	silentStopping
+)
+
+var silentReasons = [...]string{silentLive: "live-connection", silentPending: "pending", silentStopping: "stopping"}
+
+// silentSYNs keeps fixed counters and a ring of the last 32 silent SYNs. The
+// clock is read and the ring locked only for a silent SYN, outside the
+// ingress lock; endpoints are formatted at stats time.
 type silentSYNs struct {
+	counts [len(silentReasons)]atomic.Uint64
 	mu     sync.Mutex
-	counts map[string]uint64
-	recent []SilentSYN
+	recent [32]silentSYN
+	noted  uint64
+}
+
+type silentSYN struct {
+	at     int64
+	tuple  platform.Tuple
+	reason silentReason
 }
 
 // SilentSYN is one silently handled SYN, for matching with a packet trace.
@@ -64,32 +84,40 @@ type SilentSYN struct {
 	Reason      string `json:"reason"`
 }
 
-func (s *silentSYNs) note(reason string, t platform.Tuple) {
+func (s *silentSYNs) note(reason silentReason, t platform.Tuple) {
+	s.counts[reason].Add(1)
+	at := time.Now().UnixMilli()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.counts == nil {
-		s.counts = map[string]uint64{}
-	}
-	s.counts[reason]++
-	if len(s.recent) == 32 {
-		s.recent = append(s.recent[:0], s.recent[1:]...)
-	}
-	s.recent = append(s.recent, SilentSYN{time.Now().UnixMilli(), t.Source.String(), t.Destination.String(), reason})
+	s.recent[s.noted%uint64(len(s.recent))] = silentSYN{at, t, reason}
+	s.noted++
+	s.mu.Unlock()
 }
 
-// SilentStats reports silently handled SYNs and how many are still pending.
+// SilentStats reports silently handled SYNs, how many are still pending, and
+// how many of those gVisor accepted but has not handed to open yet.
 func (f *Forwarder) SilentStats() map[string]any {
-	f.silent.mu.Lock()
-	counts := make(map[string]uint64, len(f.silent.counts))
-	for reason, n := range f.silent.counts {
-		counts[reason] = n
+	counts := make(map[string]uint64, len(silentReasons)-1)
+	for reason := silentLive; int(reason) < len(silentReasons); reason++ {
+		counts[silentReasons[reason]] = f.silent.counts[reason].Load()
 	}
-	recent := append([]SilentSYN(nil), f.silent.recent...)
+	f.silent.mu.Lock()
+	noted := f.silent.noted
+	ring := f.silent.recent
 	f.silent.mu.Unlock()
+	recent := make([]SilentSYN, 0, min(noted, uint64(len(ring))))
+	for i := noted - uint64(cap(recent)); i < noted; i++ {
+		s := ring[i%uint64(len(ring))]
+		recent = append(recent, SilentSYN{s.at, s.tuple.Source.String(), s.tuple.Destination.String(), silentReasons[s.reason]})
+	}
 	f.mu.RLock()
-	pending := len(f.pending)
+	pending, unopened := len(f.pending), 0
+	for _, p := range f.pending {
+		if p.request.Load() == nil {
+			unopened++
+		}
+	}
 	f.mu.RUnlock()
-	return map[string]any{"counts": counts, "recent": recent, "forwarded": f.Forwarded.Load(), "opened": f.Opened.Load(), "pending": pending}
+	return map[string]any{"counts": counts, "recent": recent, "pending": pending, "unopened": unopened}
 }
 
 type orderedOutput interface {
@@ -100,6 +128,7 @@ type orderedOutput interface {
 func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Controller, owners platform.OwnerLookup, dialer platform.LineDialer, out orderedOutput) *Forwarder {
 	ctx, cancel := context.WithCancel(ctx)
 	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]*pendingOpen), connections: make(map[stack.TransportEndpointID]*connection), retired: make(map[*connection]struct{}), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
+	f.flowDialer, _ = dialer.(platform.FlowDialer)
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 2*inFlight, f.open)
 	f.relays = newRelayWorkers()
 	s.SetTransportProtocolHandler(gtcp.ProtocolNumber, f.Handle)
@@ -134,6 +163,13 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 	if !h.Flags().Contains(header.TCPFlagSyn) || h.Flags()&(header.TCPFlagAck|header.TCPFlagRst|header.TCPFlagFin) != 0 {
 		return false
 	}
+	silent := notSilent
+	defer func() {
+		// Runs after the deferred unlock below.
+		if silent != notSilent {
+			f.silent.note(silent, tuple(id))
+		}
+	}()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c := f.connections[id]; c != nil {
@@ -158,16 +194,16 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 			// A delayed reopen callback can follow a duplicate SYN that has
 			// already established the replacement. It must not reset or dial
 			// that live incarnation a second time.
-			f.silent.note("live-connection", tuple(id))
+			silent = silentLive
 			return true
 		}
 	}
 	if _, ok := f.pending[id]; ok {
-		f.silent.note("pending", tuple(id))
+		silent = silentPending
 		return true
 	}
 	if f.ctx.Err() != nil {
-		f.silent.note("stopping", tuple(id))
+		silent = silentStopping
 		return true
 	}
 	t := tuple(id)
@@ -195,15 +231,12 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		ticket.Close()
 		f.wg.Done()
 		reject()
-		return true
 	}
-	f.Forwarded.Add(1)
 	return true
 }
 
 func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	defer f.wg.Done()
-	f.Opened.Add(1)
 	id := r.ID()
 	// Setup only reads the admission record. Serializing every new callback
 	// on an exclusive lock creates a mutex-handoff convoy during SYN bursts,
@@ -274,7 +307,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		return
 	}
 	dial, cancelDial := context.WithTimeout(ctx, DialTimeout)
-	remote, err := f.dialer.DialTCP(dial, decision.Line, t.Destination)
+	var remote platform.TCPConn
+	if f.flowDialer != nil {
+		remote, err = f.flowDialer.DialFlowTCP(dial, decision.Line, t.Destination, platform.FlowIdentity{Owner: owner, Source: t.Source, Destination: t.Destination})
+	} else {
+		remote, err = f.dialer.DialTCP(dial, decision.Line, t.Destination)
+	}
 	cancelDial()
 	if err != nil {
 		f.DialFailed.Add(1)

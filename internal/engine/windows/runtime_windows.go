@@ -32,7 +32,12 @@ func (r *Runtime) Stats() any {
 	stats["ownerLookup"] = r.owners.Stats()
 	stats["socketResources"] = r.dialer.ports.stats()
 	stats["udpSocketExhaustions"] = r.dialer.udpExhaustions.Load()
-	stats["udpBindRetries"] = r.dialer.udpBinds.stats()
+	// Refused automatic port choices, per protocol (SYSTEM-DESIGN 5.9): first
+	// refusals, fresh attempts and final failures; each final one is listed
+	// with its flow in finalPortRefusals.
+	stats["udpBindRetries"] = r.dialer.udpRetries.stats()
+	stats["tcpDialRetries"] = r.dialer.tcpRetries.stats()
+	stats["finalPortRefusals"] = r.dialer.refusals.stats()
 	stats["udpSendFailures"] = udpSendFailureStats()
 	if failure := r.dialer.udpFailure.Load(); failure != nil {
 		stats["udpAllocationFailure"] = failure

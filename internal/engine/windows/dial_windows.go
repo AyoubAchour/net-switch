@@ -30,7 +30,11 @@ type Dialer struct {
 	udp               *udpReadiness
 	ports             *portDiagnostics
 	udpExhaustions    atomic.Uint64
-	udpBinds          udpBindRetries
+	udpRetries        portRetries
+	tcpRetries        portRetries
+	refusals          finalRefusals
+	// nativeDial replaces pool.dial in tests that inject refusals.
+	nativeDial        func(context.Context, Adapter, netip.Addr, netip.AddrPort) (*readySocket, error)
 	udpLastLog        atomic.Int64
 	udpFailureStarted atomic.Bool
 	udpFailure        atomic.Pointer[udpAllocationFailure]
@@ -161,21 +165,36 @@ func bindSocket(a Adapter, v6 bool) func(string, string, syscall.RawConn) error 
 }
 
 func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort) (platform.TCPConn, error) {
-	if d.pool == nil {
-		return nil, errors.New("Windows socket readiness was not initialized")
+	return d.DialFlowTCP(ctx, line, remote, platform.FlowIdentity{Destination: remote})
+}
+
+// DialFlowTCP dials a relay socket for flow. A refusal of the automatic port
+// choice gets bounded fresh attempts (SYSTEM-DESIGN 5.9); one that still
+// ends refused is counted and kept with the flow.
+func (d *Dialer) DialFlowTCP(ctx context.Context, line string, remote netip.AddrPort, flow platform.FlowIdentity) (platform.TCPConn, error) {
+	native := d.nativeDial
+	if native == nil {
+		if d.pool == nil {
+			return nil, errors.New("Windows socket readiness was not initialized")
+		}
+		native = d.pool.dial
 	}
 	a, source, err := d.Routes.binding(line, remote.Addr().Is6())
 	if err != nil {
 		return nil, err
 	}
 	note, started := d.startDial(line, remote)
-	c, err := d.pool.dial(ctx, a, source, remote)
+	c, attempts, err := retryOpen(&d.tcpRetries, portLimit, func() (*readySocket, error) { return native(ctx, a, source, remote) })
 	var conn net.Conn
 	if c != nil {
 		conn = c
 	}
 	d.finishDial(note, started, conn, err)
 	if err != nil {
+		if portLimit(err) {
+			flow.Destination = remote
+			d.refusals.record("tcp", "flow", line, netip.AddrPortFrom(source, 0), flow, attempts, err)
+		}
 		d.ports.observe(err)
 		return nil, err
 	}
@@ -198,9 +217,13 @@ func (d *Dialer) dialProbe(ctx context.Context, line string, remote netip.AddrPo
 	dial := net.Dialer{Timeout: tcpDialTimeout, LocalAddr: net.TCPAddrFromAddrPort(netip.AddrPortFrom(source, 0)),
 		Control: bindSocket(a, remote.Addr().Is6()), KeepAlive: 30 * time.Second}
 	note, started := d.startDial(line, remote)
-	c, err := dial.DialContext(ctx, network, remote.String())
+	// A probe is the engine's own TCP dial too: the same fresh attempts.
+	c, attempts, err := retryOpen(&d.tcpRetries, portLimit, func() (net.Conn, error) { return dial.DialContext(ctx, network, remote.String()) })
 	d.finishDial(note, started, c, err)
 	if err != nil {
+		if portLimit(err) {
+			d.refusals.record("tcp", "probe", line, netip.AddrPortFrom(source, 0), platform.FlowIdentity{Destination: remote}, attempts, err)
+		}
 		d.ports.observe(err)
 		return nil, err
 	}
@@ -293,6 +316,12 @@ func prepareUDP(socket winhandle.Owner, a Adapter, local netip.AddrPort, v6 bool
 }
 
 func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UDPConn, error) {
+	return d.OpenFlowUDP(ctx, line, v6, platform.FlowIdentity{})
+}
+
+// OpenFlowUDP binds a relay socket for flow, with bounded fresh attempts
+// after a refused automatic port choice (SYSTEM-DESIGN 5.9).
+func (d *Dialer) OpenFlowUDP(ctx context.Context, line string, v6 bool, flow platform.FlowIdentity) (platform.UDPConn, error) {
 	a, source, err := d.Routes.binding(line, v6)
 	if err != nil {
 		return nil, err
@@ -302,8 +331,11 @@ func (d *Dialer) OpenUDP(ctx context.Context, line string, v6 bool) (platform.UD
 		network = "udp6"
 	}
 	local := netip.AddrPortFrom(source, 0)
-	s, err := d.udpBinds.open(func() (*udpSocket, error) { return openUDP(a, local, d.udp) })
+	s, attempts, err := retryOpen(&d.udpRetries, udpPortRefusal, func() (*udpSocket, error) { return openUDP(a, local, d.udp) })
 	if err != nil {
+		if udpPortRefusal(err) {
+			d.refusals.record("udp", "flow", line, local, flow, attempts, err)
+		}
 		err = &net.OpError{Op: "listen", Net: network, Addr: net.UDPAddrFromAddrPort(local), Err: err}
 		if portLimit(err) {
 			total := d.udpExhaustions.Add(1)

@@ -191,6 +191,22 @@ type LineDialer interface {
 	OpenUDP(context.Context, string, bool) (UDPConn, error)
 }
 
+// FlowIdentity is the flow an outbound socket serves: its owner, the app's
+// own endpoint and its first destination. A platform records it with a
+// refused open, so the refusal can be traced to the flow it hit.
+type FlowIdentity struct {
+	Owner       Owner
+	Source      netip.AddrPort
+	Destination netip.AddrPort
+}
+
+// FlowDialer is an optional LineDialer extension that is told which flow a
+// socket is for. Dialers without it get the plain calls.
+type FlowDialer interface {
+	DialFlowTCP(context.Context, string, netip.AddrPort, FlowIdentity) (TCPConn, error)
+	OpenFlowUDP(context.Context, string, bool, FlowIdentity) (UDPConn, error)
+}
+
 // DestinationDialer lets an adapter ask the OS to choose a source address for
 // the first datagram, then bind it for the lifetime of an unconnected mapping.
 // This preserves endpoint-independent mapping on interfaces with many addresses.
