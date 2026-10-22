@@ -11,8 +11,9 @@ import { hostedOnly, run, startHarness } from './testisp/harness.mjs';
 
 hostedOnly();
 const requested = (process.env.NETSWITCH_UDP_CONTROL_VARIANTS ?? '').split(',').map((v) => v.trim()).filter(Boolean);
-const variants = requested.length ? requested : ['go', 'raw', 'raw+broadcast', 'raw+unicastif', 'raw+resetsoff', 'raw+fionbio',
-  'raw+iocp', 'raw+protocol17', 'all', 'all+protocol17', 'golike', 'production', 'production+watch'];
+const variants = requested.length ? requested : ['go', 'go+fionbio', 'go:explicit', 'raw', 'raw:explicit', 'raw+broadcast',
+  'raw+unicastif', 'raw+resetsoff', 'raw+fionbio', 'raw+iocp', 'raw+protocol17', 'all', 'all+protocol17', 'golike',
+  'production', 'production+watch'];
 const rounds = Number(process.env.NETSWITCH_UDP_CONTROL_ROUNDS ?? 2);
 // A fresh random order every round, logged, so run order cannot skew a rate.
 const shuffled = () => {
