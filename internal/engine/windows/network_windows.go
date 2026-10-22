@@ -17,21 +17,21 @@ import (
 )
 
 type Adapter struct {
-	ID        string       `json:"id"`
-	Alias     string       `json:"alias"`
-	LUID      uint64       `json:"luid"`
-	Index4    uint32       `json:"index4"`
-	Index6    uint32       `json:"index6"`
+	ID     string `json:"id"`
+	Alias  string `json:"alias"`
+	LUID   uint64 `json:"luid"`
+	Index4 uint32 `json:"index4"`
+	Index6 uint32 `json:"index6"`
 	// Addresses are preferred: new sockets take their source from these.
 	Addresses []netip.Addr `json:"addresses"`
 	// Valid adds deprecated addresses, which existing flows keep using
 	// (RFC 4862 5.5.4). Only an address leaving Valid closes flows.
-	Valid []netip.Addr `json:"validAddresses"`
-	Up    bool         `json:"up"`
-	Default4  bool         `json:"default4"`
-	Default6  bool         `json:"default6"`
-	MTU       uint32       `json:"mtu"`
-	Metric    uint32       `json:"metric"`
+	Valid    []netip.Addr `json:"validAddresses"`
+	Up       bool         `json:"up"`
+	Default4 bool         `json:"default4"`
+	Default6 bool         `json:"default6"`
+	MTU      uint32       `json:"mtu"`
+	Metric   uint32       `json:"metric"`
 }
 
 // IP Helper copies these structures during the call. Preserve the compiler's

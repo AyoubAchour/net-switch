@@ -146,11 +146,11 @@ func capacityProbe() error {
 				// StartMS and EndMS bound the whole attempt (open, exchange
 				// or failure) on this process's monotonic clock, so a
 				// re-attempt can be timed from the original start.
-				StartMS, EndMS float64
-				ReplyBytes     int
-				FailedAt                            time.Time `json:",omitzero"`
-				NativeError, NativeCall             string    `json:",omitempty"`
-				NativeCode                          uint32    `json:",omitempty"`
+				StartMS, EndMS          float64
+				ReplyBytes              int
+				FailedAt                time.Time `json:",omitzero"`
+				NativeError, NativeCall string    `json:",omitempty"`
+				NativeCode              uint32    `json:",omitempty"`
 			}
 			attempts := make([]attempt, command.Count)
 			sockets := make([]heldDatagram, command.Count)

@@ -26,14 +26,14 @@ import (
 )
 
 type Dialer struct {
-	Routes            *Routes
-	pool              *readiness
-	udp               *udpReadiness
-	ports             *portDiagnostics
-	udpExhaustions    atomic.Uint64
-	udpRetries        portRetries
-	tcpRetries        portRetries
-	refusals          finalRefusals
+	Routes         *Routes
+	pool           *readiness
+	udp            *udpReadiness
+	ports          *portDiagnostics
+	udpExhaustions atomic.Uint64
+	udpRetries     portRetries
+	tcpRetries     portRetries
+	refusals       finalRefusals
 	// nativeDial replaces pool.dial in tests that inject refusals.
 	nativeDial        func(context.Context, Adapter, netip.Addr, netip.AddrPort) (*readySocket, error)
 	udpLastLog        atomic.Int64

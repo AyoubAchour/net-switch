@@ -427,6 +427,7 @@ func (s *Server) RunLease(ctx context.Context) {
 		}
 	}
 }
+
 // StatsBudget is what the engine's stats may take of one reply, leaving room
 // under MessageLimit for the envelope.
 const StatsBudget = MessageLimit - 16<<10

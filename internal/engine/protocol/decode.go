@@ -15,21 +15,21 @@ const MessageLimit = 1 << 20
 const Outstanding = 16
 
 type Request struct {
-	ID            string           `json:"id"`
-	Method        string           `json:"method"`
-	Instance      string           `json:"engineInstanceId"`
-	Epoch         uint64           `json:"epoch"`
-	Revision      *policy.Revision `json:"revision,omitempty"`
-	Cursor        string           `json:"cursor,omitempty"`
+	ID       string           `json:"id"`
+	Method   string           `json:"method"`
+	Instance string           `json:"engineInstanceId"`
+	Epoch    uint64           `json:"epoch"`
+	Revision *policy.Revision `json:"revision,omitempty"`
+	Cursor   string           `json:"cursor,omitempty"`
 	// All asks flows for every admitted flow, unresolved ones included.
-	All           bool             `json:"all,omitempty"`
-	OpID         string           `json:"opId,omitempty"`
-	Selector      flows.Selector   `json:"selector,omitempty"`
-	StartedBefore uint64           `json:"startedBefore,omitempty"`
-	Line          string           `json:"line,omitempty"`
-	Operator      string           `json:"operator,omitempty"`
-	App           string           `json:"app,omitempty"`
-	Fault         json.RawMessage  `json:"fault,omitempty"`
+	All           bool            `json:"all,omitempty"`
+	OpID          string          `json:"opId,omitempty"`
+	Selector      flows.Selector  `json:"selector,omitempty"`
+	StartedBefore uint64          `json:"startedBefore,omitempty"`
+	Line          string          `json:"line,omitempty"`
+	Operator      string          `json:"operator,omitempty"`
+	App           string          `json:"app,omitempty"`
+	Fault         json.RawMessage `json:"fault,omitempty"`
 	// Adapter is the temporary milestone-two compatibility payload. It is
 	// accepted only by a runtime advertising singbox-adapter-v1; the lease and
 	// fencing are identical to the native engine protocol.
