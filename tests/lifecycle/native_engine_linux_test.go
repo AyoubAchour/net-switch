@@ -31,9 +31,10 @@ func resumeNative(t *testing.T, pid uint32) {
 	}
 }
 
-func assertNativeCapture(t *testing.T, _ string, _ tunFixture) {
+func assertNativeCapture(t *testing.T, instance string, _ tunFixture) {
 	t.Helper()
-	for _, args := range [][]string{{"link", "show", "dev", "NetSwitch"}, {"-4", "rule", "show"}} {
+	name := nativeLinuxTun(t, instance)
+	for _, args := range [][]string{{"link", "show", "dev", name}, {"-4", "rule", "show"}} {
 		b, err := exec.Command("ip", append([]string{"-n", topo.DUT}, args...)...).CombinedOutput()
 		if err != nil {
 			t.Fatal("native capture precondition", err, string(b))

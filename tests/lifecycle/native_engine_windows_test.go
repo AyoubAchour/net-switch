@@ -52,6 +52,10 @@ func resumeNative(t *testing.T, pid uint32) {
 
 func assertNativeCapture(t *testing.T, _ string, fixture tunFixture) { fixture.installed(t) }
 
+func prepareNativeTunables(*testing.T) func(*testing.T, *nativeClient) {
+	return func(*testing.T, *nativeClient) {}
+}
+
 func waitNativeCleanup(t *testing.T, fixture tunFixture, data, instance string) {
 	// Read the journal only after the result written after recovery closes.
 	// Holding a journal reader during its atomic checkpoint can block that

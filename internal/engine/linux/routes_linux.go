@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -203,10 +204,28 @@ func (p *Platform) OpenTun(ctx context.Context) (platform.TunDevice, error) {
 // Change only our journal-owned TUN; a physical IPv6 line requires capture even
 // when the TUN inherited disable_ipv6=1.
 func (p *Platform) enableIPv6(ctx context.Context) error {
-	path := "/proc/sys/net/ipv6/conf/" + p.tunSpec.Name + "/disable_ipv6"
-	if err := os.WriteFile(path, []byte("0\n"), 0600); err != nil {
-		return fmt.Errorf("enable IPv6 on the engine TUN: %w", err)
+	link, err := netlink.LinkByIndex(p.tunSpec.Index)
+	if err != nil {
+		return err
 	}
+	if p.objects.tun == nil || link.Attrs().Name != p.tunSpec.Name || link.Attrs().Alias != p.tunSpec.Alias {
+		return errors.New("engine TUN ownership changed before IPv6 configuration")
+	}
+	path := "/proc/sys/net/ipv6/conf/" + p.tunSpec.Name + "/disable_ipv6"
+	value, err := readKernelFile(path, 16)
+	if err != nil {
+		return fmt.Errorf("read IPv6 state on engine TUN: %w", err)
+	}
+	before := strings.TrimSpace(string(value))
+	if before != "0" && before != "1" {
+		return fmt.Errorf("invalid engine TUN disable_ipv6 value %q", before)
+	}
+	if before == "1" {
+		if err := os.WriteFile(path, []byte("0\n"), 0600); err != nil {
+			return fmt.Errorf("enable IPv6 on owned engine TUN %s (inherited disable_ipv6=1): %w", p.tunSpec.Name, err)
+		}
+	}
+	log.Printf("engine TUN IPv6 instance=%s name=%s disable_ipv6_before=%s after=0 wrote=%t", p.Instance, p.tunSpec.Name, before, before == "1")
 	v := addressObject{p.tunSpec.Index, p.tunSpec.Name, p.tunSpec.Alias, "fdfe:dcba:9876::1/126"}
 	if err := p.journal.Create(ctx, "address", p.objects.fingerprint(v)); err != nil {
 		return err

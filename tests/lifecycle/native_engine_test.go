@@ -277,6 +277,7 @@ func TestNativeEngineService(t *testing.T) {
 		}
 	})
 	fixture := prepareTUN(t, dir, data)
+	auditTunables := prepareNativeTunables(t)
 	startCtx, startCancel := context.WithTimeout(ctx, 45*time.Second)
 	startErr := service.Start(startCtx, service.Engine)
 	startCancel()
@@ -314,6 +315,7 @@ func TestNativeEngineService(t *testing.T) {
 	if status.State != "on" || status.Applied == nil || *status.Applied != started || status.Started.IsZero() {
 		t.Fatal("start not loaded", status, started)
 	}
+	auditTunables(t, c)
 	conn, err := fixture.dial(ctx, "tcp4", fixture.target)
 	if err != nil {
 		t.Fatal(err)
@@ -330,7 +332,7 @@ func TestNativeEngineService(t *testing.T) {
 	if !captured || full.Counted == nil {
 		t.Fatal("precondition: traffic was not in the real native TUN", full)
 	}
-	assertNativeCapture(t, data, fixture)
+	assertNativeCapture(t, c.instance, fixture)
 	rev.N = 2
 	var applied, repeated policy.Applied
 	nativeMust(t, c, "apply", map[string]any{"revision": rev}, &applied)
@@ -423,6 +425,7 @@ func TestNativeEngineService(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture.clean(t)
+	auditTunables(t, nil)
 	end, err := service.Query(service.Engine)
 	if err != nil || !end.ExitKnown || end.ExitCode != 0 {
 		t.Fatal("clean service exit not retained", end, err)
@@ -443,6 +446,7 @@ func TestNativeEngineService(t *testing.T) {
 		t.Fatal("old-instance closure accepted")
 	}
 	nativeMust(t, c, "start", map[string]any{"revision": rev}, &started)
+	auditTunables(t, c)
 	if faults {
 		t.Run("whole-service-stall-observation", func(t *testing.T) { observeWholeServiceStall(t, c, fixture, ctx) })
 	} else {
@@ -479,7 +483,7 @@ func TestNativeEngineService(t *testing.T) {
 			}
 			defer held.Close()
 			nativeEcho(t, held, "capture-before-service-crash")
-			assertNativeCapture(t, data, fixture)
+			assertNativeCapture(t, crashed.instance, fixture)
 			assertNativeOwnedLeftovers(t, data, crashed.instance)
 			s, err := service.Query(service.Engine)
 			if err != nil || !s.Running {
@@ -602,7 +606,7 @@ func observeForwardingStall(t *testing.T, c *nativeClient, conn net.Conn, data s
 			nextSample = time.Now().Add(5 * time.Second)
 		}
 	}
-	assertNativeCapture(t, data, fixture)
+	assertNativeCapture(t, c.instance, fixture)
 	observeNativeCounters(t, c, "during-read-pump-stall")
 	sample("before-read-pump-release")
 	t.Logf("M4_STALL kind=forwarding-only observed=%s since_send=%s ipc_replies=%d slowest_ipc_round=%s flow=%s poll_deadlines=%d capture_still_present=true automatic_recovery=false", time.Since(start), time.Since(traffic.sent), responses, slowest, traffic.outcome(), traffic.polls)
@@ -627,6 +631,7 @@ func observeForwardingStall(t *testing.T, c *nativeClient, conn net.Conn, data s
 	}
 	defer fresh.Close()
 	nativeEcho(t, fresh, "fresh-connection-after-read-pump-release")
+	observeNativeCounters(t, c, "after-fresh-flow-recovery")
 	t.Log("M4_FLOW phase=after-read-pump-release fresh_connection=passed (does not substitute for the original stream)")
 }
 
@@ -683,7 +688,7 @@ func observeWholeServiceStall(t *testing.T, c *nativeClient, fixture tunFixture,
 			nextSample = time.Now().Add(5 * time.Second)
 		}
 	}
-	assertNativeCapture(t, "", fixture)
+	assertNativeCapture(t, c.instance, fixture)
 	sample("before-whole-service-resume")
 	t.Logf("M4_STALL kind=whole-service observed=%s since_send=%s exceeds_lease=true service_pid=%d ipc_timeout=true flow=%s poll_deadlines=%d automatic_recovery=false", time.Since(start), time.Since(traffic.sent), s.PID, traffic.outcome(), traffic.polls)
 	resumeNative(t, s.PID)

@@ -159,6 +159,11 @@ func Install(c Config) error {
 	}
 	if c.Native {
 		units["netswitch-engine.service"] += nativeStateMetadata(c.Data)
+		// The journal-owned TUN is created after this mount namespace, with a
+		// fresh name per instance. A missing per-device ReadWritePaths entry
+		// is ignored permanently. Keep the exception at the smallest existing
+		// parent; global/default and loopback IPv6 settings remain read-only.
+		units["netswitch-engine.service"] += "ReadWritePaths=-/proc/sys/net/ipv6/conf\nReadOnlyPaths=-/proc/sys/net/ipv6/conf/all -/proc/sys/net/ipv6/conf/default -/proc/sys/net/ipv6/conf/lo\n"
 	}
 	if err := os.MkdirAll("/run/netswitch", 0755); err != nil {
 		return err

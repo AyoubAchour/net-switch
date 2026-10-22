@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
@@ -100,6 +101,9 @@ func configureNativeProof(data string, options *host.Options) {
 			if err := json.Unmarshal(b, &request); err != nil {
 				return nil, err
 			}
+			if request.Kind == "kernel-sandbox" {
+				return nativeKernelSandboxEvidence(server.Instance)
+			}
 			if request.Kind != "totals-capacity" {
 				return nil, errors.New("unknown hosted native fault")
 			}
@@ -131,6 +135,37 @@ func configureNativeProof(data string, options *host.Options) {
 	options.WrapTun = func(tun platform.TunDevice) platform.TunDevice {
 		return &stalledReader{TunDevice: tun, data: data}
 	}
+}
+
+// Hosted-only: attempt write opens without writing any bytes. This executes
+// with the installed Engine's actual identity, mount namespace and sandbox.
+func nativeKernelSandboxEvidence(instance string) (any, error) {
+	if runtime.GOOS != "linux" || len(instance) != 32 {
+		return nil, errors.New("Linux native sandbox proof requires a live instance")
+	}
+	result := map[string]string{}
+	for _, path := range []string{
+		"/proc/sys/net/ipv4/ip_forward", "/proc/sys/net/ipv4/conf/all/rp_filter",
+		"/proc/sys/net/ipv6/conf/all/disable_ipv6", "/proc/sys/net/ipv6/conf/default/disable_ipv6",
+		"/proc/sys/net/ipv6/conf/all/forwarding", "/proc/sys/net/ipv6/conf/default/accept_ra",
+		"/proc/sys/net/ipv6/conf/lo/disable_ipv6",
+		"/sys/class/net/lo/mtu", "/sys/fs/cgroup/cgroup.procs",
+		"/proc/sys/net/ipv6/conf/ns" + instance[:10] + "/disable_ipv6",
+	} {
+		f, err := os.OpenFile(path, os.O_WRONLY, 0)
+		switch {
+		case err == nil:
+			if err := f.Close(); err != nil {
+				return nil, err
+			}
+			result[path] = "writable"
+		case errors.Is(err, syscall.EROFS):
+			result[path] = "read-only"
+		default:
+			result[path] = err.Error()
+		}
+	}
+	return result, nil
 }
 
 type nativeProofOutcome struct{}
