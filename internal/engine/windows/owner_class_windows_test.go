@@ -258,13 +258,18 @@ func TestOwnerReadTimeAtPortLimit(t *testing.T) {
 			at(indexes, 50), at(indexes, 95), at(totals, 95), (sum / time.Duration(len(samples))).Microseconds()}
 	}
 	phase := func(name string) {
-		fill()
 		var oldScratch, newScratch []uint64
 		var oldSamples, newSamples []sample
 		oldRows, newRows := [2]int{1 << 30, 0}, [2]int{1 << 30, 0}
-		for range 150 {
-			measure(tcpOwnerPIDAll, &oldScratch, &oldSamples, &oldRows)
-			measure(tcpOwnerPIDConnections, &newScratch, &newSamples, &newRows)
+		// Top up between short chunks: on a busy runner 1,600 expiring
+		// TIME_WAIT rows drained a whole phase below the range (x64 job
+		// 119593031358 reached 13,584).
+		for range 10 {
+			fill()
+			for range 15 {
+				measure(tcpOwnerPIDAll, &oldScratch, &oldSamples, &oldRows)
+				measure(tcpOwnerPIDConnections, &newScratch, &newSamples, &newRows)
+			}
 		}
 		total, timeWait := nativeTCPRowCounts(t)
 		out, _ := json.Marshal(map[string]any{"phase": name, "before": summarize(tcpOwnerPIDAll, oldSamples, oldRows),
