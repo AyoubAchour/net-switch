@@ -76,6 +76,8 @@ jobs:
         run: |
           # No engine: plain Go sockets, plain under TCP load, and the engine's
           # own native sockets through its readiness path (event registration).
+          go test -count=1 -v -timeout=10m -run '^TestUDPPortReleaseDelay$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -count=1 -v -timeout=40m -run '^TestNativeUDPPairedCapacity$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Prove native poll lifetime, callback collection and heap publication
