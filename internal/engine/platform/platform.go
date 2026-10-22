@@ -28,6 +28,11 @@ type TunDevice interface {
 // implementations may avoid per-packet hooks only for this same Done channel.
 type TunIOContext interface{ BindIOContext(context.Context) }
 
+// TunCloseStarter optionally interrupts I/O and begins native teardown without
+// waiting. Close must still join teardown and return its result. The engine
+// overlaps this work with route cleanup, and joins before acknowledging stop.
+type TunCloseStarter interface{ BeginClose() }
+
 // RouteQuiescer stops and joins background route repair before teardown can
 // remove the TUN. Cancelling sibling contexts alone does not order their work.
 type RouteQuiescer interface{ Quiesce() }
@@ -184,6 +189,22 @@ type UDPErrorHandler interface {
 type LineDialer interface {
 	DialTCP(context.Context, string, netip.AddrPort) (TCPConn, error)
 	OpenUDP(context.Context, string, bool) (UDPConn, error)
+}
+
+// FlowIdentity is the flow an outbound socket serves: its owner, the app's
+// own endpoint and its first destination. A platform records it with a
+// refused open, so the refusal can be traced to the flow it hit.
+type FlowIdentity struct {
+	Owner       Owner
+	Source      netip.AddrPort
+	Destination netip.AddrPort
+}
+
+// FlowDialer is an optional LineDialer extension that is told which flow a
+// socket is for. Dialers without it get the plain calls.
+type FlowDialer interface {
+	DialFlowTCP(context.Context, string, netip.AddrPort, FlowIdentity) (TCPConn, error)
+	OpenFlowUDP(context.Context, string, bool, FlowIdentity) (UDPConn, error)
 }
 
 // DestinationDialer lets an adapter ask the OS to choose a source address for

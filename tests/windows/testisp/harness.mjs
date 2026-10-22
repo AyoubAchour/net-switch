@@ -4,6 +4,7 @@ import { randomBytes, createHash } from 'node:crypto';
 import { subscribe, unsubscribe } from 'node:diagnostics_channel';
 import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import http from 'node:http';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -77,6 +78,20 @@ export async function startHarness(directory) {
   let spawnError;
   processHandle.on('error', (error) => { spawnError = error; });
   const exited = new Promise((resolve) => processHandle.on('close', resolve));
+  let reservedAgent;
+  const controlFetch = (url, options) => {
+    if (!reservedAgent) return fetch(url, options);
+    return new Promise((resolve, reject) => {
+      const request = http.request(url, { ...options, agent: reservedAgent }, (response) => {
+        const chunks = [];
+        response.on('data', (chunk) => chunks.push(chunk));
+        response.once('error', reject);
+        response.once('end', () => resolve(new Response(Buffer.concat(chunks), { status: response.statusCode })));
+      });
+      request.once('error', reject);
+      request.end(options.body);
+    });
+  };
   const httpEvents = [];
   const channels = ['client:beforeConnect', 'client:connected', 'client:sendHeaders', 'client:connectError', 'request:error'];
   const observers = channels.map((name) => {
@@ -95,7 +110,7 @@ export async function startHarness(directory) {
     const started = performance.now();
     let phase = 'request';
     try {
-      const response = await fetch(`${state.control}/${endpoint}`, { method: body === undefined ? 'GET' : 'POST',
+      const response = await controlFetch(`${state.control}/${endpoint}`, { method: body === undefined ? 'GET' : 'POST',
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(5000) });
       phase = 'response';
@@ -123,6 +138,22 @@ export async function startHarness(directory) {
       throw new Error(`TestISP ${endpoint}: ${JSON.stringify(evidence)}`, { cause });
     }
   };
+  const reserveControl = async () => {
+    assert(!reservedAgent, 'Control connection is already reserved');
+    reservedAgent = new http.Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 });
+    const reservation = { connections: 0, localPort: null };
+    const connect = reservedAgent.createConnection.bind(reservedAgent);
+    reservedAgent.createConnection = (options, callback) => {
+      assert.equal(reservation.connections, 0, 'The reserved control connection was lost; refusing a hidden reconnect');
+      reservation.connections++;
+      const socket = connect(options, callback);
+      socket.once('connect', () => { reservation.localPort = socket.localPort; });
+      return socket;
+    };
+    await control('capacity');
+    assert(reservation.localPort, 'Control socket was not established before port pressure');
+    return reservation;
+  };
   // A caller's finally may close again after a failure. Preserve the first
   // pre-recovery snapshot and error instead of inspecting a recovered device.
   let closePromise;
@@ -146,6 +177,7 @@ export async function startHarness(directory) {
       await exited; clearTimeout(timer);
     }
     log.end();
+    reservedAgent?.destroy();
     channels.forEach((name, i) => unsubscribe(`undici:${name}`, observers[i]));
     if (!crash) {
       try {
@@ -214,7 +246,7 @@ export async function startHarness(directory) {
       }
       return result;
     };
-    return { uplink, testisp: state, control, diagnosticClient: { url: state.control, token }, network, probe, close };
+    return { uplink, testisp: state, control, reserveControl, diagnosticClient: { url: state.control, token }, network, probe, close };
   } catch (error) {
     try { await close(); }
     catch (cleanupError) { throw new AggregateError([error, cleanupError], 'TestISP startup and cleanup failed'); }

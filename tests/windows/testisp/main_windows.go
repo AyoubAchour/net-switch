@@ -25,10 +25,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/wintun"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 
 func main() {
+	// Before the hosted-runner check: the registrar child gets a minimal
+	// environment and only needs its parent session's inherited handles.
+	if len(os.Args) == 2 && os.Args[1] == wintun.RegistrarMode {
+		os.Exit(wintun.RunRegistrar())
+	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds | log.LUTC)
 	if len(os.Args) == 2 && os.Args[1] == "version" {
 		fmt.Printf("TestISP 1 (%s %s/%s)\n", runtime.Version(), runtime.GOOS, runtime.GOARCH)
@@ -85,8 +91,10 @@ type gateway struct {
 	uplinkIP     net.IP
 	mode         atomic.Int32 // 0 running, 1 paused, 2 dropping
 	stats        observations
+	udpCapacity  udpCapacityResponder
 	targetMu     sync.RWMutex
 	targets      map[string]string
+	probePorts   atomic.Pointer[probePorts] // capacity case only
 	done         chan struct{}
 	stop         sync.Once
 }
@@ -129,6 +137,8 @@ func serve(args []string) error {
 	}
 	defer listener.Close()
 	mux := http.NewServeMux()
+	g.installCapacity(mux)
+	g.installUDPCapacity(mux)
 	mux.HandleFunc("POST /targets", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Ports []int `json:"ports"`

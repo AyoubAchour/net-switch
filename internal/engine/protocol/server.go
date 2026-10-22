@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -52,6 +53,8 @@ type Server struct {
 	operations                  map[string]*operation
 	order                       []string
 	clients                     map[*connection]struct{}
+	controller                  *connection
+	terminal                    *terminalDelivery
 	EventsDropped               atomic.Uint64
 	done                        chan struct{}
 	doneOnce                    sync.Once
@@ -111,7 +114,10 @@ func (s *Server) fence(r Request) error {
 }
 
 func (s *Server) Handle(ctx context.Context, r Request) Reply {
-	result, err := s.execute(ctx, r)
+	return s.handle(ctx, r, nil)
+}
+func (s *Server) handle(ctx context.Context, r Request, c *connection) Reply {
+	result, err := s.execute(ctx, r, c)
 	reply := Reply{ID: r.ID, Result: result}
 	reply.stop = r.Method == "stop" && err == nil
 	if err != nil {
@@ -120,7 +126,7 @@ func (s *Server) Handle(ctx context.Context, r Request) Reply {
 	}
 	return reply
 }
-func (s *Server) execute(ctx context.Context, r Request) (any, error) {
+func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, error) {
 	switch r.Method {
 	case "attach", "start", "apply", "stop", "closeFlows", "adapterForgetLane":
 		// A new controller cannot overtake an accepted mutation. Renewals
@@ -129,8 +135,12 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		defer s.mutation.Unlock()
 	}
 	s.mu.Lock()
+	if r.Method == "terminalAck" {
+		defer s.mu.Unlock()
+		return s.ackTerminal(r, c)
+	}
 	if r.Method == "hello" {
-		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks"}}
+		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks", "terminal-stop"}}
 		s.mu.Unlock()
 		if adapter, ok := s.runtime.(AdapterRuntime); ok {
 			v["capabilities"] = []string{"singbox-adapter-v1", "revisions", "lease"}
@@ -160,10 +170,15 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		s.epoch = next
 		s.expires = s.now().Add(Lease)
 		s.attached = true
+		s.controller = c
 		s.table.SetEpoch(s.epoch)
 		epoch := s.epoch
 		s.mu.Unlock()
 		return map[string]any{"epoch": epoch, "leaseSeconds": 30}, nil
+	}
+	if s.terminal != nil {
+		s.mu.Unlock()
+		return nil, errors.New("engine terminal shutdown")
 	}
 	if r.Method == "stop" && s.stopped && r.Instance == s.Instance && r.Epoch == s.epoch {
 		s.mu.Unlock()
@@ -243,6 +258,9 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		s.stopped = true
 		return true, nil
 	case "flows":
+		if r.All {
+			return s.table.PageAll(r.Cursor)
+		}
 		return s.table.Page(r.Cursor)
 	case "totals":
 		return s.table.Totals(), nil
@@ -251,7 +269,7 @@ func (s *Server) execute(ctx context.Context, r Request) (any, error) {
 		if runtime, ok := s.runtime.(interface{ Stats() any }); ok {
 			data = runtime.Stats()
 		}
-		return map[string]any{"engine": data, "eventsDropped": s.EventsDropped.Load()}, nil
+		return map[string]any{"engine": boundStats(data), "eventsDropped": s.EventsDropped.Load()}, nil
 	case "predict":
 		return s.table.Predict(r.App)
 	case "closeFlows":
@@ -350,7 +368,8 @@ func (s *Server) effect(ctx context.Context, r Request, run func() (any, error))
 func (s *Server) Expired() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.attached || s.stopped || s.now().Before(s.expires) {
+	// A pending adapter-lost terminal record owns shutdown.
+	if s.terminal != nil || !s.attached || s.stopped || s.now().Before(s.expires) {
 		return false
 	}
 	s.stopping = true
@@ -362,7 +381,8 @@ func (s *Server) Expired() bool {
 // cleanup begins, no new controller can resurrect this engine instance.
 func (s *Server) CheckLease(ctx context.Context) error {
 	s.mu.Lock()
-	if !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {
+	// A pending adapter-lost terminal record owns shutdown.
+	if s.terminal != nil || !s.attached || s.stopped || (!s.stopping && s.now().Before(s.expires)) {
 		s.mu.Unlock()
 		return nil
 	}
@@ -407,6 +427,57 @@ func (s *Server) RunLease(ctx context.Context) {
 		}
 	}
 }
+
+// StatsBudget is what the engine's stats may take of one reply, leaving room
+// under MessageLimit for the envelope.
+const StatsBudget = MessageLimit - 16<<10
+
+// boundStats keeps the stats reply deliverable whatever the diagnostics hold.
+// Every production entry has its own fixed bound; hosted CI's trace sections
+// (whole-system socket tables) grow with the machine. When the encoded stats
+// exceed StatsBudget, the largest top-level sections are left out, largest
+// first, and named with their sizes under "omittedForSize", so a reader sees
+// exactly what is missing instead of losing the whole reply. Under budget the
+// stats are encoded once, here, not again by the transport.
+func boundStats(data any) any {
+	stats, ok := data.(map[string]any)
+	if !ok {
+		return data
+	}
+	b, err := json.Marshal(stats)
+	if err != nil {
+		return data
+	}
+	if len(b) <= StatsBudget {
+		return json.RawMessage(b)
+	}
+	sizes := make(map[string]int, len(stats))
+	keys := make([]string, 0, len(stats))
+	for key, value := range stats {
+		encoded, _ := json.Marshal(value)
+		sizes[key] = len(key) + len(encoded) + 4 // quotes, colon, comma
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return sizes[keys[i]] > sizes[keys[j]] })
+	kept := make(map[string]any, len(stats))
+	for key, value := range stats {
+		kept[key] = value
+	}
+	omitted := map[string]int{}
+	total := len(b)
+	for _, key := range keys {
+		// Room for the omission record itself.
+		if total+len(omitted)*80+64 <= StatsBudget {
+			break
+		}
+		delete(kept, key)
+		omitted[key] = sizes[key]
+		total -= sizes[key]
+	}
+	kept["omittedForSize"] = omitted
+	return kept
+}
+
 func (s *Server) Emit(event Event) {
 	if len(event.Message) > 4096 {
 		event.Message = event.Message[:4096]

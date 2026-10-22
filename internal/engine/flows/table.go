@@ -36,6 +36,11 @@ type Record struct {
 	Up      uint64 `json:"up"`
 	Down    uint64 `json:"down"`
 	Closing bool   `json:"closing"`
+	// Handshake: TCP, admitted, the app-side handshake not yet established.
+	Handshake bool `json:"handshake,omitempty"`
+	// Unresolved: admitted while its owner lookup still runs, so it has no
+	// owner or decision yet. Only a full listing (PageAll) includes these.
+	Unresolved bool `json:"unresolved,omitempty"`
 }
 type Bytes struct {
 	Up   uint64 `json:"up"`
@@ -245,7 +250,7 @@ type liveRecord struct {
 
 func (f *ticket) snapshotRecord() Record {
 	r := f.record
-	return Record{ID: r.ID, Epoch: r.Epoch, Point: r.Point, Start: time.Unix(0, r.Start), Owner: r.Owner, Protocol: r.Protocol, Source: r.Source, Destination: r.Destination, PhysicalSource: r.PhysicalSource, Decision: r.Decision, Up: f.up.Load(), Down: f.down.Load(), Closing: r.Closing}
+	return Record{ID: r.ID, Epoch: r.Epoch, Point: r.Point, Start: time.Unix(0, r.Start), Owner: r.Owner, Protocol: r.Protocol, Source: r.Source, Destination: r.Destination, PhysicalSource: r.PhysicalSource, Decision: r.Decision, Up: f.up.Load(), Down: f.down.Load(), Closing: r.Closing, Handshake: f.handshake, Unresolved: !f.resolved}
 }
 
 func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
@@ -713,18 +718,53 @@ func (t *Table) CloseFlows(s Selector, before uint64) (CloseResult, error) {
 	for _, id := range s.IDs {
 		ids[id] = true
 	}
+	result, cancels := t.closeLocked(func(id uint64, f *ticket) bool {
+		r := f.record
+		match := ids[id] || (s.Line != "" && r.Line == s.Line) || (s.App != "" && r.Owner.AppID == s.App && r.Line != s.NotLine) || f.matchesSource(s.Source) || (s.IPv6 && r.Source.Addr().Is6())
+		if match {
+			delete(ids, id)
+		}
+		return match
+	}, before)
+	result.Gone = len(ids)
+	t.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+	return result, nil
+}
+
+// CloseLineSource closes the flows of one physical line that use one of that
+// line's local addresses: line and address must both match. A line event
+// closes only that line's flows (SYSTEM-DESIGN 5.7), even when another line
+// has the same address, as two routers handing out the same 192.168.1.x do.
+// The protocol's Selector stays one condition; this is the platform's own.
+func (t *Table) CloseLineSource(line string, source netip.Addr) CloseResult {
+	if line == "" || !source.IsValid() {
+		return CloseResult{}
+	}
+	t.mu.Lock()
+	result, cancels := t.closeLocked(func(_ uint64, f *ticket) bool {
+		return f.record.Line == line && f.matchesSource(source)
+	}, 0)
+	t.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+	return result
+}
+
+// closeLocked marks every live flow that matches as closing and returns the
+// cancellations to run after t.mu is released. before, when not zero, keeps
+// flows admitted at or after that apply point.
+func (t *Table) closeLocked(match func(uint64, *ticket) bool, before uint64) (CloseResult, []context.CancelFunc) {
 	var cancels []context.CancelFunc
 	result := CloseResult{}
 	for id, f := range t.flows {
-		if f.retired {
+		if f.retired || !match(id, f) {
 			continue
 		}
 		r := f.record
-		match := ids[id] || (s.Line != "" && r.Line == s.Line) || (s.App != "" && r.Owner.AppID == s.App && r.Line != s.NotLine) || f.matchesSource(s.Source) || (s.IPv6 && r.Source.Addr().Is6())
-		if !match {
-			continue
-		}
-		delete(ids, id)
 		if before != 0 && r.Point >= before {
 			continue
 		}
@@ -737,12 +777,7 @@ func (t *Table) CloseFlows(s Selector, before uint64) (CloseResult, error) {
 			cancels = append(cancels, f.cancel)
 		}
 	}
-	result.Gone = len(ids)
-	t.mu.Unlock()
-	for _, cancel := range cancels {
-		cancel()
-	}
-	return result, nil
+	return result, cancels
 }
 func (t *Table) CloseAll() {
 	t.mu.Lock()

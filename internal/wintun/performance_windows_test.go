@@ -400,8 +400,38 @@ func pairedRatios(ours, dll []float64) ([]float64, error) {
 	return ratios, nil
 }
 
+// useProductionRegistrar makes the hashed release engine the registrar for
+// the rest of the test when CI provides one, as production does. Otherwise
+// the test binary keeps serving as its own registrar.
+func useProductionRegistrar(t *testing.T, label string) {
+	t.Helper()
+	if os.Getenv(productionEngineEnv) == "" {
+		return
+	}
+	engine := productionEngine(t)
+	previous := registrarExecutable
+	registrarExecutable = func() (string, error) { return engine.Path, nil }
+	t.Cleanup(func() { registrarExecutable = previous })
+	report(t, map[string]any{"test": label, "engine": engine})
+}
+
+// The reference is the signed DLL. NETSWITCH_WINTUN_REFERENCE=inprocess runs
+// the same matched pairs and unchanged gate against the test-only in-process
+// registration, isolating the registrar's cost from the DLL comparison.
 func TestWintunPerformance(t *testing.T) {
 	requireRunner(t)
+	// Keep every matched sample and threshold unchanged, while making the
+	// registration owner the exact release engine measured by the footprint
+	// test. The packet loop still runs through these same shared rings.
+	useProductionRegistrar(t, "performance_registrar_provenance")
+	reference := "dll"
+	switch os.Getenv("NETSWITCH_WINTUN_REFERENCE") {
+	case "", "dll":
+	case "inprocess":
+		reference = "inprocess"
+	default:
+		t.Fatal("unknown NETSWITCH_WINTUN_REFERENCE")
+	}
 	const pairs = 12
 	metrics := []struct {
 		name    string
@@ -414,9 +444,9 @@ func TestWintunPerformance(t *testing.T) {
 		{"tcp_1_MBps", 1, true},
 		{"tcp_8_MBps", 8, true},
 	}
-	results := map[string]map[string][]float64{"ours": {}, "dll": {}}
+	results := map[string]map[string][]float64{"ours": {}, reference: {}}
 	for _, metric := range metrics {
-		for _, mode := range []string{"ours", "dll"} {
+		for _, mode := range []string{"ours", reference} {
 			// An absent/failed sample stays zero at its original pair index.
 			results[mode][metric.name] = make([]float64, pairs)
 		}
@@ -424,9 +454,9 @@ func TestWintunPerformance(t *testing.T) {
 	for trial := 0; trial < pairs; trial++ {
 		t.Run(fmt.Sprintf("pair%d", trial), func(t *testing.T) {
 			a := newAdapter(t, 0)
-			modes := []string{"ours", "dll"}
+			modes := []string{"ours", reference}
 			if trial%2 != 0 {
-				modes = []string{"dll", "ours"}
+				modes = []string{reference, "ours"}
 			}
 			for _, metric := range metrics {
 				// Match the SAME metric back to back, not two whole suites.
@@ -483,22 +513,22 @@ func TestWintunPerformance(t *testing.T) {
 						results[mode][metric.name][trial] = value
 					})
 				}
-				own, dll := results["ours"][metric.name][trial], results["dll"][metric.name][trial]
+				own, dll := results["ours"][metric.name][trial], results[reference][metric.name][trial]
 				if own > 0 && dll > 0 {
-					report(t, map[string]any{"test": "performance_pair", "arch": runtime.GOARCH, "trial": trial, "metric": metric.name, "first": modes[0], "ours": own, "dll": dll, "ratio": own / dll})
+					report(t, map[string]any{"test": "performance_pair", "arch": runtime.GOARCH, "reference": reference, "trial": trial, "metric": metric.name, "first": modes[0], "ours": own, "dll": dll, "ratio": own / dll})
 				}
 			}
 		})
 	}
 	for _, metric := range metrics {
-		ours, dll := results["ours"][metric.name], results["dll"][metric.name]
+		ours, dll := results["ours"][metric.name], results[reference][metric.name]
 		ratios, err := pairedRatios(ours, dll)
 		if err != nil {
-			t.Errorf("%s: %v; ours=%v DLL=%v", metric.name, err, ours, dll)
+			t.Errorf("%s: %v; ours=%v %s=%v", metric.name, err, ours, reference, dll)
 			continue
 		}
 		ratio := median(ratios)
-		report(t, map[string]any{"test": "performance_paired", "statistic": "median_pair_ratio", "arch": runtime.GOARCH, "pairs": pairs, "metric": metric.name, "ratio": ratio, "pair_ratios": ratios, "dll_samples": dll, "ours_samples": ours})
+		report(t, map[string]any{"test": "performance_paired", "statistic": "median_pair_ratio", "arch": runtime.GOARCH, "reference": reference, "pairs": pairs, "metric": metric.name, "ratio": ratio, "pair_ratios": ratios, "dll_samples": dll, "ours_samples": ours})
 		if metric.name == "udp_p95_us" {
 			if ratio > 1.10 {
 				t.Errorf("latency regression: median matched ratio %.3f > 1.10", ratio)

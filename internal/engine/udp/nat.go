@@ -412,6 +412,14 @@ func (s *session) run() {
 			return
 		}
 		socket, err = dialer.OpenUDPTo(ctx, decision.Line, destination)
+	} else if dialer, ok := n.dialer.(platform.FlowDialer); ok {
+		flow := platform.FlowIdentity{Owner: owner, Source: s.source}
+		s.mu.Lock()
+		if len(s.queue) > 0 {
+			flow.Destination = s.queue[0].destination
+		}
+		s.mu.Unlock()
+		socket, err = dialer.OpenFlowUDP(ctx, decision.Line, s.source.Addr().Is6(), flow)
 	} else {
 		socket, err = n.dialer.OpenUDP(ctx, decision.Line, s.source.Addr().Is6())
 	}
@@ -560,12 +568,8 @@ func (s *session) read(ctx context.Context) {
 				n.ReadErrors.Add(1)
 			}
 			// A permanently failing adapter must not turn this into a busy loop.
-			timer := time.NewTimer(time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
+			if !waitReadRetry(ctx) {
 				return
-			case <-timer.C:
 			}
 			continue
 		}

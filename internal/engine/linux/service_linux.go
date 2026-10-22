@@ -87,8 +87,7 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	}
 	e.OnFatal = p.Fatal
 	srv.OnCleanupFailure = func(err error) { p.Fatal(fmt.Errorf("control cleanup failed: %w", err)) }
-	p.LineDown = func(line string) { e.Table.CloseFlows(flows.Selector{Line: line}, 0) }
-	p.AddressRemoved = func(addr netip.Addr) { e.Table.CloseFlows(flows.Selector{Source: addr}, 0) }
+	p.LineDown, p.AddressRemoved = lineEvents(e.Table)
 	if hooks != nil {
 		hooks(p, e, srv)
 	}
@@ -176,6 +175,15 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	<-acceptDone
 	clients.Wait()
 	return err
+}
+
+// lineEvents closes what a line event took away (SYSTEM-DESIGN 5.7): every
+// flow of a line that went down or moved, and, when a line loses an address,
+// that line's flows from it: line and source together, since two routers
+// commonly hand out the same 192.168.1.x to two lines.
+func lineEvents(t *flows.Table) (down func(string), removed func(string, netip.Addr)) {
+	return func(line string) { t.CloseFlows(flows.Selector{Line: line}, 0) },
+		func(line string, addr netip.Addr) { t.CloseLineSource(line, addr) }
 }
 
 type serviceRuntime struct {

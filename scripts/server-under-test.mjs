@@ -12,7 +12,9 @@ const run = promisify(execFile);
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const nodeEntry = path.join(root, 'scripts', 'server-under-test-node.mjs');
 export const launchSpec = launchOptions();
-if (launchSpec.entry && !process.argv.includes('--server-entry')) launchSpec.entry = nodeEntry;
+// The v1 profile's default entry is the 1.0 engine driver, not today's Node
+// server; only the Node server's default is replaced by the shim.
+if (launchSpec.entry && launchSpec.profile !== 'v1' && !process.argv.includes('--server-entry')) launchSpec.entry = nodeEntry;
 export const serverExecutable = launchSpec.server;
 export const engineExecutable = launchSpec.engine;
 export const isNodeServer = launchSpec.entry !== null;

@@ -188,7 +188,7 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.regular_jobs) && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.legacy_windows != 'false') }}
     name: Windows acceptance / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -200,7 +200,8 @@ jobs:
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
-      GOFLAGS: -mod=vendor -p=2
+      GOFLAGS: -mod=vendor -p=2 -tags=netswitch_handlecheck
+      NETSWITCH_EXPECT_HANDLECHECK: '1'
     defaults:
       run:
         shell: powershell
@@ -216,8 +217,21 @@ jobs:
         with:
           node-version: '24.21.0'
           package-manager-cache: false
-      - name: Build gateway and separately addressed probe process
+      - name: Verify native pointer allocation with the pinned compiler
         run: |
+          node scripts/check-windows-pointer-escapes.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build gateway and separately addressed probe process
+        id: native-build
+        run: |
+          go build -o dist/windows-test/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/recovery/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o dist/windows-test/windows-platform.test.exe ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -v ./internal/engine/... ./internal/winhandle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test ./tests/windows/testisp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
@@ -241,13 +255,34 @@ jobs:
         env:
           GOFLAGS: -mod=readonly -p=2
         run: ./scripts/build-helper.ps1
-      - name: Fetch the verified engine and signed Wintun DLL
+      - name: Measure cold owner latency at 1950–2100 actual TCP rows
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
+        env:
+          NETSWITCH_LOOKUP_GATE: '1'
         run: |
-          ./scripts/fetch-engine.ps1
+          go test -count=1 -v -run '^TestOwnerSteadyColdTiming$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Attribute at least 995 of 1000 cold burst sockets
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
+        env:
+          NETSWITCH_LOOKUP_GATE: '1'
+        run: |
+          go test -count=1 -v -run '^TestOwnerColdBurstTiming$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Fetch the signed Wintun DLL beside the real engine
+        id: native-dll
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
+        run: |
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
-      - name: Run acceptance against today's Node server and sing-box
+      - name: Run the 1.0 profile against the real Windows engine
+        # A timing failure stays red, but must not hide independent packet and
+        # lifecycle evidence. This is intentionally not continue-on-error.
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' && steps.native-dll.outcome == 'success' }}
+        env:
+          NETSWITCH_ENGINE_TEST_TRACE: '1'
+          NETSWITCH_ENGINE_HEAP_CAPTURE: '1'
         run: |
-          node tests/windows/acceptance.mjs --server-exe (Get-Command node).Source --server-entry scripts/server-under-test-node.mjs --engine-exe engine/sing-box.exe --profile baseline
+          node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep report, executable identities and traffic evidence
         if: always()
@@ -444,6 +479,11 @@ jobs:
           node --test scripts/gvisor-diff.test.mjs scripts/repeat-close-tests.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: go vet ./internal/... ./cmd/... ./tests/...
+      - name: Held hostile engine ownership folder through startup and recovery
+        if: runner.os == 'Windows'
+        env:
+          NETSWITCH_OWNERSHIP_DIRECTORY_CI: '1'
+        run: go test -count=1 -v -timeout=3m -run '^TestOwnershipLockHostileDirectoryStartupAndRecovery$' ./internal/engine/windows
       - name: Deterministic gVisor dispatch regression
         run: go test -mod=mod ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1 gvisor.dev/gvisor/pkg/tcpip/transport/tcp
       - run: go test -v ./internal/... ./cmd/... ./tests/...
@@ -562,6 +602,17 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      - name: Build and identify the release registrar executable
+        run: |
+          go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o dist/registrar-release/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go version -m dist/registrar-release/netswitch-engine.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $engine = (Resolve-Path dist/registrar-release/netswitch-engine.exe).Path
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant()
+          "Release registrar $engine from $env:GITHUB_SHA, SHA-256 $hash"
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE=$engine" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Compile the native test executable
         run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
       - uses: ./.github/actions/cache-pinned-archive
@@ -571,11 +622,18 @@ jobs:
         run: ./scripts/prepare-wintun-tests.ps1
       - name: Ring ABI, parser, cancellation, corruption recovery and parallel UDP
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=8m' '-test.run=TestPauseClassification|TestPerformanceMedian|TestRing|TestPinnedDLL|TestWintun(PauseMonitor|SessionDelay|ParallelUDP|RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|BatchCost)$'
+      - name: Registrar ownership, loss and release-engine footprint
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=12m' '-test.run=^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine|SurpriseRemovalReleasesCrossProcessRegistration|EngineCrashReleasesRealRegistration))$'
       - name: Single-packet ping-pong, 200000 round trips per implementation
         if: ${{ !cancelled() }}
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPingPong$'
       - name: Bulk UDP and TCP throughput and latency comparison
         if: ${{ !cancelled() }}
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPerformance$'
+      - name: Matched release registrar versus former in-process registration
+        if: ${{ !cancelled() }}
+        env:
+          NETSWITCH_WINTUN_REFERENCE: inprocess
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPerformance$'
       - name: 1000 session cycles and forced crash cleanup, including phantom devices
         if: ${{ !cancelled() }}
@@ -605,7 +663,7 @@ jobs:
       - name: Race detector with real recovery and teardown
         if: ${{ !cancelled() && matrix.arch == 'x64' }}
         run: |
-          go test -race -c -o ./bin/wintun-race.test.exe ./internal/wintun
+          go test -race -tags=netswitch_handlecheck -c -o ./bin/wintun-race.test.exe ./internal/wintun
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./bin/wintun-race.test.exe '-test.v' '-test.timeout=5m' '-test.run=TestRing|TestWintun(RecoveryAndCancellation|RecoveryLeak|AdapterRemoval|Lifetime)$'
 

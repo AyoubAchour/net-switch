@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"runtime/metrics"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
@@ -29,8 +30,18 @@ type Dependencies struct {
 	Dialer     platform.LineDialer
 	Owners     platform.OwnerLookup
 	Identities platform.UDPIdentity
+	// SilentSYNDiagnostics records SYNs answered with neither a dial nor a
+	// reset (stats tcpSilentSYN). Windows opts in; off, the TCP ingress path
+	// does no work for them.
+	SilentSYNDiagnostics bool
 }
 type Engine struct {
+	// OnTunError may hand a platform-specific terminal condition to the service.
+	// It runs under mu and must not block or call Engine methods. Returning true
+	// transfers responsibility for Stop to the service; other errors retain the
+	// ordinary cleanup and OnFatal path. Install before starting the engine.
+	OnTunError func(error) bool
+
 	OnFatal   func(error)
 	mu        sync.Mutex
 	root      context.Context
@@ -100,6 +111,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 		device.BindIOContext(run)
 	}
 	e.tcp = ntcp.New(run, s, e.limits.Handshakes, e.Table, e.deps.Owners, e.deps.Dialer, link)
+	if e.deps.SilentSYNDiagnostics {
+		e.tcp.RecordSilentSYNs() // before the pumps below deliver any packet
+	}
 	e.udp = udp.New(run, s, e.Table, e.deps.Owners, e.deps.Identities, e.deps.Dialer, link, tun.MTU())
 	echo := newEcho(run, e.deps.Dialer, e.Table, link)
 	nat := e.udp
@@ -195,6 +209,9 @@ func (e *Engine) fail(link *ns.Link, err error) {
 		if e.link != link {
 			return
 		}
+		if e.OnTunError != nil && e.OnTunError(err) {
+			return
+		}
 		e.lastError = err
 		cleanup := e.stopLocked(context.Background())
 		e.lastError = errors.Join(err, cleanup)
@@ -244,36 +261,73 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return e.stopLocked(ctx)
 }
 func (e *Engine) stopLocked(ctx context.Context) error {
+	phase := func(string) func() { return func() {} }
+	if timing, ok := e.deps.Routes.(interface{ StopPhase(string) func() }); ok {
+		phase = timing.StopPhase
+	}
+	finish := phase("quiesce")
 	if routes, ok := e.deps.Routes.(platform.RouteQuiescer); ok {
 		routes.Quiesce()
 	}
+	finish()
+	finish = phase("flow-close")
 	if e.cancel != nil {
 		e.cancel()
 	}
 	e.Table.Unload()
 	e.Table.CloseAll()
+	finish()
+	finish = phase("tcp-stop")
 	if e.tcp != nil {
 		e.tcp.Stop()
 	}
+	finish()
+	finish = phase("stack-close")
 	if e.stack != nil {
 		e.stack.Close()
 	}
+	finish()
+	finish = phase("udp-close")
 	if e.udp != nil {
 		e.udp.Close()
 	}
+	finish()
+	finish = phase("tun-signal")
+	beginTun := func() {}
+	joinTun := func() error { return nil }
 	if e.tun != nil {
-		e.tun.Close()
+		if starter, ok := e.tun.(platform.TunCloseStarter); ok {
+			// The cancelled I/O context wakes the pumps. Complete socket
+			// cancellation before native device teardown; device close still
+			// overlaps the journal's fingerprint checks and route cleanup.
+			beginTun = starter.BeginClose
+			joinTun = e.tun.Close
+		} else {
+			e.tun.Close()
+		}
 	}
+	finish()
+	finish = phase("pumps-join")
 	e.pumps.Wait()
+	finish()
+	finish = phase("stack-join")
 	if e.stack != nil {
 		e.stack.Wait()
 	}
+	finish()
+	finish = phase("tcp-join")
 	if e.tcp != nil {
 		e.tcp.Wait()
 	}
+	finish()
+	finish = phase("tun-begin")
+	beginTun()
+	finish()
+	finish = phase("link-close")
 	if e.link != nil {
 		e.link.Close()
 	}
+	finish()
 	e.stack = nil
 	e.tcp = nil
 	e.udp = nil
@@ -281,10 +335,11 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	e.tun = nil
 	e.cancel = nil
 	e.lines = nil
+	var cleanup error
 	if e.deps.Routes != nil {
-		return e.deps.Routes.Cleanup(ctx)
+		cleanup = e.deps.Routes.Cleanup(ctx)
 	}
-	return nil
+	return errors.Join(cleanup, joinTun())
 }
 
 func cloneLines(lines []platform.Line) []platform.Line {
@@ -297,6 +352,8 @@ func cloneLines(lines []platform.Line) []platform.Line {
 func (e *Engine) Stats() any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// Aggregates only: every entry has a fixed bound (see stats_bound_test.go).
+	// Per-flow detail is in the paged flows listing.
 	s := map[string]any{"flows": e.Table.Stats()}
 	if tun, ok := e.tun.(interface{ Stats() any }); ok {
 		s["tunKernel"] = tun.Stats()
@@ -324,7 +381,7 @@ func (e *Engine) Stats() any {
 	s["gcCPUNanos"] = uint64(samples[2].Value.Float64() * 1e9)
 	s["totalCPUNanos"] = uint64(samples[3].Value.Float64() * 1e9)
 	if e.lastError != nil {
-		s["fatal"] = e.lastError.Error()
+		s["fatal"] = Clip(e.lastError.Error(), 4096)
 	}
 	if e.link != nil {
 		s["tunDropped"] = e.link.Dropped.Load()
@@ -339,6 +396,9 @@ func (e *Engine) Stats() any {
 		s["tcpRejected"] = e.tcp.Rejected.Load()
 		s["tcpInvalid"] = e.tcp.Invalid.Load()
 		s["tcpDialFailed"] = e.tcp.DialFailed.Load()
+		if silent := e.tcp.SilentStats(); silent != nil {
+			s["tcpSilentSYN"] = silent
+		}
 		s["tcpFlows"], s["tcpFlowsOmitted"] = e.tcp.Diagnostics(128)
 	}
 	if e.stack != nil {
@@ -364,4 +424,17 @@ func (e *Engine) Stats() any {
 		s["udpPeakQueueBytes"] = e.udp.PeakQueueBytes.Load()
 	}
 	return s
+}
+
+// Clip bounds a diagnostic string in the stats reply to n bytes, keeping a
+// UTF-8 boundary, and says how much was cut.
+func Clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + fmt.Sprintf("... (%d bytes cut)", len(s)-cut)
 }

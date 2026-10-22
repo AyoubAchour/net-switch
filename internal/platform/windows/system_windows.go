@@ -22,6 +22,8 @@ func Execute(operation string, a map[string]any) (any, error) {
 		return checkLine(uint32(js.Number(a["index"])), js.Text(a["target"]), a["quick"] == true, a["custom"] == true), nil
 	case "network":
 		return readNetwork()
+	case "tcp-port-configuration":
+		return readTCPPortSettings()
 	case "architecture":
 		return Architecture()
 	case "policy":

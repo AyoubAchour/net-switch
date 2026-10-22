@@ -39,8 +39,95 @@ type Forwarder struct {
 	control                       flowapi.Controller
 	owners                        platform.OwnerLookup
 	dialer                        platform.LineDialer
+	flowDialer                    platform.FlowDialer // dialer, when it records refused flows
 	out                           flowapi.Output
 	Rejected, Invalid, DialFailed atomic.Uint64
+	// Diagnostics only, opt-in by the platform (RecordSilentSYNs): SYNs that
+	// get neither a dial nor a reset, noted after Handle releases f.mu. Nil
+	// leaves Handle as it was before these diagnostics existed.
+	silent *silentSYNs
+}
+
+// RecordSilentSYNs turns on the silent-SYN diagnostics; Windows' capacity
+// diagnosis uses them. Call it before the first packet. Without it a
+// duplicate SYN costs no counter, clock read, lock or formatting.
+func (f *Forwarder) RecordSilentSYNs() { f.silent = &silentSYNs{} }
+
+// silentReason says why Handle returned a SYN as handled without a dial or
+// a reset.
+type silentReason uint8
+
+const (
+	notSilent silentReason = iota
+	silentLive
+	silentPending
+	silentStopping
+)
+
+var silentReasons = [...]string{silentLive: "live-connection", silentPending: "pending", silentStopping: "stopping"}
+
+// silentSYNs keeps fixed counters and a ring of the last 32 silent SYNs. The
+// clock is read and the ring locked only for a silent SYN, outside the
+// ingress lock; endpoints are formatted at stats time.
+type silentSYNs struct {
+	counts [len(silentReasons)]atomic.Uint64
+	mu     sync.Mutex
+	recent [32]silentSYN
+	noted  uint64
+}
+
+type silentSYN struct {
+	at     int64
+	tuple  platform.Tuple
+	reason silentReason
+}
+
+// SilentSYN is one silently handled SYN, for matching with a packet trace.
+type SilentSYN struct {
+	AtUnixMilli int64  `json:"at"`
+	Source      string `json:"source"`
+	Destination string `json:"destination"`
+	Reason      string `json:"reason"`
+}
+
+func (s *silentSYNs) note(reason silentReason, t platform.Tuple) {
+	s.counts[reason].Add(1)
+	at := time.Now().UnixMilli()
+	s.mu.Lock()
+	s.recent[s.noted%uint64(len(s.recent))] = silentSYN{at, t, reason}
+	s.noted++
+	s.mu.Unlock()
+}
+
+// SilentStats reports silently handled SYNs, how many are still pending, and
+// how many of those gVisor accepted but has not handed to open yet. Nil when
+// the diagnostics are off.
+func (f *Forwarder) SilentStats() map[string]any {
+	if f.silent == nil {
+		return nil
+	}
+	counts := make(map[string]uint64, len(silentReasons)-1)
+	for reason := silentLive; int(reason) < len(silentReasons); reason++ {
+		counts[silentReasons[reason]] = f.silent.counts[reason].Load()
+	}
+	f.silent.mu.Lock()
+	noted := f.silent.noted
+	ring := f.silent.recent
+	f.silent.mu.Unlock()
+	recent := make([]SilentSYN, 0, min(noted, uint64(len(ring))))
+	for i := noted - uint64(cap(recent)); i < noted; i++ {
+		s := ring[i%uint64(len(ring))]
+		recent = append(recent, SilentSYN{s.at, s.tuple.Source.String(), s.tuple.Destination.String(), silentReasons[s.reason]})
+	}
+	f.mu.RLock()
+	pending, unopened := len(f.pending), 0
+	for _, p := range f.pending {
+		if p.request.Load() == nil {
+			unopened++
+		}
+	}
+	f.mu.RUnlock()
+	return map[string]any{"counts": counts, "recent": recent, "pending": pending, "unopened": unopened}
 }
 
 type orderedOutput interface {
@@ -51,6 +138,7 @@ type orderedOutput interface {
 func New(ctx context.Context, s *stack.Stack, inFlight int, control flowapi.Controller, owners platform.OwnerLookup, dialer platform.LineDialer, out orderedOutput) *Forwarder {
 	ctx, cancel := context.WithCancel(ctx)
 	f := &Forwarder{ctx: ctx, cancel: cancel, pending: make(map[stack.TransportEndpointID]*pendingOpen), connections: make(map[stack.TransportEndpointID]*connection), retired: make(map[*connection]struct{}), stack: s, inFlight: inFlight, control: control, owners: owners, dialer: dialer, out: out}
+	f.flowDialer, _ = dialer.(platform.FlowDialer)
 	f.forwarder = gtcp.NewForwarder(s, MinimumBuffer, 2*inFlight, f.open)
 	f.relays = newRelayWorkers()
 	s.SetTransportProtocolHandler(gtcp.ProtocolNumber, f.Handle)
@@ -85,6 +173,15 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 	if !h.Flags().Contains(header.TCPFlagSyn) || h.Flags()&(header.TCPFlagAck|header.TCPFlagRst|header.TCPFlagFin) != 0 {
 		return false
 	}
+	silent := notSilent
+	if f.silent != nil {
+		defer func() {
+			// Runs after the deferred unlock below.
+			if silent != notSilent {
+				f.silent.note(silent, tuple(id))
+			}
+		}()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if c := f.connections[id]; c != nil {
@@ -109,13 +206,16 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 			// A delayed reopen callback can follow a duplicate SYN that has
 			// already established the replacement. It must not reset or dial
 			// that live incarnation a second time.
+			silent = silentLive
 			return true
 		}
 	}
 	if _, ok := f.pending[id]; ok {
+		silent = silentPending
 		return true
 	}
 	if f.ctx.Err() != nil {
+		silent = silentStopping
 		return true
 	}
 	t := tuple(id)
@@ -193,7 +293,14 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	}()
 	ticket.SetCancel(cancel)
 	t := tuple(id)
-	lookup, cancelLookup := context.WithTimeout(ctx, 50*time.Millisecond)
+	// 50 ms unless the platform's lookup needs longer: Windows holds a SYN
+	// for a fresh owner-table read under overload (spec 5.6) and applies the
+	// 50 ms bound itself otherwise.
+	lookupBound := 50 * time.Millisecond
+	if bounded, ok := f.owners.(interface{ TCPLookupBound() time.Duration }); ok {
+		lookupBound = bounded.TCPLookupBound()
+	}
+	lookup, cancelLookup := context.WithTimeout(ctx, lookupBound)
 	lookupStart := time.Now()
 	var lookupErr error
 	owner, lookupErr = f.owners.TCP(lookup, t)
@@ -212,7 +319,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		return
 	}
 	dial, cancelDial := context.WithTimeout(ctx, DialTimeout)
-	remote, err := f.dialer.DialTCP(dial, decision.Line, t.Destination)
+	var remote platform.TCPConn
+	if f.flowDialer != nil {
+		remote, err = f.flowDialer.DialFlowTCP(dial, decision.Line, t.Destination, platform.FlowIdentity{Owner: owner, Source: t.Source, Destination: t.Destination})
+	} else {
+		remote, err = f.dialer.DialTCP(dial, decision.Line, t.Destination)
+	}
 	cancelDial()
 	if err != nil {
 		f.DialFailed.Add(1)

@@ -56,7 +56,16 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			destination := net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort)))
 			g.record(destination)
 			g.event("dial-start", connection, tuple, "")
-			remote, err := boundDialer(g.index, g.uplinkIP).DialContext(context.Background(), "tcp4", g.backend(destination))
+			backend := g.backend(destination)
+			var remote net.Conn
+			var err error
+			reserved := false
+			if ports := g.probePorts.Load(); ports != nil && probeTargets[backend] {
+				remote, reserved, err = ports.dial(context.Background(), backend)
+			}
+			if !reserved {
+				remote, err = boundDialer(g.index, g.uplinkIP).DialContext(context.Background(), "tcp4", backend)
+			}
 			if err != nil {
 				g.event("dial-error", connection, tuple, err.Error())
 				g.failure(destination, err)
