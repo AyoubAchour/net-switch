@@ -63,17 +63,27 @@ export async function nativeRecoveryControl(binding) {
   const result = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
     ['-test.v', '-test.run=^TestUDPControlVariant$', '-test.timeout=15m'],
     { env: { NETSWITCH_PORT_GATE: '1', NETSWITCH_UDP_RECOVERY_CYCLES: String(udpRecoveryCycles), NETSWITCH_UDP_CONTROL_VARIANT: 'go',
-      NETSWITCH_UDP_BASELINE_SOURCE: binding.address, NETSWITCH_UDP_BASELINE_INDEX: String(binding.index) }, timeout: 900_000 });
+      NETSWITCH_UDP_CONTROL_TCP_LOAD: '1', NETSWITCH_UDP_BASELINE_SOURCE: binding.address, NETSWITCH_UDP_BASELINE_INDEX: String(binding.index) },
+    timeout: 900_000 });
   const pick = (marker) => result.stdout.split(/\r?\n/).filter((value) => value.includes(marker))
-    .map((value) => JSON.parse(value.slice(value.indexOf(marker) + marker.length)))[0];
-  const cycles = pick('WINDOWS NATIVE UDP RECOVERY CYCLES ');
-  const variant = pick('WINDOWS UDP CONTROL VARIANT ');
-  assert(cycles?.cycles?.length === udpRecoveryCycles && variant, `Native UDP recovery control did not run: ${result.stdout.slice(-2000)}`);
-  const refusals = cycles.cycles.flatMap((cycle) => (cycle.refusals ?? []).filter((item) => item.phase === 'reopen'));
-  const control = { attempts: cycles.reopenAttempts, firstRefusals: cycles.reopenRefused,
-    automaticRefusals: refusals.filter((item) => item.code === 'ENOBUFS').length,
-    immediate: { refused: refusals.length, recoveredImmediately: refusals.filter((item) => item.immediateOK).length,
-      attempts: refusals.map((item) => item.immediateAttempts), micros: refusals.map((item) => item.immediateMicros) },
+    .map((value) => JSON.parse(value.slice(value.indexOf(marker) + marker.length)));
+  const sets = pick('WINDOWS NATIVE UDP RECOVERY CYCLES ');
+  const [variant] = pick('WINDOWS UDP CONTROL VARIANT ');
+  const udpOnly = sets.find((set) => !set.tcpLoad);
+  const tcpHeld = sets.find((set) => set.tcpLoad > 0);
+  assert(udpOnly?.cycles?.length === udpRecoveryCycles && tcpHeld?.cycles?.length === udpRecoveryCycles && variant,
+    `Native UDP recovery control did not run: ${result.stdout.slice(-2000)}`);
+  const summary = (cycles) => {
+    const refusals = cycles.cycles.flatMap((cycle) => (cycle.refusals ?? []).filter((item) => item.phase === 'reopen'));
+    return { attempts: cycles.reopenAttempts, firstRefusals: cycles.reopenRefused, tcpLoad: cycles.tcpLoad ?? 0,
+      automaticRefusals: refusals.filter((item) => item.code === 'ENOBUFS').length,
+      immediate: { refused: refusals.length, recoveredImmediately: refusals.filter((item) => item.immediateOK).length,
+        attempts: refusals.map((item) => item.immediateAttempts), micros: refusals.map((item) => item.immediateMicros) } };
+  };
+  // The UDP-only set matches the engine's evidence cycles run before any TCP
+  // load; the TCP-held set matches the gated recovery, which runs with the
+  // TCP corner held.
+  const control = { ...summary(udpOnly), tcpHeld: summary(tcpHeld),
     heldPairs: variant.heldPairs, provider: variant.provider, source: variant.source };
   console.log(`WINDOWS UDP NATIVE RECOVERY CONTROL ${JSON.stringify(control)}`);
   return control;
@@ -613,11 +623,13 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         // The gate (SYSTEM-DESIGN 5.9 resolution): the first cycle's reopens,
         // first attempts only. A refusal is OS behaviour, reported and not
         // counted, only when the native control in this job, at this address
-        // and occupancy, also showed it, and the engine's first-refusal rate
-        // across its cycles in this job is at most the control's.
+        // and occupancy (TCP corner held), also showed it, and the engine's
+        // first-refusal rate across its TCP-held cycles is at most the
+        // control's. The UDP-only pair is reported beside it.
         const exhaustions = failures.length ? (evidence.recoveryFailure?.socketExhaustions ?? 0) - (before.udpSocketExhaustions ?? 0) : 0;
         const gate = udpRecoveryGate({ failures, contention: evidence.recoveryFailure?.newVerdict === 'reported', exhaustions,
-          engineCycles: [...(evidence.matchedCycles ?? []), ...evidence.recoveryCycles], control: native.recoveryControl });
+          engineCycles: evidence.recoveryCycles, control: native.recoveryControl.tcpHeld });
+        gate.udpOnly = udpRecoveryGate({ failures, engineCycles: evidence.matchedCycles ?? [], control: native.recoveryControl });
         evidence.recoveryGate = gate;
         console.log(`WINDOWS UDP RECOVERY VERDICT ${JSON.stringify({ reopened: reopen - failures.length, failed: failures.length, ...gate })}`);
         if (gate.newVerdict === 'fail') {

@@ -356,6 +356,13 @@ func TestUDPControlVariant(t *testing.T) {
 		explicit(space)
 	}
 	nativeUDPRecoveryCycles(t, cycles, halves, &apps, &engines, peer, source, space)
+	if os.Getenv("NETSWITCH_UDP_CONTROL_TCP_LOAD") == "1" {
+		// The engine's gated cycles run with the TCP corner held; repeat the
+		// cycles under the same condition.
+		tcp, release := holdNativeTCPLoad(t)
+		nativeUDPRecoveryCyclesWith(t, cycles, halves, tcp, &apps, &engines, peer, source, space)
+		release()
+	}
 	evidence, _ := json.Marshal(map[string]any{"variant": name, "socket": halves.kind(), "provider": provider,
 		"heldPairs": held, "limit": limit.Error(), "source": source})
 	t.Logf("WINDOWS UDP CONTROL VARIANT %s", evidence)
