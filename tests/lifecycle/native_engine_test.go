@@ -144,15 +144,23 @@ func TestNativeEngineService(t *testing.T) {
 		if err := service.Uninstall(stop); err != nil {
 			t.Error("native uninstall", err)
 		}
-		for _, name := range []string{"NetSwitchEngine.log", "engine-state.json", "engine-journal.json"} {
+		for _, name := range []string{"NetSwitchEngine.log", "engine-state.json", "engine-journal.json", "native-startup-phase.txt", "native-startup-stacks.txt"} {
 			if b, err := os.ReadFile(filepath.Join(data, name)); err == nil {
 				t.Logf("NATIVE_EVIDENCE %s: %s", name, b)
 			}
 		}
 	})
 	fixture := prepareTUN(t, dir, data)
-	if err := service.Start(ctx, service.Engine); err != nil {
-		t.Fatal(err)
+	startCtx, startCancel := context.WithTimeout(ctx, 45*time.Second)
+	startErr := service.Start(startCtx, service.Engine)
+	startCancel()
+	if startErr != nil {
+		status, queryErr := service.Query(service.Engine)
+		t.Logf("native start failed: %v status=%+v query=%v", startErr, status, queryErr)
+		killCtx, killCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer killCancel()
+		if err := service.ForceStop(killCtx, service.Engine); err != nil { t.Log("failed startup termination", err) }
+		t.Fatal(startErr)
 	}
 	c, initial := attachNative(t, ctx)
 	if initial.State != "off" || initial.Applied != nil {

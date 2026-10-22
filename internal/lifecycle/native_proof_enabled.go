@@ -6,6 +6,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync/atomic"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
@@ -46,6 +48,17 @@ func (r *stalledReader) ReadPacket(ctx context.Context, b []byte) (int, error) {
 }
 
 func configureNativeProof(data string, options *host.Options) {
+	var ready atomic.Bool
+	options.Progress = func(stage string) {
+		if stage == "ready-callback-end" { ready.Store(true) }
+		_ = os.WriteFile(filepath.Join(data, "native-startup-phase.txt"), []byte(time.Now().UTC().Format(time.RFC3339Nano)+" "+stage), 0600)
+	}
+	time.AfterFunc(25*time.Second, func() {
+		if ready.Load() { return }
+		b := make([]byte, 256<<10)
+		n := runtime.Stack(b, true)
+		_ = os.WriteFile(filepath.Join(data, "native-startup-stacks.txt"), b[:n], 0600)
+	})
 	options.WrapTun = func(tun platform.TunDevice) platform.TunDevice {
 		return &stalledReader{TunDevice: tun, data: data}
 	}

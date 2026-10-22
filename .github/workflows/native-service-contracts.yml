@@ -7,6 +7,16 @@ on:
     branches: [main]
     paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml']
   workflow_dispatch:
+    inputs:
+      runner:
+        description: 'One runner for focused diagnostics; ordinary PRs use the full matrix'
+        type: choice
+        options: [all, windows-latest, windows-11-arm, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04]
+        default: all
+      faults_only:
+        description: 'Run only the fault build while diagnosing its own harness'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -22,8 +32,9 @@ jobs:
     timeout-minutes: 25
     strategy:
       fail-fast: false
+      max-parallel: 2
       matrix:
-        runner: [windows-latest, windows-11-arm, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04]
+        runner: ${{ fromJSON(inputs.runner && inputs.runner != 'all' && format('["{0}"]', inputs.runner) || '["windows-latest","windows-11-arm","ubuntu-24.04","ubuntu-24.04-arm","ubuntu-26.04"]') }}
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
@@ -31,6 +42,7 @@ jobs:
       NETSWITCH_LIFECYCLE_CI: '1'
       NETSWITCH_NATIVE_CI: '1'
       NETSWITCH_LIFECYCLE_FILTER: '^TestNativeEngineService$'
+      NATIVE_FAULTS_ONLY: ${{ inputs.faults_only && '1' || '0' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -48,6 +60,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           foreach ($variant in @('product', 'faults')) {
+            if ($env:NATIVE_FAULTS_ONLY -eq '1' -and $variant -eq 'product') { continue }
             $env:NETSWITCH_NATIVE_FAULTS = if ($variant -eq 'faults') { '1' } else { '0' }
             $tags = if ($variant -eq 'faults') { 'm4_native,lifecycle_test' } else { 'm4_native' }
             $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles "NetSwitch-Native-CI-$variant"
@@ -73,6 +86,7 @@ jobs:
         shell: bash
         run: |
           for variant in product faults; do
+            if [ "$NATIVE_FAULTS_ONLY" = 1 ] && [ "$variant" = product ]; then continue; fi
             export NETSWITCH_NATIVE_FAULTS=0
             tags=m4_native
             if [ "$variant" = faults ]; then export NETSWITCH_NATIVE_FAULTS=1; tags=m4_native,lifecycle_test; fi

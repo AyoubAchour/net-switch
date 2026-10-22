@@ -144,6 +144,7 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 }
 
 func ServeHosted(parent context.Context, dir string, standalone bool, options host.Options) (err error) {
+	options.Stage("native-enter")
 	// Setup failures/panics still need the deferred closers. Once the tail has
 	// completed, it owns both closure and error reporting; do not re-add each
 	// cached close error to its final result.
@@ -154,6 +155,7 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 	}
 	stateStarted := winclock.Now()
 	state, err := StateDirectory(dir)
+	options.Stage("state-directory")
 	stateElapsed := winclock.Since(stateStarted)
 	if err != nil {
 		return err
@@ -165,6 +167,7 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 		}
 	}()
 	routes, err := recoverRoutes(dir)
+	options.Stage("ownership-recovered")
 	if err != nil {
 		return err
 	}
@@ -181,6 +184,7 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 	// Allocate the completion service before any capture can start. A failure
 	// here leaves ordinary OS routing in place instead of rejecting every flow.
 	dialer, err := NewDialer(routes)
+	options.Stage("dialer-created")
 	if err != nil {
 		return fmt.Errorf("initialize Windows socket readiness: %w", err)
 	}
@@ -193,7 +197,9 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 	var serviceState host.State
 	var history flows.StateStore = flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncParent}
 	if options.OpenState != nil {
+		options.Stage("state-open-begin")
 		serviceState, err = options.OpenState(routes.Instance)
+		options.Stage("state-open-end")
 		if err != nil {
 			return err
 		}
@@ -213,6 +219,7 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 	e.OnTunError = loss.handle
 	runtime := &Runtime{Engine: e, routes: routes, owners: owners, dialer: dialer, state: serviceState}
 	server := protocol.New(runtime, e.Table, dialer)
+	options.Stage("protocol-created")
 	// The ownership records and command fence identify this same engine.
 	// NewRoutes receives the instance before any OS object can be created.
 	server.Instance = routes.Instance
@@ -226,6 +233,7 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 	}
 	e.OnFatal, routes.Fatal, server.OnCleanupFailure = fail, fail, fail
 	stopProfile, err := startHeapProfile(routes.Instance, standalone)
+	options.Stage("profile-created")
 	if err != nil {
 		return err
 	}
@@ -236,6 +244,7 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 		}
 	}()
 	pipe, err := ListenPipe(EnginePipe, standalone)
+	options.Stage("pipe-created")
 	if err != nil {
 		return err
 	}
@@ -273,9 +282,13 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 			})
 		}
 	}()
+	options.Stage("ready-log-begin")
 	log.Printf("engine %s ready; pid control uses authenticated pipe %s", server.Instance, EnginePipe)
+	options.Stage("ready-log-end")
 	if options.Ready != nil {
+		options.Stage("ready-callback-begin")
 		options.Ready(server)
+		options.Stage("ready-callback-end")
 	}
 	err = serveUntilStopped(parent, shutdownTail{
 		runtime: runtime, server: server, loss: loss, fatal: fatal,

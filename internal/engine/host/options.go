@@ -19,7 +19,11 @@ type Options struct {
 	OpenState func(instance string) (State, error)
 	// Ready runs after the authenticated listener and its workers exist.
 	Ready func(*protocol.Server)
+	// Progress is a coarse startup diagnostic, never a packet-path callback.
+	Progress func(string)
 	// WrapTun is nil in product builds; hosted tests stall the actual packet
 	// reader without suspending the separate control/lease goroutines.
 	WrapTun func(platform.TunDevice) platform.TunDevice
 }
+
+func (o Options) Stage(name string) { if o.Progress != nil { o.Progress(name) } }
