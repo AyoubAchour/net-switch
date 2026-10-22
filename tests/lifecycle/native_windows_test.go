@@ -146,7 +146,7 @@ func checkedWindowsActor(name string) error {
 	defer windows.NetApiBufferFree(b)
 	u := (*actorUserInfo)(unsafe.Pointer(b))
 	if windows.UTF16PtrToString(u.Name) != name || windows.UTF16PtrToString(u.Comment) != actorComment || u.Privilege != 1 || u.Flags&0x200 == 0 || u.Flags&0x2 != 0 {
-		return fmt.Errorf("%s is not the expected disposable unprivileged account", name)
+		return fmt.Errorf("unexpected disposable account: want_name=%q name=%q want_comment=%q comment=%q privilege=%d flags=%#x normal=%t disabled=%t home=%q script=%q", name, windows.UTF16PtrToString(u.Name), actorComment, windows.UTF16PtrToString(u.Comment), u.Privilege, u.Flags, u.Flags&0x200 != 0, u.Flags&0x2 != 0, windows.UTF16PtrToString(u.Home), windows.UTF16PtrToString(u.Script))
 	}
 	// IsElevated alone misses a split administrator token. Check all direct
 	// and indirect local memberships before reusing the account or changing it.
@@ -160,9 +160,13 @@ func checkedWindowsActor(name string) error {
 		return fmt.Errorf("read disposable account groups: code=%d read=%d total=%d", code, read, total)
 	}
 	for _, group := range unsafe.Slice((**uint16)(unsafe.Pointer(groups)), read) {
-		sid, _, _, err := windows.LookupSID("", windows.UTF16PtrToString(group))
+		groupName := windows.UTF16PtrToString(group)
+		sid, _, _, err := windows.LookupSID("", groupName)
+		if err != nil {
+			return fmt.Errorf("%s local group %q SID lookup: %w", name, groupName, err)
+		}
 		if err != nil || sid.String() != "S-1-5-32-545" { // BUILTIN Users, any locale
-			return fmt.Errorf("%s has unexpected local group membership", name)
+			return fmt.Errorf("%s has unexpected local group membership: name=%q sid=%q", name, groupName, sid.String())
 		}
 	}
 	return nil

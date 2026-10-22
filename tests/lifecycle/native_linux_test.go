@@ -114,20 +114,20 @@ func checkedLinuxActor(name string) (*user.User, error) {
 	uid, uidErr := strconv.ParseUint(u.Uid, 10, 32)
 	gid, gidErr := strconv.ParseUint(u.Gid, 10, 32)
 	if uidErr != nil || gidErr != nil || uid < 1000 || gid < 1000 || u.Username != name || u.Name != actorComment || u.HomeDir != "/home/"+name {
-		return nil, fmt.Errorf("%s is not the expected disposable unprivileged account", name)
+		return nil, fmt.Errorf("unexpected disposable account: want_name=%q name=%q uid=%q gid=%q want_comment=%q comment=%q home=%q uid_error=%v gid_error=%v", name, u.Username, u.Uid, u.Gid, actorComment, u.Name, u.HomeDir, uidErr, gidErr)
 	}
 	group, err := user.LookupGroupId(u.Gid)
 	if err != nil || group.Name != name {
-		return nil, fmt.Errorf("%s has an unexpected primary group", name)
+		return nil, fmt.Errorf("%s has an unexpected primary group: gid=%q group=%+v error=%v", name, u.Gid, group, err)
 	}
 	groups, err := u.GroupIds()
 	if err != nil || len(groups) != 1 || groups[0] != u.Gid {
-		return nil, fmt.Errorf("%s has unexpected supplementary groups", name)
+		return nil, fmt.Errorf("%s has unexpected supplementary groups: primary=%q groups=%v error=%v", name, u.Gid, groups, err)
 	}
 	b, err := exec.Command("passwd", "--status", name).Output()
 	fields := strings.Fields(string(b))
 	if err != nil || len(fields) < 2 || fields[0] != name || fields[1] != "L" {
-		return nil, fmt.Errorf("%s does not have the expected locked password", name)
+		return nil, fmt.Errorf("%s does not have the expected locked password: passwd_status=%q error=%v", name, strings.TrimSpace(string(b)), err)
 	}
 	return u, nil
 }
