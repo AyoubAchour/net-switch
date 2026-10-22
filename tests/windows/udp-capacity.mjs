@@ -29,9 +29,10 @@ export async function nativeUDPCapacity(binding) {
   // engine's readiness path (native duplicate and event registration).
   const nativeRecovery = paired.stdout.split(/\r?\n/).filter((value) => value.includes(cyclesMarker))
     .map((value) => JSON.parse(value.slice(value.indexOf(cyclesMarker) + cyclesMarker.length)));
-  // Four with cycles: plain Go, plain Go under TCP load, the engine's native
-  // socket registered for readiness, and the same socket not registered.
-  assert(udpRecoveryCycles === 0 || (nativeRecovery.length === 4 && nativeRecovery.every((item) => item.cycles?.length === udpRecoveryCycles)),
+  // Five with cycles: plain Go, plain Go under TCP load, the engine's native
+  // socket registered for readiness, the same socket not registered, and not
+  // registered but on a completion port like Go's.
+  assert(udpRecoveryCycles === 0 || (nativeRecovery.length === 5 && nativeRecovery.every((item) => item.cycles?.length === udpRecoveryCycles)),
     `Native UDP recovery controls did not run: ${paired.stdout.slice(-2000)}`);
   for (const item of nativeRecovery) {
     const path = item.readyUDP ? `native, ${item.engineSocket}` : item.tcpLoad ? `native, TCP corner held (${item.tcpLoad} TCP clients)` : 'native';
@@ -43,8 +44,8 @@ export async function nativeUDPCapacity(binding) {
   const pairMarker = 'WINDOWS NATIVE UDP PAIRED CAPACITY ';
   const pairs = paired.stdout.split(/\r?\n/).filter((value) => value.includes(pairMarker))
     .map((value) => JSON.parse(value.slice(value.indexOf(pairMarker) + pairMarker.length)));
-  // Go and ReadyUDP always; the unregistered Constructor variant with cycles.
-  assert.equal(pairs.length, udpRecoveryCycles > 0 ? 3 : 2, 'The Go and ReadyUDP matched baselines must run');
+  // Go and ReadyUDP always; the two unregistered Constructor variants with cycles.
+  assert.equal(pairs.length, udpRecoveryCycles > 0 ? 4 : 2, 'The Go and ReadyUDP matched baselines must run');
   for (const sample of pairs) {
     assert.equal(sample.source, binding.address);
     assert.equal(sample.interfaceIndex, binding.index);

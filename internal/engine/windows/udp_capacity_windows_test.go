@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,10 @@ type udpEngineHalves struct {
 	// registration (WSAEventSelect), to tell the constructor apart from the
 	// registration when one of them changes Windows' refusal rate.
 	unwatched bool
+	// completionPort additionally attaches each unwatched native socket to
+	// an I/O completion port with Go's notification modes, the one remaining
+	// difference from a Go-created socket.
+	completionPort windows.Handle
 	line      Adapter
 	source    netip.Addr
 	config    net.ListenConfig
@@ -100,6 +105,16 @@ func (h udpEngineHalves) openReady(wake func()) (*udpSocket, *udpWatch, error) {
 		return nil, nil, err
 	}
 	if h.unwatched {
+		if h.completionPort != 0 {
+			handle := s.handle.Handle("UDP control completion port")
+			if _, err := windows.CreateIoCompletionPort(handle, h.completionPort, 0, 0); err != nil {
+				return nil, nil, errors.Join(err, s.Close())
+			}
+			if err := windows.SetFileCompletionNotificationModes(handle,
+				windows.FILE_SKIP_SET_EVENT_ON_HANDLE|windows.FILE_SKIP_COMPLETION_PORT_ON_SUCCESS); err != nil {
+				return nil, nil, errors.Join(err, s.Close())
+			}
+		}
 		return s, nil, nil
 	}
 	watch, err := s.Watch(wake)
@@ -125,6 +140,9 @@ func (h udpEngineHalves) open() (io.Closer, error) {
 }
 
 func (h udpEngineHalves) kind() string {
+	if h.ready && h.unwatched && h.completionPort != 0 {
+		return "engine native constructor, no Watch, on a completion port like Go"
+	}
 	if h.ready && h.unwatched {
 		return "engine native constructor, no Watch"
 	}
@@ -140,8 +158,8 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 		t.Skip("native UDP pair isolation belongs to the hosted capacity fixture")
 	}
 	index, source, peerSource := udpPairBinding(t)
-	for _, variant := range []string{"Go", "ReadyUDP", "Constructor"} {
-		native, unwatched := variant != "Go", variant == "Constructor"
+	for _, variant := range []string{"Go", "ReadyUDP", "Constructor", "ConstructorIOCP"} {
+		native, unwatched := variant != "Go", strings.HasPrefix(variant, "Constructor")
 		if unwatched && udpRecoveryCycleCount() == 0 {
 			continue // only the recovery control needs this split
 		}
@@ -173,6 +191,14 @@ func TestNativeUDPPairedCapacity(t *testing.T) {
 			wake := make(chan struct{}, 1)
 			halves := newUDPEngineHalves(native, index, source, pool)
 			halves.unwatched = unwatched
+			if variant == "ConstructorIOCP" {
+				port, err := windows.CreateIoCompletionPort(windows.InvalidHandle, 0, 0, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer windows.CloseHandle(port)
+				halves.completionPort = port
+			}
 			ports := map[uint16]bool{}
 			payload := []byte("native UDP pairs")
 			var received [64]byte
