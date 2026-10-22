@@ -108,7 +108,7 @@ func Stop(ctx context.Context, name string) error { return systemctl(ctx, "stop"
 func Query(name string) (Status, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--property=MainPID,ActiveState,SubState,ExecMainCode,ExecMainStatus,Result", unit(name))
+	cmd := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--property=MainPID,ActiveState,SubState,ExecMainCode,ExecMainStatus,Result,InvocationID", unit(name))
 	cmd.Env = ChildEnvironment()
 	b, err := cmd.Output()
 	if err != nil {
@@ -131,6 +131,8 @@ func Query(name string) (Status, error) {
 		out.ExitCode, out.ExitKnown = uint32(code), true
 	}
 	out.ManagerResult = values["Result"]
+	out.ManagerCode, out.ManagerStatus = values["ExecMainCode"], values["ExecMainStatus"]
+	out.ManagerInvocation = values["InvocationID"]
 	return nativeOutcome(name, out), err
 }
 func SetOwner(string) error              { return nil }

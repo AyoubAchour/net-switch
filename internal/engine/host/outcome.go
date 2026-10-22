@@ -18,6 +18,10 @@ type Outcome struct {
 	State    string `json:"state"` // running, pending, complete, failed
 	Reason   string `json:"reason,omitempty"`
 	Error    string `json:"error,omitempty"`
+	// systemd can unload an inactive unit and forget ExecMainStatus. Only its
+	// matching ExecStopPost invocation may supply the retained main result.
+	InvocationID string       `json:"invocationId,omitempty"`
+	Systemd      *SystemdExit `json:"systemd,omitempty"`
 }
 
 func OutcomePath(data, instance string) (string, error) {
@@ -57,6 +61,12 @@ func ReadOutcome(data, instance string) (Outcome, error) {
 	}
 	if result.State == "complete" && result.Error != "" {
 		return result, errors.New("native cleanup reports both success and failure")
+	}
+	if result.InvocationID != "" && !ValidInvocationID(result.InvocationID) {
+		return result, errors.New("invalid service invocation")
+	}
+	if result.Systemd != nil && (!ValidInvocationID(result.InvocationID) || !result.Systemd.Valid()) {
+		return result, errors.New("invalid retained systemd exit")
 	}
 	return result, nil
 }

@@ -55,7 +55,7 @@ jobs:
         shell: bash
         run: |
           go test -v -count=1 ./internal/engine ./internal/engine/host ./internal/engine/protocol ./internal/engine/flows ./internal/service
-          go test -v -count=1 -tags lifecycle_test -run '^TestNativeReadFault' ./internal/lifecycle
+          go test -v -count=1 -tags lifecycle_test -run '^TestNative(ReadFault|ManagerExit)' ./internal/lifecycle
           go test -v -count=1 -run '^TestNative(Stall|TCPInfo)' ./tests/lifecycle
       - name: Installed Windows services, product and fault builds
         if: runner.os == 'Windows'

@@ -20,6 +20,9 @@ func nativeOutcome(name string, state Status) Status {
 
 func readNativeOutcome(data string, state Status, err error) Status {
 	state.MainExitCode, state.MainExitKnown = state.ExitCode, state.ExitKnown
+	if state.MainExitKnown {
+		state.MainExitSource = "manager"
+	}
 	state.ExitKnown = false
 	state.Cleanup = "pending"
 	if err != nil {
@@ -37,6 +40,22 @@ func readNativeOutcome(data string, state Status, err error) Status {
 		return state
 	}
 	state.Cleanup, state.LastError = outcome.State, outcome.Error
+	if state.ManagerInvocation != "" && state.ManagerInvocation != outcome.InvocationID {
+		state.Cleanup = "unknown"
+		state.LastError = "native cleanup belongs to another service invocation"
+		return state
+	}
+	// A newly loaded, never-run unit has code 0 and no invocation. Only then
+	// use the manager result retained by this native instance's ExecStopPost.
+	// Never replace a signal, another invocation, or a live manager result.
+	if !state.MainExitKnown && state.ManagerCode == "0" && state.ManagerStatus == "0" && state.ManagerInvocation == "" && state.ManagerResult == "success" && outcome.Systemd != nil {
+		state.MainExitCode, state.MainExitKnown = outcome.Systemd.ExitCode()
+		state.MainExitSource = "systemd-stop-post"
+		state.ManagerResult = outcome.Systemd.Result
+		if !state.MainExitKnown && state.LastError == "" {
+			state.LastError = fmt.Sprintf("retained main result has no exit code: code=%q status=%q result=%q", outcome.Systemd.Code, outcome.Systemd.Status, outcome.Systemd.Result)
+		}
+	}
 	if outcome.State == "failed" || (state.MainExitKnown && state.MainExitCode == 0 && state.ManagerResult != "" && state.ManagerResult != "success") {
 		state.ExitKnown, state.ExitCode = true, 1
 		if state.LastError == "" {
@@ -49,6 +68,9 @@ func readNativeOutcome(data string, state Status, err error) Status {
 	}
 	if state.LastError == "" && outcome.State != "complete" {
 		state.LastError = fmt.Sprintf("native cleanup is %s for %s", outcome.State, record.Instance)
+	}
+	if state.LastError == "" && !state.MainExitKnown {
+		state.LastError = fmt.Sprintf("main exit code unavailable: manager code=%q status=%q invocation=%q", state.ManagerCode, state.ManagerStatus, state.ManagerInvocation)
 	}
 	return state
 }

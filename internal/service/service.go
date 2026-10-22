@@ -24,13 +24,17 @@ type Status struct {
 	// Native ExitKnown requires the main outcome AND instance-matched recovery.
 	// The raw main result remains separately visible for diagnosis. A successful
 	// main exit is never proof that SCM/ExecStopPost cleanup succeeded.
-	ExitCode      uint32 `json:"exitCode,omitempty"`
-	ExitKnown     bool   `json:"exitKnown,omitempty"`
-	MainExitCode  uint32 `json:"mainExitCode,omitempty"`
-	MainExitKnown bool   `json:"mainExitKnown,omitempty"`
-	Cleanup       string `json:"cleanup,omitempty"`
-	LastError     string `json:"lastError,omitempty"`
-	ManagerResult string `json:"managerResult,omitempty"`
+	ExitCode          uint32 `json:"exitCode,omitempty"`
+	ExitKnown         bool   `json:"exitKnown,omitempty"`
+	MainExitCode      uint32 `json:"mainExitCode,omitempty"`
+	MainExitKnown     bool   `json:"mainExitKnown,omitempty"`
+	Cleanup           string `json:"cleanup,omitempty"`
+	LastError         string `json:"lastError,omitempty"`
+	ManagerResult     string `json:"managerResult,omitempty"`
+	ManagerCode       string `json:"managerCode,omitempty"`
+	ManagerStatus     string `json:"managerStatus,omitempty"`
+	ManagerInvocation string `json:"managerInvocation,omitempty"`
+	MainExitSource    string `json:"mainExitSource,omitempty"`
 }
 
 // ExitCode accepts only a direct, completed outcome. In particular, joining

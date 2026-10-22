@@ -9,8 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/AyoubAchour/net-switch/internal/service"
 	"github.com/AyoubAchour/net-switch/tests/linux/topo"
 	"golang.org/x/sys/unix"
 )
@@ -53,6 +56,31 @@ func waitNativeCleanup(t *testing.T, fixture tunFixture, data, instance string) 
 	if len(nativeLiveRecords(t, data, instance)) != 0 {
 		t.Fatal("native journal still has live records after cleanup")
 	}
+}
+
+func assertNativeExitRetention(t *testing.T, data, instance string) {
+	t.Helper()
+	// list-units does not load the unit. Wait for actual collection so the
+	// regression cannot pass just because this runner still retains its status.
+	wait(t, "systemd unloads the stopped native unit", 5*time.Second, func() bool {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		b, err := exec.CommandContext(ctx, "systemctl", "list-units", "--all", "--plain", "--no-legend", "netswitch-engine.service").CombinedOutput()
+		if err != nil {
+			t.Fatal("read loaded units", err, string(b))
+		}
+		return strings.TrimSpace(string(b)) == ""
+	})
+	state, err := service.Query(service.Engine)
+	t.Logf("NATIVE_SYSTEMD_COLLECTED %+v error=%v", state, err)
+	if err != nil || state.ManagerCode != "0" || state.ManagerStatus != "0" || state.ManagerInvocation != "" || !state.MainExitKnown || state.MainExitSource != "systemd-stop-post" {
+		t.Fatal("manager collection did not preserve the actual main exit", state, err)
+	}
+	out, err := host.ReadOutcome(data, instance)
+	if err != nil || out.Systemd == nil || out.Systemd.Code != "exited" || out.Systemd.Status != "0" || out.Systemd.Result != "success" {
+		t.Fatal("clean exit was not recorded by matching ExecStopPost", out, err)
+	}
+	t.Logf("NATIVE_SYSTEMD_RETAINED invocation=%s exit=%+v", out.InvocationID, out.Systemd)
 }
 
 func nativeLiveRecords(t *testing.T, data, instance string) []journal.Record {

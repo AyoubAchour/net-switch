@@ -433,9 +433,11 @@ func TestNativeEngineService(t *testing.T) {
 	}
 	fixture.clean(t)
 	auditTunables(t, nil)
+	assertNativeExitRetention(t, data, c.instance)
 	end, err := service.Query(service.Engine)
+	t.Logf("NATIVE_MANAGER_CLEAN_EXIT %+v error=%v", end, err)
 	if err != nil || !end.ExitKnown || end.ExitCode != 0 {
-		t.Fatal("clean service exit not retained", end, err)
+		t.Fatalf("clean service exit not retained: %+v error=%v", end, err)
 	}
 	var history host.Record
 	if err := lifecycle.Read(filepath.Join(data, "engine-state.json"), &history); err != nil || history.Epoch != c.epoch || history.N != rev.N {

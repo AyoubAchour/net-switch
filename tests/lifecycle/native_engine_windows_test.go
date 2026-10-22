@@ -52,6 +52,8 @@ func resumeNative(t *testing.T, pid uint32) {
 
 func assertNativeCapture(t *testing.T, _ string, fixture tunFixture) { fixture.installed(t) }
 
+func assertNativeExitRetention(*testing.T, string, string) {} // SCM retains its stopped status.
+
 func prepareNativeTunables(*testing.T) func(*testing.T, *nativeClient) {
 	return func(*testing.T, *nativeClient) {}
 }

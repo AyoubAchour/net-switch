@@ -20,6 +20,10 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, log func(s
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
 	instance := ""
+	invocation := ""
+	if runtime.GOOS == "linux" && host.ValidInvocationID(os.Getenv("INVOCATION_ID")) {
+		invocation = os.Getenv("INVOCATION_ID")
+	}
 	var server *protocol.Server
 	options := host.Options{
 		Progress: func(stage string) { log("native startup: " + stage) },
@@ -33,7 +37,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, log func(s
 			if err != nil {
 				return nil, err
 			}
-			return state, writeOutcome(c.Data, host.Outcome{Instance: id, State: "running"})
+			return state, writeOutcome(c.Data, host.Outcome{Instance: id, State: "running", InvocationID: invocation})
 		},
 		Ready: func(s *protocol.Server) {
 			server = s
@@ -63,7 +67,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, log func(s
 		err = nativeProofExit(c.Data)
 	}
 	if instance != "" {
-		out := host.Outcome{Instance: instance, State: "pending", Reason: "stop"}
+		out := host.Outcome{Instance: instance, State: "pending", Reason: "stop", InvocationID: invocation}
 		if server != nil && server.LeaseExpired() {
 			out.Reason = "lease-expired"
 		}
@@ -110,6 +114,9 @@ func recoveryOutcome(data string) (func(error) error, error) {
 		out = host.Outcome{Instance: record.Instance}
 	} else if err != nil {
 		return nil, err
+	}
+	if runtime.GOOS == "linux" {
+		captureSystemdExit(&out, os.Getenv)
 	}
 	out.State, out.Error = "pending", ""
 	if err := writeOutcome(data, out); err != nil {
