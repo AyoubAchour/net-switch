@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 )
@@ -148,6 +149,57 @@ func TestWildcardUDPAddressRemovalMatchesOnlyItsLineAndFamily(t *testing.T) {
 	}
 	if g := f.Stats(); g.UDPReadBytes != 0 || g.UDPAdapterBytes != 2*(8<<10) {
 		t.Fatal("idle UDP sockets must account adapter storage without retaining receive buffers")
+	}
+}
+
+// SYSTEM-DESIGN 5.7: two routers commonly hand out the same 192.168.1.x, so
+// two lines can share a local address. Losing it on one line closes only that
+// line's flows, by line and source together, for bound TCP and wildcard UDP.
+func TestLineSourceClosureLeavesAnotherLineWithTheSameAddress(t *testing.T) {
+	shared := netip.MustParseAddr("192.168.1.2")
+	f := New(Defaults(), nil)
+	r := revision(1)
+	r.Config.Combine = false
+	r.Config.Lines[0].Addresses = []netip.Addr{shared}
+	r.Config.Lines[1].Addresses = []netip.Addr{shared}
+	r.Hash = policy.Hash(r.Config)
+	if _, err := f.Apply(r); err != nil {
+		t.Fatal(err)
+	}
+	type flow struct {
+		x      flowapi.Ticket
+		ctx    context.Context
+		line   string
+		closes bool
+	}
+	var all []flow
+	for _, c := range []struct {
+		protocol, app string
+		source        netip.Addr
+		closes        bool
+	}{
+		{"tcp", "first", shared, true},                    // line A, bound to the lost address
+		{"udp", "first", netip.IPv4Unspecified(), true},   // line A, wildcard UDP
+		{"tcp", "pinned", shared, false},                  // line B, same address
+		{"udp", "pinned", netip.IPv4Unspecified(), false}, // line B, wildcard UDP
+	} {
+		x := admit(t, f, c.protocol, c.app)
+		defer x.Close()
+		x.Established(c.source)
+		ctx, cancel := context.WithCancel(context.Background())
+		x.SetCancel(cancel)
+		all = append(all, flow{x, ctx, map[string]string{"first": "A", "pinned": "B"}[c.app], c.closes})
+	}
+	if result := f.CloseLineSource("A", shared); result.Closed != 2 {
+		t.Fatalf("closed %d flows on line A, want 2", result.Closed)
+	}
+	for i, x := range all {
+		if closed := x.ctx.Err() != nil; closed != x.closes {
+			t.Fatalf("flow %d on line %s: closed %t, want %t", i, x.line, closed, x.closes)
+		}
+	}
+	if result := f.CloseLineSource("", shared); result.Closed != 0 {
+		t.Fatal("a closure without a line closed flows")
 	}
 }
 

@@ -21,7 +21,9 @@ type Request struct {
 	Epoch         uint64           `json:"epoch"`
 	Revision      *policy.Revision `json:"revision,omitempty"`
 	Cursor        string           `json:"cursor,omitempty"`
-	OpID          string           `json:"opId,omitempty"`
+	// All asks flows for every admitted flow, unresolved ones included.
+	All           bool             `json:"all,omitempty"`
+	OpID         string           `json:"opId,omitempty"`
 	Selector      flows.Selector   `json:"selector,omitempty"`
 	StartedBefore uint64           `json:"startedBefore,omitempty"`
 	Line          string           `json:"line,omitempty"`

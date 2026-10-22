@@ -257,6 +257,9 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		s.stopped = true
 		return true, nil
 	case "flows":
+		if r.All {
+			return s.table.PageAll(r.Cursor)
+		}
 		return s.table.Page(r.Cursor)
 	case "totals":
 		return s.table.Totals(), nil

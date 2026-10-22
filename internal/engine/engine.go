@@ -10,6 +10,7 @@ import (
 	"runtime/debug"
 	"runtime/metrics"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
@@ -344,7 +345,9 @@ func cloneLines(lines []platform.Line) []platform.Line {
 func (e *Engine) Stats() any {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	s := map[string]any{"flows": e.Table.Stats(), "handshakeFlows": e.Table.HandshakeFlows()}
+	// Aggregates only: every entry has a fixed bound (see stats_bound_test.go).
+	// Per-flow detail is in the paged flows listing.
+	s := map[string]any{"flows": e.Table.Stats()}
 	if tun, ok := e.tun.(interface{ Stats() any }); ok {
 		s["tunKernel"] = tun.Stats()
 	}
@@ -371,7 +374,7 @@ func (e *Engine) Stats() any {
 	s["gcCPUNanos"] = uint64(samples[2].Value.Float64() * 1e9)
 	s["totalCPUNanos"] = uint64(samples[3].Value.Float64() * 1e9)
 	if e.lastError != nil {
-		s["fatal"] = e.lastError.Error()
+		s["fatal"] = Clip(e.lastError.Error(), 4096)
 	}
 	if e.link != nil {
 		s["tunDropped"] = e.link.Dropped.Load()
@@ -412,4 +415,17 @@ func (e *Engine) Stats() any {
 		s["udpPeakQueueBytes"] = e.udp.PeakQueueBytes.Load()
 	}
 	return s
+}
+
+// Clip bounds a diagnostic string in the stats reply to n bytes, keeping a
+// UTF-8 boundary, and says how much was cut.
+func Clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + fmt.Sprintf("... (%d bytes cut)", len(s)-cut)
 }
