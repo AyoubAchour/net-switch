@@ -3,7 +3,13 @@
 package suite
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
 )
 
@@ -57,7 +63,12 @@ func (e *Env) capacityAccounting(label, protocol string, before, after engine.St
 		capDecisions += r.PerApp
 	}
 	if protocol == "udp" {
-		e.T.Check(after.Counters["udpGenerationMissing"] == before.Counters["udpGenerationMissing"], "%s: every UDP setup obtained a socket generation (%d missing)", label, after.Counters["udpGenerationMissing"]-before.Counters["udpGenerationMissing"])
+		missing := after.Counters["udpGenerationMissing"] - before.Counters["udpGenerationMissing"]
+		details := ""
+		if missing != 0 {
+			details = "; " + udpGenerationFailureDetails(after.OwnerLookup)
+		}
+		e.T.Check(after.Counters["udpGenerationMissing"] == before.Counters["udpGenerationMissing"], "%s: every UDP setup obtained a socket generation (%d missing%s)", label, missing, details)
 		e.T.Check(after.Counters["udpOpenFailed"] == before.Counters["udpOpenFailed"], "%s: no native UDP open failed (%d)", label, after.Counters["udpOpenFailed"]-before.Counters["udpOpenFailed"])
 		r = after.RefusedUDP.Sub(before.RefusedUDP)
 		forward = after.Counters["udpRejected"] - before.Counters["udpRejected"]
@@ -124,6 +135,39 @@ func (e *Env) capacityAccounting(label, protocol string, before, after engine.St
 		return 0
 	}
 	return floor
+}
+
+// The engine retains eight failures. Surface that bounded history beside the
+// exact assertion; LastError may already describe an unrelated holder timeout.
+func udpGenerationFailureDetails(raw json.RawMessage) string {
+	var lookup struct {
+		UDPGenerationFailures []struct {
+			Tuple        platform.Tuple
+			Stage, Error string
+			Errno        int
+			Query        *struct {
+				Stage                         string
+				StartedNS, DeadlineNS, SentNS int64
+				ReplyErrno                    int32
+			}
+		}
+	}
+	if err := json.Unmarshal(raw, &lookup); err != nil {
+		return fmt.Sprintf("UDPGenerationFailures unavailable: %v", err)
+	}
+	var details []string
+	for _, f := range lookup.UDPGenerationFailures[:min(8, len(lookup.UDPGenerationFailures))] {
+		query := "query=none"
+		if q := f.Query; q != nil {
+			lag := "unbounded"
+			if q.DeadlineNS != 0 {
+				lag = time.Duration(q.StartedNS - q.DeadlineNS).String()
+			}
+			query = fmt.Sprintf("query-stage=%s query-start-after-deadline=%s sent=%t reply-errno=%d", q.Stage, lag, q.SentNS != 0, q.ReplyErrno)
+		}
+		details = append(details, fmt.Sprintf("tuple=%s->%s stage=%s %s errno=%d error=%q", f.Tuple.Source, f.Tuple.Destination, f.Stage, query, f.Errno, f.Error))
+	}
+	return "UDPGenerationFailures=[" + strings.Join(details, "; ") + "]"
 }
 
 func (e *Env) exactCapacity(label string, held, target int, unknownRefusals uint64) {

@@ -81,14 +81,24 @@ type Owners struct {
 	indexSeed               maphash.Seed
 	windows                 map[uint32]fdWindow
 	ambiguousPorts          map[uint16]time.Time
+
+	udpIdentityExpiredGeneration            atomic.Uint64
+	udpGenerationQueryAfterIdentityDeadline atomic.Uint64
+	udpLateIdentityDiscarded                atomic.Uint64
 	// Fault callbacks are assigned only by the acceptance build.
 	fault        func(context.Context) error
 	destroyFault func(context.Context, socketRow, func())
+	// Tests pause here without replacing the real context or kernel query.
+	afterUDPIdentityContext func(context.Context)
+	afterUDPOwnerResolution func(context.Context, platform.Owner)
 }
 
 type lookupStats struct {
-	ExpiredBeforeHolderScan   uint64
-	ExactRepliesAfterDeadline uint64
+	ExpiredBeforeHolderScan                 uint64
+	ExactRepliesAfterDeadline               uint64
+	UDPIdentityExpiredGeneration            uint64
+	UDPGenerationQueryAfterIdentityDeadline uint64
+	UDPLateIdentityDiscarded                uint64
 	// This remains explicit while the eBPF initiator/sender backend is pending.
 	Backend                                                                              string
 	Timeout, Missing, Ambiguous, Other                                                   uint64
@@ -123,6 +133,9 @@ func (o *Owners) Stats() any {
 	s := lookupStats{Backend: "proc-fallback", Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
 	s.ExactRepliesAfterDeadline = o.queries.lateReplies.Load()
 	s.ExpiredBeforeHolderScan = o.expiredBeforeHolderScan.Load()
+	s.UDPIdentityExpiredGeneration = o.udpIdentityExpiredGeneration.Load()
+	s.UDPGenerationQueryAfterIdentityDeadline = o.udpGenerationQueryAfterIdentityDeadline.Load()
+	s.UDPLateIdentityDiscarded = o.udpLateIdentityDiscarded.Load()
 	if size, err := descriptorTableSize(); err == nil {
 		s.FDTableSize = size
 	} else {
@@ -271,7 +284,7 @@ func (o *Owners) Close() {
 	o.queries.close()
 }
 func (o *Owners) query(ctx context.Context, family, protocol int, local, remote netip.AddrPort) ([]socketRow, error) {
-	return diagQuery(ctx, family, protocol, local, remote, false, &o.queries)
+	return diagQuery(ctx, family, protocol, local, remote, false, &o.queries, nil)
 }
 
 // Work stops short of 10 ms to leave room for returning, timing and policy
@@ -335,13 +348,63 @@ func (o *Owners) udpOwner(ctx context.Context, tuple platform.Tuple) (owner plat
 			unknown = true
 		}
 	}
-	ctx, cancel := lookupContext(ctx)
+	identity, cancel := lookupContext(ctx)
 	defer cancel()
+	var cookie uint64
+	var queryStarted time.Time
+	defer func() {
+		if o.afterUDPOwnerResolution != nil {
+			o.afterUDPOwnerResolution(identity, owner)
+		}
+		// Clear a previous setup's unknown marker before the final identity
+		// deadline check, so waiting for this shard cannot accept late identity.
+		if owner.AppID != "" && cookie != 0 {
+			o.recordUDPUnknown(tuple.Source, cookie, false)
+		}
+		stopped := lookupContextError(identity)
+		discarded := stopped != nil && owner.AppID != ""
+		if stopped != nil && owner.Generation != "" {
+			owner = platform.Owner{Generation: owner.Generation}
+			if !errors.Is(err, stopped) && !errors.Is(err, platform.ErrAmbiguous) {
+				err = fmt.Errorf("UDP identity context: %w", stopped)
+			}
+		}
+		// Holder hints are not the admission result: the final deadline check
+		// can discard a known identity after holders cached it. Record unknown
+		// per source so reconciliation keeps that decision, without invalidating
+		// known sessions using another local address of the same wildcard socket.
+		if owner.Generation != "" && owner.AppID == "" && cookie != 0 {
+			o.recordUDPUnknown(tuple.Source, cookie, true)
+		}
+		// A queued reply may outlive its deadline. Check the outer context
+		// after recording the outcome too; only identity expiry allows recovery.
+		if outerStopped := lookupContextError(ctx); outerStopped != nil {
+			owner = platform.Owner{}
+			err = fmt.Errorf("UDP setup context: %w", errors.Join(outerStopped, err))
+			return
+		}
+		if errors.Is(stopped, context.DeadlineExceeded) && owner.Generation != "" {
+			o.udpIdentityExpiredGeneration.Add(1)
+			deadline, _ := identity.Deadline()
+			if !queryStarted.IsZero() && !queryStarted.Before(deadline) {
+				o.udpGenerationQueryAfterIdentityDeadline.Add(1)
+			}
+			if discarded {
+				o.udpLateIdentityDiscarded.Add(1)
+			}
+		}
+	}()
+	if o.afterUDPIdentityContext != nil {
+		o.afterUDPIdentityContext(identity)
+	}
+	// The mandatory generation gets one exact query under the outer setup
+	// budget. Attribution and fallback dumps retain the original identity
+	// deadline: a late cookie must never authorize a late cached owner.
 	// Exact lookup is useful for the common wildcard socket. A port-filtered
 	// dump also detects SO_REUSEPORT ambiguity instead of accepting the arbitrary
 	// socket that the kernel's inbound hash selected.
 	stage = "exact-query"
-	exact, err := o.query(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source, tuple.Destination)
+	exact, err := diagQuery(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source, tuple.Destination, false, &o.queries, &queryStarted)
 	if err != nil && !errors.Is(err, unix.ENOENT) {
 		return platform.Owner{}, fmt.Errorf("UDP exact query: %w", err)
 	}
@@ -353,17 +416,18 @@ func (o *Owners) udpOwner(ctx context.Context, tuple platform.Tuple) (owner plat
 	o.mu.Unlock()
 	if err == nil && tuple.Destination.IsValid() && !ambiguous {
 		if r, e := matchUDP(exact, source); e == nil {
-			return o.resolveUDP(ctx, r, unknown)
+			cookie = r.cookie
+			return o.resolveUDP(identity, r, unknown)
 		}
 	}
 	stage = "family-dump"
-	rows, err := diagDump(ctx, familyOf(source.Addr()), unix.IPPROTO_UDP, source)
+	rows, err := diagDump(identity, familyOf(source.Addr()), unix.IPPROTO_UDP, source)
 	if err != nil {
 		return platform.Owner{}, fmt.Errorf("UDP family dump: %w", err)
 	}
 	if source.Addr().Is4() {
 		stage = "dual-stack-dump"
-		v6, err := diagDump(ctx, unix.AF_INET6, unix.IPPROTO_UDP, source)
+		v6, err := diagDump(identity, unix.AF_INET6, unix.IPPROTO_UDP, source)
 		if err != nil {
 			return platform.Owner{}, fmt.Errorf("UDP dual-stack dump: %w", err)
 		}
@@ -380,7 +444,20 @@ func (o *Owners) udpOwner(ctx context.Context, tuple platform.Tuple) (owner plat
 	if err != nil {
 		return platform.Owner{}, err
 	}
-	return o.resolveUDP(ctx, r, unknown)
+	cookie = r.cookie
+	return o.resolveUDP(identity, r, unknown)
+}
+
+// Context timers can be scheduled after their absolute deadlines. Check both
+// before publishing an identity or a generation to the admission path.
+func lookupContextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
 }
 
 func (o *Owners) resolveUDP(ctx context.Context, r socketRow, unknown bool) (owner platform.Owner, err error) {
@@ -1542,6 +1619,13 @@ func (o *Owners) SnapshotAt(ctx context.Context, keys []netip.AddrPort, started 
 			continue
 		}
 		live[r.cookie] = true
+		// Revalidate the kernel cookie, but do not promote an admitted unknown
+		// session using late holder hints. That is new information, not a
+		// change to the socket which would justify closing the live mapping.
+		if o.udpWasUnknown(k, r.cookie) {
+			out[k] = platform.Owner{Generation: r.generation()}
+			continue
+		}
 		cached := o.cachedHolders(r.cookie)
 		var owner platform.Owner
 		if len(cached) == 0 {
@@ -1583,6 +1667,10 @@ func (o *Owners) SnapshotAt(ctx context.Context, keys []netip.AddrPort, started 
 		}
 	}
 	o.mu.Unlock()
-	o.pruneCookies(live, started)
+	referenced := make(map[netip.AddrPort]bool, len(keys))
+	for _, key := range keys {
+		referenced[key] = true
+	}
+	o.pruneCookies(live, referenced, started)
 	return out, nil
 }

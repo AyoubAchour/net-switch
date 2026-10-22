@@ -614,9 +614,9 @@ func TestRealUDPDiagAndConflictingLiveHolders(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { child.Process.Kill(); child.Wait() }()
-	_, err = o.holders(ctx, r)
-	if !errors.Is(err, platform.ErrAmbiguous) {
-		t.Fatalf("two real executable identities must be ambiguous, got %v", err)
+	owner, err = o.resolveUDP(ctx, r, false)
+	if !errors.Is(err, platform.ErrAmbiguous) || owner != (platform.Owner{Generation: r.generation()}) {
+		t.Fatalf("two real executable identities must retain only their cookie and ambiguity, got %+v %v", owner, err)
 	}
 	child.Process.Kill()
 	child.Wait()

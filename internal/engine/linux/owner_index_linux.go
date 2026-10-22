@@ -4,6 +4,7 @@ package linux
 
 import (
 	"hash/maphash"
+	"net/netip"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,41 @@ type ownerIndex struct {
 	inodes  map[uint32]inodeHolders
 	waiters map[uint32]*inodeWaiter
 	cookies map[uint64]cachedHolders
+	unknown map[netip.AddrPort]unknownUDPGeneration
+}
+
+type unknownUDPGeneration struct {
+	cookie   uint64
+	observed time.Time
+}
+
+func (o *Owners) sourceIndex(source netip.AddrPort) *ownerIndex {
+	return &o.index[maphash.Comparable(o.indexSeed, source)%ownerIndexShards]
+}
+
+// Admission may discard identity after a successful holder scan. Keep that
+// outcome separately from the cookie's reusable holder hints. A socket can
+// serve multiple local addresses with independent known/unknown decisions.
+func (o *Owners) recordUDPUnknown(source netip.AddrPort, cookie uint64, unknown bool) {
+	s := o.sourceIndex(source)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !unknown {
+		delete(s.unknown, source)
+		return
+	}
+	if s.unknown == nil {
+		s.unknown = make(map[netip.AddrPort]unknownUDPGeneration)
+	}
+	s.unknown[source] = unknownUDPGeneration{cookie: cookie, observed: time.Now()}
+}
+
+func (o *Owners) udpWasUnknown(source netip.AddrPort, cookie uint64) bool {
+	s := o.sourceIndex(source)
+	s.mu.Lock()
+	entry, ok := s.unknown[source]
+	s.mu.Unlock()
+	return ok && entry.cookie == cookie
 }
 
 func (o *Owners) cookieIndex(cookie uint64) *ownerIndex {
@@ -49,13 +85,18 @@ func (o *Owners) forgetCookie(cookie uint64) {
 	s.mu.Unlock()
 }
 
-func (o *Owners) pruneCookies(live map[uint64]bool, started time.Time) {
+func (o *Owners) pruneCookies(live map[uint64]bool, referenced map[netip.AddrPort]bool, started time.Time) {
 	for i := range o.index {
 		s := &o.index[i]
 		s.mu.Lock()
 		for cookie, cached := range s.cookies {
 			if !live[cookie] && cached.observed.Before(started) {
 				delete(s.cookies, cookie)
+			}
+		}
+		for source, entry := range s.unknown {
+			if (!referenced[source] || !live[entry.cookie]) && entry.observed.Before(started) {
+				delete(s.unknown, source)
 			}
 		}
 		s.mu.Unlock()

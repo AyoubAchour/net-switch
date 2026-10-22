@@ -74,13 +74,17 @@ var diagDumpBuffers = sync.Pool{New: func() any { b := make([]byte, 64<<10); ret
 var diagSequence atomic.Uint32
 
 func diag(ctx context.Context, family, protocol int, local, remote netip.AddrPort, dump bool) ([]socketRow, error) {
-	return diagQuery(ctx, family, protocol, local, remote, dump, nil)
+	return diagQuery(ctx, family, protocol, local, remote, dump, nil, nil)
 }
 
 // Only completed exact queries are reusable. Interrupted dumps, cancellation,
 // malformed messages and errors discard the descriptor with all pending data.
-func diagQuery(ctx context.Context, family, protocol int, local, remote netip.AddrPort, dump bool, pool *diagPool) (rows []socketRow, err error) {
-	trace := diagQueryTrace{Stage: "context", StartedNS: time.Now().UnixNano()}
+func diagQuery(ctx context.Context, family, protocol int, local, remote netip.AddrPort, dump bool, pool *diagPool, started *time.Time) (rows []socketRow, err error) {
+	now := time.Now()
+	if started != nil {
+		*started = now
+	}
+	trace := diagQueryTrace{Stage: "context", StartedNS: now.UnixNano()}
 	if deadline, ok := ctx.Deadline(); ok {
 		trace.DeadlineNS = deadline.UnixNano()
 	}
@@ -104,9 +108,9 @@ func diagQuery(ctx context.Context, family, protocol int, local, remote netip.Ad
 	var canceled chan struct{}
 	var stop func() bool
 	lateReply := false
-	// A lookup's native read deadline is already at most 8 ms. It needs no
-	// extra cancellation goroutine/channel; cancellation still finishes
-	// inside that budget. Longer dumps retain immediate cancellation.
+	// Short identity queries need no extra cancellation goroutine/channel;
+	// cancellation still finishes inside that budget. UDP generation queries
+	// use the longer outer setup budget and retain immediate cancellation.
 	if dump || !timed || time.Until(deadline) > 10*time.Millisecond {
 		canceled = make(chan struct{})
 		stop = context.AfterFunc(ctx, func() { f.SetReadDeadline(time.Now()); close(canceled) })
