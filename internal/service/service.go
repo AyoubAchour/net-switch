@@ -20,6 +20,24 @@ type Status struct {
 	PID     uint32 `json:"pid"`
 	Running bool   `json:"running"`
 	Stopped bool   `json:"stopped"`
+	// ExitCode is meaningful only when ExitKnown and Stopped are both true.
+	// A signal/SCM infrastructure failure never masquerades as engine exit 3.
+	ExitCode  uint32 `json:"exitCode,omitempty"`
+	ExitKnown bool   `json:"exitKnown,omitempty"`
+}
+
+// ExitCode accepts only a direct, completed outcome. In particular, joining
+// an adapter-loss outcome with a late cleanup failure must return failure 1.
+func ExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	if outcome, ok := err.(interface{ EngineExitCode() int }); ok {
+		if code := outcome.EngineExitCode(); code > 0 && code < 256 {
+			return code
+		}
+	}
+	return 1
 }
 
 func WaitStopped(ctx context.Context, name string) error {

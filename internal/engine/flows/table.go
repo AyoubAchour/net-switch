@@ -87,6 +87,7 @@ type Table struct {
 	totals               Totals
 	gauges               Gauges
 	snapshots            map[uint64]*snapshot
+	totalSnapshots       map[uint64]*totalsSnapshot
 	nextSnapshot         uint64
 	rejectSecond         int64
 	timeWaitLogSecond    int64
@@ -638,6 +639,9 @@ func (t *Table) Lookup(d time.Duration, err error, owner platform.Owner) {
 func (t *Table) Totals() Totals {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.totalsLocked()
+}
+func (t *Table) totalsLocked() Totals {
 	v := Totals{Apps: map[string]Bytes{}, Lines: map[string]Bytes{}}
 	for k, b := range t.totals.Apps {
 		v.Apps[k] = b

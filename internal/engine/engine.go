@@ -10,6 +10,8 @@ import (
 	"runtime/debug"
 	"runtime/metrics"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
@@ -57,6 +59,21 @@ type Engine struct {
 	pumps     sync.WaitGroup
 	lastError error
 	lines     []platform.Line
+	live      atomic.Pointer[liveState]
+}
+
+type liveState struct {
+	status  string
+	started time.Time
+}
+
+// LiveState is independent of the engine mutation lock. Status and lease
+// traffic must remain readable while a start/apply/stop is waiting on I/O.
+func (e *Engine) LiveState() (string, time.Time) {
+	if s := e.live.Load(); s != nil {
+		return s.status, s.started
+	}
+	return "off", time.Time{}
 }
 
 func New(ctx context.Context, d Dependencies, l flows.Limits, state flows.StateStore) *Engine {
@@ -75,9 +92,11 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	if _, err := policy.Compile(r); err != nil {
 		return policy.Applied{}, err
 	}
+	e.live.Store(&liveState{status: "starting"})
 	debug.SetMemoryLimit(512 << 20)
 	tun, err := e.deps.OpenTun(ctx)
 	if err != nil {
+		e.live.Store(&liveState{status: "off"})
 		return policy.Applied{}, err
 	}
 	e.tun = tun
@@ -200,6 +219,7 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	if err := e.deps.Routes.Capture(ctx); err != nil {
 		return rollback(err)
 	}
+	e.live.Store(&liveState{status: "on", started: time.Now()})
 	return a, nil
 }
 func (e *Engine) fail(link *ns.Link, err error) {
@@ -261,6 +281,7 @@ func (e *Engine) Stop(ctx context.Context) error {
 	return e.stopLocked(ctx)
 }
 func (e *Engine) stopLocked(ctx context.Context) error {
+	e.live.Store(&liveState{status: "stopping"})
 	phase := func(string) func() { return func() {} }
 	if timing, ok := e.deps.Routes.(interface{ StopPhase(string) func() }); ok {
 		phase = timing.StopPhase
@@ -339,7 +360,13 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	if e.deps.Routes != nil {
 		cleanup = e.deps.Routes.Cleanup(ctx)
 	}
-	return errors.Join(cleanup, joinTun())
+	err := errors.Join(cleanup, joinTun())
+	status := "off"
+	if err != nil {
+		status = "error"
+	}
+	e.live.Store(&liveState{status: status})
+	return err
 }
 
 func cloneLines(lines []platform.Line) []platform.Line {

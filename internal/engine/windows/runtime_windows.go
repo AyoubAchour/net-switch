@@ -14,6 +14,8 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/AyoubAchour/net-switch/internal/engine/host"
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
@@ -25,6 +27,20 @@ type Runtime struct {
 	routes *Routes
 	owners *Owners
 	dialer *Dialer
+	state  host.State
+}
+
+func (r *Runtime) InitialEpoch() uint64 {
+	if r.state == nil {
+		return 0
+	}
+	return r.state.InitialEpoch()
+}
+func (r *Runtime) SaveEpoch(epoch uint64) error {
+	if r.state == nil {
+		return nil
+	}
+	return r.state.SaveEpoch(epoch)
 }
 
 func (r *Runtime) Stats() any {
@@ -124,6 +140,10 @@ func Recover(dir string) error {
 }
 
 func Serve(parent context.Context, dir string, standalone bool) (err error) {
+	return ServeHosted(parent, dir, standalone, host.Options{})
+}
+
+func ServeHosted(parent context.Context, dir string, standalone bool, options host.Options) (err error) {
 	// Setup failures/panics still need the deferred closers. Once the tail has
 	// completed, it owns both closure and error reporting; do not re-add each
 	// cached close error to its final result.
@@ -170,12 +190,28 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 			err = joinShutdownError(err, closeDialer())
 		}
 	}()
-	e := engine.New(ctx, engine.Dependencies{OpenTun: routes.OpenTun, Routes: routes, Dialer: dialer, Owners: owners, Identities: owners,
+	var serviceState host.State
+	var history flows.StateStore = flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncParent}
+	if options.OpenState != nil {
+		serviceState, err = options.OpenState(routes.Instance)
+		if err != nil {
+			return err
+		}
+		history = serviceState
+	}
+	openTun := func(ctx context.Context) (platform.TunDevice, error) {
+		tun, err := routes.OpenTun(ctx)
+		if err == nil && options.WrapTun != nil {
+			tun = options.WrapTun(tun)
+		}
+		return tun, err
+	}
+	e := engine.New(ctx, engine.Dependencies{OpenTun: openTun, Routes: routes, Dialer: dialer, Owners: owners, Identities: owners,
 		SilentSYNDiagnostics: true},
-		flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncParent})
+		flows.Defaults(), history)
 	loss := newAdapterLoss()
 	e.OnTunError = loss.handle
-	runtime := &Runtime{Engine: e, routes: routes, owners: owners, dialer: dialer}
+	runtime := &Runtime{Engine: e, routes: routes, owners: owners, dialer: dialer, state: serviceState}
 	server := protocol.New(runtime, e.Table, dialer)
 	// The ownership records and command fence identify this same engine.
 	// NewRoutes receives the instance before any OS object can be created.
@@ -238,6 +274,9 @@ func Serve(parent context.Context, dir string, standalone bool) (err error) {
 		}
 	}()
 	log.Printf("engine %s ready; pid control uses authenticated pipe %s", server.Instance, EnginePipe)
+	if options.Ready != nil {
+		options.Ready(server)
+	}
 	err = serveUntilStopped(parent, shutdownTail{
 		runtime: runtime, server: server, loss: loss, fatal: fatal,
 		cancel: cancel, closePipe: closePipe,

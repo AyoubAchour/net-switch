@@ -108,7 +108,7 @@ func Stop(ctx context.Context, name string) error { return systemctl(ctx, "stop"
 func Query(name string) (Status, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--property=MainPID,ActiveState,SubState", unit(name))
+	cmd := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--property=MainPID,ActiveState,SubState,ExecMainCode,ExecMainStatus", unit(name))
 	cmd.Env = ChildEnvironment()
 	b, err := cmd.Output()
 	if err != nil {
@@ -122,7 +122,15 @@ func Query(name string) (Status, error) {
 		}
 	}
 	n, err := strconv.ParseUint(values["MainPID"], 10, 32)
-	return Status{PID: uint32(n), Running: values["ActiveState"] == "active" && values["SubState"] == "running" && n != 0, Stopped: n == 0 && (values["ActiveState"] == "inactive" || values["ActiveState"] == "failed")}, err
+	out := Status{PID: uint32(n), Running: values["ActiveState"] == "active" && values["SubState"] == "running" && n != 0, Stopped: n == 0 && (values["ActiveState"] == "inactive" || values["ActiveState"] == "failed")}
+	if out.Stopped && values["ExecMainCode"] == "1" { // CLD_EXITED, not killed by a signal
+		code, parseErr := strconv.ParseUint(values["ExecMainStatus"], 10, 8)
+		if parseErr != nil {
+			return out, parseErr
+		}
+		out.ExitCode, out.ExitKnown = uint32(code), true
+	}
+	return out, err
 }
 func SetOwner(string) error              { return nil }
 func ReportError(name string, err error) { fmt.Fprintf(os.Stderr, "%s: %v\n", name, err) }

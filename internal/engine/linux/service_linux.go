@@ -17,6 +17,8 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/AyoubAchour/net-switch/internal/engine/host"
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"golang.org/x/sys/unix"
 )
@@ -58,6 +60,10 @@ func checkSocketDirectory(path string) error {
 }
 
 func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *engine.Engine, *protocol.Server)) error {
+	return ServeHosted(parent, socket, dir, host.Options{}, hooks)
+}
+
+func ServeHosted(parent context.Context, socket, dir string, options host.Options, hooks func(*Platform, *engine.Engine, *protocol.Server)) (err error) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	start, cancelStart := context.WithTimeout(ctx, 3*time.Second)
@@ -73,9 +79,25 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	if err := pingPermission(); err != nil {
 		log.Print(err)
 	}
-	defer p.Close()
-	e := engine.New(forwarding, engine.Dependencies{OpenTun: p.OpenTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners}, flows.Defaults(), flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncDir})
-	runtime := serviceRuntime{Engine: e, cancel: cancelForwarding}
+	defer func() { err = errors.Join(err, p.Close()) }()
+	var state host.State
+	var history flows.StateStore = flows.FileState{Path: filepath.Join(dir, "engine-state.json"), SyncParent: SyncDir}
+	if options.OpenState != nil {
+		state, err = options.OpenState(p.Instance)
+		if err != nil {
+			return err
+		}
+		history = state
+	}
+	openTun := func(ctx context.Context) (platform.TunDevice, error) {
+		tun, err := p.OpenTun(ctx)
+		if err == nil && options.WrapTun != nil {
+			tun = options.WrapTun(tun)
+		}
+		return tun, err
+	}
+	e := engine.New(forwarding, engine.Dependencies{OpenTun: openTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners}, flows.Defaults(), history)
+	runtime := serviceRuntime{Engine: e, cancel: cancelForwarding, state: state}
 	srv := protocol.New(runtime, e.Table, p)
 	srv.Instance = p.Instance
 	fatal := make(chan error, 1)
@@ -130,7 +152,8 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	}
 	stopListen := context.AfterFunc(ctx, func() { l.Close() })
 	defer stopListen()
-	go srv.RunLease(ctx)
+	leaseDone := make(chan struct{})
+	go func() { defer close(leaseDone); srv.RunLease(ctx) }()
 	var clients sync.WaitGroup
 	acceptErr := make(chan error, 1)
 	acceptDone := make(chan struct{})
@@ -155,6 +178,9 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 		}
 	}()
 	log.Printf("engine %s ready at %s", p.Instance, socket)
+	if options.Ready != nil {
+		options.Ready(srv)
+	}
 	select {
 	case <-parent.Done():
 	case <-srv.Done():
@@ -174,6 +200,7 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	l.Close()
 	<-acceptDone
 	clients.Wait()
+	<-leaseDone
 	return err
 }
 
@@ -189,6 +216,19 @@ func lineEvents(t *flows.Table) (down func(string), removed func(string, netip.A
 type serviceRuntime struct {
 	*engine.Engine
 	cancel context.CancelFunc
+	state  host.State
 }
 
 func (r serviceRuntime) Stop(ctx context.Context) error { r.cancel(); return r.Engine.Stop(ctx) }
+func (r serviceRuntime) InitialEpoch() uint64 {
+	if r.state == nil {
+		return 0
+	}
+	return r.state.InitialEpoch()
+}
+func (r serviceRuntime) SaveEpoch(epoch uint64) error {
+	if r.state == nil {
+		return nil
+	}
+	return r.state.SaveEpoch(epoch)
+}

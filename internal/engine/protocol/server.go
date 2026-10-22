@@ -140,7 +140,8 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		return s.ackTerminal(r, c)
 	}
 	if r.Method == "hello" {
-		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": s.table.Applied(), "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks", "terminal-stop"}}
+		status := s.status()
+		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": status.Applied, "status": status, "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks", "terminal-stop", "status", "paged-totals"}}
 		s.mu.Unlock()
 		if adapter, ok := s.runtime.(AdapterRuntime); ok {
 			v["capabilities"] = []string{"singbox-adapter-v1", "revisions", "lease"}
@@ -235,6 +236,8 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		return true, nil
 	case "version":
 		return buildinfo.String(), nil
+	case "status":
+		return s.status(), nil
 	case "start", "apply":
 		if r.Revision == nil {
 			return nil, errors.New("revision required")
@@ -263,7 +266,7 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		}
 		return s.table.Page(r.Cursor)
 	case "totals":
-		return s.table.Totals(), nil
+		return s.table.PageTotals(r.Cursor)
 	case "stats":
 		var data any = s.table.Stats()
 		if runtime, ok := s.runtime.(interface{ Stats() any }); ok {

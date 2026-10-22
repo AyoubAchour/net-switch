@@ -10,7 +10,11 @@ import (
 // CheckInstallation verifies executable bytes and the namespaces used to find
 // them, including DLLs and the adapter's adjacent verification manifest.
 func CheckInstallation(directory, adapter string) error {
-	for _, dir := range []string{directory, filepath.Dir(adapter)} {
+	directories := []string{directory}
+	if adapter != "" {
+		directories = append(directories, filepath.Dir(adapter))
+	}
+	for _, dir := range directories {
 		if !filepath.IsAbs(dir) {
 			return fmt.Errorf("installation needs absolute paths")
 		}
@@ -42,6 +46,9 @@ func CheckInstallation(directory, adapter string) error {
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("service executable is not a regular file: %s", name)
 		}
+	}
+	if adapter == "" {
+		return nil
 	}
 	info, err := os.Lstat(adapter)
 	if err != nil {

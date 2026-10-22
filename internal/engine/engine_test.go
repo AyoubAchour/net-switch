@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/netip"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,9 +13,70 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
 	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
 )
+
+type captureBarrier struct {
+	testfake.Routes
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *captureBarrier) Capture(ctx context.Context) error {
+	close(r.entered)
+	select {
+	case <-r.release:
+		return r.Routes.Capture(ctx)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestLoadedStatusWaitsForCaptureWithoutBlockingHello(t *testing.T) {
+	tun := testfake.NewTun()
+	routes := &captureBarrier{entered: make(chan struct{}), release: make(chan struct{})}
+	e := New(context.Background(), Dependencies{OpenTun: func(context.Context) (platform.TunDevice, error) { return tun, nil }, Routes: routes, Dialer: testfake.Dialer{}, Owners: &testfake.Owners{}}, flows.Defaults(), nil)
+	release := sync.OnceFunc(func() { close(routes.release) })
+	defer func() { release(); _ = e.Stop(context.Background()) }()
+	s := protocol.New(e, e.Table, nil)
+	config := policy.Config{Lines: []platform.Line{{ID: "A"}}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.Start(context.Background(), policy.Revision{N: 1, Hash: policy.Hash(config), Config: config})
+		done <- err
+	}()
+	select {
+	case <-routes.entered:
+	case err := <-done:
+		t.Fatalf("start did not reach capture: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("capture was not reached")
+	}
+	if e.Table.Applied() == nil {
+		t.Fatal("precondition: history not committed before capture")
+	}
+	hello := make(chan protocol.Reply, 1)
+	go func() { hello <- s.Handle(context.Background(), protocol.Request{ID: "hello", Method: "hello"}) }()
+	select {
+	case reply := <-hello:
+		status := reply.Result.(map[string]any)["status"].(protocol.Status)
+		if status.State != "starting" || status.Applied != nil {
+			t.Fatal("unfinished capture reported as loaded", status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("hello blocked on the mutation lock")
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	status := s.Handle(context.Background(), protocol.Request{ID: "hello", Method: "hello"}).Result.(map[string]any)["status"].(protocol.Status)
+	if status.State != "on" || status.Applied == nil || status.Applied.N != 1 || status.Started.IsZero() {
+		t.Fatal(status)
+	}
+}
 
 func TestStartRollbackAndDisconnectLifetime(t *testing.T) {
 	for _, fail := range []string{"prepare", "capture", ""} {

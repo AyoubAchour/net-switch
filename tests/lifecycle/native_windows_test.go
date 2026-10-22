@@ -252,6 +252,9 @@ func hostedMain(m *testing.M) (bool, int) {
 		os.Stdout, os.Stderr = log, log
 		code := 1
 		os.Args = []string{os.Args[0], "-test.v", "-test.timeout=22m"}
+		if filter := os.Getenv("NETSWITCH_LIFECYCLE_FILTER"); filter != "" {
+			os.Args = append(os.Args, "-test.run="+filter)
+		}
 		err = service.Run("NetSwitchLifecycleTests", func(_ context.Context, ready func()) error {
 			ready()
 			code = m.Run()
@@ -276,6 +279,10 @@ func hostedMain(m *testing.M) (bool, int) {
 		exe, _ := os.Executable()
 		cwd, _ := os.Getwd()
 		output := filepath.Join(os.Getenv("ProgramData"), "netswitch-lifecycle-test.log")
+		if err := os.Remove(output + ".result"); err != nil && !os.IsNotExist(err) {
+			fmt.Println(err)
+			return true, 1
+		}
 		mgr, err := mgr.Connect()
 		if err != nil {
 			fmt.Println(err)
@@ -295,7 +302,7 @@ func hostedMain(m *testing.M) (bool, int) {
 			return true, 1
 		}
 		env := []string{}
-		for _, name := range []string{"GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "NETSWITCH_LIFECYCLE_CI", "NETSWITCH_LIFECYCLE_DIR", "SystemRoot", "ProgramData"} {
+		for _, name := range []string{"GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "NETSWITCH_LIFECYCLE_CI", "NETSWITCH_LIFECYCLE_DIR", "NETSWITCH_LIFECYCLE_FILTER", "NETSWITCH_NATIVE_CI", "NETSWITCH_NATIVE_FAULTS", "SystemRoot", "ProgramData"} {
 			env = append(env, name+"="+os.Getenv(name))
 		}
 		err = key.SetStringsValue("Environment", env)
