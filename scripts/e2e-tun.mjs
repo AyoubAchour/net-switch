@@ -43,7 +43,11 @@ const report = [];
 function log(message) { console.log(message); report.push(message); }
 async function network(action, adapter, timeoutMs = 45_000) {
   const started = Date.now();
-  const child = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+  // pwsh, not Windows PowerShell 5.1: on the ARM64 runner each powershell.exe
+  // start takes 22-28 s, and the 20 cleanup cycles alone then overran the
+  // job's 15-minute limit (run 39712318797). pwsh starts in under a second;
+  // the script's NetAdapter/NetTCPIP/NetSecurity/DnsClient cmdlets work in it.
+  const child = spawn('pwsh.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
     path.resolve('scripts/tun-test-network.ps1'), '-Action', action], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...process.env, NETSWITCH_TEST_ADAPTER: String(adapter?.index ?? ''), NETSWITCH_TEST_STATIC_DNS: adapter?.staticDns ?? '' },

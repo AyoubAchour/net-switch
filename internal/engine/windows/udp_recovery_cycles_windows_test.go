@@ -25,15 +25,20 @@ import (
 // dynamic ports when it happened, and a separate retry 200 ms later.
 
 type udpRecoveryRefusal struct {
-	Phase      string `json:"phase"` // reopen or restore
-	Half       string `json:"half"`  // app connect or engine bind
-	Code       string `json:"code"`
-	Errno      uint32 `json:"errno,omitempty"`
-	Error      string `json:"error"`
-	Free       int    `json:"freeAtRefusal"`
-	RetryOK    bool   `json:"retryAfter200msOK"`
-	RetryCode  string `json:"retryCode,omitempty"`
-	RetryErrno uint32 `json:"retryErrno,omitempty"`
+	Phase   string `json:"phase"` // reopen or restore
+	Half    string `json:"half"`  // app connect or engine bind
+	Code    string `json:"code"`
+	Errno   uint32 `json:"errno,omitempty"`
+	Error   string `json:"error"`
+	Free    int    `json:"freeAtRefusal"`
+	RetryOK bool   `json:"retryAfter200msOK"`
+	// Up to four fresh automatic attempts right after the refusal.
+	ImmediateAttempts int      `json:"immediateAttempts"`
+	ImmediateOK       bool     `json:"immediateOK"`
+	ImmediateMicros   int64    `json:"immediateMicros"`
+	ImmediateCodes    []string `json:"immediateErrors,omitempty"`
+	RetryCode         string   `json:"retryCode,omitempty"`
+	RetryErrno        uint32   `json:"retryErrno,omitempty"`
 }
 
 type udpRecoveryCycle struct {
@@ -204,12 +209,28 @@ func nativeUDPRecoveryCyclesWith(t *testing.T, cycles int, halves udpEngineHalve
 			}
 			refusal := udpRecoveryRefusal{Phase: phase, Half: half, Error: err.Error(), Free: freeDynamicUDP4(t, space)}
 			refusal.Code, refusal.Errno = udpFailureCode(err)
-			time.Sleep(200 * time.Millisecond)
-			if keep, err := attempt(half); err == nil {
-				keep()
-				refusal.RetryOK = true
-			} else {
-				refusal.RetryCode, refusal.RetryErrno = udpFailureCode(err)
+			// Measured, never counted as the first attempt: up to four fresh
+			// automatic attempts straight away (each a new socket, port 0),
+			// then the later 200 ms attempt only if all of them failed.
+			started := time.Now()
+			for n := 1; n <= 4 && !refusal.RetryOK; n++ {
+				refusal.ImmediateAttempts = n
+				if keep, err := attempt(half); err == nil {
+					keep()
+					refusal.RetryOK, refusal.ImmediateOK = true, true
+				} else {
+					refusal.ImmediateCodes = append(refusal.ImmediateCodes, err.Error())
+				}
+			}
+			refusal.ImmediateMicros = time.Since(started).Microseconds()
+			if !refusal.RetryOK {
+				time.Sleep(200 * time.Millisecond)
+				if keep, err := attempt(half); err == nil {
+					keep()
+					refusal.RetryOK = true
+				} else {
+					refusal.RetryCode, refusal.RetryErrno = udpFailureCode(err)
+				}
 			}
 			cycle.Refusals = append(cycle.Refusals, refusal)
 			if phase == "reopen" {

@@ -1,7 +1,24 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { heldSweepLatency, heldUDPSweepGate, ledgerDigest, udpRecoveryVerdict } from '../tests/windows/udp-capacity.mjs';
+import { heldSweepLatency, heldUDPSweepGate, ledgerDigest, udpRecoveryGate, udpRecoveryVerdict } from '../tests/windows/udp-capacity.mjs';
+
+test('UDP recovery gate counts a port-0 refusal as OS behaviour only with matching native evidence', () => {
+  const cycles = (refused) => [{ reopenAttempts: 2560, reopenRefused: refused }];
+  const control = (first, automatic = first) => ({ attempts: 2560, firstRefusals: first, automaticRefusals: automatic });
+  const app = [{ Error: 'ENOBUFS', NativeCall: 'connect' }];
+  const gate = (change) => udpRecoveryGate({ failures: app, engineCycles: cycles(3), control: control(9), ...change });
+  assert.equal(gate().newVerdict, 'reported: Windows automatic port search, also refused in the native control');
+  assert.equal(gate().oldVerdict, 'fail');
+  assert.equal(gate({ control: control(0) }).newVerdict, 'fail', 'the native control never refused');
+  assert.equal(gate({ engineCycles: cycles(12) }).newVerdict, 'fail', 'engine rate above native');
+  assert.equal(gate({ failures: [{ Error: 'ETIMEDOUT', NativeCall: 'read' }] }).newVerdict, 'fail', 'not a refusal of the port search');
+  assert.equal(gate({ failures: [{ Error: 'ECONNRESET', NativeCall: 'wsarecv' }] }).newVerdict, 'fail', 'reset without an engine bind refusal');
+  assert.equal(gate({ failures: [{ Error: 'ECONNRESET', NativeCall: 'wsarecv' }], exhaustions: 1 }).newVerdict,
+    'reported: Windows automatic port search, also refused in the native control');
+  assert.equal(gate({ contention: true, control: control(0) }).newVerdict, 'reported: another process took the ports');
+  assert.equal(udpRecoveryGate({ failures: [], control: control(0) }).newVerdict, 'pass');
+});
 
 test('UDP recovery reports a port another process took, and fails everything else', () => {
   // ARM64 job 119178917661: 1 of 512 reopens failed with ENOBUFS while PID

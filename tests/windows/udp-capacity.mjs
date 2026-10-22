@@ -17,35 +17,18 @@ export async function nativeUDPCapacity(binding) {
   assert(line, result.stdout);
   const native = JSON.parse(line.slice(line.indexOf(marker) + marker.length));
   assert(native.held > 0 && native.uniquePorts === native.held && Object.keys(native.failures).length);
-  // The Go pair variant also runs the native control for UDP recovery: the
-  // engine run's release/reopen cycle with the engine out of the path.
+  // Matched pair baselines only. Their in-process recovery cycles were
+  // skewed by run order (SYSTEM-DESIGN 5.9 resolution); the recovery
+  // control below runs in its own process instead.
   const paired = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
     ['-test.v', '-test.run=^TestNativeUDPPairedCapacity$', '-test.timeout=10m'],
     { env: { NETSWITCH_PORT_GATE: '1', NETSWITCH_UDP_BASELINE_SOURCE: binding.address,
-      NETSWITCH_UDP_BASELINE_INDEX: String(binding.index), NETSWITCH_UDP_RECOVERY_CYCLES: String(udpRecoveryCycles) },
+      NETSWITCH_UDP_BASELINE_INDEX: String(binding.index), NETSWITCH_UDP_RECOVERY_CYCLES: '0' },
     timeout: 600_000 });
-  const cyclesMarker = 'WINDOWS NATIVE UDP RECOVERY CYCLES ';
-  // Two native controls: plain sockets, and engine halves through the
-  // engine's readiness path (native duplicate and event registration).
-  const nativeRecovery = paired.stdout.split(/\r?\n/).filter((value) => value.includes(cyclesMarker))
-    .map((value) => JSON.parse(value.slice(value.indexOf(cyclesMarker) + cyclesMarker.length)));
-  // Five with cycles: plain Go, plain Go under TCP load, the engine's native
-  // socket registered for readiness, the same socket not registered, and not
-  // registered but on a completion port like Go's.
-  assert(udpRecoveryCycles === 0 || (nativeRecovery.length === 5 && nativeRecovery.every((item) => item.cycles?.length === udpRecoveryCycles)),
-    `Native UDP recovery controls did not run: ${paired.stdout.slice(-2000)}`);
-  for (const item of nativeRecovery) {
-    const path = item.readyUDP ? `native, ${item.engineSocket}` : item.tcpLoad ? `native, TCP corner held (${item.tcpLoad} TCP clients)` : 'native';
-    console.log(`WINDOWS UDP RECOVERY RATE ${JSON.stringify({ path, cycles: item.cycles.length,
-      attempts: item.reopenAttempts, refused: item.reopenRefused,
-      restoreRefused: item.cycles.reduce((n, cycle) => n + cycle.restoreRefused, 0),
-      refusals: item.cycles.flatMap((cycle) => cycle.refusals ?? []) })}`);
-  }
   const pairMarker = 'WINDOWS NATIVE UDP PAIRED CAPACITY ';
   const pairs = paired.stdout.split(/\r?\n/).filter((value) => value.includes(pairMarker))
     .map((value) => JSON.parse(value.slice(value.indexOf(pairMarker) + pairMarker.length)));
-  // Go and ReadyUDP always; the two unregistered Constructor variants with cycles.
-  assert.equal(pairs.length, udpRecoveryCycles > 0 ? 4 : 2, 'The Go and ReadyUDP matched baselines must run');
+  assert.equal(pairs.length, 2, 'The Go and ReadyUDP matched baselines must run');
   for (const sample of pairs) {
     assert.equal(sample.source, binding.address);
     assert.equal(sample.interfaceIndex, binding.index);
@@ -67,7 +50,33 @@ export async function nativeUDPCapacity(binding) {
     assert(sample.limitReached && sample.verifiedPayloads === sample.heldPairs * 2);
   }
   console.log(`WINDOWS CONCURRENT UDP BASELINE ${JSON.stringify(concurrentPairs)}`);
-  return { ...native, matchedPairs: pairs, concurrentPairs, nativeRecovery };
+  const recoveryControl = await nativeRecoveryControl(binding);
+  return { ...native, matchedPairs: pairs, concurrentPairs, recoveryControl };
+}
+
+// The native control for the UDP recovery gate (SYSTEM-DESIGN 5.9 resolution):
+// plain Go sockets, in their own process, at the gate's address, filled to
+// the OS limit, then the engine run's release-512 / reopen-256 cycle,
+// udpRecoveryCycles times. First refusals are counted apart from the later
+// attempts, which are only recorded.
+export async function nativeRecoveryControl(binding) {
+  const result = await run(path.resolve('dist/windows-test/windows-platform.test.exe'),
+    ['-test.v', '-test.run=^TestUDPControlVariant$', '-test.timeout=15m'],
+    { env: { NETSWITCH_PORT_GATE: '1', NETSWITCH_UDP_RECOVERY_CYCLES: String(udpRecoveryCycles), NETSWITCH_UDP_CONTROL_VARIANT: 'go',
+      NETSWITCH_UDP_BASELINE_SOURCE: binding.address, NETSWITCH_UDP_BASELINE_INDEX: String(binding.index) }, timeout: 900_000 });
+  const pick = (marker) => result.stdout.split(/\r?\n/).filter((value) => value.includes(marker))
+    .map((value) => JSON.parse(value.slice(value.indexOf(marker) + marker.length)))[0];
+  const cycles = pick('WINDOWS NATIVE UDP RECOVERY CYCLES ');
+  const variant = pick('WINDOWS UDP CONTROL VARIANT ');
+  assert(cycles?.cycles?.length === udpRecoveryCycles && variant, `Native UDP recovery control did not run: ${result.stdout.slice(-2000)}`);
+  const refusals = cycles.cycles.flatMap((cycle) => (cycle.refusals ?? []).filter((item) => item.phase === 'reopen'));
+  const control = { attempts: cycles.reopenAttempts, firstRefusals: cycles.reopenRefused,
+    automaticRefusals: refusals.filter((item) => item.code === 'ENOBUFS').length,
+    immediate: { refused: refusals.length, recoveredImmediately: refusals.filter((item) => item.immediateOK).length,
+      attempts: refusals.map((item) => item.immediateAttempts), micros: refusals.map((item) => item.immediateMicros) },
+    heldPairs: variant.heldPairs, provider: variant.provider, source: variant.source };
+  console.log(`WINDOWS UDP NATIVE RECOVERY CONTROL ${JSON.stringify(control)}`);
+  return control;
 }
 
 // Release/reopen cycles for the UDP recovery rates (SYSTEM-DESIGN 5.9 open
@@ -101,6 +110,37 @@ export function udpRecoveryVerdict({ failures, portSpace, othersBefore, othersAf
   const reported = portErrors && poolFull && grownByOthers >= failures.length;
   return { oldVerdict: failures.length ? 'fail' : 'pass', newVerdict: failures.length ? (reported ? 'reported' : 'fail') : 'pass',
     grownByOthers, portErrors, poolFull, available: pool?.available ?? null };
+}
+
+// The UDP recovery gate (SYSTEM-DESIGN 5.9 resolution, 2026-10-22). Windows'
+// automatic port search (port 0) can refuse with WSAENOBUFS while free ports
+// exist, for plain Go sockets too. A first-attempt refusal is reported, not
+// counted, only when all of these hold:
+//   - each failure is that refusal: the app's own connect got ENOBUFS, or
+//     the app got ECONNRESET because the engine's own bind was refused (its
+//     socket-exhaustion count rose by at least as many);
+//   - the native control in the same job, same address and occupancy, also
+//     had at least one such first refusal;
+//   - the engine's first-refusal rate over its cycles in the job is at most
+//     the control's.
+// "Another process took the ports" (contention) stays reported as before.
+// Anything else fails. oldVerdict is the strict check this replaces.
+export function udpRecoveryGate({ failures, contention = false, exhaustions = 0, engineCycles = [], control }) {
+  const engineAttempts = engineCycles.reduce((n, cycle) => n + (cycle.reopenAttempts ?? 0), 0);
+  const engineFirst = engineCycles.reduce((n, cycle) => n + (cycle.reopenRefused ?? 0), 0);
+  const engineRate = engineAttempts ? engineFirst / engineAttempts : 0;
+  const nativeRate = control?.attempts ? control.firstRefusals / control.attempts : 0;
+  const resets = failures.filter((item) => item.Error === 'ECONNRESET').length;
+  const automatic = failures.every((item) => (item.Error === 'ENOBUFS' && item.NativeCall === 'connect') || item.Error === 'ECONNRESET')
+    && exhaustions >= resets;
+  const nativeShowed = (control?.automaticRefusals ?? 0) > 0;
+  const os = failures.length > 0 && automatic && nativeShowed && engineRate <= nativeRate;
+  const newVerdict = failures.length === 0 ? 'pass'
+    : contention ? 'reported: another process took the ports'
+      : os ? 'reported: Windows automatic port search, also refused in the native control' : 'fail';
+  return { oldVerdict: failures.length ? 'fail' : 'pass', newVerdict, automatic, nativeShowed,
+    engineRate, nativeRate, engineAttempts, engineFirstRefusals: engineFirst,
+    nativeAttempts: control?.attempts ?? 0, nativeFirstRefusals: control?.firstRefusals ?? 0 };
 }
 
 // Held-session responsiveness (SYSTEM-DESIGN 5.9, decided 2026-10-21): at the
@@ -570,10 +610,17 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         const gated = { gated: true, freeBeforeReopen: availableBefore, reopenAttempts: reopen, reopenRefused: failures.length,
           refusals: await refusalsOf('reopen', returned.attempts) };
         evidence.recoveryCycles = await evidenceCycles(udpRecoveryCycles - 1, 'engine, TCP corner held', [gated]);
-        console.log(`WINDOWS UDP RECOVERY VERDICT ${JSON.stringify({ reopened: reopen - failures.length, failed: failures.length,
-          oldVerdict: failures.length ? 'fail' : 'pass', newVerdict: failures.length ? evidence.recoveryFailure.newVerdict : 'pass' })}`);
-        // The gate, unchanged: the first cycle's reopens, before any retry.
-        if (failures.length && evidence.recoveryFailure.newVerdict !== 'reported') {
+        // The gate (SYSTEM-DESIGN 5.9 resolution): the first cycle's reopens,
+        // first attempts only. A refusal is OS behaviour, reported and not
+        // counted, only when the native control in this job, at this address
+        // and occupancy, also showed it, and the engine's first-refusal rate
+        // across its cycles in this job is at most the control's.
+        const exhaustions = failures.length ? (evidence.recoveryFailure?.socketExhaustions ?? 0) - (before.udpSocketExhaustions ?? 0) : 0;
+        const gate = udpRecoveryGate({ failures, contention: evidence.recoveryFailure?.newVerdict === 'reported', exhaustions,
+          engineCycles: [...(evidence.matchedCycles ?? []), ...evidence.recoveryCycles], control: native.recoveryControl });
+        evidence.recoveryGate = gate;
+        console.log(`WINDOWS UDP RECOVERY VERDICT ${JSON.stringify({ reopened: reopen - failures.length, failed: failures.length, ...gate })}`);
+        if (gate.newVerdict === 'fail') {
           assert.equal(failures.length, 0, `UDP capacity did not recover on first attempts: ${JSON.stringify(failures)}`);
         }
         evidence.recovery = { released, reconciled, returned, reopen, availableBefore, ms: performance.now() - started, verified: await verify('after-recovery') };
