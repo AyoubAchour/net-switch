@@ -220,22 +220,30 @@ export function reopenTimings(first, retried = []) {
 // connections and the peer's live ones, the UDP cohort the held sessions, and
 // the gauges the cohorts plus the enumerated background flows. A counter that
 // leaks without a record fails countersMatchRecords; a record that outlives
-// its connection fails the cohort checks.
-export function flowReconciliation({ records, counted, tcpCohort, udpCohort, clientsTCP, peerTCP, clientsUDP }) {
+// its connection fails the cohort checks. A handshake still in progress that
+// is ours (ourHandshake: resolved to a test app, or unresolved to the test
+// peer) fails noOwnHandshakes, wherever it is counted; Windows' own are
+// reported with owner, resolution and age (acceptance ARM64 job 119697112090).
+export function flowReconciliation({ records, counted, tcpCohort, udpCohort, ourHandshake, clientsTCP, peerTCP, clientsUDP, now = Date.now() }) {
   const tcp = records.filter((flow) => flow.protocol === 'tcp' && tcpCohort(flow));
   const udp = records.filter((flow) => flow.protocol === 'udp' && udpCohort(flow));
   const background = records.filter((flow) => !tcp.includes(flow) && !udp.includes(flow));
   const listedUDP = records.filter((flow) => flow.protocol === 'udp').length;
   const listedHandshakes = records.filter((flow) => flow.handshake).length;
+  const handshake = (flow) => ({ id: flow.id, app: flow.app?.path ?? '', resolved: !flow.unresolved, source: flow.source,
+    destination: flow.destination, line: flow.line ?? '', ageMS: flow.start ? now - Date.parse(flow.start) : null });
+  const ourHandshakes = records.filter((flow) => flow.handshake && ourHandshake(flow)).map(handshake);
+  const foreignHandshakes = records.filter((flow) => flow.handshake && !ourHandshake(flow)).map(handshake);
   const checks = {
     countersMatchRecords: counted?.flows === records.length && counted?.udp === listedUDP && counted?.handshakes === listedHandshakes,
     gaugesEqualCohortsAndBackground: counted?.flows === tcp.length + udp.length + background.length,
     tcpEqualsClients: tcp.length === clientsTCP,
     tcpEqualsPeer: tcp.length === peerTCP,
     udpEqualsClients: udp.length === clientsUDP,
+    noOwnHandshakes: ourHandshakes.length === 0,
   };
   return { pass: Object.values(checks).every(Boolean), checks, counted: counted ?? null, listed: records.length,
-    tcp: tcp.length, udp: udp.length, clientsTCP, peerTCP, clientsUDP,
+    tcp: tcp.length, udp: udp.length, clientsTCP, peerTCP, clientsUDP, ourHandshakes, foreignHandshakes,
     background: background.map((flow) => ({ id: flow.id, protocol: flow.protocol, app: flow.app?.path ?? '', destination: flow.destination,
       unresolved: Boolean(flow.unresolved), handshake: Boolean(flow.handshake), closing: Boolean(flow.closing) })) };
 }

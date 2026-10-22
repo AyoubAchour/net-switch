@@ -80,9 +80,11 @@ test('flow reconciliation fails a counter-only leak and a stale-record leak', ()
   // As in capacity.mjs.
   const tcpCohort = (flow) => /[\\/]capacity-app-\d+\.exe$/i.test(flow.app?.path ?? '') && peer.ports.some((port) => flow.destination === `${peer.host}:${port}`);
   const udpCohort = (flow) => flow.protocol === 'udp' && flow.destination === '198.19.128.2:26000';
+  // As in capacity.mjs: a test app's handshake, or an unresolved one to the peer.
+  const ourHandshake = (flow) => (flow.unresolved ? flow.destination.startsWith(`${peer.host}:`) : /[\\/]case[\\/]/.test(flow.app?.path ?? ''));
   const records = [...Array.from({ length: 100 }, (_, i) => tcp(i)), ...Array.from({ length: 50 }, (_, i) => udp(100 + i)), ...background];
   const counted = { flows: records.length, udp: 51, handshakes: 1 };
-  const reconcile = (change) => flowReconciliation({ records, counted, tcpCohort, udpCohort, clientsTCP: 100, peerTCP: 100, clientsUDP: 50, ...change });
+  const reconcile = (change) => flowReconciliation({ records, counted, tcpCohort, udpCohort, ourHandshake, clientsTCP: 100, peerTCP: 100, clientsUDP: 50, ...change });
   const exact = reconcile();
   assert.equal(exact.pass, true, JSON.stringify(exact.checks));
   assert.equal(exact.background.length, 2, 'background flows are enumerated');
@@ -105,6 +107,33 @@ test('flow reconciliation fails a counter-only leak and a stale-record leak', ()
   assert.equal(reconcile({ counted: { ...counted, udp: 52 } }).pass, false, 'a leaked UDP charge');
   assert.equal(reconcile({ counted: { ...counted, handshakes: 0 } }).pass, false, 'a handshake counted without its record');
   assert.equal(reconcile({ counted: undefined }).pass, false, 'no counts from the engine');
+  assert.equal(exact.foreignHandshakes.length, 1, 'Windows\' own unresolved handshake elsewhere is reported, not counted');
+  assert.equal(exact.ourHandshakes.length, 0);
+});
+
+test('flow reconciliation fails a leftover unresolved handshake to the test peer even when every count matches', () => {
+  // Review of 822789db: after recovery, clients, peer and the TCP cohort all
+  // agree, but one earlier attempt left an unresolved handshake to the peer.
+  // It has no app, so it sits in the background, and its charge matches its
+  // record; only the handshake check sees it.
+  const peer = '198.19.128.2';
+  const tcp = (id) => ({ id, protocol: 'tcp', app: { path: 'C:\\case\\capacity-app-0.exe' }, destination: `${peer}:25000` });
+  const leftover = { id: 999, protocol: 'tcp', handshake: true, unresolved: true, source: '198.18.0.1:61000', destination: `${peer}:25003`,
+    start: new Date(1_000_000).toISOString() };
+  const records = [...Array.from({ length: 10 }, (_, i) => tcp(i)), leftover];
+  const reconcile = (records) => flowReconciliation({ records, counted: { flows: records.length, udp: 0, handshakes: records.filter((f) => f.handshake).length },
+    tcpCohort: (flow) => Boolean(flow.app) && flow.destination.startsWith(`${peer}:`), udpCohort: () => false,
+    ourHandshake: (flow) => (flow.unresolved ? flow.destination.startsWith(`${peer}:`) : true),
+    clientsTCP: 10, peerTCP: 10, clientsUDP: 0, now: 1_250_000 });
+  const result = reconcile(records);
+  const { noOwnHandshakes, ...counts } = result.checks;
+  assert(Object.values(counts).every(Boolean), `every count matches: ${JSON.stringify(counts)}`);
+  assert.equal(noOwnHandshakes, false);
+  assert.equal(result.pass, false, 'the leftover handshake fails the reconciliation');
+  assert.deepEqual(result.ourHandshakes, [{ id: 999, app: '', resolved: false, source: '198.18.0.1:61000', destination: `${peer}:25003`, line: '', ageMS: 250_000 }]);
+  assert.equal(reconcile(records.slice(0, 10)).pass, true, 'without it the same state passes');
+  const foreign = { ...leftover, destination: '172.183.7.194:443' };
+  assert.equal(reconcile([...records.slice(0, 10), foreign]).pass, true, 'an unresolved handshake elsewhere is Windows\' own: reported only');
 });
 
 test('the previous UDP control gate counts a port-0 refusal as OS behaviour only with matching native evidence', () => {

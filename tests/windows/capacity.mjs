@@ -233,19 +233,11 @@ export async function capacity({ server, harness, directory, line }) {
       const clientsTCP = states.reduce((n, s) => n + s.live + (s.survival?.live ? 1 : 0), 0);
       const peerTCP = (await harness.control('capacity')).live;
       const { records, counted } = await listAllFlows();
-      const result = { label, ...flowReconciliation({ records, counted, tcpCohort, udpCohort: udpHold.cohort,
+      // Handshakes in progress, from the same listing: ours (a test app's, or
+      // an unresolved one to our peer) fail it; Windows' own are reported.
+      const ourHandshake = (flow) => (flow.unresolved ? flow.destination.startsWith(`${target.host}:`) : ours(flow));
+      return { label, ...flowReconciliation({ records, counted, tcpCohort, udpCohort: udpHold.cohort, ourHandshake,
         clientsTCP, peerTCP, clientsUDP: udpHold.held }) };
-      // Handshakes in progress, from the same listing: ours must be none.
-      // Windows' own connections can sit in the handshake state for minutes
-      // (acceptance ARM64 job 119697112090), so they are reported with their
-      // owner, resolution and age, not counted. An unresolved handshake to our
-      // peer is counted as ours.
-      const now = Date.now();
-      const handshakes = records.filter((flow) => flow.handshake).map((flow) => ({ id: flow.id, app: flow.app?.path ?? '',
-        resolved: !flow.unresolved, source: flow.source, destination: flow.destination, line: flow.line ?? '', ageMS: now - Date.parse(flow.start) }));
-      result.ourHandshakes = handshakes.filter((flow) => (flow.resolved ? ours({ app: { path: flow.app } }) : flow.destination.startsWith(`${target.host}:`)));
-      result.foreignHandshakes = handshakes.filter((flow) => !result.ourHandshakes.includes(flow));
-      return result;
     };
     const before = await until(async () => {
       const flows = await listFlows();
@@ -449,12 +441,17 @@ export async function capacity({ server, harness, directory, line }) {
     assert.equal(verifiedAfter.reduce((total, s) => total + s.live, 1), held - 512 + 256);
     // After release and recovery the engine and the peer converge on the
     // clients' counts; a record or charge left behind never does.
+    // Recovery is held to everything the plateau is: exact counts and no
+    // handshake of ours left in progress (review of 822789db: an unresolved
+    // one to our peer sits in the background, where the counts still agree).
     let afterRecovery;
-    await until(async () => (afterRecovery = await reconcile('after-recovery')).pass, 'exact flow accounting after recovery', 15_000)
+    const reconciledAfter = (result) => result.pass && result.ourHandshakes.length === 0;
+    await until(async () => reconciledAfter(afterRecovery = await reconcile('after-recovery')), 'exact flow accounting after recovery', 15_000)
       .catch(() => {});
     progress.reconciliation.push(afterRecovery);
     console.log(`WINDOWS CAPACITY RECONCILIATION ${JSON.stringify(afterRecovery)}`);
-    assert(afterRecovery.pass, `Engine flow accounting does not match after recovery: ${JSON.stringify({ ...afterRecovery, background: undefined })}`);
+    assert.equal(afterRecovery.ourHandshakes.length, 0, `A test app's handshake is in progress after recovery: ${JSON.stringify(afterRecovery.ourHandshakes)}`);
+    assert(reconciledAfter(afterRecovery), `Engine flow accounting does not match after recovery: ${JSON.stringify({ ...afterRecovery, background: undefined })}`);
     assert.equal(afterRecovery.tcp, held - 512 + 256, 'The engine TCP cohort differs from the held count after recovery');
     const retriesWholeCase = await engineStats();
     progress.portRetries = { tcpDialRetries: retriesWholeCase.tcpDialRetries, udpBindRetries: retriesWholeCase.udpBindRetries,
