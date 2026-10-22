@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine"
 	"golang.org/x/sys/windows"
 )
 
@@ -27,7 +28,7 @@ func (o *Owners) noteFailure(kind, stage string, source netip.AddrPort, generati
 		return
 	}
 	value := lookupFailure{At: time.Now(), Kind: kind, Stage: stage, Source: source,
-		Error: err.Error(), Deadline: errors.Is(err, context.DeadlineExceeded), Generation: generation}
+		Error: engine.Clip(err.Error(), 512), Deadline: errors.Is(err, context.DeadlineExceeded), Generation: engine.Clip(generation, 256)}
 	var code windows.Errno
 	if errors.As(err, &code) {
 		value.Code = uint32(code)

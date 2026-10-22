@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 )
 
@@ -38,7 +39,7 @@ func noteUDPSendFailure(path string, destination netip.AddrPort, err error) {
 	if err == nil || errors.Is(err, platform.ErrWouldBlock) || errors.Is(err, platform.ErrDatagramDropped) || errors.As(err, &tooBig) {
 		return
 	}
-	record := udpSendFailure{At: time.Now(), Path: path, Destination: destination.String(), Error: err.Error()}
+	record := udpSendFailure{At: time.Now(), Path: path, Destination: destination.String(), Error: engine.Clip(err.Error(), 512)}
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
 		record.Errno = uint32(errno)
@@ -49,7 +50,12 @@ func noteUDPSendFailure(path string, destination netip.AddrPort, err error) {
 	if udpSendFailures.byErr == nil {
 		udpSendFailures.byErr = make(map[string]uint64)
 	}
-	udpSendFailures.byErr[record.Error]++
+	// One key per distinct error, at most 32 (stats keep a fixed bound).
+	key := record.Error
+	if _, ok := udpSendFailures.byErr[key]; !ok && len(udpSendFailures.byErr) >= 31 {
+		key = "other"
+	}
+	udpSendFailures.byErr[key]++
 	udpSendFailures.recent[udpSendFailures.next%len(udpSendFailures.recent)] = record
 	udpSendFailures.next++
 }

@@ -45,7 +45,7 @@ func (r *Runtime) Stats() any {
 	if winhandle.Enabled {
 		stats["handleOwnership"] = winhandle.Stats()
 	}
-	stats["bindings"] = r.routes.Bindings()
+	stats["bindings"], stats["bindingsTruncated"] = statsBindings(r.routes.Bindings())
 	stats["wintun"] = r.routes.TunStats()
 	stats["lifecyclePhases"] = r.routes.timings.snapshot()
 	if trace := r.routes.trace.snapshot(); trace != nil {
@@ -61,6 +61,24 @@ func (r *Runtime) Stats() any {
 		stats["processMemoryError"] = err.Error()
 	}
 	return stats
+}
+
+// statsBindings gives each line's binding a fixed bound in stats, so the
+// policy's 255 lines stay bounded however many addresses Windows lists: the
+// alias at 256 bytes and each address list at its first 8. Lines cut are
+// named.
+func statsBindings(b map[string]Adapter) (map[string]Adapter, []string) {
+	var truncated []string
+	for id, a := range b {
+		if len(a.Alias) > 256 || len(a.Addresses) > 8 || len(a.Valid) > 8 {
+			truncated = append(truncated, id)
+		}
+		a.Alias = engine.Clip(a.Alias, 256)
+		a.Addresses = a.Addresses[:min(len(a.Addresses), 8)]
+		a.Valid = a.Valid[:min(len(a.Valid), 8)]
+		b[id] = a
+	}
+	return b, truncated
 }
 
 func (r *Runtime) Start(ctx context.Context, revision policy.Revision) (policy.Applied, error) {

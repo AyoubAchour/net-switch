@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -268,7 +269,7 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		if runtime, ok := s.runtime.(interface{ Stats() any }); ok {
 			data = runtime.Stats()
 		}
-		return map[string]any{"engine": data, "eventsDropped": s.EventsDropped.Load()}, nil
+		return map[string]any{"engine": boundStats(data), "eventsDropped": s.EventsDropped.Load()}, nil
 	case "predict":
 		return s.table.Predict(r.App)
 	case "closeFlows":
@@ -426,6 +427,56 @@ func (s *Server) RunLease(ctx context.Context) {
 		}
 	}
 }
+// StatsBudget is what the engine's stats may take of one reply, leaving room
+// under MessageLimit for the envelope.
+const StatsBudget = MessageLimit - 16<<10
+
+// boundStats keeps the stats reply deliverable whatever the diagnostics hold.
+// Every production entry has its own fixed bound; hosted CI's trace sections
+// (whole-system socket tables) grow with the machine. When the encoded stats
+// exceed StatsBudget, the largest top-level sections are left out, largest
+// first, and named with their sizes under "omittedForSize", so a reader sees
+// exactly what is missing instead of losing the whole reply. Under budget the
+// stats are encoded once, here, not again by the transport.
+func boundStats(data any) any {
+	stats, ok := data.(map[string]any)
+	if !ok {
+		return data
+	}
+	b, err := json.Marshal(stats)
+	if err != nil {
+		return data
+	}
+	if len(b) <= StatsBudget {
+		return json.RawMessage(b)
+	}
+	sizes := make(map[string]int, len(stats))
+	keys := make([]string, 0, len(stats))
+	for key, value := range stats {
+		encoded, _ := json.Marshal(value)
+		sizes[key] = len(key) + len(encoded) + 4 // quotes, colon, comma
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool { return sizes[keys[i]] > sizes[keys[j]] })
+	kept := make(map[string]any, len(stats))
+	for key, value := range stats {
+		kept[key] = value
+	}
+	omitted := map[string]int{}
+	total := len(b)
+	for _, key := range keys {
+		// Room for the omission record itself.
+		if total+len(omitted)*80+64 <= StatsBudget {
+			break
+		}
+		delete(kept, key)
+		omitted[key] = sizes[key]
+		total -= sizes[key]
+	}
+	kept["omittedForSize"] = omitted
+	return kept
+}
+
 func (s *Server) Emit(event Event) {
 	if len(event.Message) > 4096 {
 		event.Message = event.Message[:4096]

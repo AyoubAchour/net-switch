@@ -19,6 +19,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
@@ -88,7 +89,7 @@ func (d *Dialer) finishDial(s *slowDial, started time.Time, c net.Conn, err erro
 		s.Local = c.LocalAddr().String()
 	}
 	if err != nil {
-		s.Error = err.Error()
+		s.Error = engine.Clip(err.Error(), 512)
 	}
 	if len(d.slowRecent) == 32 {
 		d.slowRecent = append(d.slowRecent[:0], d.slowRecent[1:]...)

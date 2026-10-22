@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine"
 	winplatform "github.com/AyoubAchour/net-switch/internal/platform/windows"
 	"github.com/AyoubAchour/net-switch/internal/platform/worker"
 	"golang.org/x/sys/windows"
@@ -78,7 +79,7 @@ func (p *portDiagnostics) load() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err != nil {
-		p.state, p.err = "error", err.Error()
+		p.state, p.err = "error", portConfigurationError(err)
 		if p.ctx.Err() != nil {
 			p.state = "cancelled"
 			return
@@ -90,6 +91,10 @@ func (p *portDiagnostics) load() {
 	encoded, _ := json.Marshal(config)
 	log.Printf("Windows TCP port configuration: %s", encoded)
 }
+
+// portConfigurationError is the worker's failure as stats keep it: the error
+// carries the worker's whole output (up to 4 MiB), so 4 KiB of it.
+func portConfigurationError(err error) string { return engine.Clip(err.Error(), 4096) }
 
 func (p *portDiagnostics) stats() map[string]any {
 	p.mu.Lock()
