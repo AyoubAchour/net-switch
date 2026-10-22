@@ -18,6 +18,10 @@ on:
         description: Comma-separated UDP matrix variants (empty runs the full list)
         type: string
         default: ''
+      ownershipOnly:
+        description: Run only the held hostile ownership-folder regressions
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,8 +31,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ownership:
+    if: ${{ inputs.ownershipOnly }}
+    name: Windows ownership / ${{ inputs.arch }}
+    runs-on: ${{ inputs.arch == 'x64' && 'windows-latest' || 'windows-11-arm' }}
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2 -tags=netswitch_handlecheck
+      NETSWITCH_EXPECT_HANDLECHECK: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Held hostile ownership folder through startup, crash and recovery
+        env:
+          NETSWITCH_OWNERSHIP_DIRECTORY_CI: '1'
+        run: |
+          go test -count=1 -v -timeout=3m -run '^TestOwnership(LockHostileDirectoryStartupAndRecovery|PreparationWait)$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Repeat held-folder startup and recovery under the race detector
+        if: ${{ inputs.arch == 'x64' }}
+        env:
+          NETSWITCH_OWNERSHIP_DIRECTORY_CI: '1'
+        run: |
+          go test -race -count=1 -v -timeout=3m -run '^TestOwnership(LockHostileDirectoryStartupAndRecovery|PreparationWait)$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Existing ownership and machine-store publication controls
+        if: ${{ !cancelled() }}
+        run: |
+          go test -count=1 -v -run '^TestOwnershipLockIgnoresGlobalSquatter$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -count=1 -v -run '^TestStorePublicationInterruptionWithHeldHostileOccupant$' ./internal/platform/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   harness-health:
-    if: ${{ endsWith(github.ref, '-health') }}
+    if: ${{ endsWith(github.ref, '-health') && !inputs.ownershipOnly }}
     name: Acceptance controller health ordering
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -43,7 +88,7 @@ jobs:
       - name: Exercise the actual driver functions with controlled I/O ordering
         run: node --test test/windows-driver-health.test.mjs
   engine:
-    if: ${{ !endsWith(github.ref, '-health') }}
+    if: ${{ !endsWith(github.ref, '-health') && !inputs.ownershipOnly }}
     name: Windows engine / ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'x64' || 'ARM64' }}
     runs-on: ${{ (inputs.arch == 'x64' || endsWith(github.ref, '-x64')) && 'windows-latest' || 'windows-11-arm' }}
     timeout-minutes: ${{ inputs.udpMatrix && 120 || 40 }}
