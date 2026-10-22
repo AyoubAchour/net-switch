@@ -49,6 +49,18 @@ In run 39843807971, Linux ARM attached at 20:01:55 UTC; systemd deactivated the 
 
 Windows was already ready: focused hosted diagnostic run 39847601708 recorded `ready-callback-end` at 20:29:21.682 UTC. Its epoch stayed zero because hello never completed. The shared M2 IPC dialer writes an impersonation primer byte before JSON; the native transport authenticates the SYSTEM process directly and does not consume that byte. The native decoder rejected it, then the RPC reader discarded the uncorrelated error and waited for the six-minute test deadline. A pure regression reproduced that misleading timeout before the fix. Native dialing now omits the M2 primer while retaining the SCM process check, and RPC surfaces a protocol rejection immediately. Attach has a specific ten-second diagnostic deadline, with service startup/outcome evidence on failure. Teardown explicitly stops the native service before uninstalling it.
 
+## ARM stall result and further measurement
+
+At head `886b220a`, run 39856819110, Windows ARM job 120097049942 passed the product build and both real cleanup paths. The fault build read all 131,072 accounting entries in 83 pages in 755.9 ms. Both exit-3 cases passed: `Cleanup:failed` with `hosted recovery failure before OS cleanup` belongs to the intentionally failing recovery case, not an unexpected cleanup failure.
+
+The read-pump stall failed after 21.58 s with Winsock error 10060 (`WSAETIMEDOUT`). Whole-process suspension failed after 23.60 s, including the two-second IPC timeout before sending data. Those are native socket failures, not Go's `os.ErrDeadlineExceeded` polling errors. The old observation returned immediately and therefore proved neither survival through the full windows nor the post-fault fate of those streams. It did not complete the 35-second whole-service observation. The approximately equal times after sending data point to retransmission exhaustion, but the old log has no client retransmission counts or actual socket settings to prove that cause.
+
+The additional diagnostic keeps flow loss a test failure and continues collecting evidence through 22/35 seconds and release/cleanup. A separate 35-second quiet-stream control exercises the same one-second read deadlines with forwarding live. Windows reads the real client's keepalive, send/receive timeout and retransmission settings without changing them; `SIO_TCP_INFO` samples established state, unacknowledged bytes, retransmitted bytes and timeout episodes. Query cost is measured before injecting the fault, and sampling is every five seconds plus fault transitions, not per packet. Linux's Unix relay is explicitly labelled as such, not represented as the namespace TCP socket.
+
+`M4_FLOW` records the first non-deadline error with elapsed time and errno, the same stream after release, and an independent fresh-stream probe. A successful fresh connection cannot turn an old-stream failure green. No TCP settings, stall duration, lease limit or failure threshold is increased. The detector and process model remain unchanged while these observations are gathered.
+
+Native socket references: [TCP_INFO_v0](https://learn.microsoft.com/en-us/windows/win32/api/mstcpip/ns-mstcpip-tcp_info_v0), [SIO_TCP_INFO](https://learn.microsoft.com/en-us/windows/win32/winsock/sio-tcp-info), [TCP socket options](https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-tcp-socket-options).
+
 All runtime proofs are hosted-only. Local validation is limited to builds and pure unit tests at Idle priority, with the pinned Go toolchain, two cores and `-p 2`.
 
 ## Sequential follow-up
