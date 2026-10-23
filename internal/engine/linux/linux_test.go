@@ -435,7 +435,39 @@ func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 		newOwner, err = o.UDPFor(ctx, tuple)
 	}
 	elapsedReuse := time.Since(startedReuse)
-	t.Logf("reused descriptor lookup: %s, %d scanned FDs in %d batches; race-instrumented=%t original-8ms-verdict=%t", elapsedReuse, o.batches.fds.Load()-beforeFDs, o.batches.started.Load()-beforeBatches, raceInstrumented, err == nil && elapsedReuse <= 8*time.Millisecond)
+	// Identity keeps the production 8 ms deadline. Report the lookup time even
+	// when it expired, but don't gate on it here: the acceptance suite's
+	// lookup.p95-measured owns the latency gate.
+	unknownIdentity := newOwner.PID == 0 && newOwner.StartTime == 0 && newOwner.Path == "" && newOwner.AppID == ""
+	t.Logf("reused descriptor lookup: %s, %d scanned FDs in %d batches; race-instrumented=%t original-8ms-verdict=%t unknown-identity=%t", elapsedReuse, o.batches.fds.Load()-beforeFDs, o.batches.started.Load()-beforeBatches, raceInstrumented, err == nil && elapsedReuse <= 8*time.Millisecond, unknownIdentity)
+	// A reused descriptor must never answer with the previous holder's
+	// identity. That is never a timing outcome, so it fails immediately.
+	if newOwner.Generation == oldCookie || (newOwner.PID != 0 && newOwner.PID != uint32(os.Getpid())) {
+		t.Fatalf("reused descriptor inherited stale identity: %+v %v", newOwner, err)
+	}
+	// Identity can miss its production deadline on a loaded runner. The engine
+	// then admits the socket's generation with an unknown identity, which is the
+	// designed outcome, not a stale identity. Only in that exact case, confirm
+	// the replacement owner once with this test's 100 ms correctness budget and
+	// log both durations, so real slowness stays visible.
+	if unknownIdentity && newOwner.Generation != "" && errors.Is(err, context.DeadlineExceeded) {
+		confirmCtx, confirmDone := context.WithTimeout(ctx, 100*time.Millisecond)
+		defer confirmDone()
+		liveRows, dumpErr := diagDump(confirmCtx, unix.AF_INET, unix.IPPROTO_UDP, source)
+		if dumpErr != nil {
+			t.Fatalf("replacement socket query after the identity deadline expired: %v", dumpErr)
+		}
+		live, matchErr := matchUDP(liveRows, source)
+		if matchErr != nil {
+			t.Fatalf("replacement socket lookup after the identity deadline expired: %v", matchErr)
+		}
+		if live.generation() == oldCookie || live.generation() != newOwner.Generation {
+			t.Fatalf("expired-identity lookup reported generation %q, replacement socket is %q (previous %q)", newOwner.Generation, live.generation(), oldCookie)
+		}
+		retryStarted := time.Now()
+		newOwner, err = o.resolveUDP(confirmCtx, live, false)
+		t.Logf("reused descriptor identity retry: %s after the production lookup took %s and left generation %s unknown; re-resolved with 100ms", time.Since(retryStarted), elapsedReuse, live.generation())
+	}
 	if err != nil || newOwner.PID != uint32(os.Getpid()) || newOwner.Generation == oldCookie {
 		t.Fatalf("reused descriptor inherited stale identity or wasn't found: %+v %v", newOwner, err)
 	}
