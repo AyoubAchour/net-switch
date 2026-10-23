@@ -1,7 +1,9 @@
 package stack_test
 
 import (
+	"context"
 	"fmt"
+	"net/netip"
 	"strings"
 	"sync"
 
@@ -76,6 +78,20 @@ func (t *closeTrace) record(format string, args ...any) {
 	t.seq++
 	t.events = append(t.events, fmt.Sprintf("%3d  %s", t.seq, fmt.Sprintf(format, args...)))
 }
+
+// The rest of flowapi.Ticket passes straight through, so a traced connection
+// resolves, accounts and cancels exactly like an untraced one.
+func (t *traceTicket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
+	return t.inner.Resolve(owner)
+}
+
+func (t *traceTicket) Buffers() (receive, send int) { return t.inner.Buffers() }
+
+func (t *traceTicket) Established(addr netip.Addr) { t.inner.Established(addr) }
+
+func (t *traceTicket) Add(up, down uint64) { t.inner.Add(up, down) }
+
+func (t *traceTicket) SetCancel(cancel context.CancelFunc) { t.inner.SetCancel(cancel) }
 
 func (t *traceTicket) TimeWait() bool {
 	ok := t.inner.TimeWait()
