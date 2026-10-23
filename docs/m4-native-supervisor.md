@@ -323,6 +323,36 @@ Windows jobs now require explicit PASS lines for the pure loss/tail contracts.
 New shared tests cover lease-report ownership and the absence of suppression
 leakage into ordinary stop. Existing fatal rollback tests remain in force.
 
+### Reading atomically published outcomes
+
+Native outcome/history readers now share the reader previously used only by
+`lifecycle.Read`. `internal/sharedfile` opens Windows files with read/write/delete
+sharing and retries only ERROR_SHARING_VIOLATION for at most two seconds.
+Open errors remain unwrapped PathErrors, preserving `os.IsNotExist`. The outcome,
+native-history and lifecycle limits remain 32 KiB, 16 KiB and 4 MiB respectively.
+The audit found three native reader entry points: `host.ReadOutcome`,
+`host.ReadRecord` (including reload after failed commits), and `host.Open`.
+All now use the helper. Stand-in state reads already go through lifecycle.Read;
+the native writer's AtomicWrite path does not read the destination itself.
+
+No additional final-outcome signal is needed for classification. The host's
+final write precedes nativeEngineService's return; the Windows service handler
+returns its stopped result only after receiving that return. Product status
+reads native outcomes only when the service is Stopped. The hosted assertion
+already waits for Stopped and completed cleanup. SCM's configured failure
+recovery command can subsequently republish pending/complete cleanup for the
+same instance, preserving the child outcome. Thus a stopped host does not imply
+an outcome file has no writer. Linux ExecStopPost is included in its manager's
+stop boundary. Transient read failures must be handled by the sharing-safe
+reader, not by sleeping or weakening the forced-failure assertion.
+
+The Windows regression holds a publisher-style DELETE handle and proves plain
+os.Open fails, while each native reader succeeds. It then races 128 actual
+native replacements against all three readers and requires no failed reads or
+classification changes. Publication uses the native rename/sync implementation
+with ordinary temporary-directory ACLs so the pure test requires no SYSTEM
+identity. Existing lifecycle publication and native commit-conflict tests remain.
+
 The Linux acceptance `routes.default-route-removed` failure in job
 120435827572 uses the namespace launcher's standalone `run` command, not the
 service host or child command. Standalone has no HealthKey, so no private probe

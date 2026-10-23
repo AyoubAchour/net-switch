@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"sync"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/AyoubAchour/net-switch/internal/sharedfile"
 )
 
 // Record is historical state, never a loaded policy. A point is meaningful only
@@ -37,16 +37,11 @@ func Open(path, instance string, save func(Record) error) (*Durable, error) {
 		return nil, errors.New("native state requires an instance and durable writer")
 	}
 	var old Record
-	file, err := os.Open(path)
+	b, err := sharedfile.ReadFile(path, 16<<10)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	if err == nil {
-		b, readErr := io.ReadAll(io.LimitReader(file, (16<<10)+1))
-		closeErr := file.Close()
-		if err := errors.Join(readErr, closeErr); err != nil {
-			return nil, err
-		}
 		if len(b) > 16<<10 {
 			return nil, errors.New("native service state exceeds its bound")
 		}
@@ -140,12 +135,7 @@ func (d *Durable) reloadCommitted() {
 
 func ReadRecord(path string) (Record, error) {
 	var record Record
-	f, err := os.Open(path)
-	if err != nil {
-		return record, err
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, (16<<10)+1))
+	b, err := sharedfile.ReadFile(path, 16<<10)
 	if err != nil {
 		return record, err
 	}

@@ -5,12 +5,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/AyoubAchour/net-switch/internal/sharedfile"
 )
 
 type Outcome struct {
@@ -51,12 +51,7 @@ func ReadOutcome(data, instance string) (Outcome, error) {
 	if err != nil {
 		return result, err
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return result, err
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, (32<<10)+1))
+	b, err := sharedfile.ReadFile(path, 32<<10)
 	if err != nil {
 		return result, err
 	}
