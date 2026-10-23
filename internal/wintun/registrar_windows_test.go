@@ -583,6 +583,43 @@ func handleSnapshot(t *testing.T) map[windows.Handle]bool {
 	return values
 }
 
+// settleUnreadableHandle re-checks a new handle whose type query failed. The
+// handle can close between the process handle snapshot and the query: the Go
+// runtime closes each M's own thread handle in unminit, publishes the M as
+// freed (so /sched/threads/total drops it), and only then closes its two
+// high-resolution timers and wait completion packet in mdestroy
+// (runtime/os_windows.go, called from mexit in runtime/proc.go). A per-M
+// handle caught in that teardown is in the snapshot but gone by the query.
+// Wintun job 120538774292 failed the enforced pass with exactly one such
+// "unreadable" handle and no other new handle; the reply reader is not
+// involved, because that subtest fails at the control-read close before the
+// reader goroutine starts.
+//
+// Wait briefly and retry. A handle that was closed is not a leak, and one that
+// becomes readable keeps its normal classification, so a leak kind still
+// fails. A handle still in the fresh handle table but still unreadable is a
+// real failure and is never excused.
+func settleUnreadableHandle(t *testing.T, h windows.Handle, first error) (kind string, gone bool) {
+	t.Helper()
+	started := time.Now()
+	for {
+		kind, err := objectType(h)
+		if err == nil {
+			t.Logf("unreadable handle %#x resolved: now readable as %q after %v (first error %v)", h, kind, time.Since(started), first)
+			return kind, false
+		}
+		if time.Since(started) >= 50*time.Millisecond {
+			if !handleSnapshot(t)[h] {
+				t.Logf("unreadable handle %#x resolved: closed during measurement after %v (first error %v)", h, time.Since(started), first)
+				return "", true
+			}
+			t.Logf("unreadable handle %#x still present and unreadable after %v: %v", h, time.Since(started), err)
+			return "", false
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 func newHandleKinds(t *testing.T, before, after map[windows.Handle]bool) map[string]int {
 	t.Helper()
 	kinds := map[string]int{}
@@ -602,8 +639,15 @@ func newHandleKinds(t *testing.T, before, after map[windows.Handle]bool) map[str
 			if fixture && guardSnapshotGone(t, h, err) {
 				continue
 			}
-			kinds["unreadable"]++
-			continue
+			settled, gone := settleUnreadableHandle(t, h, err)
+			if gone {
+				continue
+			}
+			if settled == "" {
+				kinds["unreadable"]++
+				continue
+			}
+			kind = settled
 		}
 		if kind == "File" {
 			if fixture {

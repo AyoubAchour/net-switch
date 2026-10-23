@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -304,6 +305,15 @@ func TestHTTPAdmissionRefusesOverLimitUsersAndDrainsOnClose(t *testing.T) {
 	}
 	l := newHTTPListener(raw, &connectionLimits{owner: "owner", users: map[string]int{}}, func(string) {}, resolve)
 	conns := dialAll(t, raw.Addr().String(), 6)
+	clientIndex := make(map[string]int, len(conns))
+	for i, c := range conns {
+		clientIndex[c.LocalAddr().String()] = i
+	}
+	// Keep the admitted connections referenced: netFD has a finalizer that
+	// closes its socket, and the client read below would then see EOF from a
+	// connection the server still holds.
+	var admitted []net.Conn
+	admittedClients := make(map[int]bool, 2)
 	for range 2 {
 		c, err := l.Accept()
 		if err != nil {
@@ -312,14 +322,37 @@ func TestHTTPAdmissionRefusesOverLimitUsersAndDrainsOnClose(t *testing.T) {
 		if user := c.(*admittedHTTPConn).user; user == "owner" {
 			t.Fatal("a low-integrity owner process used owner capacity")
 		}
+		i, ok := clientIndex[c.RemoteAddr().String()]
+		if !ok {
+			t.Fatal("accepted connection does not belong to a dialed client", c.RemoteAddr())
+		}
+		admitted = append(admitted, c)
+		admittedClients[i] = true
 	}
+	defer func() {
+		for _, c := range admitted {
+			c.Close()
+		}
+	}()
 	refused := 0
-	for _, c := range conns {
+	for i, c := range conns {
 		c.SetReadDeadline(time.Now().Add(time.Second))
-		if _, err := c.Read(make([]byte, 1)); errors.Is(err, io.EOF) {
+		_, err := c.Read(make([]byte, 1))
+		eof := errors.Is(err, io.EOF)
+		if eof {
 			refused++
 		}
+		if admittedClients[i] {
+			if eof {
+				t.Fatalf("admitted connection %d was closed by the server", i)
+			}
+			continue
+		}
+		if !eof {
+			t.Fatalf("connection %d over the limit stayed open (read error %v)", i, err)
+		}
 	}
+	runtime.KeepAlive(admitted)
 	if refused != 4 {
 		t.Fatal("public per-user limit was not applied", refused)
 	}
