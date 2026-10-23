@@ -54,6 +54,8 @@ type Tuple struct {
 	Destination netip.AddrPort `json:"destination"`
 }
 
+// Owner's generation identifies the native socket independently of app
+// identity: Linux's cookie; Windows' owning PID and endpoint creation time.
 type Owner struct {
 	PID        uint32 `json:"pid"`
 	StartTime  uint64 `json:"startTime"`

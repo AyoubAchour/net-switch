@@ -21,14 +21,19 @@ type lookupFailure struct {
 	Code       uint32         `json:"code,omitempty"`
 	Deadline   bool           `json:"deadline,omitempty"`
 	Generation string         `json:"generation,omitempty"`
+	DurationUS int64          `json:"durationUS,omitempty"`
 }
 
 func (o *Owners) noteFailure(kind, stage string, source netip.AddrPort, generation string, err error) {
+	o.noteTimedFailure(kind, stage, source, generation, err, 0)
+}
+
+func (o *Owners) noteTimedFailure(kind, stage string, source netip.AddrPort, generation string, err error, duration time.Duration) {
 	if err == nil {
 		return
 	}
 	value := lookupFailure{At: time.Now(), Kind: kind, Stage: stage, Source: source,
-		Error: engine.Clip(err.Error(), 512), Deadline: errors.Is(err, context.DeadlineExceeded), Generation: engine.Clip(generation, 256)}
+		Error: engine.Clip(err.Error(), 512), Deadline: errors.Is(err, context.DeadlineExceeded), Generation: engine.Clip(generation, 256), DurationUS: duration.Microseconds()}
 	var code windows.Errno
 	if errors.As(err, &code) {
 		value.Code = uint32(code)

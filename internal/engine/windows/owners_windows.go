@@ -123,70 +123,77 @@ type LookupHistogram struct {
 	Misses    uint64 `json:"misses"`
 	Ambiguous uint64 `json:"ambiguous"`
 	// Non-cumulative buckets, upper bounds in microseconds, last = infinity.
-	UpperUS            []uint64        `json:"upperUS"`
-	Buckets            []uint64        `json:"buckets"`
-	MaxUS              uint64          `json:"maxUS"`
-	TCPRefreshes       uint64          `json:"tcpRefreshes"`
-	TCPReadNanos       uint64          `json:"tcpReadNanos"`
-	TCPIndexNanos      uint64          `json:"tcpIndexNanos"`
-	CacheMissRefreshes uint64          `json:"cacheMissRefreshes"`
-	TCPRetries         uint64          `json:"tcpRetries"`
-	SnapshotBuckets    []uint64        `json:"snapshotBuckets"`
-	ProcessBuckets     []uint64        `json:"processBuckets"`
-	RefreshBuckets     []uint64        `json:"refreshBuckets"`
-	TCPRawRows         uint64          `json:"tcpRawRows"`
-	TCPPeakRows        uint64          `json:"tcpPeakRows"`
-	TCPRowsByFamily    [2]uint64       `json:"tcpRowsByFamily"`
-	TCPFamiliesSampled [2]bool         `json:"tcpFamiliesSampled"`
-	UDPRefreshes       uint64          `json:"udpRefreshes"`
-	UDPReadNanos       uint64          `json:"udpReadNanos"`
-	UDPIndexNanos      uint64          `json:"udpIndexNanos"`
-	UDPReadBuckets     []uint64        `json:"udpReadBuckets"`    // native reads alone, not lookups
-	UDPRefreshBuckets  []uint64        `json:"udpRefreshBuckets"` // slot start to published snapshot
-	UDPWaitBuckets     []uint64        `json:"udpWaitBuckets"`    // a lookup's wait for one read
-	UDPReadMaxUS       uint64          `json:"udpReadMaxUS"`      // slowest native read
-	UDPPeakRows        uint64          `json:"udpPeakRows"`       // largest table read
-	UDPParallelPeak    int             `json:"udpParallelPeak"`   // most reads in flight for one family
-	TCPParallelPeak    int             `json:"tcpParallelPeak"`   // most reads in flight for one family
-	TCPHolds           uint64          `json:"tcpHolds"`          // lookups held past 50 ms for a fresh read
-	TCPHeldFound       uint64          `json:"tcpHeldFound"`      // held lookups that found the owner
-	TCPHoldReads       uint64          `json:"tcpHoldReads"`      // fresh reads started at a 50 ms bound, shared by every waiting SYN
-	TCPLateIdentities  uint64          `json:"tcpLateIdentities"` // found rows whose identity step ended past 50 ms
-	TCPReadMaxUS       uint64          `json:"tcpReadMaxUS"`      // slowest native TCP read
-	TCPReadBuckets     []uint64        `json:"tcpReadBuckets"`    // native TCP reads alone, not lookups
-	Failures           []lookupFailure `json:"failures,omitempty"`
+	UpperUS                      []uint64        `json:"upperUS"`
+	Buckets                      []uint64        `json:"buckets"`
+	MaxUS                        uint64          `json:"maxUS"`
+	TCPRefreshes                 uint64          `json:"tcpRefreshes"`
+	TCPReadNanos                 uint64          `json:"tcpReadNanos"`
+	TCPIndexNanos                uint64          `json:"tcpIndexNanos"`
+	CacheMissRefreshes           uint64          `json:"cacheMissRefreshes"`
+	TCPRetries                   uint64          `json:"tcpRetries"`
+	SnapshotBuckets              []uint64        `json:"snapshotBuckets"`
+	ProcessBuckets               []uint64        `json:"processBuckets"`
+	RefreshBuckets               []uint64        `json:"refreshBuckets"`
+	TCPRawRows                   uint64          `json:"tcpRawRows"`
+	TCPPeakRows                  uint64          `json:"tcpPeakRows"`
+	TCPRowsByFamily              [2]uint64       `json:"tcpRowsByFamily"`
+	TCPFamiliesSampled           [2]bool         `json:"tcpFamiliesSampled"`
+	UDPRefreshes                 uint64          `json:"udpRefreshes"`
+	UDPReadNanos                 uint64          `json:"udpReadNanos"`
+	UDPIndexNanos                uint64          `json:"udpIndexNanos"`
+	UDPReadBuckets               []uint64        `json:"udpReadBuckets"`    // native reads alone, not lookups
+	UDPRefreshBuckets            []uint64        `json:"udpRefreshBuckets"` // slot start to published snapshot
+	UDPWaitBuckets               []uint64        `json:"udpWaitBuckets"`    // a lookup's wait for one read
+	UDPReadMaxUS                 uint64          `json:"udpReadMaxUS"`      // slowest native read
+	UDPPeakRows                  uint64          `json:"udpPeakRows"`       // largest table read
+	UDPParallelPeak              int             `json:"udpParallelPeak"`   // most reads in flight for one family
+	UDPHolds                     uint64          `json:"udpHolds"`
+	UDPHeldGenerations           uint64          `json:"udpHeldGenerations"`
+	UDPGenerationRefusals        uint64          `json:"udpGenerationRefusals"`
+	UDPIdentityExpiredGeneration uint64          `json:"udpIdentityExpiredGeneration"`
+	TCPParallelPeak              int             `json:"tcpParallelPeak"`   // most reads in flight for one family
+	TCPHolds                     uint64          `json:"tcpHolds"`          // lookups held past 50 ms for a fresh read
+	TCPHeldFound                 uint64          `json:"tcpHeldFound"`      // held lookups that found the owner
+	TCPHoldReads                 uint64          `json:"tcpHoldReads"`      // fresh reads started at a 50 ms bound, shared by every waiting SYN
+	TCPLateIdentities            uint64          `json:"tcpLateIdentities"` // found rows whose identity step ended past 50 ms
+	TCPReadMaxUS                 uint64          `json:"tcpReadMaxUS"`      // slowest native TCP read
+	TCPReadBuckets               []uint64        `json:"tcpReadBuckets"`    // native TCP reads alone, not lookups
+	Failures                     []lookupFailure `json:"failures,omitempty"`
 }
 
 var lookupBounds = [...]uint64{100, 250, 500, 1000, 2000, 3000, 4000, 5000, 10000, 20000, 50000, ^uint64(0)}
 
 type Owners struct {
-	mu                                                            sync.Mutex
-	snapshot                                                      [2]atomic.Pointer[ownerSnapshot]
-	tcpReads                                                      [2]tableReads[*ownerSnapshot]
-	paths                                                         map[processKey]platform.Owner
-	tcpBuffers                                                    [2][ownerParallelReads][]uint64
-	udpSnapshots                                                  [2]atomic.Pointer[udpOwnerSnapshot]
-	udpReads                                                      [2]tableReads[*udpOwnerSnapshot]
-	udpBuffers                                                    [2][ownerParallelReads][]uint64
-	udpDumps, udpReadNanos, udpIndexNanos                         atomic.Uint64
-	udpReadHist, udpRefreshHist, udpWaitHist                      [len(lookupBounds)]atomic.Uint64
-	udpReadMaxUS, udpPeakRows                                     atomic.Uint64
-	hist                                                          [len(lookupBounds)]atomic.Uint64
-	snapshotHist, processHist                                     [len(lookupBounds)]atomic.Uint64
-	refreshHist                                                   [len(lookupBounds)]atomic.Uint64
-	count, misses, ambiguous, maxUS                               atomic.Uint64
-	tcpRefreshes, tcpReadNanos, tcpIndexNanos, cacheMissRefreshes atomic.Uint64
-	tcpRetries                                                    atomic.Uint64
-	tcpPeakRows                                                   atomic.Uint64
-	tcpHolds, tcpHeldFound, tcpReadMaxUS, tcpLateIdentities       atomic.Uint64
-	tcpHoldReads                                                  atomic.Uint64
-	tcpReadHist                                                   [len(lookupBounds)]atomic.Uint64
-	failures                                                      [16]lookupFailure
-	failureCount                                                  uint64
-	// readTCP and identify replace the native TCP table read and the process
+	mu                                                                                sync.Mutex
+	snapshot                                                                          [2]atomic.Pointer[ownerSnapshot]
+	tcpReads                                                                          [2]tableReads[*ownerSnapshot]
+	paths                                                                             map[processKey]platform.Owner
+	tcpBuffers                                                                        [2][ownerParallelReads][]uint64
+	udpSnapshots                                                                      [2]atomic.Pointer[udpOwnerSnapshot]
+	udpReads                                                                          [2]tableReads[*udpOwnerSnapshot]
+	udpBuffers                                                                        [2][ownerParallelReads][]uint64
+	udpDumps, udpReadNanos, udpIndexNanos                                             atomic.Uint64
+	udpReadHist, udpRefreshHist, udpWaitHist                                          [len(lookupBounds)]atomic.Uint64
+	udpReadMaxUS, udpPeakRows                                                         atomic.Uint64
+	udpHolds, udpHeldGenerations, udpGenerationRefusals, udpIdentityExpiredGeneration atomic.Uint64
+	hist                                                                              [len(lookupBounds)]atomic.Uint64
+	snapshotHist, processHist                                                         [len(lookupBounds)]atomic.Uint64
+	refreshHist                                                                       [len(lookupBounds)]atomic.Uint64
+	count, misses, ambiguous, maxUS                                                   atomic.Uint64
+	tcpRefreshes, tcpReadNanos, tcpIndexNanos, cacheMissRefreshes                     atomic.Uint64
+	tcpRetries                                                                        atomic.Uint64
+	tcpPeakRows                                                                       atomic.Uint64
+	tcpHolds, tcpHeldFound, tcpReadMaxUS, tcpLateIdentities                           atomic.Uint64
+	tcpHoldReads                                                                      atomic.Uint64
+	tcpReadHist                                                                       [len(lookupBounds)]atomic.Uint64
+	failures                                                                          [16]lookupFailure
+	failureCount                                                                      uint64
+	// readTCP, readUDP and identify replace native table reads and the process
 	// identity step in tests; nil in production.
-	readTCP  func(ctx context.Context, family uint32, scratch *[]uint64) ([]byte, error)
-	identify func(pid uint32) (platform.Owner, error)
+	readTCP           func(ctx context.Context, family uint32, scratch *[]uint64) ([]byte, error)
+	readUDP           func(ctx context.Context, family uint32, scratch *[]uint64) ([]byte, error)
+	beforeUDPSnapshot func() // test barrier: all callers arrive before the shared read
+	identify          func(pid uint32) (platform.Owner, error)
 }
 
 func NewOwners() *Owners { return &Owners{paths: make(map[processKey]platform.Owner)} }
@@ -245,6 +252,8 @@ func (o *Owners) Stats() LookupHistogram {
 		h.UDPWaitBuckets[i] = o.udpWaitHist[i].Load()
 	}
 	h.UDPReadMaxUS, h.UDPPeakRows = o.udpReadMaxUS.Load(), o.udpPeakRows.Load()
+	h.UDPHolds, h.UDPHeldGenerations = o.udpHolds.Load(), o.udpHeldGenerations.Load()
+	h.UDPGenerationRefusals, h.UDPIdentityExpiredGeneration = o.udpGenerationRefusals.Load(), o.udpIdentityExpiredGeneration.Load()
 	for family := range 2 {
 		h.UDPParallelPeak = max(h.UDPParallelPeak, o.udpReads[family].peakInFlight())
 		h.TCPParallelPeak = max(h.TCPParallelPeak, o.tcpReads[family].peakInFlight())
@@ -726,19 +735,49 @@ func (o *Owners) udpOwner(key netip.AddrPort, rows udpRows) (platform.Owner, err
 		return platform.Owner{}, err
 	}
 	owner, err := o.process(r.pid)
-	owner.Generation = strconv.FormatUint(r.created, 16)
+	owner.Generation = r.generation()
 	return owner, err
+}
+
+// Generation must also distinguish processes when identity expires. The NAT
+// then keeps only this value; a timestamp alone could collide across PIDs.
+func (r socketOwner) generation() string {
+	return strconv.FormatUint(uint64(r.pid), 16) + ":" + strconv.FormatUint(r.created, 16)
+}
+
+// The NAT retains its existing pending ticket and datagram budget throughout
+// this hold. Use the precise Windows clock for the caller's deadline too.
+func (o *Owners) UDPLookupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return winclock.System.WithTimeout(parent, ownerOverloadHold)
 }
 
 func (o *Owners) UDP(ctx context.Context, key netip.AddrPort) (owner platform.Owner, err error) {
 	start := winclock.Now()
 	stage := "GetExtendedUdpTable snapshot"
-	defer func() {
-		o.measure(start, err)
-		o.noteFailure("udp-lookup", stage, key, owner.Generation, err)
-	}()
-	ctx, cancel := winclock.System.WithTimeout(ctx, 50*time.Millisecond)
+	ctx, cancel := o.UDPLookupContext(ctx)
 	defer cancel()
+	defer func() {
+		// Native APIs cannot be interrupted. Never publish an overdue result,
+		// even if the timer goroutine has not run yet.
+		if stopped := ctx.Err(); stopped != nil {
+			owner, err = platform.Owner{}, stopped
+		} else if winclock.Since(start) >= ownerOverloadHold {
+			owner, err = platform.Owner{}, context.DeadlineExceeded
+		}
+		if owner.Generation == "" {
+			o.udpGenerationRefusals.Add(1)
+		} else if winclock.Since(start) >= ownerLookupBound {
+			owner = platform.Owner{Generation: owner.Generation}
+			err = context.DeadlineExceeded
+			o.udpIdentityExpiredGeneration.Add(1)
+		}
+		o.measure(start, err)
+		kind := "udp-identity"
+		if owner.Generation == "" {
+			kind = "udp-generation"
+		}
+		o.noteTimedFailure(kind, stage, key, owner.Generation, err, winclock.Since(start))
+	}()
 	family := 0
 	if key.Addr().Is6() {
 		family = 1
@@ -746,12 +785,33 @@ func (o *Owners) UDP(ctx context.Context, key netip.AddrPort) (owner platform.Ow
 	// Require a native read started after this call. Reusing an earlier
 	// positive row would artificially lengthen the socket-generation collision
 	// window. Concurrent calls still share the next in-flight native dump.
-	snapshot, err := o.udpSnapshot(ctx, start, family)
+	if o.beforeUDPSnapshot != nil {
+		o.beforeUDPSnapshot()
+	}
+	snapshot, held, err := o.udpSnapshot(ctx, start, family)
 	if err != nil {
 		return owner, err
 	}
-	stage = "socket row and process identity"
-	return o.udpOwner(key, snapshot.rows)
+	stage = "socket generation row"
+	row, err := udpCandidate(key, snapshot.rows)
+	if err != nil {
+		return owner, err
+	}
+	owner.Generation = row.generation()
+	if held {
+		o.udpHeldGenerations.Add(1)
+	}
+	stage = "process identity"
+	if winclock.Since(start) >= ownerLookupBound {
+		return owner, context.DeadlineExceeded
+	}
+	identify := o.process
+	if o.identify != nil {
+		identify = o.identify
+	}
+	owner, err = identify(row.pid)
+	owner.Generation = row.generation()
+	return owner, err
 }
 
 // The NAT invokes this once per second, even in the absence of traffic. One
@@ -810,11 +870,13 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (result ma
 			processes[row.pid] = result
 			o.noteFailure("udp-reconcile-process", stage, key, "", result.err)
 		}
-		if result.err != nil {
-			continue
-		}
 		owner := result.owner
-		owner.Generation = strconv.FormatUint(row.created, 16)
+		if result.err != nil {
+			// A live native generation still validates an unknown admission.
+			// Known admissions continue to fail identity comparison normally.
+			owner = platform.Owner{}
+		}
+		owner.Generation = row.generation()
 		out[key] = owner
 	}
 	return out, nil

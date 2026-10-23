@@ -329,7 +329,15 @@ func (s *session) run() {
 		return
 	}
 	s.ticket.SetCancel(cancel)
-	lookup, cl := context.WithTimeout(ctx, 50*time.Millisecond)
+	var lookup context.Context
+	var cl context.CancelFunc
+	if bounded, ok := n.owners.(interface {
+		UDPLookupContext(context.Context) (context.Context, context.CancelFunc)
+	}); ok {
+		lookup, cl = bounded.UDPLookupContext(ctx)
+	} else {
+		lookup, cl = context.WithTimeout(ctx, 50*time.Millisecond)
+	}
 	lookupStart := time.Now()
 	var owner platform.Owner
 	var err error
@@ -379,7 +387,7 @@ func (s *session) run() {
 			return
 		}
 		live, err := n.identities.Snapshot(ctx, []netip.AddrPort{s.source})
-		if err != nil || !same(live[s.source], owner) {
+		if err != nil || !same(owner, live[s.source]) {
 			n.IdentityErrors.Add(1)
 			return
 		}
