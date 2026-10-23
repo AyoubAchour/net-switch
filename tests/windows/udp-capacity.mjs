@@ -459,6 +459,89 @@ async function client(server, directory, line, app) {
   return { app, child, call, exe, ledger, admissions: [] };
 }
 
+// A client-side port-choice refusal in the UDP fill: the app's own bind or
+// connect failing to allocate a port (WSAENOBUFS/WSAEADDRINUSE). An engine
+// refusal reaches the app as ECONNRESET/ECONNREFUSED after its SYN, so it can
+// never match here.
+export function clientPortChoiceRefusal(attempt) {
+  return Boolean(attempt) && ['ENOBUFS', 'EADDRINUSE'].includes(attempt.Error) &&
+    ['bind', 'connect'].includes(attempt.NativeCall);
+}
+
+// The engine's own port-choice policy (internal/engine/windows/
+// udp_bind_retries_windows.go): after the first refusal, at most four fresh
+// attempts on new sockets, with a short bounded backoff. The fill mirrors it
+// so one app-side automatic port search refusal with free ports does not end
+// the whole run (x64 job 120500237589: one connect ENOBUFS at 6,911 held with
+// 2,150 IPv4 dynamic ports free, and its single re-attempt was refused too).
+export const fillFreshAttempts = 4;
+export const fillFreshBackoffMS = Object.freeze([10, 20, 40, 80]);
+
+const fillRefusalSummary = (attempt) => ({ call: attempt?.NativeCall ?? null, code: attempt?.Error ?? null });
+
+export function fillReattemptError(record, held, floor) {
+  const codes = [...new Set(record.finalRefused.map((item) => item.code).filter(Boolean))].join('/') || 'UNKNOWN';
+  return `UDP held ${held}, below the 95% native layout floor ${floor}: client-side ${codes} with free ports, ` +
+    `${record.finalClientRefusals} flow(s) still refused after ${record.freshAttempts} of ${record.maxFreshAttempts} fresh attempts, ` +
+    `${record.available} IPv4 dynamic ports were free at the first refusal`;
+}
+
+// The floor verdict is the only pass/fail condition. Client retries that run
+// out while ports are still free are worth reporting, but near the native
+// limit Windows' automatic port search may legitimately refuse with a handful
+// of ports left: only a fill that actually ends below the floor fails, and
+// then its message should say which case stopped it.
+export function udpFloorShortfall(evidence, held) {
+  if (held >= evidence.floor) return null;
+  const last = evidence.fillReattempts?.at(-1);
+  if (last?.room && last.finalClientRefusals > 0) return fillReattemptError(last, held, evidence.floor);
+  return `UDP held ${held}, below the 95% native layout floor ${evidence.floor}`;
+}
+
+// Retry refused fill flows on fresh sockets, up to fillFreshAttempts times,
+// with the engine's short bounded backoff. A round retries only the flows
+// whose latest error is still the app's own bind/connect port choice, and
+// only while the pool had room at the first refusal. An engine-side refusal
+// stops the retries at once. The record carries every attempt for evidence.
+export async function retryFillRefusals({ refused, room, available, reopen, sleep = (ms) => delay(ms) }) {
+  const record = {
+    available, room, firstRefusals: refused.length,
+    maxFreshAttempts: fillFreshAttempts, backoffMS: [...fillFreshBackoffMS],
+    freshAttempts: 0, recoveredOnFreshAttempt: Array(fillFreshAttempts).fill(0),
+    attemptsPerRefusal: refused.map(() => 1),
+    finalClientRefusals: 0, finalOtherRefusals: 0, finalRefused: [],
+  };
+  let pending = refused.map((attempt, index) => ({ attempt, index }));
+  let outcome = null;
+  for (let round = 0; round < fillFreshAttempts && pending.length && room; round++) {
+    await sleep(fillFreshBackoffMS[round]);
+    outcome = await reopen(pending.length);
+    record.freshAttempts++;
+    const attempts = outcome.result?.attempts ?? [];
+    const next = [];
+    let blocked = false;
+    for (const [i, entry] of pending.entries()) {
+      record.attemptsPerRefusal[entry.index]++;
+      const attempt = attempts[i];
+      if (!attempt) { blocked = true; next.push(entry); continue; }
+      entry.attempt = attempt;
+      if (!attempt.Error) {
+        record.recoveredOnFreshAttempt[round]++;
+        continue;
+      }
+      next.push(entry);
+      if (!clientPortChoiceRefusal(attempt)) blocked = true;
+    }
+    pending = next;
+    if (blocked) break;
+  }
+  const final = pending.map((entry) => entry.attempt);
+  record.finalClientRefusals = final.filter(clientPortChoiceRefusal).length;
+  record.finalOtherRefusals = final.length - record.finalClientRefusals;
+  record.finalRefused = final.map(fillRefusalSummary);
+  return { refused: final, record, outcome };
+}
+
 export async function holdUDPCapacity({ server, harness, directory, line, native, evidence }) {
   hostedOnly();
   const target = await harness.control('udp-capacity', {});
@@ -496,10 +579,12 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     let held = 0;
     const failed = [], attempts = [];
     // SYSTEM-DESIGN 5.9 amended: a refused first attempt while the pool still
-    // has room for its pair gets one explicit, reported re-attempt; the fill
-    // stops at a refusal only when the pool is full or the re-attempt fails.
-    // Acceptance x64 job 119667481104 stopped at 5,119 on one app connect
-    // ENOBUFS with 5,738 IPv4 dynamic ports free.
+    // has room for its pair gets up to four fresh attempts on new sockets, the
+    // engine's own port-choice policy, with a short bounded backoff. The fill
+    // stops at a refusal only when the pool is full, the retries are spent, or
+    // the engine itself refused. Acceptance x64 job 119667481104 stopped at
+    // 5,119 on one app connect ENOBUFS with 5,738 IPv4 dynamic ports free; a
+    // single re-attempt was still not enough on job 120500237589.
     const family = target.host.includes(':') ? 'ipv6' : 'ipv4';
     evidence.fillReattempts = [];
     const admit = (app, result) => {
@@ -540,11 +625,11 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
           const space = await udpPortSpaceAtFailure().catch((error) => ({ error: String(error) }));
           const available = space.families?.find((item) => item.family === family)?.available;
           const room = space.state === 'complete' && available >= 2 * refused.length;
-          const record = { held, available, room, refused: refused.map((item) => ({ call: item.NativeCall, code: item.Error })) };
-          if (room) {
-            ({ refused, stats } = await open(app, refused.length));
-            record.reattemptFailures = refused.map((item) => ({ call: item.NativeCall, code: item.Error }));
-          }
+          const firstRefusals = refused.map((item) => ({ call: item.NativeCall, code: item.Error }));
+          const retry = await retryFillRefusals({ refused, room, available, reopen: (count) => open(app, count) });
+          refused = retry.refused;
+          stats = retry.outcome?.stats ?? stats;
+          const record = { held, refused: firstRefusals, ...retry.record };
           evidence.fillReattempts.push(record);
           console.log(`WINDOWS UDP FILL REATTEMPT ${JSON.stringify(record)}`);
           if (!room) evidence.portSpaceAtFailure = space;
@@ -575,7 +660,8 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     assert(failed.length, 'UDP fixture did not reach the native OS port limit');
     assert(failed.every((item) => ['ENOBUFS', 'EADDRINUSE', 'ECONNRESET', 'ECONNREFUSED'].includes(item.Error)),
       `UDP delivery loss or unrelated failure: ${JSON.stringify(failed)}`);
-    assert(held >= evidence.floor, `UDP held ${held}, below the 95% native layout floor ${evidence.floor}`);
+    const shortfall = udpFloorShortfall(evidence, held);
+    assert.equal(shortfall, null, shortfall ?? undefined);
     assert.equal(evidence.portSpaceAtFailure.state, 'complete', 'The failed allocation lacks complete port-space evidence');
     const atLimit = await engineStats();
     console.log(`WINDOWS UDP GENERATION HOLD ${JSON.stringify(atLimit.ownerLookup)}`);
