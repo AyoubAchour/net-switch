@@ -166,7 +166,7 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 				var j struct {
 					Failures []int64 `json:"failures"`
 				}
-				return lifecycle.Read(filepath.Join(config.Data, "control-journal.json"), &j) == nil && len(j.Failures) >= hang
+				return readJournal(filepath.Join(config.Data, "control-journal.json"), &j) == nil && len(j.Failures) >= hang
 			})
 			if hang < 5 {
 				wait(t, "new working engine after hang", 45*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
@@ -192,8 +192,11 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 			var j struct {
 				Failures []int64 `json:"failures"`
 			}
-			if err := lifecycle.Read(filepath.Join(config.Data, "control-journal.json"), &j); err != nil || len(j.Failures) != hang {
-				t.Fatal("hang counted more than once", len(j.Failures), err)
+			if err := readJournal(filepath.Join(config.Data, "control-journal.json"), &j); err != nil {
+				t.Fatalf("could not read the control journal: %v", err)
+			}
+			if len(j.Failures) != hang {
+				t.Fatalf("hang counted %d times, want %d", len(j.Failures), hang)
 			}
 			t.Logf("HUNG_ENGINE hang=%d clean=%s recovered_or_latched=%s failures=%d control_down=%t", hang, cleanAt, time.Since(faultAt), len(j.Failures), hang == 1)
 		}
