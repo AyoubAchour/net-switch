@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
@@ -390,13 +391,39 @@ func TestPauseClassificationSampling(t *testing.T) {
 	}
 }
 
-// Hold the real session's reader lock while a real packet is queued. Only that
-// reader is blocked: both pause samplers must continue to run. No production
-// hooks, retries or classifier exemptions are involved.
-func TestWintunSessionDelay(t *testing.T) {
-	requireRunner(t)
-	f := newFixture(t, "ours", 0)
-	s := f.io.(*Session)
+const (
+	sessionDelayWindow   = 80 * time.Millisecond
+	sessionDelayAttempts = 3
+	// Healthy CI runs (2026-10-21/22) replied in 80.4-81.7 ms, 0.4-1.7 ms over
+	// the injected block. Five milliseconds keeps ordinary jitter on time, so a
+	// late reply - the evidence this test exists to judge - is never retried.
+	sessionDelayLateAllowance = 5 * time.Millisecond
+	// A working sampler reaches 51-71 samples per ~80 ms window (0.63-0.89 of
+	// the nominal 1 ms cadence). Half is a wide margin below that and still
+	// catches one that lost most of the window.
+	pauseSamplerFloorRatio = 0.5
+)
+
+type sessionDelayAttempt struct {
+	Number  int
+	Start   int64
+	End     int64
+	Samples [2]int
+	Gaps    [2][]pauseGap // Complete monitor evidence; the log clips it to the window.
+	Queued  *sessionObservation
+}
+
+func sessionDelaySampleFloor(window time.Duration) int {
+	return int(pauseSamplerFloorRatio * float64(window) / float64(pauseSamplePeriod))
+}
+
+// measureSessionDelay performs one injection: the real reader lock is held
+// while a real packet queues, then released. Latency and both samplers' counts
+// and gaps are captured here, before any judgement, so an under-sampled window
+// is still fully reported. The echo is stopped and restarted because a parked
+// ReadBatch holds readMu, which this test needs to take.
+func measureSessionDelay(t *testing.T, f *fixture, s *Session, c *net.UDPConn, payload []byte, number int) *sessionDelayAttempt {
+	t.Helper()
 	f.stopEcho()
 	s.readMu.Lock()
 	locked := true
@@ -407,10 +434,7 @@ func TestWintunSessionDelay(t *testing.T) {
 	}()
 	f.startEcho(t)
 	monitor := startPauseMonitor(t, s)
-	c := udpSocket(t)
-	defer c.Close()
 	must(t, c.SetDeadline(time.Now().Add(2*time.Second)))
-	payload := []byte("deliberately blocked session reader")
 	start := ticks()
 	monitor.inflight.Store(start)
 	_, err := c.Write(payload)
@@ -426,7 +450,7 @@ func TestWintunSessionDelay(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	queued := ticks()
-	for elapsed(queued) < 80*time.Millisecond {
+	for elapsed(queued) < sessionDelayWindow {
 		time.Sleep(time.Millisecond)
 	}
 	before := observeSession(s)
@@ -444,13 +468,50 @@ func TestWintunSessionDelay(t *testing.T) {
 		t.Fatal("injected trip payload mismatch")
 	}
 	monitor.finish(t)
-	classification, covered := classifyPause(start, end, false, monitor.gaps[0], monitor.gaps[1])
-	for id, count := range monitor.samples {
-		if count < 20 {
-			t.Fatalf("sampler %d did not make progress during injection: %d", id, count)
+	return &sessionDelayAttempt{Number: number, Start: start, End: end, Samples: monitor.samples, Gaps: monitor.gaps, Queued: before}
+}
+
+// Hold the real session's reader lock while a real packet is queued. Only that
+// reader is blocked: both pause samplers must continue to run. No production
+// hooks, retries or classifier exemptions are involved.
+//
+// A sampler that loses most of the window has not measured anything, so that
+// attempt is logged in full and redone on a fresh window. A late reply is
+// evidence and is judged on the attempt that produced it, never retried.
+func TestWintunSessionDelay(t *testing.T) {
+	requireRunner(t)
+	f := newFixture(t, "ours", 0)
+	s := f.io.(*Session)
+	c := udpSocket(t)
+	defer c.Close()
+	payload := []byte("deliberately blocked session reader")
+
+	var attempt *sessionDelayAttempt
+	logged := make([]string, 0, sessionDelayAttempts)
+	for number := 1; number <= sessionDelayAttempts; number++ {
+		attempt = measureSessionDelay(t, f, s, c, payload, number)
+		latency := qpcDuration(attempt.Start, attempt.End)
+		floor := sessionDelaySampleFloor(latency)
+		report(t, map[string]any{"test": "session_delay_attempt", "arch": runtime.GOARCH, "attempt": number, "ms": latency.Seconds() * 1000, "samples": attempt.Samples, "sample_floor": floor, "heartbeat_gaps": overlappingGaps(attempt.Gaps[0], attempt.Start, attempt.End), "scheduler_gaps": overlappingGaps(attempt.Gaps[1], attempt.Start, attempt.End)})
+		entry := fmt.Sprintf("attempt %d: %d/%d samples (floor %d), reply %.1f ms", number, attempt.Samples[0], attempt.Samples[1], floor, latency.Seconds()*1000)
+		logged = append(logged, entry)
+		if latency > sessionDelayWindow+sessionDelayLateAllowance {
+			break
+		}
+		if attempt.Samples[0] >= floor && attempt.Samples[1] >= floor {
+			break
+		}
+		if number < sessionDelayAttempts {
+			t.Logf("pause sampler starved (test instrument, not the session; retrying): %s", entry)
 		}
 	}
-	report(t, map[string]any{"test": "session_delay_proof", "arch": runtime.GOARCH, "classification": classification, "ms": qpcDuration(start, end).Seconds() * 1000, "common_pause_ms": covered.Seconds() * 1000, "samples": monitor.samples, "queued_before_release": before, "state_at_reply": observeSession(s)})
+	latency := qpcDuration(attempt.Start, attempt.End)
+	floor := sessionDelaySampleFloor(latency)
+	if (attempt.Samples[0] < floor || attempt.Samples[1] < floor) && latency <= sessionDelayWindow+sessionDelayLateAllowance {
+		t.Fatalf("pause sampler starved on %d attempts; the test instrument lost the windows, the session reply arrived on time in every attempt: %s", sessionDelayAttempts, strings.Join(logged, "; "))
+	}
+	classification, covered := classifyPause(attempt.Start, attempt.End, false, attempt.Gaps[0], attempt.Gaps[1])
+	report(t, map[string]any{"test": "session_delay_proof", "arch": runtime.GOARCH, "attempts": attempt.Number, "classification": classification, "ms": latency.Seconds() * 1000, "common_pause_ms": covered.Seconds() * 1000, "samples": attempt.Samples, "queued_before_release": attempt.Queued, "state_at_reply": observeSession(s)})
 	if classification != "session_stall" {
 		t.Fatalf("real blocked session was exempted: %s", classification)
 	}
