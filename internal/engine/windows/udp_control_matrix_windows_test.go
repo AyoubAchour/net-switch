@@ -203,6 +203,7 @@ func TestUDPControlVariant(t *testing.T) {
 	if os.Getenv("NETSWITCH_PORT_GATE") != "1" || name == "" {
 		t.Skip("one variant per process, run by tests/windows/udp-control-matrix.mjs")
 	}
+	requireProcessDiagnostics(t)
 	cycles := udpRecoveryCycleCount()
 	if cycles == 0 {
 		t.Fatal("NETSWITCH_UDP_RECOVERY_CYCLES is required")

@@ -67,6 +67,13 @@ remain, with configuration diagnostics explicitly disabled. No documented
 native enumeration equivalent to both dynamic and active excluded ranges was
 found; partial data is not substituted for the test-only diagnostic.
 
+The native-service matrix's **Windows process diagnostic build contracts** step
+requires explicit PASS results for the product-off proof and both trace-build
+proofs (live UDP netsh settings and the restricted TCP configuration worker), on
+x64 and ARM64. Missing or skipped tests fail the step. Capacity/control fixtures
+that need these readers reject a product build before allocating their sockets;
+their acceptance and focused diagnostic workflows already use the trace tag.
+
 ## Hosted evidence
 
 | Case | Required evidence |

@@ -4,6 +4,7 @@ package winengine
 
 import (
 	"context"
+	"errors"
 	"go/build"
 	"go/parser"
 	"go/token"
@@ -37,6 +38,9 @@ func TestProductNoProcessDiagnostics(t *testing.T) {
 	}
 	if r := runNetsh(context.Background(), "interface", "ipv4", "show", "dynamicport", "udp"); r.Error != errDiagnosticProcessesDisabled.Error() {
 		t.Fatal(r)
+	}
+	if config, err := readPortConfiguration(context.Background()); config != nil || !errors.Is(err, errDiagnosticProcessesDisabled) {
+		t.Fatal("product enabled the TCP configuration worker", config, err)
 	}
 	// Inspect the compiled product's source set, so an unconditional process
 	// runner cannot be hidden behind a flag that the mocks alone would accept.

@@ -60,12 +60,33 @@ jobs:
           go test -tags lifecycle_test -run '^$' -fuzz '^FuzzProxyHandshake$' -fuzztime=5s ./internal/engine/testproxy
           go test -v -count=1 -tags lifecycle_test -run '^TestNative(ReadFault|ManagerExit)' ./internal/lifecycle
           go test -v -count=1 -run '^TestNative(Stall|TCPInfo|Actor)' ./tests/lifecycle
+      - name: Windows process diagnostic build contracts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildCases = @(
+            @{ Tags = ''; Tests = @('TestProductNoProcessDiagnostics') },
+            @{ Tags = 'netswitch_handlecheck'; Tests = @('TestUDPPortSpaceDiagnosisReadsHostedSettings', 'TestPortConfigurationMatchesNativeProvider') }
+          )
+          foreach ($buildCase in $buildCases) {
+            $selector = '^(' + ($buildCase.Tests -join '|') + ')$'
+            $proof = & go test -v -count=1 -timeout=6m "-tags=$($buildCase.Tags)" "-run=$selector" ./internal/engine/windows
+            $result = $LASTEXITCODE
+            $proof | Write-Output
+            if ($result -ne 0) { exit $result }
+            foreach ($test in $buildCase.Tests) {
+              if (-not ($proof -match ('^--- PASS: ' + [regex]::Escape($test) + ' '))) {
+                throw "Missing PASS for $test with tags '$($buildCase.Tags)'; absent or skipped tests are failures"
+              }
+            }
+          }
       - name: Installed Windows services, product and fault builds
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          go test -v -count=1 -run '^Test(ProductNoProcessDiagnostics|ProbeUnavailable|RetiredLine|RouteStats|WindowsStatsStayBounded)' ./internal/engine/windows
+          go test -v -count=1 -run '^Test(ProbeUnavailable|RetiredLine|RouteStats|WindowsStatsStayBounded)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($variant in @('product', 'faults')) {
             if ($env:NATIVE_FAULTS_ONLY -eq '1' -and $variant -eq 'product') { continue }
