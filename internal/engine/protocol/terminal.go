@@ -9,6 +9,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 )
 
 const TerminalDeliveryTimeout = 2 * time.Second
@@ -91,7 +93,7 @@ func (s *Server) StopWithReason(ctx context.Context, reason string, finalize fun
 	s.mu.Unlock()
 	// Restore ordinary routing first. A slow probe must neither delay this
 	// nor spend any of the context's cleanup budget before Stop begins.
-	cleanupErr = s.runtime.Stop(ctx)
+	cleanupErr = s.runtime.Stop(platform.WithCleanupOwner(ctx))
 	join, cancelJoin := context.WithTimeout(context.Background(), TerminalProbeJoinTimeout)
 	joined := true
 	for _, done := range pending {

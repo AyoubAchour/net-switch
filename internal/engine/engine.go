@@ -258,7 +258,7 @@ func (e *Engine) fail(link *ns.Link, err error) {
 			return
 		}
 		e.lastError = err
-		cleanup := e.stopLocked(context.Background())
+		cleanup := e.stopLocked(platform.WithCleanupOwner(context.Background()))
 		e.lastError = errors.Join(err, cleanup)
 		e.Table.Emit(flowapi.Event{Type: "fatal", Message: e.lastError.Error()})
 		if e.OnFatal != nil {
@@ -412,7 +412,9 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	// error that may wait for Control's backoff while its lease is renewed.
 	// Service runtimes route this nonblocking signal to process exit; their
 	// supervisor/manager recovers the retained journal after ownership ends.
-	if err != nil && e.OnFatal != nil {
+	// A caller already owning terminal delivery reports the returned error
+	// itself; a competing generic fatal would cut off that receipt.
+	if err != nil && e.OnFatal != nil && !platform.CleanupOwned(ctx) {
 		e.OnFatal(err)
 	}
 	return err

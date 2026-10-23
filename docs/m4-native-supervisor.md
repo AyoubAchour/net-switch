@@ -253,7 +253,7 @@ All capacity/recovery assertions still run first; none are waived by this stop.
 ### Retirement failure and stop-cost audit
 
 A failed stop is fatal, distinct from a cleanly idle configuration error.
-`engine.go:122` routes start rollback through stopLocked; `engine.go:416` now
+`engine.go:122` routes start rollback through stopLocked; `engine.go:418` now
 signals OnFatal when session join or journal cleanup fails. The notification
 is the existing nonblocking service failure channel, not a new shutdown worker.
 
@@ -295,6 +295,33 @@ No post-reorder comparison is claimed: the old overlap unit test blocked
 Windows acceptance on aadc43c1 and Linux acceptance was still running at audit.
 New hosted timings and the unchanged 15 s stop/28 s hang gates must establish
 the serialization cost; pure tests cannot supply those numbers.
+
+### One terminal owner
+
+The stop-failure escalation must not race a caller that already owns terminal
+delivery. `StopWithReason` now passes an internal cleanup-owner context: the
+engine returns all cleanup errors without also emitting OnFatal. Adapter loss
+therefore retains its specific cause and receipt after cleanup attempts. The
+Windows shutdown tail still exits with failure 1 when cleanup failed, keeping
+the journal available for host recovery; only successful loss cleanup exits 3.
+
+The same per-call ownership applies to service shutdown tails, the lease
+cleanup reporter, and the generic pump-failure reporter. Each already returns
+or reports the cleanup error to the service exit path. Ordinary Control Stop
+and start rollback remain unowned and still emit fatal on cleanup failure.
+The marker is neither wire-visible nor retained in engine state, so a later
+ordinary failed stop cannot inherit suppression from a previous terminal call.
+
+Before this fix's push, all 104 Windows-only test files in the affected engine,
+platform, lifecycle, service, Wintun, winchild and lifecycle-test packages were
+audited for stop/fatal/terminal/cleanup assertions. The adapter-loss and shutdown
+contracts were read together, including competing explicit stop, lease retry,
+late finalizer errors, blocked readers and retained journal ownership. The
+existing Windows adapter-loss and shutdown-tail tests pass unchanged locally;
+the fixed production-pipe and real-driver cases remain hosted-only. Both native
+Windows jobs now require explicit PASS lines for the pure loss/tail contracts.
+New shared tests cover lease-report ownership and the absence of suppression
+leakage into ordinary stop. Existing fatal rollback tests remain in force.
 
 The Linux acceptance `routes.default-route-removed` failure in job
 120435827572 uses the namespace launcher's standalone `run` command, not the

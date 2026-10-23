@@ -440,7 +440,7 @@ func (s *Server) CheckLease(ctx context.Context) error {
 		return nil
 	}
 	s.mu.Unlock()
-	err := s.runtime.Stop(ctx)
+	err := s.runtime.Stop(platform.WithCleanupOwner(ctx))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err == nil {

@@ -149,3 +149,29 @@ func TestStartRollbackRetirementFailureIsFatal(t *testing.T) {
 		t.Fatal("rollback never attempted journal cleanup")
 	}
 }
+
+func TestOwnedCleanupReturnsFailureWithoutCompetingFatal(t *testing.T) {
+	release := make(chan struct{})
+	close(release)
+	failure := errors.New("owned cleanup failed")
+	tun := &stagedCloseTun{Tun: testfake.NewTun(), begun: make(chan struct{}), release: release}
+	routes := &stagedCloseRoutes{tun: tun, cleanup: make(chan struct{}), cleanupErr: failure}
+	e := New(context.Background(), Dependencies{OpenTun: func(context.Context) (platform.TunDevice, error) { return tun, nil }, Routes: routes, Dialer: testfake.Dialer{}, Owners: &testfake.Owners{}}, flows.Defaults(), nil)
+	config := policy.Config{Lines: []platform.Line{{ID: "A"}}}
+	if _, err := e.Start(context.Background(), policy.Revision{N: 1, Hash: policy.Hash(config), Config: config}); err != nil {
+		t.Fatal(err)
+	}
+	var fatals int
+	e.OnFatal = func(error) { fatals++ }
+	if err := e.Stop(platform.WithCleanupOwner(context.Background())); !errors.Is(err, failure) || fatals != 0 {
+		t.Fatal("terminal owner lost cleanup error or was preempted", err, fatals)
+	}
+	if !tun.joined.Load() {
+		t.Fatal("terminal error preceded native teardown")
+	}
+	// Ownership is per call; it must not suppress a later ordinary failed stop.
+	routes.cleanup = make(chan struct{})
+	if err := e.Stop(context.Background()); !errors.Is(err, failure) || fatals != 1 {
+		t.Fatal("terminal ownership leaked into ordinary retry", err, fatals)
+	}
+}

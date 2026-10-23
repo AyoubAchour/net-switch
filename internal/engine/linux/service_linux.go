@@ -179,7 +179,7 @@ func ServeHosted(parent context.Context, socket, dir string, options host.Option
 	// Remove capture even if the control transport failed. A nonpersistent
 	// TUN disappearing on SIGKILL also removes its default route, leaving main.
 	stop, cancelStop := context.WithTimeout(context.Background(), 10*time.Second)
-	err = errors.Join(err, runtime.Stop(stop))
+	err = errors.Join(err, runtime.Stop(platform.WithCleanupOwner(stop)))
 	cancelStop()
 	cancel()
 	l.Close()

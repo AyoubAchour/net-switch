@@ -67,6 +67,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $buildCases = @(
             @{ Tags = ''; Tests = @('TestProductNoProcessDiagnostics', 'TestPrivatePipeACLBeforePIDCheck', 'TestAdapterRetirementPrecedesJournalClosure', 'TestAdapterRetirementHonorsCancellation', 'TestAdapterRetirementMayOutliveTwoSeconds') },
+            @{ Tags = ''; Tests = @('TestAdapterLossContractCleansJournalAndNativeHandleBeforeReceipt', 'TestAdapterLossHandoffIsIdempotentAndLeavesOtherErrorsFatal', 'TestServeTailTerminalDecisionAndLateFailures', 'TestServeTailExplicitStopWinsAndFlushesReplyBeforeClose', 'TestServeTailLeaseCleanupAfterFailedStopWins', 'TestServeTailExplicitStopUnresponsiveControllerIsBounded', 'TestServeTailNoControllerStillReturnsAdapterLoss', 'TestRuntimeStopAfterLossLatchRetriesCancelledCleanup', 'TestServeTailDefersFinalizationUntilTimedOutProbeActuallyJoins') },
             @{ Tags = 'netswitch_handlecheck'; Tests = @('TestUDPPortSpaceDiagnosisReadsHostedSettings', 'TestPortConfigurationMatchesNativeProvider') }
           )
           foreach ($buildCase in $buildCases) {
