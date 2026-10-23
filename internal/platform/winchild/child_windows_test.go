@@ -7,8 +7,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -24,12 +26,65 @@ func hosted() bool {
 	return os.Getenv("GITHUB_ACTIONS") == "true" && os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted" && os.Getenv("NETSWITCH_CHILD_CI") == "1"
 }
 
+func requireHosted(t *testing.T) {
+	t.Helper()
+	if hosted() {
+		return
+	}
+	if os.Getenv("GITHUB_ACTIONS") == "true" || os.Getenv("NETSWITCH_CHILD_CI") != "" {
+		t.Fatal("hosted launcher proof requires NETSWITCH_CHILD_CI=1 and RUNNER_ENVIRONMENT=github-hosted")
+	}
+	t.Skip("process proofs run only on hosted runners")
+}
+
 func TestMain(m *testing.M) {
 	if len(os.Args) >= 3 && os.Args[1] == "--guarded-child-fixture" {
 		if !hosted() {
 			os.Exit(99)
 		}
 		switch os.Args[2] {
+		case "exit-command":
+			fmt.Println("READY")
+			bufio.NewReader(os.Stdin).ReadString('\n')
+			os.Exit(3)
+		case "ordinary-child":
+			exe, _ := os.Executable()
+			c := exec.Command(exe, "--guarded-child-fixture", "exit", "0")
+			if err := c.Start(); err == nil {
+				c.Wait()
+				os.Exit(94)
+			}
+			fmt.Println("ORDINARY_CHILD_REFUSED")
+		case "replace-image":
+			path, _ := os.Executable()
+			if err := os.Rename(path, path+".old"); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(93)
+			}
+			in, err := os.Open(path + ".old")
+			if err != nil {
+				os.Exit(92)
+			}
+			out, err := os.Create(path)
+			if err != nil {
+				os.Exit(91)
+			}
+			_, copyErr := io.Copy(out, in)
+			if err := errors.Join(copyErr, out.Close(), in.Close()); err != nil {
+				os.Exit(90)
+			}
+			p, err := StartSelf(Options{Args: []string{"--guarded-child-fixture", "hold"}, Env: os.Environ()})
+			if err == nil {
+				if p.Identity.File != startupImageID {
+					p.Close()
+					os.Exit(89)
+				}
+				p.Close()
+			} else if !strings.Contains(err.Error(), "image file changed") {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(88)
+			}
+			fmt.Println("SAME_IMAGE_FILE_ENFORCED")
 		case "create-window", "create-window-uncontained":
 			report := func(pid uint32) {
 				fmt.Println(pid)
@@ -88,9 +143,7 @@ func TestMain(m *testing.M) {
 }
 
 func TestHostedDeathAtCreateReturnClosesTheOldOrphanWindow(t *testing.T) {
-	if !hosted() {
-		t.Skip("creation death proofs run only on hosted runners")
-	}
+	requireHosted(t)
 	for _, mode := range []string{"create-window-uncontained", "create-window"} {
 		t.Run(mode, func(t *testing.T) {
 			exe, err := os.Executable()
@@ -199,7 +252,7 @@ func TestHostedFullOutputPipesDoNotBlockTermination(t *testing.T) {
 }
 
 func TestEnvironmentIsExplicitAndBounded(t *testing.T) {
-	for _, env := range [][]string{nil, {"A=bad\x00value"}, {"A=" + strings.Repeat("x", 32767)}} {
+	for _, env := range [][]string{nil, {""}, {"NO_EQUALS"}, {"=notDrive"}, {"=ZZ:=x"}, {"A=1", "", "GOMEMLIMIT=8MiB"}, {"A=bad\x00value"}, {"A=" + strings.Repeat("x", 32767)}} {
 		if _, err := environment(env); err == nil {
 			t.Fatal("invalid environment accepted")
 		}
@@ -231,9 +284,7 @@ func TestRegistrarParentRequiresExplicitGuard(t *testing.T) {
 
 func startFixture(t *testing.T, registrar bool, args ...string) *Process {
 	t.Helper()
-	if !hosted() {
-		t.Skip("guarded process proofs run only on hosted runners")
-	}
+	requireHosted(t)
 	p, err := StartSelf(Options{Args: append([]string{"--guarded-child-fixture"}, args...), Env: os.Environ(), RegistrarBreakaway: registrar})
 	if err != nil {
 		t.Fatal(err)
@@ -247,6 +298,114 @@ func startFixture(t *testing.T, registrar bool, args ...string) *Process {
 		t.Fatal("missing verified identity", p.Identity)
 	}
 	return p
+}
+
+func TestHostedNaturalExitThreeWinsTerminationRace(t *testing.T) {
+	p := startFixture(t, true, "exit-command")
+	if err := p.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if line, err := bufio.NewReader(p.Output).ReadString('\n'); err != nil || line != "READY\n" {
+		t.Fatal(line, err)
+	}
+	previous := beforeTerminate
+	defer func() { beforeTerminate = previous }()
+	raced := false
+	beforeTerminate = func() {
+		if _, err := io.WriteString(p.Input, "exit\n"); err != nil {
+			t.Fatal(err)
+		}
+		state, err := windows.WaitForSingleObject(p.process.Handle("natural exit race"), 5000)
+		if err != nil || state != windows.WAIT_OBJECT_0 {
+			t.Fatal(state, err)
+		}
+		raced = true
+	}
+	if err := p.Terminate(); err != nil {
+		t.Fatal(err)
+	}
+	if result := awaitExit(t, p); !raced || result.Code != 3 || result.Forced {
+		t.Fatal("clean 3 counted as forced", raced, result)
+	}
+}
+
+func TestHostedOrdinaryChildRefusedAndReplacedImageRejected(t *testing.T) {
+	p := startFixture(t, true, "ordinary-child")
+	if err := p.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if result := awaitExit(t, p); result.Code != 0 || result.Forced {
+		t.Fatal("ordinary descendant was allowed", result)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "replace-fixture.exe")
+	in, err := os.Open(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := os.Create(path)
+	if err != nil {
+		in.Close()
+		t.Fatal(err)
+	}
+	_, copyErr := io.Copy(out, in)
+	if err := errors.Join(copyErr, out.Close(), in.Close()); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(filepath.Dir(path), "image-alias.exe")
+	if err := os.Link(path, alias); err != nil {
+		t.Fatal(err)
+	}
+	first, firstErr := imageIDAt(path)
+	second, secondErr := imageIDAt(alias)
+	if firstErr != nil || secondErr != nil || first != second {
+		t.Fatal("same file under different paths did not match", firstErr, secondErr)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c := exec.CommandContext(ctx, path, "--guarded-child-fixture", "replace-image")
+	b, err := c.CombinedOutput()
+	if err != nil || !strings.Contains(string(b), "SAME_IMAGE_FILE_ENFORCED") {
+		t.Fatal("image replacement check", err, string(b))
+	}
+}
+
+func TestHostedRegistrarCapabilityJoinsBeforeChildWaitCompletes(t *testing.T) {
+	child := startFixture(t, true, "hold")
+	registrar := startFixture(t, false, "hold") // independent lifetime, deliberately kept alive
+	var remote windows.Handle
+	if err := windows.DuplicateHandle(windows.CurrentProcess(), registrar.process.Handle("test registrar source"), child.process.Handle("test child capability receiver"),
+		&remote, windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.TrackRegistrar(Registrar{Handle: uint64(remote), PID: registrar.Identity.PID}); err != nil {
+		t.Fatal(err)
+	}
+	if err := child.TrackRegistrar(Registrar{Handle: uint64(remote), PID: registrar.Identity.PID}); err != nil || len(child.registrars) != 1 {
+		t.Fatal("acknowledgement retry consumed another observer slot", err)
+	}
+	if _, err := windows.GetProcessId(child.registrars[0].Handle("test synchronize-only observer")); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatal("observer retained extra access", err)
+	}
+	if err := child.Terminate(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	_, err := child.Wait(ctx)
+	cancel()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal("child wait did not include the live registrar", err)
+	}
+	if err := registrar.Terminate(); err != nil {
+		t.Fatal(err)
+	}
+	if exit := awaitExit(t, child); !exit.Forced {
+		t.Fatal(exit)
+	}
+	t.Log("REGISTRAR_OBSERVER synchronize_only=true child_wait_includes_registrar=true")
 }
 
 func awaitExit(t *testing.T, p *Process) Exit {

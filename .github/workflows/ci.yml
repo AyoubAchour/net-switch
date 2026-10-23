@@ -481,6 +481,7 @@ jobs:
             runner: windows-11-arm
     env: &go1-env
       GOTOOLCHAIN: local
+      NETSWITCH_CHILD_CI: '1'
       GOMAXPROCS: '2'
       GOFLAGS: -mod=vendor -p=2
     steps: &go1-steps

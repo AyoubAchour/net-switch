@@ -23,11 +23,18 @@ import (
 
 const jobListAttribute = 0x0002000D
 
+const forcedExitCode uint32 = 0xe04e5301
+
 var closeOwner = func(owner winhandle.Owner, site string) error { return owner.HandleClose(site) }
 
 // Hosted death injection immediately after creation, before identity checks.
 // Production has no hook and never performs a later job-assignment operation.
 var afterCreate func(windows.ProcessInformation)
+var beforeTerminate func() // hosted natural-exit race barrier
+
+var restrictHandles = func(attrs *windows.ProcThreadAttributeListContainer, handles []windows.Handle) error {
+	return attrs.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&handles[0]), uintptr(len(handles))*unsafe.Sizeof(handles[0]))
+}
 
 type Options struct {
 	Args               []string
@@ -40,6 +47,7 @@ type Identity struct {
 	PID     uint32
 	Created uint64 // Windows creation FILETIME, read through the pinned process handle
 	Image   string
+	File    FileID
 }
 
 type Exit struct {
@@ -50,12 +58,14 @@ type Exit struct {
 type Process struct {
 	Identity                         Identity
 	Input, Output, Errors            *winhandle.File
-	mu, closeMu                      sync.Mutex
+	mu, closeMu, joinMu              sync.Mutex
 	process, thread, job             winhandle.Owner
 	done                             chan struct{}
 	exit                             Exit
 	waitErr, closeErr                error
 	forced, resumed, closing, closed bool
+	registrars                       []winhandle.Owner
+	registrarsJoined                 bool
 }
 
 func environment(entries []string) ([]uint16, error) {
@@ -64,6 +74,11 @@ func environment(entries []string) ([]uint16, error) {
 	}
 	var block []uint16
 	for _, entry := range entries {
+		key, _, found := strings.Cut(entry, "=")
+		drive := len(entry) >= 4 && entry[0] == '=' && ((entry[1] >= 'A' && entry[1] <= 'Z') || (entry[1] >= 'a' && entry[1] <= 'z')) && entry[2:4] == ":="
+		if !found || (key == "" && !drive) {
+			return nil, errors.New("invalid child environment entry")
+		}
 		part, err := windows.UTF16FromString(entry)
 		if err != nil {
 			return nil, err
@@ -114,6 +129,9 @@ func StartSelf(o Options) (_ *Process, err error) {
 	if err != nil {
 		return nil, err
 	}
+	if startupImageError != nil {
+		return nil, fmt.Errorf("capture running image identity: %w", startupImageError)
+	}
 	app, err := windows.UTF16PtrFromString(exe)
 	if err != nil {
 		return nil, err
@@ -135,6 +153,10 @@ func StartSelf(o Options) (_ *Process, err error) {
 		return nil, fmt.Errorf("pin child image: %w", err)
 	}
 	imageOwner := winhandle.Open(image, "guarded child image pin")
+	pinnedID, identityErr := fileID(image)
+	if identityErr != nil || pinnedID != startupImageID {
+		return nil, errors.Join(fmt.Errorf("running image file changed before child launch: %v", identityErr), closeOwner(imageOwner, "changed child image unpin"))
+	}
 	p := &Process{done: make(chan struct{})}
 	var ends []*winhandle.File
 	var inherited []winhandle.Owner
@@ -203,7 +225,7 @@ func StartSelf(o Options) (_ *Process, err error) {
 		return nil, err
 	}
 	defer attrs.Delete()
-	if err := attrs.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&handles[0]), uintptr(len(handles))*unsafe.Sizeof(handles[0])); err != nil {
+	if err := restrictHandles(attrs, handles); err != nil {
 		return nil, err
 	}
 	jobs := []windows.Handle{job}
@@ -238,10 +260,11 @@ func StartSelf(o Options) (_ *Process, err error) {
 		return nil, err
 	}
 	actual := windows.UTF16ToString(path[:size])
-	if !strings.EqualFold(filepath.Clean(actual), filepath.Clean(exe)) {
-		return nil, fmt.Errorf("unexpected child image %q", actual)
+	actualID, err := imageIDAt(actual)
+	if err != nil || actualID != startupImageID {
+		return nil, fmt.Errorf("unexpected child image file identity at %q: %v", actual, err)
 	}
-	p.Identity = Identity{pi.ProcessId, uint64(creation.HighDateTime)<<32 | uint64(creation.LowDateTime), actual}
+	p.Identity = Identity{pi.ProcessId, uint64(creation.HighDateTime)<<32 | uint64(creation.LowDateTime), actual, actualID}
 	transferred = true
 	return p, nil
 }
@@ -311,7 +334,7 @@ func (p *Process) observe() {
 		err = windows.GetExitCodeProcess(p.process.Handle("guarded child raw exit"), &code)
 	}
 	p.mu.Lock()
-	p.exit, p.waitErr = Exit{code, p.forced}, err
+	p.exit, p.waitErr = Exit{code, p.forced && code == forcedExitCode}, err
 	close(p.done)
 	p.mu.Unlock()
 }
@@ -321,6 +344,9 @@ func (p *Process) Wait(ctx context.Context) (Exit, error) {
 	case <-ctx.Done():
 		return Exit{}, ctx.Err()
 	case <-p.done:
+		if err := p.joinRegistrars(ctx); err != nil {
+			return Exit{}, err
+		}
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		return p.exit, p.waitErr
@@ -338,7 +364,10 @@ func (p *Process) terminateLocked() error {
 		return err
 	}
 	p.forced = true
-	return windows.TerminateJobObject(p.job.Handle("guarded child terminate"), 1)
+	if beforeTerminate != nil {
+		beforeTerminate()
+	}
+	return windows.TerminateJobObject(p.job.Handle("guarded child terminate"), forcedExitCode)
 }
 
 func (p *Process) Terminate() error {
@@ -377,6 +406,10 @@ func (p *Process) Close() error {
 		p.closeErr = errors.Join(p.closeErr, closeOwner(p.thread, "guarded child unresumed thread close"))
 	}
 	p.closeErr = errors.Join(p.closeErr, closeOwner(p.process, "guarded child process close"))
+	for _, registrar := range p.registrars {
+		p.closeErr = errors.Join(p.closeErr, closeOwner(registrar, "guarded registrar observer close"))
+	}
+	p.registrars = nil
 	p.mu.Unlock()
 	p.closeErr = errors.Join(p.closeErr, closeFile(p.Input), closeFile(p.Output), closeFile(p.Errors))
 	p.closed = true

@@ -2,10 +2,10 @@ name: Native service contracts
 
 on:
   pull_request:
-    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml']
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
   push:
     branches: [main]
-    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml']
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
   workflow_dispatch:
     inputs:
       runner:
@@ -54,6 +54,7 @@ jobs:
       - name: Offline native contracts, including the full totals measurement
         shell: bash
         run: |
+          node .github/ci/registrar-breakaway.mjs
           go test -v -count=1 ./internal/engine ./internal/engine/host ./internal/engine/protocol ./internal/engine/flows ./internal/engine/probe ./internal/engine/testproxy ./internal/service
           go test -v -count=1 -tags lifecycle_test ./internal/engine/testproxy
           go test -tags lifecycle_test -run '^$' -fuzz '^FuzzProxyHandshake$' -fuzztime=5s ./internal/engine/testproxy
@@ -64,7 +65,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          go test -v -count=1 -run '^Test(ProbeUnavailable|RetiredLine|RouteStats|WindowsStatsStayBounded)' ./internal/engine/windows
+          go test -v -count=1 -run '^Test(ProductNoProcessDiagnostics|ProbeUnavailable|RetiredLine|RouteStats|WindowsStatsStayBounded)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($variant in @('product', 'faults')) {
             if ($env:NATIVE_FAULTS_ONLY -eq '1' -and $variant -eq 'product') { continue }
@@ -108,7 +109,7 @@ jobs:
           "CONTAINMENT_BINARY $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256"
           & (Join-Path $proof 'winchild.test.exe') '-test.v' '-test.timeout=2m'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & (Join-Path $proof 'wintun.test.exe') '-test.v' '-test.timeout=5m' '-test.run=^TestWintunSupervisorContainment$'
+          & (Join-Path $proof 'wintun.test.exe') '-test.v' '-test.timeout=5m' '-test.run=^Test(WintunSupervisorContainment|RegistrarBusyRetryOnlyUnclaimedRegistration)$'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Installed Linux services, product and fault builds
         if: runner.os == 'Linux'

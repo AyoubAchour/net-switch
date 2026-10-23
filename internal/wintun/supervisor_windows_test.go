@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
 	"github.com/AyoubAchour/net-switch/internal/platform/winchild"
@@ -31,10 +32,38 @@ func TestWintunSupervisorChild(t *testing.T) {
 	if !ok {
 		t.Fatal("invalid child fixture")
 	}
-	must(t, ConfigureSupervisorChild())
+	must(t, ConfigureSupervisorChild(func(ctx context.Context, registrar winchild.Registrar) error {
+		message, err := json.Marshal(registrar)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("REGISTRAR_OBSERVE %s\n", message)
+		ack := make(chan error, 1)
+		go func() {
+			line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+			if err == nil && line != "REGISTRAR_ACK\n" {
+				err = fmt.Errorf("unexpected observer acknowledgement %q", line)
+			}
+			ack <- err
+		}()
+		select {
+		case err := <-ack:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}))
 	provenance := productionEngine(t)
 	registrarExecutable = func() (string, error) { return provenance.Path, nil }
 	registrarBeforeResume = func(pid uint32, job windows.Handle) {
+		process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+		must(t, err)
+		var member uint32
+		ok, _, membershipErr := isProcessInJob.Call(uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&member)))
+		must(t, windows.CloseHandle(process))
+		if ok == 0 || member == 0 {
+			t.Fatalf("registrar not in its own restricted job: member=%d error=%v", member, membershipErr)
+		}
 		var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 		var ui windows.JOBOBJECT_BASIC_UI_RESTRICTIONS
 		must(t, winapi.QueryJobInformation(job, windows.JobObjectExtendedLimitInformation, &limits))
@@ -88,7 +117,13 @@ func TestWintunSupervisorHost(t *testing.T) {
 	var tail []string
 	for scan.Scan() {
 		line := scan.Text()
-		if rest, ok := strings.CutPrefix(line, "REGISTRAR_CREATED "); ok {
+		if rest, ok := strings.CutPrefix(line, "REGISTRAR_OBSERVE "); ok {
+			var registrar winchild.Registrar
+			must(t, json.Unmarshal([]byte(rest), &registrar))
+			must(t, p.TrackRegistrar(registrar)) // production handle handoff, before resume
+			_, err := io.WriteString(p.Input, "REGISTRAR_ACK\n")
+			must(t, err)
+		} else if rest, ok := strings.CutPrefix(line, "REGISTRAR_CREATED "); ok {
 			fields := strings.Fields(rest)
 			pid, err := strconv.ParseUint(fields[0], 10, 32)
 			must(t, err)
@@ -179,16 +214,16 @@ func TestWintunSupervisorContainment(t *testing.T) {
 			} else {
 				must(t, windows.TerminateProcess(child, 37))
 			}
-			if dead, code := exitState(child, 5*time.Second); !dead || code == 0 || code == 3 {
-				t.Fatal("child did not die as a failure", dead, code)
+			dead, childCode := exitState(child, 5*time.Second)
+			if !dead {
+				t.Fatal("child survived host/child termination", childCode)
 			}
-			if registrar != 0 {
-				if dead, _ := exitState(registrar, 5*time.Second); !dead {
-					t.Fatal("registrar survived owner/host death")
-				}
+			if strings.HasPrefix(stage, "child-") && childCode != 37 {
+				t.Fatal("explicit termination code changed", childCode)
 			}
-			if code := host.join(t, 10*time.Second); code == 0 {
-				t.Fatal("host death fixture was a clean exit")
+			hostCode := host.join(t, 10*time.Second)
+			if hostCode == 0 || hostCode == 3 {
+				t.Fatal("host observer classified forced loss as clean stop/adapter loss", hostCode, childCode)
 			}
 			// Same creator and adapter; a new registration and traffic prove the
 			// earlier registration was released, not hidden by adapter removal.
@@ -196,7 +231,15 @@ func TestWintunSupervisorContainment(t *testing.T) {
 			exchange(t, 16)
 			fresh.stopEcho()
 			must(t, fresh.io.Close())
+			// Check only AFTER recovery: production's registrar observer (or the
+			// bounded registration path after host death) must close the race.
+			if registrar != 0 {
+				if dead, _ := exitState(registrar, 0); !dead {
+					t.Fatal("registrar survived recovery")
+				}
+			}
 			report(t, map[string]any{"test": "supervisor_containment", "stage": stage, "child": id,
+				"raw_child_exit": childCode, "host_exit": hostCode, "outcome_source": "host", "classified_failure": true,
 				"elapsed_ms": time.Since(start).Milliseconds(), "same_adapter_recovered": true, "ui_restrictions_preserved": true})
 		})
 	}

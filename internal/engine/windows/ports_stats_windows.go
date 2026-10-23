@@ -7,14 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine"
 	winplatform "github.com/AyoubAchour/net-switch/internal/platform/windows"
-	"github.com/AyoubAchour/net-switch/internal/platform/worker"
 	"golang.org/x/sys/windows"
 )
 
@@ -35,7 +33,11 @@ type portDiagnostics struct {
 
 func newPortDiagnostics() *portDiagnostics {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &portDiagnostics{ctx: ctx, cancel: cancel, state: "notRequested"}
+	state := "notRequested"
+	if !diagnosticProcesses {
+		state = "disabled"
+	}
+	return &portDiagnostics{ctx: ctx, cancel: cancel, state: state}
 }
 
 func portLimit(err error) bool {
@@ -52,6 +54,9 @@ func (p *portDiagnostics) observe(err error) {
 	if old != second && p.lastLog.CompareAndSwap(old, second) {
 		log.Printf("Windows TCP port pool exhausted; refused=%d; bound socket failed: %v", total, err)
 	}
+	if !diagnosticProcesses {
+		return
+	}
 	p.once.Do(func() {
 		p.mu.Lock()
 		p.state = "loading"
@@ -63,19 +68,7 @@ func (p *portDiagnostics) observe(err error) {
 func (p *portDiagnostics) load() {
 	// This diagnostic runs once, only after real port exhaustion. It neither
 	// changes TCP settings nor delays routing startup or the refused packet.
-	executable, err := os.Executable()
-	var config []portTemplate
-	if err == nil {
-		var value any
-		value, err = (worker.Supervisor{Executable: executable}).Once(p.ctx, "tcp-port-configuration", nil)
-		if err == nil {
-			var output []byte
-			output, err = json.Marshal(value)
-			if err == nil {
-				err = json.Unmarshal(output, &config)
-			}
-		}
-	}
+	config, err := readPortConfiguration(p.ctx)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err != nil {
