@@ -3,7 +3,9 @@
 This is the first sequential PR for option (e), recorded in spec §3.4. The full
 hosting, relay, health and installed fault matrix would exceed the review-size
 target. This part establishes Windows launch and registrar ownership first.
-The installed native service still runs in process until the next PR.
+The follow-up now uses these prerequisites for the installed native service:
+see [native hosting and watchdog](m4-native-supervisor.md). The scope and
+evidence below describe the containment prerequisite PR.
 
 ## Launch and ownership
 

@@ -40,6 +40,9 @@ func readNativeOutcome(data string, state Status, err error) Status {
 		return state
 	}
 	state.Cleanup, state.LastError = outcome.State, outcome.Error
+	if state.LastError == "" && outcome.Child != nil {
+		state.LastError = outcome.Child.Error
+	}
 	if state.ManagerBootID != "" && state.ManagerBootID != outcome.BootID {
 		state.Cleanup = "unknown"
 		state.LastError = "native cleanup belongs to another or unknown boot"
@@ -65,10 +68,15 @@ func readNativeOutcome(data string, state Status, err error) Status {
 			state.LastError = fmt.Sprintf("retained main result has no exit code: code=%q status=%q result=%q", outcome.Systemd.Code, outcome.Systemd.Status, outcome.Systemd.Result)
 		}
 	}
-	if outcome.State == "failed" || (state.MainExitKnown && state.MainExitCode == 0 && state.ManagerResult != "" && state.ManagerResult != "success") {
+	incomplete := outcome.Child != nil && (!outcome.Child.Completed || outcome.Child.Forced || state.MainExitKnown && outcome.Child.Code != state.MainExitCode)
+	if outcome.State == "failed" || state.MainExitKnown && incomplete && (state.MainExitCode == 0 || state.MainExitCode == 3) || (state.MainExitKnown && state.MainExitCode == 0 && state.ManagerResult != "" && state.ManagerResult != "success") {
 		state.ExitKnown, state.ExitCode = true, 1
 		if state.LastError == "" {
-			state.LastError = "service cleanup failed: " + state.ManagerResult
+			if incomplete {
+				state.LastError = "native child has no completed, unforced outcome"
+			} else {
+				state.LastError = "service cleanup failed: " + state.ManagerResult
+			}
 		}
 		return state
 	}

@@ -49,6 +49,7 @@ func (r *Routes) StopPhase(name string) func() {
 }
 
 type Routes struct {
+	healthIndex   atomic.Uint32
 	Instance      string
 	mu            sync.Mutex
 	session       *journal.Session
@@ -138,6 +139,7 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 		return nil, err
 	}
 	base := journal.Fingerprint{"guid": wintun.DefaultGUID, "luid": number(luid), "index": number(uint64(index))}
+	r.healthIndex.Store(index)
 	var setup []journal.Creation
 	for _, family := range []uint16{windows.AF_INET, windows.AF_INET6} {
 		fp := maps.Clone(base)

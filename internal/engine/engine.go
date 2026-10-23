@@ -28,6 +28,7 @@ import (
 )
 
 type Dependencies struct {
+	HealthKey  []byte
 	OpenTun    func(context.Context) (platform.TunDevice, error)
 	Routes     platform.RouteManager
 	Dialer     platform.LineDialer
@@ -45,23 +46,25 @@ type Engine struct {
 	// ordinary cleanup and OnFatal path. Install before starting the engine.
 	OnTunError func(error) bool
 
-	OnFatal   func(error)
-	mu        sync.Mutex
-	root      context.Context
-	deps      Dependencies
-	Table     *flows.Table
-	limits    flows.Limits
-	cancel    context.CancelFunc
-	tun       platform.TunDevice
-	stack     *gv.Stack
-	link      *ns.Link
-	tcp       *ntcp.Forwarder
-	udp       *udp.NAT
-	testProxy *testproxy.Server
-	pumps     sync.WaitGroup
-	lastError error
-	lines     []platform.Line
-	live      atomic.Pointer[liveState]
+	OnFatal    func(error)
+	mu         sync.Mutex
+	root       context.Context
+	deps       Dependencies
+	Table      *flows.Table
+	limits     flows.Limits
+	cancel     context.CancelFunc
+	tun        platform.TunDevice
+	stack      *gv.Stack
+	link       *ns.Link
+	tcp        *ntcp.Forwarder
+	udp        *udp.NAT
+	testProxy  *testproxy.Server
+	health     *forwardingCheck
+	healthInfo atomic.Pointer[forwardingInfo]
+	pumps      sync.WaitGroup
+	lastError  error
+	lines      []platform.Line
+	live       atomic.Pointer[liveState]
 }
 
 type liveState struct {
@@ -139,6 +142,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	}
 	e.link = link
 	e.stack = s
+	if err := e.startForwardingCheck(); err != nil {
+		return rollback(err)
+	}
 	// A disconnected controller does not own the forwarding lifetime. The
 	// service context and protocol lease do; reattach keeps these flows alive.
 	run, cancel := context.WithCancel(e.root)
@@ -319,6 +325,11 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 		e.testProxy.Close()
 		e.testProxy = nil
 	}
+	if e.health != nil {
+		e.health.Close()
+		e.health = nil
+	}
+	e.healthInfo.Store(nil)
 	e.Table.Unload()
 	e.Table.CloseAll()
 	finish()

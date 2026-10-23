@@ -109,7 +109,7 @@ func ServeHosted(parent context.Context, socket, dir string, options host.Option
 		}
 		return tun, err
 	}
-	e := engine.New(forwarding, engine.Dependencies{OpenTun: openTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners}, flows.Defaults(), history)
+	e := engine.New(forwarding, engine.Dependencies{OpenTun: openTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners, HealthKey: options.HealthKey}, flows.Defaults(), history)
 	runtime := serviceRuntime{Engine: e, cancel: cancelForwarding, state: state}
 	srv := protocol.New(runtime, e.Table, p)
 	srv.Instance = p.Instance
@@ -129,43 +129,15 @@ func ServeHosted(parent context.Context, socket, dir string, options host.Option
 	if hooks != nil {
 		hooks(p, e, srv)
 	}
-	if !filepath.IsAbs(socket) {
-		return errors.New("control socket must be absolute")
+	listen := options.Listen
+	if listen == nil {
+		listen = func() (host.Listener, error) { return ListenNative(socket) }
 	}
-	if err := os.MkdirAll(filepath.Dir(socket), 0700); err != nil {
-		return err
-	}
-	if err := checkSocketDirectory(filepath.Dir(socket)); err != nil {
-		return err
-	}
-	// Holding the lifetime flock proves the previous engine is gone. A stale
-	// socket is removed only if root owns an actual socket, never a link/file.
-	if st, err := os.Lstat(socket); err == nil {
-		var s unix.Stat_t
-		if err := unix.Lstat(socket, &s); err != nil {
-			return err
-		}
-		if st.Mode()&os.ModeSocket == 0 || s.Uid != 0 {
-			return errors.New("refusing to replace non-engine socket path")
-		}
-		if c, err := net.DialTimeout("unix", socket, 100*time.Millisecond); err == nil {
-			c.Close()
-			return errors.New("another engine is listening on the control socket")
-		}
-		if err := os.Remove(socket); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: socket, Net: "unix"})
+	l, err := listen()
 	if err != nil {
 		return err
 	}
 	defer l.Close()
-	if err := os.Chmod(socket, 0600); err != nil {
-		return err
-	}
 	stopListen := context.AfterFunc(ctx, func() { l.Close() })
 	defer stopListen()
 	leaseDone := make(chan struct{})
@@ -176,15 +148,10 @@ func ServeHosted(parent context.Context, socket, dir string, options host.Option
 	go func() {
 		defer close(acceptDone)
 		for {
-			c, err := l.AcceptUnix()
+			c, err := l.Accept(ctx)
 			if err != nil {
 				acceptErr <- err
 				return
-			}
-			if err := peerRoot(c); err != nil {
-				log.Printf("refused engine peer: %v", err)
-				c.Close()
-				continue
 			}
 			clients.Go(func() {
 				if err := srv.Serve(ctx, c); err != nil && ctx.Err() == nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
@@ -195,7 +162,9 @@ func ServeHosted(parent context.Context, socket, dir string, options host.Option
 	}()
 	log.Printf("engine %s ready at %s", p.Instance, socket)
 	if options.Ready != nil {
+		options.Stage("ready-callback-begin")
 		options.Ready(srv)
+		options.Stage("ready-callback-end")
 	}
 	select {
 	case <-parent.Done():

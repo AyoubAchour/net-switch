@@ -16,7 +16,7 @@
     "args": ["-test.run=^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine|SurpriseRemovalReleasesCrossProcessRegistration|EngineCrashReleasesRealRegistration))$"]
   },
   {
-    "name": "supervisor-containment", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 300,
+    "name": "supervisor-containment", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 300, "proof": "containment",
     "args": ["-test.run=^TestWintunSupervisorContainment$"]
   },
   {

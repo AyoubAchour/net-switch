@@ -3,11 +3,18 @@
 package host
 
 import (
+	"context"
 	"crypto/tls"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"io"
 )
+
+type Listener interface {
+	Accept(context.Context) (io.ReadWriteCloser, error)
+	Close() error
+}
 
 type State interface {
 	flows.StateStore
@@ -16,6 +23,11 @@ type State interface {
 }
 
 type Options struct {
+	// Listen replaces only the transport. The child retains all protocol state.
+	Listen func() (Listener, error)
+	// HealthKey enables the private, TUN-bound forwarding endpoint for a child.
+	// It is delivered over inherited capabilities, never the public protocol.
+	HealthKey []byte
 	// OpenState runs only after the native lifetime lock has been acquired.
 	OpenState func(instance string) (State, error)
 	// Ready runs after the authenticated listener and its workers exist.

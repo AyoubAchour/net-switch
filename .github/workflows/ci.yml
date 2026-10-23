@@ -763,7 +763,7 @@ jobs:
       - name: Registrar ownership, loss and release-engine footprint
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=12m' '-test.run=^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine|SurpriseRemovalReleasesCrossProcessRegistration|EngineCrashReleasesRealRegistration))$'
       - name: Supervised child and registrar death boundaries
-        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintunSupervisorContainment$'
+        run: node scripts/run-native-proof.mjs containment ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestWintunSupervisorContainment$'
       - name: Single-packet ping-pong, 200000 round trips per implementation
         if: ${{ !cancelled() }}
         run: ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunPingPong$'

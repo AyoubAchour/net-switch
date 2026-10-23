@@ -14,15 +14,26 @@ import (
 )
 
 type Outcome struct {
-	Instance string `json:"engineInstanceId"`
-	State    string `json:"state"` // running, pending, complete, failed
-	Reason   string `json:"reason,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Child    *ChildOutcome `json:"child,omitempty"`
+	Instance string        `json:"engineInstanceId"`
+	State    string        `json:"state"` // running, pending, complete, failed
+	Reason   string        `json:"reason,omitempty"`
+	Error    string        `json:"error,omitempty"`
 	// systemd can unload an inactive unit and forget ExecMainStatus. Only its
 	// matching ExecStopPost invocation may supply the retained main result.
 	InvocationID string       `json:"invocationId,omitempty"`
 	BootID       string       `json:"bootId,omitempty"`
 	Systemd      *SystemdExit `json:"systemd,omitempty"`
+}
+
+type ChildOutcome struct {
+	HostHealthPasses uint64 `json:"hostHealthPasses,omitempty"`
+	HostLogsDropped  uint64 `json:"hostLogsDropped,omitempty"`
+	PID              uint32 `json:"pid"`
+	Code             uint32 `json:"code"`
+	Forced           bool   `json:"forced"`
+	Completed        bool   `json:"completed"`
+	Error            string `json:"error,omitempty"`
 }
 
 func OutcomePath(data, instance string) (string, error) {

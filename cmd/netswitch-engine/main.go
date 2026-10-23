@@ -10,6 +10,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "native-child" {
+		if err := lifecycle.NativeChildCommand(os.Args[2:]); err != nil {
+			// The private channel carries the outcome. A full log pipe must
+			// never hold the child's process exit after routing cleanup.
+			os.Exit(exitCode(err))
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "worker" {
 		os.Exit(lifecycle.Worker(os.Args[2:]))
 	}

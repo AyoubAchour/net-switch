@@ -2,6 +2,8 @@
 
 2026-10-22. This is the first reviewable part of the native-contracts PR in the M4 plan. Control's production cutover is still separate.
 
+For the current child process model and watchdog, see [native supervision](m4-native-supervisor.md). The in-process stall evidence below is the earlier design evidence.
+
 ## Scope
 
 The `m4_native` build uses the native runtime through the installed `netswitch-engine service` entrypoint and Ctl cleanup. Ordinary builds retain the M2 stand-in until the Control cutover. Selection is compile-time; there is no runtime fallback. The temporary tag goes away at cutover.

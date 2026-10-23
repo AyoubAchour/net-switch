@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,6 +21,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/AyoubAchour/net-switch/internal/engine/supervisor"
 )
 
 // This fault only exists in hosted-test builds. The arm/hit/release files are
@@ -128,6 +130,16 @@ func configureNativeProof(data string, options *host.Options) error {
 			if err := json.Unmarshal(b, &request); err != nil {
 				return nil, err
 			}
+			if request.Kind == "log-flood" {
+				logger, ok := log.Writer().(*supervisor.Log)
+				if !ok {
+					return nil, errors.New("child bounded logger unavailable")
+				}
+				for range 512 {
+					logger.Write(make([]byte, 4096))
+				}
+				return map[string]uint64{"dropped": logger.Dropped.Load()}, nil
+			}
 			if request.Kind == "probe-exhaustion" {
 				probeExhausted.Store(true)
 				return true, nil
@@ -167,6 +179,32 @@ func configureNativeProof(data string, options *host.Options) error {
 		return &stalledReader{TunDevice: tun, data: data}
 	}
 	return nil
+}
+
+func nativeProofBeforeReady(data string) error {
+	if _, err := os.Stat(filepath.Join(data, "fault-native-startup-exit")); err == nil {
+		return errors.New("hosted startup death before readiness")
+	}
+	return nil
+}
+func nativeProofLogSink(ctx context.Context, data string, report func(string)) func(string) {
+	return func(s string) {
+		path := filepath.Join(data, "fault-native-log-sink")
+		if _, err := os.Stat(path); err == nil {
+			_ = Save(path+".hit", map[string]int{"pid": os.Getpid()})
+			for {
+				if _, err := os.Stat(path); os.IsNotExist(err) {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+		}
+		report(s)
+	}
 }
 
 // Hosted-only: attempt write opens without writing any bytes. This executes
