@@ -183,13 +183,12 @@ func tcpTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float6
 	var contents [][]byte
 	var references [][]byte
 	var wants [][sha256.Size]byte
-	var transfer uint64
+	transfer := integrityTransferID.Add(1)
 	label := "transfer"
 	if len(phase) != 0 {
 		label = phase[0]
 	}
 	if f.integrity != nil {
-		transfer = integrityTransferID.Add(1)
 		contents = make([][]byte, streams)
 		references = make([][]byte, streams)
 		wants = make([][sha256.Size]byte, streams)
@@ -254,14 +253,24 @@ func tcpTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float6
 			digest := sha256.New()
 			var receiver io.Reader = c
 			var hostReader *integrityReader
+			var capture *payloadCaptureReader
 			if f.integrity != nil {
 				hostReader = &integrityReader{reader: c, d: f.integrity, stage: "host_receive", local: c.LocalAddr().String(), connection: identity}
 				if identity != nil {
 					hostReader.fastReference = references[i]
 				}
 				receiver = hostReader
+			} else if !f.skipPayloadCapture {
+				capture = &payloadCaptureReader{reader: c, expected: content}
+				receiver = capture
 			}
 			received, err := io.CopyN(digest, receiver, size)
+			if capture != nil && capture.first != nil {
+				report(t, map[string]any{"test": "tcp_payload_difference", "verdict": "integrity_failure", "mode": f.mode,
+					"pair": performancePair(t.Name()), "test_path": t.Name(), "phase": label, "transfer_id": transfer,
+					"stream_id": i, "local": c.LocalAddr().String(), "length": received, "expected_length": size,
+					"difference": capture.first, "expected_sha256": fmt.Sprintf("%x", want), "actual_sha256": fmt.Sprintf("%x", digest.Sum(nil))})
+			}
 			if f.integrity != nil {
 				f.integrity.hashes(identity, want[:], digest.Sum(nil), received, hostReader.reads)
 			}

@@ -675,8 +675,15 @@ jobs:
           artifact: wintun
       - name: Fetch the pinned signed DLL unchanged
         run: ./scripts/prepare-wintun-tests.ps1
+      - name: Measure inline capture against SHA-only in the ordinary binary
+        if: matrix.scenario == 'proof'
+        run: |
+          go test -c -o ./bin/wintun-capture.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./bin/wintun-capture.test.exe '-test.v' '-test.run=^TestWintunCaptureProof$' '-test.timeout=8m'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Repeat complete matched cases without retrying or replacing failures
-        run: ./scripts/test-wintun-integrity.ps1 -Repeats $env:INTEGRITY_REPEATS -Scenario $env:INTEGRITY_SCENARIO -Arch $env:RUNNER_ARCH
+        run: node scripts/wintun-integrity-summary.mjs
       - name: Keep full-sequence CPU profiles
         if: always() && matrix.scenario == 'full'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

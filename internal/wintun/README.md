@@ -275,6 +275,39 @@ against the test-only in-process registration.
 
 ### TCP integrity investigation (hosted CI only)
 
+Ordinary TCP performance runs also compare each existing 32 KiB receive read
+against the shared deterministic sender slice using `bytes.Equal`. They retain
+only the first difference, with stream/transfer ID, implementation, pair,
+warm-up/measurement label, received length, byte offset and up to 64 bytes
+before and after it (clipped to that read). Reading and SHA-256 continue
+unchanged. `tcp_payload_difference` emits the excerpt and both hashes before
+teardown, including partial reads. No 512 MiB receive body is retained.
+The expected slice is shared with the sender; SHA-256 remains the independent
+check if that slice itself changes. The opt-in diagnostic uses separate oracles.
+
+The small proof first runs `TestWintunCaptureProof` in an **ordinary untagged
+binary**: eight fixed alternating-order SHA-only/capture pairs per implementation,
+same shared payload and two warm-ups. It logs every matched rate and ratio;
+the per-mode median must retain 95% of SHA-only throughput. This is an overhead
+guard, not a claim that the overhead has already been measured negligible.
+The only capture bypass is a fixture field set by this hosted proof's baseline;
+normal CI has no environment switch that can silently disable the comparison.
+
+`wintun-nightly.yml` runs at 03:17 UTC once merged into the default branch.
+Eighteen shards per architecture/scenario, two cycles each, produce 72 jobs
+under one `max-parallel: 10` cap. Each boundary gets three shards per variant.
+Observed job durations predict roughly 2.5–3 hours with available runner slots;
+queue contention can extend this. The nightly workflow also allows manual
+dispatch and serializes its own invocations. Do not launch an additional manual
+hunt alongside it if the combined work would occupy the remaining CI slots.
+
+The job summary distinguishes positive TCP byte/hash evidence, incomplete
+diagnostics, timeouts and unrelated test failures. Known recovery/throughput
+failure signatures are named separately. All failed exit codes remain failed;
+no general test failure is silently waived or labelled TCP corruption. Detailed
+boundary records stay in the Actions log. This workflow reports observations;
+it never closes the release blocker.
+
 First dispatch `ci.yml` with `wintun_integrity=true`,
 `wintun_integrity_arch=both`, `wintun_integrity_shards=2`, and
 `wintun_integrity_scenario=proof`: **four jobs total**. Both architectures share

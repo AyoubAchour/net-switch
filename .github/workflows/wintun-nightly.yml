@@ -1,0 +1,103 @@
+name: Nightly TCP integrity
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One shared matrix; do not overlap two nightly/manual invocations of it.
+concurrency:
+  group: wintun-nightly
+  cancel-in-progress: false
+
+jobs:
+  wintun-integrity:
+    name: TCP integrity / ${{ matrix.runner }} / ${{ matrix.scenario }} / ${{ matrix.shard }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        # Interleave scenario/architecture per shard so every kind starts in
+        # the first wave. A hunt is ONE matrix, not two independent caps.
+        shard: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18]
+        scenario: [isolated, full]
+        runner: [windows-latest, windows-11-arm]
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+      NETSWITCH_WINTUN_INTEGRITY: '1'
+      NETSWITCH_WINTUN_INTEGRITY_BOUNDARY: rotate
+      INTEGRITY_REPEATS: '2'
+      INTEGRITY_SCENARIO: ${{ matrix.scenario }}
+      INTEGRITY_SHARD: ${{ matrix.shard }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Read the pinned Go version
+        id: pins
+        run: |
+          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
+          "go_version=$($pins.go.version)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ steps.pins.outputs.go_version }}
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check full-sequence parity and the read-only PowerShell plans
+        run: node --test .github/ci/wintun-integrity.test.mjs
+      - name: Compile explicitly instrumented test binary and verify diagnostic logic
+        run: |
+          go test -tags=wintun_integrity -c -o ./bin/wintun.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./bin/wintun.test.exe '-test.v' '-test.run=^Test(Integrity|Performance)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build and identify the uninstrumented release registrar
+        run: |
+          go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o dist/registrar-release/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $engine = (Resolve-Path dist/registrar-release/netswitch-engine.exe).Path
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant()
+          "Release registrar from $env:GITHUB_SHA, SHA-256 $hash"
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE=$engine" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Race-check the pure diagnostic on x64
+        if: runner.arch == 'X64'
+        run: go test -race -tags=wintun_integrity -count=1 -v -run '^Test(Integrity|Performance)' ./internal/wintun
+      - name: Build the normal race/handlecheck binary for the full sequence
+        if: runner.arch == 'X64' && matrix.scenario == 'full'
+        run: go test -race -tags=netswitch_handlecheck -c -o ./bin/wintun-race.test.exe ./internal/wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - name: Fetch the pinned signed DLL unchanged
+        run: ./scripts/prepare-wintun-tests.ps1
+      - name: Measure inline capture against SHA-only in the ordinary binary
+        if: matrix.scenario == 'proof'
+        run: |
+          go test -c -o ./bin/wintun-capture.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./bin/wintun-capture.test.exe '-test.v' '-test.run=^TestWintunCaptureProof$' '-test.timeout=8m'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Repeat complete matched cases without retrying or replacing failures
+        run: node scripts/wintun-integrity-summary.mjs
+      - name: Keep full-sequence CPU profiles
+        if: always() && matrix.scenario == 'full'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: wintun-integrity-${{ runner.arch }}-${{ matrix.scenario }}-${{ matrix.shard }}-profiles
+          path: bin/wintun-*-cpu.pprof
+          retention-days: 14

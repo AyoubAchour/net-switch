@@ -137,13 +137,16 @@ type batchIO interface {
 }
 
 type fixture struct {
-	integrity *integrityDiagnostic
-	a         *Adapter
-	io        batchIO
-	stopEcho  func()
-	faults    atomic.Uint64
-	faultMu   sync.Mutex
-	lastFault error
+	mode string
+	// Only the hosted capture overhead proof sets this, for its SHA-only baseline.
+	skipPayloadCapture bool
+	integrity          *integrityDiagnostic
+	a                  *Adapter
+	io                 batchIO
+	stopEcho           func()
+	faults             atomic.Uint64
+	faultMu            sync.Mutex
+	lastFault          error
 }
 
 func (f *fixture) recordFault(err error) {
@@ -201,7 +204,7 @@ func newFixture(t *testing.T, mode string, capacity uint32) *fixture {
 
 func fixtureOnAdapter(t *testing.T, mode string, adapter *Adapter) *fixture {
 	t.Helper()
-	f := &fixture{a: adapter}
+	f := &fixture{a: adapter, mode: mode}
 	f.io = startIO(t, f.a, mode)
 	integrityFixtureState(t, f, mode, "started", nil)
 	f.startEcho(t)

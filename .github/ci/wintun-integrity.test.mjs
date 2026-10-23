@@ -11,6 +11,21 @@ const manifest = JSON.parse(readFileSync(new URL('../../scripts/wintun-integrity
 const phases = manifest.filter(phase => phase.name !== 'proof');
 const runner = fileURLToPath(new URL('../../scripts/test-wintun-integrity.ps1', import.meta.url));
 
+test('nightly uses the qualified sequence with one shared cap and no ordinary CI jobs', () => {
+  const text = readFileSync(new URL('../workflows/wintun-nightly.yml', import.meta.url), 'utf8');
+  const nightly = readWorkflow(text);
+  assert.deepEqual([...nightly.jobs.keys()], ['wintun-integrity']);
+  assert.match(text, /cron: '17 3 \* \* \*'/);
+  assert.match(text, /max-parallel: 10/);
+  assert.match(text, /scenario: \[isolated, full\]/);
+  assert.match(text, /runner: \[windows-latest, windows-11-arm\]/);
+  assert.match(text, /shard: \[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18\]/);
+  assert.match(text, /INTEGRITY_REPEATS: '2'/);
+  assert.match(text, /NETSWITCH_WINTUN_INTEGRITY_BOUNDARY: rotate/);
+  assert.deepEqual(nightly.jobs.get('wintun-integrity').steps, readWorkflow(workflowText).jobs.get('wintun-integrity').steps);
+  assert.ok(!text.includes('continue-on-error'), 'other failures stay visible, never become fake green');
+});
+
 function assertParity(plan) {
   for (const phase of plan) {
     // Start-Process's argument joining is safe only while these manifest
