@@ -363,8 +363,8 @@ do not combine different transfers into a single causal trace.
 An isolated repeat runs all 12 positions of `tcp_8_MBps`: two serial 64 MiB
 warm-ups, then eight 64 MiB streams, for both the signed DLL and our session,
 alternating which mode runs first. A full repeat replays the normal Wintun
-job: ring/recovery tests, registrar tests, ping-pong, the **entire five-metric
-performance test**, its in-process-reference comparison, lifetime/crash,
+job: ring/recovery tests, registrar tests, supervisor containment, ping-pong,
+the **entire five-metric performance test**, its in-process-reference comparison, lifetime/crash,
 both CPU profiles, fuzzing, and x64 race/handle checks. The manifest is checked
 against the normal job's selectors and ordering. Its normal failure-dependent
 steps remain failure-dependent; later `!cancelled()` phases still execute.

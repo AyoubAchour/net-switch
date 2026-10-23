@@ -85,13 +85,15 @@ function assertParity(plan) {
   }
   assert.equal(plan.find(phase => phase.name === 'race-recovery').arch, 'x64');
   assert.equal(plan.find(phase => phase.name === 'profile-ours').requiresSuccess, 'pprof-dll');
-  assert.deepEqual(plan.filter(phase => !phase.runAfterFailure).map(phase => phase.name), ['ring-recovery', 'registrar']);
+  assert.deepEqual(plan.filter(phase => !phase.runAfterFailure).map(phase => phase.name), ['ring-recovery', 'registrar', 'supervisor-containment']);
 }
 
 test('full diagnostic preserves the normal Wintun sequence, including its post-performance phases', () => assertParity(phases));
 
 test('the sequence guard rejects omitted or reordered state-producing phases', () => {
-  assert.throws(() => assertParity(phases.filter(phase => phase.name !== 'registrar')));
+  for (const name of ['registrar', 'supervisor-containment']) {
+    assert.throws(() => assertParity(phases.filter(phase => phase.name !== name)));
+  }
   const reordered = structuredClone(phases);
   [reordered[0], reordered[3]] = [reordered[3], reordered[0]];
   assert.throws(() => assertParity(reordered));

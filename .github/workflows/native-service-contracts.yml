@@ -2,10 +2,10 @@ name: Native service contracts
 
 on:
   pull_request:
-    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml']
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
   push:
     branches: [main]
-    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml']
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
   workflow_dispatch:
     inputs:
       runner:
@@ -54,11 +54,33 @@ jobs:
       - name: Offline native contracts, including the full totals measurement
         shell: bash
         run: |
+          node .github/ci/registrar-breakaway.mjs
           go test -v -count=1 ./internal/engine ./internal/engine/host ./internal/engine/protocol ./internal/engine/flows ./internal/engine/probe ./internal/engine/testproxy ./internal/service
           go test -v -count=1 -tags lifecycle_test ./internal/engine/testproxy
           go test -tags lifecycle_test -run '^$' -fuzz '^FuzzProxyHandshake$' -fuzztime=5s ./internal/engine/testproxy
           go test -v -count=1 -tags lifecycle_test -run '^TestNative(ReadFault|ManagerExit)' ./internal/lifecycle
           go test -v -count=1 -run '^TestNative(Stall|TCPInfo|Actor)' ./tests/lifecycle
+      - name: Windows process diagnostic build contracts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildCases = @(
+            @{ Tags = ''; Tests = @('TestProductNoProcessDiagnostics') },
+            @{ Tags = 'netswitch_handlecheck'; Tests = @('TestUDPPortSpaceDiagnosisReadsHostedSettings', 'TestPortConfigurationMatchesNativeProvider') }
+          )
+          foreach ($buildCase in $buildCases) {
+            $selector = '^(' + ($buildCase.Tests -join '|') + ')$'
+            $proof = & go test -v -count=1 -timeout=6m "-tags=$($buildCase.Tags)" "-run=$selector" ./internal/engine/windows
+            $result = $LASTEXITCODE
+            $proof | Write-Output
+            if ($result -ne 0) { exit $result }
+            foreach ($test in $buildCase.Tests) {
+              if (-not ($proof -match ('^--- PASS: ' + [regex]::Escape($test) + ' '))) {
+                throw "Missing PASS for $test with tags '$($buildCase.Tags)'; absent or skipped tests are failures"
+              }
+            }
+          }
       - name: Installed Windows services, product and fault builds
         if: runner.os == 'Windows'
         shell: pwsh
@@ -88,6 +110,28 @@ jobs:
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             } finally { Pop-Location }
           }
+      - name: Atomic child launch and supervised registrar containment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $proof = Join-Path $PWD 'dist/native-child'
+          go build -trimpath -buildvcs=false -o (Join-Path $proof 'netswitch-engine.exe') ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -tags netswitch_handlecheck -c -o (Join-Path $proof 'winchild.test.exe') ./internal/platform/winchild
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -tags netswitch_handlecheck -c -o (Join-Path $proof 'wintun.test.exe') ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory $proof
+          $env:NETSWITCH_CHILD_CI = '1'
+          $env:NETSWITCH_WINTUN_CI = '1'
+          $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE = Join-Path $proof 'netswitch-engine.exe'
+          $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE).Hash.ToLowerInvariant()
+          "CONTAINMENT_BINARY $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256"
+          & (Join-Path $proof 'winchild.test.exe') '-test.v' '-test.timeout=2m'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $proof 'wintun.test.exe') '-test.v' '-test.timeout=5m' '-test.run=^Test(WintunSupervisorContainment|RegistrarBusyRetryOnlyUnclaimedRegistration)$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Installed Linux services, product and fault builds
         if: runner.os == 'Linux'
         shell: bash

@@ -4,6 +4,7 @@ package wintun
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/platform/winchild"
 	"github.com/AyoubAchour/net-switch/internal/winclock"
 	"github.com/AyoubAchour/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
@@ -57,7 +59,7 @@ var (
 	registrarExecutable   = os.Executable
 	registrarCommand      = RegistrarMode
 	registrarExtraEnv     []string
-	registrarBeforeResume func(pid uint32)
+	registrarBeforeResume func(pid uint32, job windows.Handle)
 	registrarStartTimeout = 15 * time.Second
 	registrarClose        = func(o winhandle.Owner, site string) error { return o.HandleClose(site) }
 )
@@ -374,8 +376,12 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	var pi windows.ProcessInformation
 	// Created suspended and already in the kill-on-close job: DETACHED_PROCESS
 	// because the registrar needs no console; its I/O is the two pipes.
+	flags := uint32(windows.CREATE_SUSPENDED | windows.DETACHED_PROCESS | windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_UNICODE_ENVIRONMENT)
+	if supervisedRegistrar.Load() != nil {
+		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
+	}
 	if err = windows.CreateProcess(app, commandLine, nil, nil, true,
-		windows.CREATE_SUSPENDED|windows.DETACHED_PROCESS|windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT,
+		flags,
 		environment, nil, &si.StartupInfo, &pi); err != nil {
 		return nil, fmt.Errorf("start Wintun registrar: %w", err)
 	}
@@ -408,8 +414,16 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	if err = errors.Join(controlReadErr, replyWriteErr); err != nil {
 		return nil, abandon(errors.Join(err, registrarClose(thread, "Wintun registrar thread close")))
 	}
+	if observer := supervisedRegistrar.Load(); observer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err := (*observer)(ctx, winchild.Registrar{Handle: uint64(process.Handle("registrar host capability")), PID: pi.ProcessId})
+		cancel()
+		if err != nil {
+			return nil, abandon(errors.Join(fmt.Errorf("supervisor did not adopt registrar: %w", err), registrarClose(thread, "unadopted registrar thread close")))
+		}
+	}
 	if registrarBeforeResume != nil {
-		registrarBeforeResume(pi.ProcessId) // crash-before-resume fixture exits here
+		registrarBeforeResume(pi.ProcessId, job.Handle("Wintun registrar before-resume witness"))
 	}
 	_, resumeErr := windows.ResumeThread(thread.Handle("Wintun registrar resume"))
 	if err = errors.Join(resumeErr, registrarClose(thread, "Wintun registrar thread close")); err != nil {
@@ -522,10 +536,26 @@ func registerDevice(path string, desc *registration) error {
 		return fmt.Errorf("open Wintun device: %w", err)
 	}
 	var returned uint32
-	if err := windows.DeviceIoControl(device, registerRingsIOCTL, (*byte)(unsafe.Pointer(desc)), uint32(unsafe.Sizeof(*desc)), nil, 0, &returned, nil); err != nil {
+	if err := registerWithBusyRetry(func() error {
+		return windows.DeviceIoControl(device, registerRingsIOCTL, (*byte)(unsafe.Pointer(desc)), uint32(unsafe.Sizeof(*desc)), nil, 0, &returned, nil)
+	}, time.Sleep); err != nil {
 		return fmt.Errorf("register Wintun rings: %w", err)
 	}
 	return nil
+}
+
+// Wintun 0.14.1 returns ALREADY_INITIALIZED before claiming this file object
+// when another owner is still unregistering. Retry only that untouched state,
+// on the same handle, adding at most 630 ms; never touch a successful device
+// handle again. This also covers a host death before it can join registrars.
+func registerWithBusyRetry(register func() error, pause func(time.Duration)) error {
+	for attempt := 0; ; attempt++ {
+		err := register()
+		if !errors.Is(err, windows.ERROR_ALREADY_INITIALIZED) || attempt == 6 {
+			return err
+		}
+		pause((10 * time.Millisecond) << attempt)
+	}
 }
 
 func isPipe(h windows.Handle) bool {

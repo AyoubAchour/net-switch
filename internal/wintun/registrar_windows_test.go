@@ -1587,7 +1587,7 @@ func TestWintunRegistrarStartupFaults(t *testing.T) {
 			// Independently witness the child's death: pin its process handle
 			// before resume so the number cannot be recycled under the check.
 			var child windows.Handle
-			registrarBeforeResume = func(pid uint32) {
+			registrarBeforeResume = func(pid uint32, _ windows.Handle) {
 				if h, err := windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid); err == nil {
 					child = h
 				}
@@ -1670,7 +1670,7 @@ func TestWintunRegistrarPostRegisterFailureCleanup(t *testing.T) {
 	}()
 	registrarCommand = registrarFixtureMode
 	registrarExtraEnv = []string{"NETSWITCH_WINTUN_FIXTURE_FAULT=post-register-exit"}
-	registrarBeforeResume = func(pid uint32) {
+	registrarBeforeResume = func(pid uint32, _ windows.Handle) {
 		child, witnessErr = windows.OpenProcess(windows.SYNCHRONIZE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	}
 	s, startErr := a.StartSession()

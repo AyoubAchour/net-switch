@@ -8,15 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
-
-	"golang.org/x/sys/windows"
 )
 
 // Hosted diagnosis only. After the first automatic UDP allocation refusal,
@@ -360,31 +355,4 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 	}
 	b.data = append(b.data, p...)
 	return n, nil
-}
-
-// runNetsh starts netsh from the system directory, hidden and without input,
-// and kills it at the command or probe deadline.
-func runNetsh(ctx context.Context, args ...string) reservationCommandResult {
-	result := reservationCommandResult{Command: "netsh " + strings.Join(args, " ")}
-	system, err := windows.GetSystemDirectory()
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	ctx, cancel := context.WithTimeout(ctx, reservationCommandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, filepath.Join(system, "netsh.exe"), args...)
-	cmd.Dir = system
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: windows.CREATE_NO_WINDOW}
-	cmd.WaitDelay = time.Second
-	var output boundedOutput
-	cmd.Stdout, cmd.Stderr = &output, &output
-	began := time.Now()
-	err = cmd.Run()
-	result.Millis = time.Since(began).Milliseconds()
-	result.Output, result.Truncated = string(output.data), output.truncated
-	if err != nil {
-		result.Error = errors.Join(err, ctx.Err()).Error()
-	}
-	return result
 }

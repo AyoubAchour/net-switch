@@ -127,7 +127,7 @@ func runRegistrarCrasher() int {
 	}
 	registrarCommand = registrarFixtureMode
 	registrarExtraEnv = []string{"NETSWITCH_WINTUN_FIXTURE_FAULT=block"}
-	registrarBeforeResume = func(pid uint32) {
+	registrarBeforeResume = func(pid uint32, _ windows.Handle) {
 		var written uint32
 		message := []byte(fmt.Sprintf("GRANDCHILD %d\n", pid))
 		windows.WriteFile(stdout, message, &written, nil)

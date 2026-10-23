@@ -190,6 +190,7 @@ func TestNativeUDPConcurrentPairedCapacity(t *testing.T) {
 	if os.Getenv("NETSWITCH_PORT_GATE") != "1" {
 		t.Skip("native UDP pair isolation belongs to the hosted capacity fixture")
 	}
+	requireProcessDiagnostics(t)
 	index, source, peerSource := udpPairBinding(t)
 	for _, native := range []bool{false, true} {
 		variant := map[bool]string{false: "Go", true: "ReadyUDP"}[native]
