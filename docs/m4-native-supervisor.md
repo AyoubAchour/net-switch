@@ -1,5 +1,43 @@
 # M4 native supervisor
 
+## Adapter removal: evidence still required
+
+ARM64 job 120561072134 joined the session in 69 ms but exhausted the
+five-second IP Helper confirmation. This disproves session retirement as a
+complete explanation of the remaining failure. No new absence criterion is
+claimed proven by that log.
+
+Main and this branch use the same fixed GUID, alias, and normal IP Helper
+table for the creation guard. Main does not confirm table disappearance at
+stop; its acceptance driver waits for the engine process to exit before the
+next start. That provides another teardown boundary, not another identity.
+Whether process exit releases the lingering interface is an open measurement.
+
+The hosted acceptance helper now samples the normal and raw interface views,
+all eight status flags, operational/admin/media state, GUID, alias, type,
+present PnP nodes, IPv4/IPv6 IP-interface lookups and unicast-address counts.
+Its first sample precedes cycle-one stop, the loaded stop and final quit. It continues every
+500 ms until both table rows disappear or 30 seconds pass; an outer 35-second
+kill bounds a stuck Windows query. This is a separate read-only process, so
+sampling neither delays service cleanup nor changes its success criterion.
+The strict stop failure remains visible. No replacement is created while the
+observer is collecting the post-stop samples.
+
+[Wintun's close path](https://git.zx2c4.com/wintun/tree/api/adapter.c)
+closes the software device, removes its device instance and queues orphan
+cleanup. [Microsoft's SwDeviceClose contract](https://learn.microsoft.com/en-us/windows/win32/api/swdevice/nf-swdevice-swdeviceclose)
+explicitly says removal is asynchronous; a subsequent software-device create
+is queued behind removal. That does not authorize bypassing our pre-create
+ownership guard. [GetIfTable2Ex](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2ex)
+returns the same set of interfaces in normal and raw modes, but obtains their
+state from the filter-stack top versus the interface itself.
+[Disconnected or down flags](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_row2)
+alone cannot establish absence. Pending the hosted samples, both the creation
+guard and retirement still require the normal row to be absent. A proposed
+PnP-plus-IP criterion must first show no present device, no IP interface and
+no addresses for the exact LUID, then be applied consistently to both paths;
+query errors must never count as absence.
+
 The `m4_native` service now hosts one verified native child. This implements
 option (e), recorded in spec §3.4. Control cutover and restart/backoff/latch
 policy remain in the later cutover PR. The host never respawns a child.

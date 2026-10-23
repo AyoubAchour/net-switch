@@ -43,6 +43,25 @@ const selectionTarget = () => localSelection ? tlsResponder.target : publicTarge
 const selectionDestination = () => localSelection ? tlsResponder.destination : publicDestination;
 const appDeviceIDs = new Set();
 const destinationCount = (stats, destination) => stats.destinations?.[destination] ?? 0;
+
+async function retirementObserver() {
+  if (options.profile !== 'v1') return async () => {};
+  const child = spawn(path.resolve('dist/windows-test/testisp.exe'), ['observe-retirement'],
+    { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  // The first sample must precede stop. Sampling runs in another process and
+  // continues after a failed stop, without extending the service's deadline.
+  let ready;
+  const first = new Promise(resolve => { ready = resolve; });
+  child.stdout.on('data', chunk => { process.stdout.write(chunk); ready(); });
+  child.stderr.on('data', chunk => process.stderr.write(chunk));
+  const timer = setTimeout(() => child.kill(), 35_000);
+  const done = new Promise(resolve => {
+    child.on('error', error => { clearTimeout(timer); console.error('ADAPTER_VIEW_ERROR', error); ready(); resolve(); });
+    child.on('close', code => { clearTimeout(timer); ready(); console.log(`ADAPTER_VIEW_EXIT ${code}`); resolve(); });
+  });
+  await first;
+  return () => done;
+}
 const udpSizes = [64, 1200, 1800, 8192, 12000, ...(options.profile === 'v1' ? [65000] : [])];
 
 async function applied(route, body, matches) {
@@ -865,11 +884,13 @@ try {
     const cycles = [], snapshots = [];
     for (let n = 1; n <= 20; n++) {
       const phases = {}, started = performance.now(), eventStart = serverOutput.events.length;
+      const finishObservation = n === 1 ? await retirementObserver() : async () => {};
       try { await timedPhase(phases, 'routingOffMs', () => server.api('routing', { on: false })); }
       catch (error) {
         error.evidence = { cycle: n, phases, native: serverOutput.events.slice(eventStart) };
         throw error;
       }
+      finally { await finishObservation(); }
       snapshots.push({ cycle: n, ...await timedPhase(phases, 'stoppedChecksMs', stoppedSnapshot) });
       await timedPhase(phases, 'routingOnMs', () => server.api('routing', { on: true }));
       await timedPhase(phases, 'routingReadyMs', () => server.on());
@@ -984,9 +1005,11 @@ try {
       return capacity({ server, harness, directory: dir, line: second.id, stopHeld: async (held) => {
         assert(held.tcp > 0 && held.udp > 0, 'Loaded stop needs independently reconciled TCP flows and UDP sessions');
         console.log(`WINDOWS LOADED STOP BEGIN ${JSON.stringify(held)}`);
+        const finishObservation = await retirementObserver();
         const began = performance.now();
-        await server.api('routing', { on: false });
-        const stopMs = performance.now() - began;
+        let stopMs;
+        try { await server.api('routing', { on: false }); stopMs = performance.now() - began; }
+        finally { await finishObservation(); }
         assert(stopMs < 20_000, `Loaded stop exceeded service budget: ${stopMs} ms`);
         const cleanup = await stoppedSnapshot();
         const direct = await harness.probe();
@@ -1010,11 +1033,13 @@ try {
   if (worker?.exitCode === null && worker.connected) worker.disconnect();
   if (quicServer?.exitCode === null) quicServer.kill();
   if (server?.child.exitCode === null) {
+    const finishObservation = await retirementObserver();
     const began = performance.now(), eventStart = serverOutput.events.length;
     let completed = false;
     try { await server.quit(); completed = true; } catch (error) { console.error(error); process.exitCode = 1; }
     finally { console.log(`WINDOWS FINAL QUIT ${JSON.stringify({ elapsedMs: performance.now() - began, completed,
-      native: serverOutput.events.slice(eventStart).filter(event => event.operation === 'stop') })}`); }
+      native: serverOutput.events.slice(eventStart).filter(event => event.operation === 'stop') })}`);
+      await finishObservation(); }
   }
   // Check before TestISP's Wintun shutdown can erase an orphan. Only the same
   // non-present IDs observed while our engine was running may use this baseline
