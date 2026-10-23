@@ -285,6 +285,9 @@ func retireAdapterScopes(store *journal.FileStore, records []journal.Record) err
 	return nil
 }
 func Cleanup(ctx context.Context, data string) error {
+	if nativeEngineBuild {
+		return cleanupNative(ctx, data)
+	}
 	// The lifetime lock is held before the listener exists and until cleanup
 	// is complete. Recovery never cleans a live engine, including startup.
 	release, err := (Lock{Data: data, Name: "engine"}).Acquire(ctx)

@@ -31,6 +31,7 @@ type windowsActor struct {
 	name, sid string
 	token     windows.Token
 	t         *testing.T
+	closed    bool
 }
 
 func (a *windowsActor) cleanup(fn func()) { a.t.Cleanup(fn) }
@@ -50,12 +51,42 @@ func (a *windowsActor) command(exe string, args ...string) *exec.Cmd {
 	return cmd
 }
 func (a *windowsActor) close() {
-	a.token.Close()
+	if a.closed {
+		return
+	}
+	a.closed = true
+	if a.token != 0 {
+		if err := a.token.Close(); err != nil {
+			a.t.Error("close disposable logon token", err)
+		}
+	}
+	if err := checkedWindowsActor(a.name); err != nil {
+		if !errors.Is(err, syscall.Errno(2221)) { // NERR_UserNotFound
+			a.t.Errorf("refuse disposable account cleanup %s: %v", a.name, err)
+		}
+		return
+	}
 	name, _ := windows.UTF16PtrFromString(a.name)
-	windows.NewLazySystemDLL("netapi32.dll").NewProc("NetUserDel").Call(0, uintptr(unsafe.Pointer(name)))
+	result, _, _ := windows.NewLazySystemDLL("netapi32.dll").NewProc("NetUserDel").Call(0, uintptr(unsafe.Pointer(name)))
+	if result != 0 {
+		a.t.Errorf("delete disposable account %s: code %d", a.name, result)
+		return
+	}
+	assertActorRemoved(a.t, a.name)
 }
+
+type actorUserInfo struct {
+	Name, Password *uint16
+	Age, Privilege uint32
+	Home, Comment  *uint16
+	Flags          uint32
+	Script         *uint16
+}
+
 func newActor(t *testing.T, name string) actor {
 	t.Helper()
+	requireActorName(t, name)
+	a := &windowsActor{name: name, t: t}
 	var entropy [16]byte
 	if _, err := rand.Read(entropy[:]); err != nil {
 		t.Fatal(err)
@@ -63,18 +94,29 @@ func newActor(t *testing.T, name string) actor {
 	password := "Ns!" + hex.EncodeToString(entropy[:]) + "9a"
 	namep, _ := windows.UTF16PtrFromString(name)
 	passwordp, _ := windows.UTF16PtrFromString(password)
-	type userInfo struct {
-		Name, Password *uint16
-		Age, Privilege uint32
-		Home, Comment  *uint16
-		Flags          uint32
-		Script         *uint16
-	}
-	info := userInfo{Name: namep, Password: passwordp, Privilege: 1, Flags: 0x10001}
+	comment, _ := windows.UTF16PtrFromString(actorComment)
+	info := actorUserInfo{Name: namep, Password: passwordp, Privilege: 1, Flags: 0x10201, Comment: comment}
 	var parameter uint32
 	result, _, _ := windows.NewLazySystemDLL("netapi32.dll").NewProc("NetUserAdd").Call(0, 1, uintptr(unsafe.Pointer(&info)), uintptr(unsafe.Pointer(&parameter)))
-	if result != 0 {
+	switch result {
+	case 0:
+		t.Cleanup(a.close) // before LogonUser or token inspection can fail
+	case 2224: // NERR_UserExists: verify before resetting any password
+		if err := checkedWindowsActor(name); err != nil {
+			t.Fatal("refuse existing account", err)
+		}
+		t.Cleanup(a.close)
+		passwordInfo := struct{ Password *uint16 }{passwordp} // USER_INFO_1003
+		code, _, _ := windows.NewLazySystemDLL("netapi32.dll").NewProc("NetUserSetInfo").Call(0, uintptr(unsafe.Pointer(namep)), 1003, uintptr(unsafe.Pointer(&passwordInfo)), uintptr(unsafe.Pointer(&parameter)))
+		if code != 0 {
+			t.Fatalf("reset verified disposable account password: code %d parameter %d", code, parameter)
+		}
+		t.Logf("ACTOR_REUSED name=%s verified_unprivileged=true", name)
+	default:
 		t.Fatalf("create disposable local user: code %d parameter %d", result, parameter)
+	}
+	if err := checkedWindowsActor(name); err != nil {
+		t.Fatal(err)
 	}
 	domain, _ := windows.UTF16PtrFromString(".")
 	var token windows.Token
@@ -82,6 +124,7 @@ func newActor(t *testing.T, name string) actor {
 	if ok == 0 {
 		t.Fatal("log on disposable user:", err)
 	}
+	a.token = token
 	user, err := token.GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +133,79 @@ func newActor(t *testing.T, name string) actor {
 		t.Fatal("test user is elevated")
 	}
 	t.Logf("standard user %s enrolled=%s", name, user.User.Sid.String())
-	return &windowsActor{name: name, sid: user.User.Sid.String(), token: token, t: t}
+	a.sid = user.User.Sid.String()
+	return a
+}
+
+func checkedWindowsActor(name string) error {
+	namep, _ := windows.UTF16PtrFromString(name)
+	var b *byte
+	if err := windows.NetUserGetInfo(nil, namep, 1, &b); err != nil {
+		return err
+	}
+	defer windows.NetApiBufferFree(b)
+	u := (*actorUserInfo)(unsafe.Pointer(b))
+	if err := checkWindowsActorInfo(name, u); err != nil {
+		return err
+	}
+	// IsElevated alone misses a split administrator token. Check all direct
+	// and indirect local memberships before reusing the account or changing it.
+	var groups *byte
+	var read, total uint32
+	code, _, _ := windows.NewLazySystemDLL("netapi32.dll").NewProc("NetUserGetLocalGroups").Call(0, uintptr(unsafe.Pointer(namep)), 0, 1, uintptr(unsafe.Pointer(&groups)), 64<<10, uintptr(unsafe.Pointer(&read)), uintptr(unsafe.Pointer(&total)))
+	if groups != nil {
+		defer windows.NetApiBufferFree(groups)
+	}
+	if code != 0 || read != total || read > 64 {
+		return fmt.Errorf("read disposable account groups: code=%d read=%d total=%d", code, read, total)
+	}
+	var observedGroups []string
+	for _, group := range unsafe.Slice((**uint16)(unsafe.Pointer(groups)), read) {
+		groupName := windows.UTF16PtrToString(group)
+		sid, _, _, err := windows.LookupSID("", groupName)
+		if err != nil {
+			return fmt.Errorf("%s local group %q SID lookup: %w", name, groupName, err)
+		}
+		if err := checkWindowsActorGroup(name, groupName, sid.String()); err != nil {
+			return err
+		}
+		observedGroups = append(observedGroups, groupName+"="+sid.String())
+	}
+	fmt.Printf("ACTOR_VERIFIED name=%q privilege=%d flags=%#x groups=%q\n", name, u.Privilege, u.Flags, observedGroups)
+	return nil
+}
+
+func checkWindowsActorInfo(name string, u *actorUserInfo) error {
+	// NetUserAdd requires USER_PRIV_USER (1), but that input is not a
+	// round-trip invariant: hosted Windows reports 0 for this normal account.
+	// Both 0 and 1 are non-admin summaries. Group checks remain independent,
+	// so a filtered administrator token cannot qualify through this field.
+	if windows.UTF16PtrToString(u.Name) != name || windows.UTF16PtrToString(u.Comment) != actorComment || u.Privilege > 1 || u.Flags&0x200 == 0 || u.Flags&0x2 != 0 {
+		return fmt.Errorf("unexpected disposable account: want_name=%q name=%q want_comment=%q comment=%q privilege=%d flags=%#x normal=%t disabled=%t home=%q script=%q", name, windows.UTF16PtrToString(u.Name), actorComment, windows.UTF16PtrToString(u.Comment), u.Privilege, u.Flags, u.Flags&0x200 != 0, u.Flags&0x2 != 0, windows.UTF16PtrToString(u.Home), windows.UTF16PtrToString(u.Script))
+	}
+	return nil
+}
+
+func checkWindowsActorGroup(name, group, sid string) error {
+	if sid != "S-1-5-32-545" { // BUILTIN Users, any locale
+		return fmt.Errorf("%s has unexpected local group membership: name=%q sid=%q", name, group, sid)
+	}
+	return nil
+}
+
+func assertActorRemoved(t *testing.T, name string) {
+	t.Helper()
+	namep, _ := windows.UTF16PtrFromString(name)
+	var b *byte
+	err := windows.NetUserGetInfo(nil, namep, 1, &b)
+	if b != nil {
+		windows.NetApiBufferFree(b)
+	}
+	if !errors.Is(err, syscall.Errno(2221)) {
+		t.Errorf("disposable account %s remains after cleanup: %v", name, err)
+	} else {
+		t.Logf("ACTOR_REMOVED name=%s", name)
+	}
 }
 func testData() string { return filepath.Join(os.Getenv("ProgramData"), "NetSwitch-Lifecycle-CI") }
 func verifyPermissions(t *testing.T, owner, other actor) {
@@ -252,6 +367,9 @@ func hostedMain(m *testing.M) (bool, int) {
 		os.Stdout, os.Stderr = log, log
 		code := 1
 		os.Args = []string{os.Args[0], "-test.v", "-test.timeout=22m"}
+		if filter := os.Getenv("NETSWITCH_LIFECYCLE_FILTER"); filter != "" {
+			os.Args = append(os.Args, "-test.run="+filter)
+		}
 		err = service.Run("NetSwitchLifecycleTests", func(_ context.Context, ready func()) error {
 			ready()
 			code = m.Run()
@@ -276,6 +394,10 @@ func hostedMain(m *testing.M) (bool, int) {
 		exe, _ := os.Executable()
 		cwd, _ := os.Getwd()
 		output := filepath.Join(os.Getenv("ProgramData"), "netswitch-lifecycle-test.log")
+		if err := os.Remove(output + ".result"); err != nil && !os.IsNotExist(err) {
+			fmt.Println(err)
+			return true, 1
+		}
 		mgr, err := mgr.Connect()
 		if err != nil {
 			fmt.Println(err)
@@ -295,7 +417,7 @@ func hostedMain(m *testing.M) (bool, int) {
 			return true, 1
 		}
 		env := []string{}
-		for _, name := range []string{"GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "NETSWITCH_LIFECYCLE_CI", "NETSWITCH_LIFECYCLE_DIR", "SystemRoot", "ProgramData"} {
+		for _, name := range []string{"GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "NETSWITCH_LIFECYCLE_CI", "NETSWITCH_LIFECYCLE_DIR", "NETSWITCH_LIFECYCLE_FILTER", "NETSWITCH_NATIVE_CI", "NETSWITCH_NATIVE_FAULTS", "SystemRoot", "ProgramData"} {
 			env = append(env, name+"="+os.Getenv(name))
 		}
 		err = key.SetStringsValue("Environment", env)

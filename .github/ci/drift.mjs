@@ -62,6 +62,10 @@ export const declared = [{
   outside: 'executables lifecycle.yml builds into NETSWITCH_LIFECYCLE_DIR (under Program Files or /usr/lib), and a sing-box binary extracted into a temporary folder',
   why: 'the real-service test hashes the binaries it runs; it fails unless NETSWITCH_LIFECYCLE_DIR is an absolute path, and the other site reads the download it just extracted',
 }, {
+  from: 'tests/lifecycle/native_engine_test.go', call: 'os.ReadFile(path)',
+  outside: 'the four native service binaries built by native-service-contracts.yml into NETSWITCH_LIFECYCLE_DIR under Program Files or /usr/lib',
+  why: 'the hosted-only test requires an absolute installation directory and hashes each actual binary before installing the services',
+}, {
   from: 'internal/engine/linux/hooks_acceptance_linux.go', call: 'os.OpenFile(path)',
   outside: 'the CPU profile file that NETSWITCH_ACCEPTANCE_PROFILE names, which the acceptance-tagged engine creates (O_CREATE|O_EXCL|O_WRONLY) wherever the person running it chose',
   why: 'it only writes a new profile; no workflow or harness in this repository sets the variable, and nothing reads the file back as a repository input',

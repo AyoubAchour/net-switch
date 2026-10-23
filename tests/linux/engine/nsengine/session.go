@@ -135,16 +135,57 @@ func (s *Session) Flows(ctx context.Context, cursor string) (engine.FlowPage, er
 
 // Totals implements engine.Controller.
 func (s *Session) Totals(ctx context.Context) (engine.Totals, error) {
-	var t flows.Totals
-	if err := s.d.do(ctx, s.request("totals"), &t); err != nil {
-		return engine.Totals{}, err
-	}
-	out := engine.Totals{PerApp: map[string]engine.Bytes{}, PerLine: map[engine.LineID]engine.Bytes{}}
-	for app, b := range t.Apps {
-		out.PerApp[app] = engine.Bytes{Up: int64(b.Up), Down: int64(b.Down)}
-	}
-	for line, b := range t.Lines {
-		out.PerLine[engine.LineID(line)] = engine.Bytes{Up: int64(b.Up), Down: int64(b.Down)}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	out := engine.Totals{PerApp: map[string]engine.Bytes{}, PerLine: map[engine.LineID]engine.Bytes{}, AppGenerations: map[string]string{}, LineGenerations: map[engine.LineID]string{}}
+	req := s.request("totals")
+	seen := map[string]bool{}
+	count := -1
+	receipt := ""
+	for {
+		var page flows.TotalsPage
+		if err := s.d.do(ctx, req, &page); err != nil {
+			return engine.Totals{}, err
+		}
+		if page.Instance != s.instance {
+			return engine.Totals{}, fmt.Errorf("totals crossed an engine restart")
+		}
+		if count < 0 {
+			count = page.Count
+			receipt = page.Receipt
+		}
+		if page.Count != count || receipt == "" || page.Receipt != receipt {
+			return engine.Totals{}, fmt.Errorf("totals snapshot count changed")
+		}
+		for app, b := range page.Apps {
+			if _, exists := out.PerApp[app]; exists {
+				return engine.Totals{}, fmt.Errorf("duplicate totals app")
+			}
+			out.PerApp[app] = engine.Bytes{Up: int64(b.Up), Down: int64(b.Down)}
+			out.AppGenerations[app] = b.Generation
+		}
+		for line, b := range page.Lines {
+			if _, exists := out.PerLine[engine.LineID(line)]; exists {
+				return engine.Totals{}, fmt.Errorf("duplicate totals line")
+			}
+			out.PerLine[engine.LineID(line)] = engine.Bytes{Up: int64(b.Up), Down: int64(b.Down)}
+			out.LineGenerations[engine.LineID(line)] = b.Generation
+		}
+		if page.Cursor == "" {
+			if len(out.PerApp)+len(out.PerLine) != count {
+				return engine.Totals{}, fmt.Errorf("incomplete totals snapshot")
+			}
+			ack := s.request("ackTotals")
+			ack.Receipt, ack.OpID = receipt, "ack-"+receipt
+			if err := s.d.do(ctx, ack, nil); err != nil {
+				return engine.Totals{}, err
+			}
+			break
+		}
+		if seen[page.Cursor] || len(page.Apps)+len(page.Lines) == 0 {
+			return engine.Totals{}, fmt.Errorf("totals cursor made no progress")
+		}
+		seen[page.Cursor], req.Cursor = true, page.Cursor
 	}
 	return out, nil
 }

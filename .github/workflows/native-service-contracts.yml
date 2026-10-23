@@ -1,0 +1,115 @@
+name: Native service contracts
+
+on:
+  pull_request:
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml']
+  push:
+    branches: [main]
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml']
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'One runner for focused diagnostics; ordinary PRs use the full matrix'
+        type: choice
+        options: [all, windows-latest, windows-11-arm, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04]
+        default: all
+      faults_only:
+        description: 'Run only the fault build while diagnosing its own harness'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('native-service-pr-{0}', github.ref) || format('native-service-run-{0}', github.run_id) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  services:
+    name: Native services / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        runner: ${{ fromJSON(inputs.runner && inputs.runner != 'all' && format('["{0}"]', inputs.runner) || '["windows-latest","windows-11-arm","ubuntu-24.04","ubuntu-24.04-arm","ubuntu-26.04"]') }}
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_LIFECYCLE_CI: '1'
+      NETSWITCH_NATIVE_CI: '1'
+      NETSWITCH_LIFECYCLE_FILTER: '^TestNativeEngineService$'
+      NATIVE_FAULTS_ONLY: ${{ inputs.faults_only && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Offline native contracts, including the full totals measurement
+        shell: bash
+        run: |
+          go test -v -count=1 ./internal/engine ./internal/engine/host ./internal/engine/protocol ./internal/engine/flows ./internal/service
+          go test -v -count=1 -tags lifecycle_test -run '^TestNative(ReadFault|ManagerExit)' ./internal/lifecycle
+          go test -v -count=1 -run '^TestNative(Stall|TCPInfo|Actor)' ./tests/lifecycle
+      - name: Installed Windows services, product and fault builds
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($variant in @('product', 'faults')) {
+            if ($env:NATIVE_FAULTS_ONLY -eq '1' -and $variant -eq 'product') { continue }
+            $env:NETSWITCH_NATIVE_FAULTS = if ($variant -eq 'faults') { '1' } else { '0' }
+            $tags = if ($variant -eq 'faults') { 'm4_native,lifecycle_test' } else { 'm4_native' }
+            $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles "NetSwitch-Native-CI-$variant"
+            foreach ($name in @('netswitch', 'netswitch-engine', 'netswitch-desktop', 'netswitchctl')) {
+              go build -tags $tags -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-$variant" -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+            go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') ./tests/lifecycle
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            go build -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'testisp.exe') ./tests/windows/testisp
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            ./tests/windows/testisp/fetch-wintun.ps1 -Directory $env:NETSWITCH_LIFECYCLE_DIR
+            icacls $env:NETSWITCH_LIFECYCLE_DIR /setowner '*S-1-5-32-544' /T /Q
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Push-Location tests/lifecycle
+            try {
+              & (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') run-hosted
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            } finally { Pop-Location }
+          }
+      - name: Installed Linux services, product and fault builds
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          for variant in product faults; do
+            if [ "$NATIVE_FAULTS_ONLY" = 1 ] && [ "$variant" = product ]; then continue; fi
+            export NETSWITCH_NATIVE_FAULTS=0
+            tags=m4_native
+            if [ "$variant" = faults ]; then export NETSWITCH_NATIVE_FAULTS=1; tags=m4_native,lifecycle_test; fi
+            export NETSWITCH_LIFECYCLE_DIR="/usr/lib/netswitch-native-ci-$variant"
+            sudo install -d -o "$(id -u)" -g "$(id -g)" "$NETSWITCH_LIFECYCLE_DIR"
+            for name in netswitch netswitch-engine netswitch-desktop netswitchctl; do
+              go build -tags "$tags" -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-$variant" -o "$NETSWITCH_LIFECYCLE_DIR/$name" "./cmd/$name"
+            done
+            go test -c -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" ./tests/lifecycle
+            sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"
+            (cd tests/lifecycle && sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR,NETSWITCH_NATIVE_CI,NETSWITCH_NATIVE_FAULTS "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v '-test.run=^TestNativeEngineService$' -test.timeout=12m)
+          done
+      - name: Linux service evidence
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: sudo journalctl -u netswitch-engine.service -u netswitch.service --no-pager --lines=200
+      - name: Windows service evidence
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-WinEvent -LogName Application -FilterXPath "*[System[Provider[@Name='NetSwitch'] or Provider[@Name='NetSwitchEngine']]]" -MaxEvents 40 -ErrorAction SilentlyContinue | ForEach-Object { $_.ToXml() }
+          if (Test-Path (Join-Path $env:ProgramData 'netswitch-lifecycle-test.log')) { Get-Content (Join-Path $env:ProgramData 'netswitch-lifecycle-test.log') }
+          exit 0

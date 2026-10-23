@@ -90,8 +90,11 @@ func LoadConfig(data string) (Config, error) {
 	if err := Read(filepath.Join(data, "service-config.json"), &c); err != nil {
 		return c, err
 	}
-	if c.Data != data || !filepath.IsAbs(c.Directory) || !filepath.IsAbs(c.Adapter) || (c.Mode != "proxy" && c.Mode != "tun") {
+	if c.Data != data || !filepath.IsAbs(c.Directory) || (!nativeEngineBuild && !filepath.IsAbs(c.Adapter)) || (c.Mode != "proxy" && c.Mode != "tun") {
 		return c, errors.New("invalid service configuration")
+	}
+	if nativeEngineBuild && (c.Adapter != "" || c.Mode != "tun") {
+		return c, errors.New("native service qualification requires tun mode and no adapter")
 	}
 	if err := service.CheckInstallation(c.Directory, c.Adapter); err != nil {
 		return c, err

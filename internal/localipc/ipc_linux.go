@@ -175,3 +175,10 @@ func Dial(ctx context.Context, e Endpoint) (*Conn, error) {
 	}
 	return &Conn{ReadWriteCloser: c, Peer: p}, nil
 }
+
+func DialNativeEngine(ctx context.Context, e Endpoint) (*Conn, error) {
+	if e.Kind != "engine" {
+		return nil, errors.New("native dial is only for the engine endpoint")
+	}
+	return Dial(ctx, e)
+}

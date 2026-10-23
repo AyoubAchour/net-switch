@@ -432,3 +432,29 @@ func FirewallState() (map[string]any, error) {
 	}
 	return map[string]any{"sublayer": layer != nil, "filters": filters}, nil
 }
+
+// InspectFirewallRecords is read-only and never loads Wintun. Tests use the
+// journal's exact keys and ownership markers, including after the OS has
+// removed the process-owned adapter but left persistent WFP objects behind.
+func InspectFirewallRecords(records []journal.Record) (map[string]bool, error) {
+	o := &objects{recovering: true}
+	defer o.closeFirewall()
+	result := map[string]bool{}
+	for _, record := range records {
+		if record.Kind != "wfp-filter" && record.Kind != "wfp-sublayer" {
+			continue
+		}
+		if err := validateWFP(record.Kind, record.Fingerprint); err != nil {
+			return nil, err
+		}
+		live, found, err := inspectWFP(o, record.Kind, record.Fingerprint)
+		if err != nil {
+			return nil, err
+		}
+		if found && !maps.Equal(live, record.Fingerprint) {
+			return nil, fmt.Errorf("firewall ownership differs for %s", record.ID)
+		}
+		result[record.ID] = found
+	}
+	return result, nil
+}

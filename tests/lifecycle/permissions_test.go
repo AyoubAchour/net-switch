@@ -19,7 +19,7 @@ func engineDenied() error {
 	}
 	status, err := service.Query(service.Engine)
 	if err != nil || !status.Running {
-		return fmt.Errorf("engine ACL precondition is not live: %v", err)
+		return fmt.Errorf("engine ACL precondition is not live: status=%+v error=%v", status, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

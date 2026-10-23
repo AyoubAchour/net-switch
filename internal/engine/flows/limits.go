@@ -6,6 +6,7 @@ import (
 )
 
 type Limits struct {
+	AccountingApps, AccountingLines                                          int
 	Handshakes, Flows, PerApp, UDP, UDPPerApp, Unknown, UnknownUDP, TimeWait int
 	TCPBytes, PendingBytes, SnapshotBytes                                    int64
 	Snapshots, SnapshotEntries                                               int

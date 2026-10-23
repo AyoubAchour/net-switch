@@ -30,7 +30,7 @@ func ServiceCommand(name string, args []string) error {
 		log := Log(c.Data, name)
 		run := ControlService
 		if name == service.Engine {
-			run = EngineService
+			run = engineProgram
 		}
 		err = run(ctx, ready, c, log)
 		if err != nil {
@@ -124,17 +124,22 @@ func Ctl(args []string) error {
 		if !Administrator() {
 			return errors.New("install requires an administrator")
 		}
-		if *dir == "" || *adapter == "" {
-			return errors.New("--directory and --adapter are required")
+		if *dir == "" {
+			return errors.New("--directory is required")
+		}
+		if !nativeEngineBuild && *adapter == "" {
+			return errors.New("--adapter is required by the stand-in service build")
 		}
 		var err error
 		*dir, err = filepath.Abs(*dir)
 		if err != nil {
 			return err
 		}
-		*adapter, err = filepath.Abs(*adapter)
-		if err != nil {
-			return err
+		if *adapter != "" {
+			*adapter, err = filepath.Abs(*adapter)
+			if err != nil {
+				return err
+			}
 		}
 		*data, err = filepath.Abs(*data)
 		if err != nil {
@@ -142,6 +147,9 @@ func Ctl(args []string) error {
 		}
 		if *mode != "tun" && *mode != "proxy" {
 			return errors.New("mode must be tun or proxy")
+		}
+		if nativeEngineBuild && (*adapter != "" || *mode != "tun") {
+			return errors.New("native service qualification requires tun mode and no adapter")
 		}
 		if err := service.CheckInstallation(*dir, *adapter); err != nil {
 			return err
@@ -161,7 +169,7 @@ func Ctl(args []string) error {
 				return err
 			}
 		}
-		return service.Install(service.Config{Directory: *dir, Data: *data, Owner: owner.User})
+		return service.Install(service.Config{Directory: *dir, Data: *data, Owner: owner.User, Native: nativeEngineBuild})
 	case "cleanup", "recover":
 		if !Administrator() {
 			return errors.New("cleanup requires an administrator")

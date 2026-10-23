@@ -97,7 +97,7 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 			}
 		case h.err = <-result:
 			if h.err != nil {
-				return true, 1
+				return true, uint32(ExitCode(h.err))
 			}
 			return false, 0
 		}
@@ -149,7 +149,15 @@ func Query(name string) (Status, error) {
 	}
 	defer s.Close()
 	state, err := s.Query()
-	return Status{PID: state.ProcessId, Running: state.State == svc.Running, Stopped: state.State == svc.Stopped}, err
+	out := Status{PID: state.ProcessId, Running: state.State == svc.Running, Stopped: state.State == svc.Stopped}
+	if out.Stopped {
+		if state.Win32ExitCode == uint32(windows.ERROR_SERVICE_SPECIFIC_ERROR) {
+			out.ExitCode, out.ExitKnown = state.ServiceSpecificExitCode, true
+		} else if state.Win32ExitCode == 0 {
+			out.ExitKnown = true
+		}
+	}
+	return nativeOutcome(name, out), err
 }
 func Start(ctx context.Context, name string) error {
 	s, err := open(name, windows.SERVICE_START|windows.SERVICE_QUERY_STATUS)
@@ -270,6 +278,12 @@ func Install(c Config) error {
 			return err
 		}
 		if entry.name == Engine {
+			if c.Native {
+				if err := setNativeState(c.Data); err != nil {
+					s.Close()
+					return err
+				}
+			}
 			// Administrators retain configuration/deletion for the installer,
 			// but only SYSTEM receives start/stop rights.
 			err = setDACL(s.Handle, "D:P(A;;GA;;;SY)(A;;0xF0007;;;BA)(A;;LC;;;AU)")

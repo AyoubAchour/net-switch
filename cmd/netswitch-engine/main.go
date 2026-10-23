@@ -16,7 +16,7 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "service" {
 		if err := lifecycle.ServiceCommand(service.Engine, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+			os.Exit(exitCode(err))
 		}
 		return
 	}
@@ -31,13 +31,5 @@ func main() {
 }
 
 func exitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	// Only a direct, completed platform outcome may override failure.
-	// Do not search through joined cleanup errors for a clean exit reason.
-	if outcome, ok := err.(interface{ EngineExitCode() int }); ok {
-		return outcome.EngineExitCode()
-	}
-	return 1
+	return service.ExitCode(err)
 }

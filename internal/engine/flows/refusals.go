@@ -7,11 +7,12 @@ package flows
 type Refusals struct {
 	Total, UDP, Handshakes, PerApp, UDPPerApp uint64
 	Unknown, UnknownUDP, Policy, Unexplained  uint64
+	Accounting                                uint64
 }
 
 func (r Refusals) Count() uint64 {
 	return r.Total + r.UDP + r.Handshakes + r.PerApp + r.UDPPerApp +
-		r.Unknown + r.UnknownUDP + r.Policy + r.Unexplained
+		r.Unknown + r.UnknownUDP + r.Policy + r.Unexplained + r.Accounting
 }
 
 func (r Refusals) Sub(before Refusals) Refusals {
@@ -21,6 +22,7 @@ func (r Refusals) Sub(before Refusals) Refusals {
 		UDPPerApp: r.UDPPerApp - before.UDPPerApp, Unknown: r.Unknown - before.Unknown,
 		UnknownUDP: r.UnknownUDP - before.UnknownUDP, Policy: r.Policy - before.Policy,
 		Unexplained: r.Unexplained - before.Unexplained,
+		Accounting:  r.Accounting - before.Accounting,
 	}
 }
 
