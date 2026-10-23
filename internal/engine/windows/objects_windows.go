@@ -12,7 +12,6 @@ import (
 	"net/netip"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 	"unsafe"
 
@@ -35,6 +34,8 @@ type objects struct {
 	wfpBatch             bool
 	wfpCreates           int
 	retirementReferences func()
+	adapterLUID          uint64
+	saveAdapterLUID      func(uint64) error
 }
 type object struct {
 	all  *objects
@@ -223,27 +224,12 @@ func (o object) Inspect(ctx context.Context, fp journal.Fingerprint) (journal.Fi
 		if o.all.recovering {
 			return maps.Clone(fp), true, nil
 		}
-		var table *windows.MibIfTable2
-		if err := windows.GetIfTable2Ex(windows.MibIfTableNormal, &table); err != nil {
-			return nil, false, err
+		present, err := nativeAdapterPresent(fp["guid"], fp["name"], o.all.adapterLUID)
+		other := maps.Clone(fp)
+		if present {
+			other["foreignLuid"] = number(o.all.adapterLUID)
 		}
-		defer windows.FreeMibTable(unsafe.Pointer(table))
-		for _, r := range unsafe.Slice(&table.Table[0], table.NumEntries) {
-			if strings.EqualFold(r.InterfaceGuid.String(), fp["guid"]) {
-				// A present adapter we did not create is not ours to remove.
-				other := maps.Clone(fp)
-				other["foreignLuid"] = number(r.InterfaceLuid)
-				return other, true, nil
-			}
-			if windows.UTF16ToString(r.Alias[:]) == fp["name"] {
-				other := maps.Clone(fp)
-				other["guid"] = r.InterfaceGuid.String()
-				return other, true, nil
-			}
-		}
-		// Recovery is entered only after loading an existing durable record
-		// under the lifetime lock. Remove verifies the phantom's GUID again.
-		return maps.Clone(fp), o.all.recovering, nil
+		return other, present, err
 	}
 	match, err := interfaceMatches(fp)
 	if err != nil || !match {
@@ -322,6 +308,9 @@ func (o object) Create(ctx context.Context, fp journal.Fingerprint) error {
 	if o.kind == "adapter" {
 		a, err := wintun.Create(wintun.Config{Name: fp["name"], GUID: fp["guid"], TunnelType: "NetSwitch", MTU: 9000})
 		o.all.adapter = a
+		if err == nil {
+			err = o.all.rememberAdapter(a.LUID())
+		}
 		return err
 	}
 	match, err := interfaceMatches(fp)
@@ -376,9 +365,14 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 		if err := o.all.commitFirewallBatch(); err != nil {
 			return err
 		}
-		var oldLUID uint64
+		oldLUID := o.all.adapterLUID
 		if o.all.adapter != nil {
 			oldLUID = o.all.adapter.LUID()
+		}
+		if _, err := nativeAdapterPresent(fp["guid"], fp["name"], oldLUID); err != nil {
+			return err
+		}
+		if o.all.adapter != nil {
 			finish := o.all.timings.begin("adapter.close")
 			err := o.all.adapter.Close()
 			finish()
@@ -391,31 +385,18 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 		if err := wintun.RecoverAfterCrash(wintun.Config{Name: fp["name"], GUID: fp["guid"]}); err != nil {
 			return err
 		}
-		// Wintun/SetupAPI removal can precede IP Helper's interface deletion.
-		// Keep the durable ownership record until the same view used by Create
-		// confirms absence. Never adopt or remove a replacement to make progress.
+		// PnP plus both IP families, exactly as in the creation guard. NDIS
+		// TIME_WAIT rows do not prove that the adapter remains functional.
 		defer o.all.timings.begin("adapter.retirement.confirm")()
 		observed := false
 		began := time.Now()
 		return awaitAdapterRemoval(ctx, func() (bool, error) {
-			var table *windows.MibIfTable2
-			if err := windows.GetIfTable2Ex(windows.MibIfTableNormal, &table); err != nil {
-				return false, err
+			present, err := nativeAdapterPresent(fp["guid"], fp["name"], oldLUID)
+			if present && !observed && time.Since(began) >= 250*time.Millisecond && o.all.retirementReferences != nil {
+				observed = true
+				o.all.retirementReferences()
 			}
-			defer windows.FreeMibTable(unsafe.Pointer(table))
-			for _, row := range unsafe.Slice(&table.Table[0], table.NumEntries) {
-				if strings.EqualFold(row.InterfaceGuid.String(), fp["guid"]) {
-					if !observed && time.Since(began) >= 250*time.Millisecond && o.all.retirementReferences != nil {
-						observed = true
-						o.all.retirementReferences()
-					}
-					if oldLUID != 0 && row.InterfaceLuid != oldLUID {
-						return false, errors.New("adapter identity changed during retirement; refusing replacement")
-					}
-					return true, nil
-				}
-			}
-			return false, nil
+			return present, err
 		})
 	case "route":
 		r := routeRow(fp)

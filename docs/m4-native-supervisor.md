@@ -1,9 +1,35 @@
 # M4 native supervisor
 
-## Adapter removal: evidence still required
+## Adapter removal: PnP and IP absence
 
-The follow-up reference inventory is read-only and local-only until the
-current acceptance run finishes. When PnP is absent but the normal row remains,
+ARM64 job 120593984006 resolved the remaining failure: by 511 ms the PnP
+device, both IP-interface entries and all addresses were gone. The same-LUID
+NDIS row stayed Down for 30 seconds. The inventory found no Wintun handle;
+the surviving endpoints were system-owned TCP TIME_WAIT records. Waiting for
+that row made stop depend on other applications' closed connections.
+
+x64 job 120593984157 failed at loaded stop with the same confirmation error.
+Its final-quit samples still show the same Down LUID, absent PnP, no addresses
+and both IP entries not found through 30 seconds. The final-quit inventory
+reported zero TCP/UDP endpoints in both families; that later snapshot does
+not establish a larger TIME_WAIT count after the fill. Neither endpoint
+counts nor a hypothesized kernel reference is used as ownership authority.
+
+The decision recorded in the spec is now shared by retirement and creation:
+no present matching Wintun devnode and ERROR_NOT_FOUND for the recorded LUID
+in both IP families means absent. NDIS status is not consulted. Unknown or
+different LUIDs, a foreign GUID using our alias, and query errors refuse the
+operation. Confirmation retains its five-second cap and the caller deadline.
+
+A small atomic, boot-bound adapter identity file beside the journal preserves
+the last created LUID after journal compaction and across engine process exit.
+It is written under the lifetime lock before adapter creation is acknowledged;
+failure rolls back through the existing journal. It is historical evidence,
+never authorization to remove a live device. Missing history cannot authorize
+ignoring an existing row. The 20-cycle harness captures the row immediately
+before the next create, checks PnP/IP re-arrival, and reports LUID reuse.
+
+The follow-up reference inventory is read-only. When PnP is absent but the normal row remains,
 the harness starts a separate eight-second inventory helper. It reports the
 matching host/child/registrar/harness process tree, system handle object IDs,
 file-object names, and both families' owning-PID TCP/UDP endpoints bound to
@@ -36,8 +62,7 @@ the host retains its connected, TUN-bound health UDP socket until the entire
 supervisor returns. Non-running status clears cached index/port but does not
 disconnect that socket. It is a candidate for installed-service teardown, but
 cannot explain standalone acceptance, which does not start the supervisor.
-No teardown or absence-rule change is justified as the demonstrated fix yet;
-the inventories must identify what remains in the failing standalone path.
+This is distinct from the now-measured standalone TIME_WAIT case.
 [Microsoft's surprise-removal contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/handling-an-irp-mn-surprise-removal-request)
 confirms that an open device handle can prevent the final remove IRP.
 
@@ -50,7 +75,7 @@ Main and this branch use the same fixed GUID, alias, and normal IP Helper
 table for the creation guard. Main does not confirm table disappearance at
 stop; its acceptance driver waits for the engine process to exit before the
 next start. That provides another teardown boundary, not another identity.
-Whether process exit releases the lingering interface is an open measurement.
+The later inventory establishes that no application device handle survives.
 
 The hosted acceptance helper now samples the normal and raw interface views,
 all eight status flags, operational/admin/media state, GUID, alias, type,
@@ -59,7 +84,7 @@ Its first sample precedes cycle-one stop, the loaded stop and final quit. It con
 500 ms until both table rows disappear or 30 seconds pass; an outer 35-second
 kill bounds a stuck Windows query. This is a separate read-only process, so
 sampling neither delays service cleanup nor changes its success criterion.
-The strict stop failure remains visible. No replacement is created while the
+Stop assertions remain strict. No replacement is created while the
 observer is collecting the post-stop samples.
 
 [Wintun's close path](https://git.zx2c4.com/wintun/tree/api/adapter.c)
@@ -71,11 +96,8 @@ ownership guard. [GetIfTable2Ex](https://learn.microsoft.com/en-us/windows/win32
 returns the same set of interfaces in normal and raw modes, but obtains their
 state from the filter-stack top versus the interface itself.
 [Disconnected or down flags](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_row2)
-alone cannot establish absence. Pending the hosted samples, both the creation
-guard and retirement still require the normal row to be absent. A proposed
-PnP-plus-IP criterion must first show no present device, no IP interface and
-no addresses for the exact LUID, then be applied consistently to both paths;
-query errors must never count as absence.
+alone cannot establish absence. The measured PnP-plus-IP criterion above is
+applied consistently to both paths; query errors never count as absence.
 
 The `m4_native` service now hosts one verified native child. This implements
 option (e), recorded in spec §3.4. Control cutover and restart/backoff/latch

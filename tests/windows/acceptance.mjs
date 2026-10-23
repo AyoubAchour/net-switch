@@ -44,6 +44,13 @@ const selectionDestination = () => localSelection ? tlsResponder.destination : p
 const appDeviceIDs = new Set();
 const destinationCount = (stats, destination) => stats.destinations?.[destination] ?? 0;
 
+async function adapterView() {
+  const result = await run(path.resolve('dist/windows-test/testisp.exe'), ['observe-retirement', 'once']);
+  const line = result.stdout.split('\n').find(value => value.startsWith('ADAPTER_VIEW '));
+  assert(line, 'Missing adapter identity observation');
+  return JSON.parse(line.slice('ADAPTER_VIEW '.length));
+}
+
 async function retirementObserver() {
   if (options.profile !== 'v1') return async () => {};
   const child = spawn(path.resolve('dist/windows-test/testisp.exe'), ['observe-retirement'],
@@ -908,8 +915,25 @@ try {
       }
       finally { await finishObservation(); }
       snapshots.push({ cycle: n, ...await timedPhase(phases, 'stoppedChecksMs', stoppedSnapshot) });
+      const beforeArrival = options.profile === 'v1' ? await adapterView() : null;
+      if (beforeArrival?.table0?.length) {
+        assert.equal(beforeArrival.pnpPresent, false);
+        assert.equal(beforeArrival.pnpError, '<nil>');
+        for (const row of beforeArrival.table0) {
+          assert.equal(row.ipInterface2.present, false);
+          assert.equal(row.ipInterface23.present, false);
+          assert.equal(row.addressCount, 0);
+        }
+      }
       await timedPhase(phases, 'routingOnMs', () => server.api('routing', { on: true }));
       await timedPhase(phases, 'routingReadyMs', () => server.on());
+      if (beforeArrival?.table0?.length) {
+        const afterArrival = await adapterView();
+        assert.equal(afterArrival.pnpPresent, true);
+        assert(afterArrival.table0.some(row => row.ipInterface2.present && row.ipInterface23.present));
+        console.log(`WINDOWS LINGERING ROW RECREATE ${JSON.stringify({ cycle: n, before: beforeArrival, after: afterArrival,
+          reusedLUID: afterArrival.table0.some(row => beforeArrival.table0.some(old => old.luid === row.luid)) })}`);
+      }
       rememberAppDevices(await timedPhase(phases, 'runningPnPCheckMs', pnpDevices));
       await timedPhase(phases, 'firstFlowMs', async () => {
         try { return await client('open', { target: responder.virtual }); } catch (error) {

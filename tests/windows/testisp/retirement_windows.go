@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unsafe"
@@ -70,7 +71,7 @@ func observeRetirement() error {
 			return err
 		}
 		fmt.Printf("ADAPTER_VIEW %s\n", data)
-		if !found || time.Since(started) >= 30*time.Second {
+		if !found || time.Since(started) >= 30*time.Second || (len(os.Args) == 3 && os.Args[2] == "once") {
 			return nil // Observation, never an alternate cleanup verdict.
 		}
 		time.Sleep(500 * time.Millisecond)

@@ -98,6 +98,14 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 	if err != nil {
 		return nil, err
 	}
+	if disk, ok := store.(*diskJournal); ok {
+		o.adapterLUID, err = disk.adapterHistory(boot)
+		if err != nil {
+			s.Close()
+			return nil, err
+		}
+		o.saveAdapterLUID = func(luid uint64) error { return disk.saveAdapterHistory(boot, luid) }
+	}
 	if err := s.Cleanup(ctx); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("engine crash recovery: %w", errors.Join(err, o.closeFirewall()))
