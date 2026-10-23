@@ -90,6 +90,40 @@ function client(command, args = {}, timeout = 120_000) {
   });
 }
 
+// The engine's owner lookup is the only pre-handshake step with a documented
+// allowance above the 100 ms freeze-gate bound (the 250 ms overload hold), so a
+// slow sample needs its counters and the TCP table rows behind them.
+const lookupCounters = ['count', 'misses', 'ambiguous', 'tcpHolds', 'tcpHeldFound', 'tcpHoldReads',
+  'tcpLateIdentities', 'tcpRefreshes', 'cacheMissRefreshes', 'tcpRetries', 'tcpReadNanos', 'tcpIndexNanos'];
+const lookupHistograms = ['buckets', 'snapshotBuckets', 'processBuckets', 'refreshBuckets', 'tcpReadBuckets'];
+
+async function engineOwnerLookup() {
+  try {
+    const reply = await server.api('engine-command', { method: 'stats' });
+    return (reply.engine ?? reply).ownerLookup ?? {};
+  } catch (error) { return { error: String(error) }; }
+}
+
+function lookupSnapshot(lookup) {
+  return { error: lookup.error, maxUS: lookup.maxUS, tcpReadMaxUS: lookup.tcpReadMaxUS, tcpHolds: lookup.tcpHolds,
+    tcpHeldFound: lookup.tcpHeldFound, tcpHoldReads: lookup.tcpHoldReads,
+    tcpLateIdentities: lookup.tcpLateIdentities, tcpRawRows: lookup.tcpRawRows,
+    tcpPeakRows: lookup.tcpPeakRows, tcpRowsByFamily: lookup.tcpRowsByFamily, upperUS: lookup.upperUS };
+}
+
+function lookupDelta(before, after) {
+  const delta = Object.fromEntries(lookupCounters.map((key) => [key, (after[key] ?? 0) - (before[key] ?? 0)]));
+  for (const key of lookupHistograms) {
+    const from = before[key] ?? [], to = after[key] ?? [], changed = {};
+    for (let i = 0; i < to.length; i++) {
+      const change = (to[i] ?? 0) - (from[i] ?? 0);
+      if (change) changed[i] = change;
+    }
+    delta[key] = changed;
+  }
+  return delta;
+}
+
 // Evidence for a flow that got no reply: engine stats (lookups, dialer, Wintun
 // counters, both ring headers and the registrar), the flow table and Control's
 // state, twice 2 s apart to show what still moves, then one more attempt.
@@ -648,7 +682,37 @@ try {
     // The verified transfer is already the warm-up on this exact tuple. Keep
     // the first timed attempt immediately after it to test large-transfer reuse.
     console.log(`REUSE WARMUP (verified 100 MB transfer) ${JSON.stringify({ port: large[0].port, peerPort: large[0].peerPort, ms: large[0].ms })}`);
-    const samples = await client('reuse', { target: responder.virtual, count: 1000, reusePort: large[0].port });
+    const before = await engineOwnerLookup();
+    // Same evidence options as the TestISP baseline: keep sampling past the
+    // first slow attempt, and capture the client heartbeat and gateway trace
+    // there. The engine counters are cumulative, so taking them after the loop
+    // still shows whether the slow sample sat behind an owner-lookup hold.
+    const samples = await client('reuse', { target: responder.virtual, count: 1000, reusePort: large[0].port,
+      maxMs: 100, diagnostics: harness.diagnosticClient, continueAfterSlow: true });
+    const after = await engineOwnerLookup();
+    const heartbeat = await client('heartbeat').catch((error) => ({ error: String(error) }));
+    const firstSlow = samples.find((sample) => sample.outcome !== 'closed' || sample.ms >= 100);
+    const gateway = firstSlow?.diagnostics;
+    for (const sample of samples) delete sample.diagnostics;
+    if (firstSlow) {
+      const gaps = gateway?.clientHeartbeat?.gaps ?? [];
+      console.log(`FREEZE_GATE_SLOW_SAMPLE ${JSON.stringify({
+        attempt: firstSlow.attempt, outcome: firstSlow.outcome, ms: firstSlow.ms,
+        bindRetries: firstSlow.bindRetries, startedAt: firstSlow.startedAt, phases: firstSlow.phases,
+        ownerLookup: { before: lookupSnapshot(before), after: lookupSnapshot(after), delta: lookupDelta(before, after) },
+        clientHeartbeat: { periodMs: gateway?.clientHeartbeat?.periodMs, ticks: gateway?.clientHeartbeat?.ticks,
+          maxGapMs: gateway?.clientHeartbeat?.maxGapMs, totalGaps: gaps.length,
+          slowGaps: gaps.filter((gap) => gap.to >= (firstSlow.startedAt - 1000) * 1000
+            && gap.from <= (firstSlow.startedAt + firstSlow.ms + 1000) * 1000) },
+        gatewayTrace: gateway?.stats?.tcpTrace?.slice(-32),
+      })}`);
+    }
+    console.log(`FREEZE_GATE_SUMMARY ${JSON.stringify({ count: samples.length,
+      maxMs: samples.length ? Math.max(...samples.map((sample) => sample.ms)) : null,
+      slowAttempt: firstSlow?.attempt ?? null,
+      ownerLookup: { after: lookupSnapshot(after), delta: lookupDelta(before, after) },
+      clientHeartbeat: { error: heartbeat.error, maxGapMs: heartbeat.maxGapMs, ticks: heartbeat.ticks,
+        gaps: heartbeat.gaps?.length } })}`);
     if (samples.some((sample) => sample.outcome === 'timeout')) throw new BaselineDefect('Port stalls after a verified 100 MB transfer', samples);
     assert(samples.length === 1000 && samples.every((sample) => sample.outcome === 'closed' && sample.ms < 100), JSON.stringify(samples));
     return samples;
