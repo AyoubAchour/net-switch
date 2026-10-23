@@ -66,7 +66,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $buildCases = @(
-            @{ Tags = ''; Tests = @('TestProductNoProcessDiagnostics', 'TestPrivatePipeACLBeforePIDCheck') },
+            @{ Tags = ''; Tests = @('TestProductNoProcessDiagnostics', 'TestPrivatePipeACLBeforePIDCheck', 'TestAdapterRetirementPrecedesJournalClosure', 'TestAdapterRetirementHonorsCancellation') },
             @{ Tags = 'netswitch_handlecheck'; Tests = @('TestUDPPortSpaceDiagnosisReadsHostedSettings', 'TestPortConfigurationMatchesNativeProvider') }
           )
           foreach ($buildCase in $buildCases) {

@@ -174,6 +174,29 @@ It observes off across five seconds of recovery ticks, not just one snapshot.
 The separate 20.069 s forced-stop message is the acknowledged-stop barrier
 case succeeding inside its existing 18–32 s assertion, not an unexpected kill.
 
+### Same-child ownership retirement
+
+ARM64 job 120468582339 on 29d6785f failed the second adapter preflight: two TUN
+setup attempts but only one adapter creation, with no second interface/address
+or firewall creation. The x64 job 120468582260 passed and recorded 24 health
+passes. Wintun close and SetupAPI cleanup had completed, but the IP Helper
+interface view still exposed the old adapter. The journal was retired too early.
+
+Adapter removal now verifies absence in the same
+[IP Helper interface table](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2ex)
+used by creation, before allowing the journal's removed checkpoint. This is
+option A: no ownership continuation or adoption exception. Polling is read-only,
+bounded by the caller's deadline and two seconds; a changed LUID is refused,
+and timeout or inspection failure retains the ownership records. Existing
+object refusals now name the object kind, and retirement has a separate timing.
+
+The installed regression restarts twice without replacing the child. Each
+cycle checks the same live-object baseline, new journal record IDs, real capture,
+fresh traffic, and health for 23 seconds; final stop requires no leftovers.
+Pure tests verify that delayed disappearance keeps journal records live and
+that replacement/error/cancellation cannot silently retire ownership. Both
+Windows hosted jobs require the retirement tests' PASS lines.
+
 The Linux acceptance `routes.default-route-removed` failure in job
 120435827572 uses the namespace launcher's standalone `run` command, not the
 service host or child command. Standalone has no HealthKey, so no private probe

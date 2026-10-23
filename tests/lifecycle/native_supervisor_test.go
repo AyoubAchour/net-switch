@@ -173,22 +173,49 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 		t.Run("same-child-routing-restart-health", func(t *testing.T) {
 			c, _ := start(t)
 			wait(t, "initial forwarding healthy", 10*time.Second, func() bool { return nativeSupervisorEvent(data, "NATIVE_HEALTH", c.instance) != "" })
-			rev.N++ // retain monotonic durable history for all following cases
-			nativeMust(t, c, "testFault", map[string]any{"fault": map[string]any{"kind": "restart-routing", "revision": rev}}, nil)
-			// More than the complete failure window. A cached old port must
-			// fail this case, even if the ordinary TCP echo remains healthy.
-			for range 23 {
-				time.Sleep(time.Second)
-				nativeMust(t, c, "renew", nil, nil)
+			previous := nativeOwnershipIDs(t, data, c.instance)
+			baseline := len(previous)
+			if baseline == 0 {
+				t.Fatal("restart has no owned baseline")
+			}
+			for cycle := 1; cycle <= 2; cycle++ {
+				rev.N++ // retain monotonic durable history for following cases
+				nativeMust(t, c, "testFault", map[string]any{"fault": map[string]any{"kind": "restart-routing", "revision": rev}}, nil)
+				current := nativeOwnershipIDs(t, data, c.instance)
+				if len(current) != baseline {
+					t.Fatal("restart changed live ownership baseline", cycle, baseline, len(current))
+				}
+				for id := range current {
+					if previous[id] {
+						t.Fatal("previous generation journal record was not retired", cycle, id)
+					}
+				}
+				assertNativeOwnedLeftovers(t, data, c.instance)
+				assertNativeCapture(t, c.instance, fixture)
+				fresh, err := fixture.dial(ctx, "tcp4", fixture.target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { fresh.Close() })
+				nativeEcho(t, fresh, "after-same-child-restart")
+				fresh.Close()
+				// Remain healthy beyond the complete failure window each time.
+				for range 23 {
+					time.Sleep(time.Second)
+					nativeMust(t, c, "renew", nil, nil)
+				}
+				t.Logf("NATIVE_RESTART_CYCLE child_pid=%d cycle=%d retired_records=%d live_records=%d", c.pid, cycle, len(previous), len(current))
+				previous = current
 			}
 			nativeMust(t, c, "stop", nil, nil)
 			if err := service.WaitStopped(ctx, service.Engine); err != nil {
 				t.Fatal(err)
 			}
 			out, err := host.ReadOutcome(data, c.instance)
-			if err != nil || out.Child == nil || out.Child.Forced || out.Child.HostHealthPasses < 20 {
+			if err != nil || out.Child == nil || out.Child.Forced || out.Child.HostHealthPasses < 40 {
 				t.Fatal("health did not survive routing restart", out, err)
 			}
+			waitNativeCleanup(t, fixture, data, c.instance)
 			t.Logf("NATIVE_RESTART_HEALTH child_pid=%d passes=%d", c.pid, out.Child.HostHealthPasses)
 		})
 		t.Run("startup-death-before-readiness", func(t *testing.T) {

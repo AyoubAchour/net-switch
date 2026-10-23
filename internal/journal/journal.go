@@ -173,7 +173,7 @@ func (s *Session) CreateBatch(ctx context.Context, creations []Creation) error {
 		if _, found, err := driver.Inspect(ctx, maps.Clone(fp)); err != nil {
 			return err
 		} else if found {
-			return errors.New("object already exists; refusing to claim ownership")
+			return fmt.Errorf("%s object already exists; refusing to claim ownership", creation.Kind)
 		}
 		var id [16]byte
 		if _, err := rand.Read(id[:]); err != nil {

@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/journal"
@@ -366,7 +367,9 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 	}
 	switch o.kind {
 	case "adapter":
+		var oldLUID uint64
 		if o.all.adapter != nil {
+			oldLUID = o.all.adapter.LUID()
 			finish := o.all.timings.begin("adapter.close")
 			err := o.all.adapter.Close()
 			finish()
@@ -376,7 +379,29 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 			}
 		}
 		defer o.all.timings.begin("adapter.RecoverAfterCrash")()
-		return wintun.RecoverAfterCrash(wintun.Config{Name: fp["name"], GUID: fp["guid"]})
+		if err := wintun.RecoverAfterCrash(wintun.Config{Name: fp["name"], GUID: fp["guid"]}); err != nil {
+			return err
+		}
+		// Wintun/SetupAPI removal can precede IP Helper's interface deletion.
+		// Keep the durable ownership record until the same view used by Create
+		// confirms absence. Never adopt or remove a replacement to make progress.
+		defer o.all.timings.begin("adapter.retirement.confirm")()
+		return awaitAdapterRemoval(ctx, func() (bool, error) {
+			var table *windows.MibIfTable2
+			if err := windows.GetIfTable2Ex(windows.MibIfTableNormal, &table); err != nil {
+				return false, err
+			}
+			defer windows.FreeMibTable(unsafe.Pointer(table))
+			for _, row := range unsafe.Slice(&table.Table[0], table.NumEntries) {
+				if strings.EqualFold(row.InterfaceGuid.String(), fp["guid"]) {
+					if oldLUID != 0 && row.InterfaceLuid != oldLUID {
+						return false, errors.New("adapter identity changed during retirement; refusing replacement")
+					}
+					return true, nil
+				}
+			}
+			return false, nil
+		})
 	case "route":
 		r := routeRow(fp)
 		return ignoreMissing(api("DeleteIpForwardEntry2", uintptr(unsafe.Pointer(&r))))
@@ -398,4 +423,28 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 		return setDNS(fp, uint32(uintField(fp, "before")))
 	}
 	return errors.New("unknown object")
+}
+
+func awaitAdapterRemoval(parent context.Context, present func() (bool, error)) error {
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+	defer cancel()
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("adapter removal not confirmed by IP Helper: %w", err)
+		}
+		found, err := present()
+		if err != nil {
+			return fmt.Errorf("inspect retiring adapter: %w", err)
+		}
+		if !found {
+			return nil
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("adapter removal not confirmed by IP Helper: %w", ctx.Err())
+		}
+	}
 }
