@@ -20,6 +20,10 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, log func(s
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
 	instance := ""
+	boot, err := host.CurrentBootID()
+	if err != nil {
+		return err
+	}
 	invocation := ""
 	if runtime.GOOS == "linux" && host.ValidInvocationID(os.Getenv("INVOCATION_ID")) {
 		invocation = os.Getenv("INVOCATION_ID")
@@ -37,7 +41,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, log func(s
 			if err != nil {
 				return nil, err
 			}
-			return state, writeOutcome(c.Data, host.Outcome{Instance: id, State: "running", InvocationID: invocation})
+			return state, writeOutcome(c.Data, host.Outcome{Instance: id, State: "running", InvocationID: invocation, BootID: boot})
 		},
 		Ready: func(s *protocol.Server) {
 			server = s
@@ -59,15 +63,17 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, log func(s
 			ready()
 		},
 	}
-	configureNativeProof(c.Data, &options)
+	if err := configureNativeProof(c.Data, &options); err != nil {
+		return err
+	}
 	// Native Serve owns the OS lifetime lock and cleanup. Acquiring the old
 	// adapter lock here would deadlock Linux startup on the same engine.lock.
-	err := serveNative(run, c.Data, options)
+	err = serveNative(run, c.Data, options)
 	if err == nil {
 		err = nativeProofExit(c.Data)
 	}
 	if instance != "" {
-		out := host.Outcome{Instance: instance, State: "pending", Reason: "stop", InvocationID: invocation}
+		out := host.Outcome{Instance: instance, State: "pending", Reason: "stop", InvocationID: invocation, BootID: boot}
 		if server != nil && server.LeaseExpired() {
 			out.Reason = "lease-expired"
 		}

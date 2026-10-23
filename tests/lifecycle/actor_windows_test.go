@@ -8,6 +8,14 @@ import (
 )
 
 func TestNativeActorAccountChecks(t *testing.T) {
+	for _, tc := range []struct {
+		kind            uint32
+		elevated, allow bool
+	}{{1, false, true}, {1, true, false}, {2, true, false}, {3, false, false}, {0, false, false}} {
+		if err := checkActorToken(tc.kind, tc.elevated); (err == nil) != tc.allow {
+			t.Fatal("split/elevated token classification", tc, err)
+		}
+	}
 	ptr := func(s string) *uint16 {
 		t.Helper()
 		p, err := windows.UTF16PtrFromString(s)

@@ -20,6 +20,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
 	ntcp "github.com/AyoubAchour/net-switch/internal/engine/tcp"
+	"github.com/AyoubAchour/net-switch/internal/engine/testproxy"
 	"github.com/AyoubAchour/net-switch/internal/engine/udp"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -56,6 +57,7 @@ type Engine struct {
 	link      *ns.Link
 	tcp       *ntcp.Forwarder
 	udp       *udp.NAT
+	testProxy *testproxy.Server
 	pumps     sync.WaitGroup
 	lastError error
 	lines     []platform.Line
@@ -85,7 +87,11 @@ func (e *Engine) LiveState() (string, time.Time) {
 }
 
 func New(ctx context.Context, d Dependencies, l flows.Limits, state flows.StateStore) *Engine {
-	return &Engine{root: ctx, deps: d, limits: l, Table: flows.New(l, state)}
+	e := &Engine{root: ctx, deps: d, limits: l, Table: flows.New(l, state)}
+	if r, ok := d.Routes.(interface{ SetLineUse(func(string) bool) }); ok {
+		r.SetLineUse(e.Table.ReferencesLine)
+	}
+	return e
 }
 
 func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, error) {
@@ -241,6 +247,7 @@ func (e *Engine) fail(link *ns.Link, err error) {
 			return
 		}
 		if e.OnTunError != nil && e.OnTunError(err) {
+			e.lastError = err
 			e.live.Store(&liveState{status: "stopping", lastError: Clip(err.Error(), 4096)})
 			return
 		}
@@ -307,6 +314,10 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	finish = phase("flow-close")
 	if e.cancel != nil {
 		e.cancel()
+	}
+	if e.testProxy != nil {
+		e.testProxy.Close()
+		e.testProxy = nil
 	}
 	e.Table.Unload()
 	e.Table.CloseAll()

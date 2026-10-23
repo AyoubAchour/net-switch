@@ -69,7 +69,8 @@ func TestNativeStatusSurvivesSystemdUnitCollection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	collected := Status{Stopped: true, ManagerCode: "0", ManagerStatus: "0", ManagerResult: "success"}
+	boot := strings.Repeat("d", 32)
+	collected := Status{Stopped: true, ManagerCode: "0", ManagerStatus: "0", ManagerResult: "success", ManagerBootID: boot}
 	for _, tc := range []struct {
 		name, cleanup string
 		exit          *host.SystemdExit
@@ -87,7 +88,7 @@ func TestNativeStatusSurvivesSystemdUnitCollection(t *testing.T) {
 		{"manager-failed", "complete", &host.SystemdExit{Code: "exited", Status: "0", Result: "timeout"}, true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			write(path, host.Outcome{Instance: instance, State: tc.cleanup, InvocationID: invocation, Systemd: tc.exit})
+			write(path, host.Outcome{Instance: instance, State: tc.cleanup, InvocationID: invocation, BootID: boot, Systemd: tc.exit})
 			got := readNativeOutcome(dir, collected, nil)
 			if got.ExitKnown != tc.known || (got.ExitKnown && got.ExitCode != tc.code) {
 				t.Fatalf("unexpected final status: %+v", got)
@@ -97,7 +98,14 @@ func TestNativeStatusSurvivesSystemdUnitCollection(t *testing.T) {
 			}
 		})
 	}
-	write(path, host.Outcome{Instance: instance, State: "complete", InvocationID: invocation, Systemd: &host.SystemdExit{Code: "exited", Status: "0", Result: "success"}})
+	write(path, host.Outcome{Instance: instance, State: "complete", InvocationID: invocation, BootID: boot, Systemd: &host.SystemdExit{Code: "exited", Status: "0", Result: "success"}})
+	for _, currentBoot := range []string{"", strings.Repeat("e", 32)} {
+		state := collected
+		state.ManagerBootID = currentBoot
+		if got := readNativeOutcome(dir, state, nil); got.ExitKnown || got.LastError == "" {
+			t.Fatal("previous boot's clean exit survived reboot/unknown boot", got)
+		}
+	}
 	for _, current := range []Status{
 		{Stopped: true, ManagerCode: "2", ManagerStatus: "9", ManagerResult: "signal"},
 		{Stopped: true, ManagerCode: "0", ManagerStatus: "0", ManagerResult: "success", ManagerInvocation: strings.Repeat("c", 32)},

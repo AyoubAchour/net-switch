@@ -125,12 +125,12 @@ func nativeMust(t *testing.T, c *nativeClient, method string, fields map[string]
 	}
 }
 
-func nativeEcho(t *testing.T, conn net.Conn, marker string) {
+func nativeEcho(t *testing.T, conn net.Conn, marker string) string {
 	t.Helper()
-	nativeEchoDeadline(t, conn, marker, time.Now().Add(5*time.Second))
+	return nativeEchoDeadline(t, conn, marker, time.Now().Add(5*time.Second))
 }
 
-func nativeEchoDeadline(t *testing.T, conn net.Conn, marker string, deadline time.Time) {
+func nativeEchoDeadline(t *testing.T, conn net.Conn, marker string, deadline time.Time) string {
 	t.Helper()
 	if err := conn.SetDeadline(deadline); err != nil {
 		t.Fatal(err)
@@ -142,6 +142,7 @@ func nativeEchoDeadline(t *testing.T, conn net.Conn, marker string, deadline tim
 	if err != nil || !strings.Contains(line, marker) {
 		t.Fatalf("echo %q: %q %v", marker, line, err)
 	}
+	return line
 }
 
 func readNativeTotals(t *testing.T, c *nativeClient, between func()) flows.TotalsPage {
@@ -284,6 +285,7 @@ func TestNativeEngineService(t *testing.T) {
 		}
 	})
 	fixture := prepareTUN(t, dir, data)
+	probeFixture := fixture.probe(t, data)
 	auditTunables := prepareNativeTunables(t)
 	startCtx, startCancel := context.WithTimeout(ctx, 45*time.Second)
 	startErr := service.Start(startCtx, service.Engine)
@@ -317,7 +319,8 @@ func TestNativeEngineService(t *testing.T) {
 		}
 	})
 	assertActorRemoved(t, "NSNativeOther")
-	config := policy.Config{Lines: []platform.Line{{ID: "a1", Interface: fixture.line}}}
+	// Saved main line is unplugged at cold start; its lane uses the live line.
+	config := policy.Config{Lines: []platform.Line{{ID: "unplugged", Interface: "ns-missing"}, {ID: "a1", Interface: fixture.line}}, Lanes: map[string]string{"unplugged": "a1"}}
 	rev := policy.Revision{N: 1, Config: config, Hash: policy.Hash(config)}
 	var started policy.Applied
 	nativeMust(t, c, "start", map[string]any{"revision": rev}, &started)
@@ -397,6 +400,7 @@ func TestNativeEngineService(t *testing.T) {
 	if totals.Lines["a1"].Up == 0 || totals.Lines["a1"].Down == 0 {
 		t.Fatal("closed-flow accounting missing", totals)
 	}
+	nativeFollowup(t, c, fixture, probeFixture, faults, &rev, newer)
 	if !faults {
 		t.Run("product-build-ignores-forwarding-fault", func(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(data, "fault-native-forwarding"), []byte("armed"), 0600); err != nil {

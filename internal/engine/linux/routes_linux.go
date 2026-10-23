@@ -7,6 +7,7 @@ package linux
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,7 @@ type lineState struct {
 	Up                 bool
 	Default4, Default6 bool
 	Unavailable        string
+	lease              *lineLease
 }
 type Platform struct {
 	testClose func()
@@ -60,6 +62,9 @@ type Platform struct {
 	allocated, capturing bool
 	tunSpec              tunObject
 	lines                map[string]lineState
+	configured           map[string]bool
+	lineUsed             func(string) bool
+	slotsDirty           bool
 	owned                map[string]ownedObject
 	captureOwned         map[string]ownedObject
 	captureOrder         []ownedObject
@@ -76,14 +81,17 @@ type Platform struct {
 	AddressRemoved func(line string, addr netip.Addr)
 	Fatal          func(error)
 	WrapTun        func(platform.TunDevice) platform.TunDevice
+	ProbeTLS       *tls.Config
+	ProbeError     func() error
 }
 type bindingSnapshot struct {
-	lines     map[string]lineState
-	capturing bool
+	lines      map[string]lineState
+	capturing  bool
+	configured int
 }
 
 func (p *Platform) publishBindings() {
-	view := &bindingSnapshot{lines: make(map[string]lineState, len(p.lines)), capturing: p.capturing}
+	view := &bindingSnapshot{lines: make(map[string]lineState, len(p.lines)), capturing: p.capturing, configured: len(p.configured)}
 	for id, l := range p.lines {
 		view.lines[id] = l
 	}
@@ -324,12 +332,22 @@ func (p *Platform) allocate(ctx context.Context, count int) error {
 
 func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 	p.routeMu.Lock()
-	var replaced []string
+	before := make(map[string]lineState, len(p.lines))
+	for id, line := range p.lines {
+		before[id] = line
+	}
+	var down []string
+	var removed []lineAddress
 	defer func() {
 		p.routeMu.Unlock()
-		for _, id := range replaced {
+		for _, id := range down {
 			if p.LineDown != nil {
 				p.LineDown(id)
+			}
+		}
+		for _, address := range removed {
+			if p.AddressRemoved != nil {
+				p.AddressRemoved(address.Line, address.Address)
 			}
 		}
 	}()
@@ -341,7 +359,20 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 			return err
 		}
 	}
-	// Resolve every line before any mutation. Old line IDs retain their table
+	wanted := make(map[string]bool, len(lines))
+	for _, line := range lines {
+		wanted[line.ID] = true
+	}
+	// Only previously retired/unreferenced lines can be reclaimed before the
+	// new policy commits. Remove their selecting rules/routes before slot reuse.
+	p.retireLines(wanted)
+	if p.slotsDirty {
+		if err := p.reconcileRetry(ctx); err != nil {
+			return err
+		}
+		p.slotsDirty = false
+	}
+	// Resolve requested lines before publishing bindings. Old IDs retain their table
 	// while existing flows use it; policy updates cannot relabel their sockets.
 	next := make(map[string]lineState, len(p.lines)+len(lines))
 	for id, l := range p.lines {
@@ -358,19 +389,10 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 		if err != nil && !ambiguous {
 			return err
 		}
-		if match == nil && !ambiguous {
-			if existing {
-				continue
-			} // a down line still needs its failover lane
-			return fmt.Errorf("line %s: interface not found", line.ID)
-		}
 		if match != nil && match.Attrs().Index == p.tunSpec.Index {
 			return errors.New("the TUN cannot be an egress line")
 		}
 		if existing {
-			if ambiguous || previous.Index != match.Attrs().Index || previous.Name != match.Attrs().Name {
-				replaced = append(replaced, line.ID)
-			}
 			if match != nil {
 				previous.Index, previous.Name = match.Attrs().Index, match.Attrs().Name
 			}
@@ -378,26 +400,29 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 			next[line.ID] = previous
 			continue
 		}
-		n := len(next) + 1
-		if n > 255 {
-			return errors.New("line allocation exhausted; restart required")
+		n := freeLineSlot(next)
+		if n == 0 {
+			return errors.New("all line slots are still configured or held by live sockets")
 		}
 		var name string
 		var index int
 		if match != nil {
 			name, index = match.Attrs().Name, match.Attrs().Index
 		}
-		next[line.ID] = lineState{ID: line.ID, Name: name, Interface: line.Interface, MatchAddresses: slices.Clone(line.Addresses), Index: index, N: n, Table: 21000 + p.base + n, Mark: uint32(0x4e530000 + p.base + n)}
+		next[line.ID] = lineState{ID: line.ID, Name: name, Interface: line.Interface, MatchAddresses: slices.Clone(line.Addresses), Index: index, N: n, Table: 21000 + p.base + n, Mark: uint32(0x4e530000 + p.base + n), lease: &lineLease{}}
 	}
-	old := p.lines
+	old, oldConfigured := p.lines, p.configured
 	p.lines = next
+	p.configured = wanted
 	if err := p.reconcileRetry(ctx); err != nil {
 		p.lines = old
+		p.configured = oldConfigured
 		if p.capturing && p.Fatal != nil {
 			go p.Fatal(fmt.Errorf("cannot reconcile line revision safely: %w", err))
 		}
 		return err
 	}
+	down, removed = lineChanges(before, p.lines)
 	return nil
 }
 
@@ -828,10 +853,12 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 		for id, l := range p.lines {
 			old[id] = l
 		}
+		p.retireLines(p.configured)
 		err := p.reconcileRetry(ctx)
 		var down []string
 		var removed []lineAddress
 		if err == nil {
+			p.slotsDirty = false
 			down, removed = lineChanges(old, p.lines)
 		}
 		if err != nil {
@@ -920,6 +947,8 @@ func (p *Platform) Cleanup(ctx context.Context) error {
 		p.captureOwned = nil
 		p.captureOrder = nil
 		p.lines = map[string]lineState{}
+		p.configured = nil
+		p.slotsDirty = false
 		p.capturing = false
 		p.allocated = false
 	}

@@ -69,7 +69,7 @@ type Gauges struct {
 	ClosingOverflow, ClosingOverflowPeak                                                              int
 	EventsDropped                                                                                     uint64
 	Flows, Handshakes, UDP, Unknown, UnknownUDP                                                       int
-	TCPBytes, PendingBytes, SnapshotBytes                                                             int64
+	TCPBytes, PendingBytes, SnapshotBytes, TotalsSnapshotBytes                                        int64
 	Rejected, DroppedNotices, Admitted, LookupCount, LookupMisses, LookupAmbiguous, LookupNanoseconds uint64
 }
 type counts struct{ flows, udp int }
@@ -85,6 +85,7 @@ type Table struct {
 	k                    atomic.Uint64
 	flows                map[uint64]*ticket
 	apps                 map[string]counts
+	lineRefs             map[string]int // resolved admissions; native socket pins cover closing tails
 	totals               Totals
 	accountingIDs        map[accountIdentity]uint64
 	nextAccounting       uint64
@@ -198,7 +199,9 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 	if !tuple.Source.IsValid() || !tuple.Destination.IsValid() {
 		return nil, errors.New("invalid tuple")
 	}
-	if tuple.Source.Addr().Is6() && !t.policy.IPv6() {
+	// The routed leg determines policy. A test-proxy client may reach us on
+	// IPv4 loopback while asking for IPv6 (or the reverse).
+	if tuple.Destination.Addr().Is6() && !t.policy.IPv6() {
 		t.refusal(protocol).Policy++
 		return nil, policy.ErrIPv6
 	}
@@ -270,7 +273,7 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	if len(owner.Path) > 1024 || len(owner.AppID) > 512 || len(owner.Generation) > 256 {
 		return flowapi.Decision{}, errors.New("owner identity too long")
 	}
-	d, err := t.policy.Decide(owner, f.record.Source.Port(), f.record.Source.Addr().Is6(), t.k.Load()+1)
+	d, err := t.policy.Decide(owner, f.record.Source.Port(), f.record.Destination.Addr().Is6(), t.k.Load()+1)
 	if err != nil {
 		t.refusal(f.record.Protocol).Policy++
 		return flowapi.Decision{}, err
@@ -309,6 +312,10 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	f.record.Owner = owner
 	f.lineAddresses = t.policy.Addresses(d.Line)
 	f.resolved = true
+	if t.lineRefs == nil {
+		t.lineRefs = map[string]int{}
+	}
+	t.lineRefs[d.Line]++
 	t.k.Add(1)
 	t.gauges.Admitted++
 	return d, nil
@@ -444,6 +451,10 @@ func (f *ticket) retireLocked() {
 		t.gauges.UDPAdapterBytes -= flowapi.UDPAdapterBuffer
 	}
 	if f.resolved {
+		t.lineRefs[f.record.Line]--
+		if t.lineRefs[f.record.Line] == 0 {
+			delete(t.lineRefs, f.record.Line)
+		}
 		app := f.record.Owner.AppID
 		c := t.apps[app]
 		c.flows--
@@ -732,7 +743,7 @@ func (t *Table) CloseFlows(s Selector, before uint64) (CloseResult, error) {
 	}
 	result, cancels := t.closeLocked(func(id uint64, f *ticket) bool {
 		r := f.record
-		match := ids[id] || (s.Line != "" && r.Line == s.Line) || (s.App != "" && r.Owner.AppID == s.App && r.Line != s.NotLine) || f.matchesSource(s.Source) || (s.IPv6 && r.Source.Addr().Is6())
+		match := ids[id] || (s.Line != "" && r.Line == s.Line) || (s.App != "" && r.Owner.AppID == s.App && r.Line != s.NotLine) || f.matchesSource(s.Source) || (s.IPv6 && r.Destination.Addr().Is6())
 		if match {
 			delete(ids, id)
 		}

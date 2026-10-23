@@ -3,6 +3,7 @@
 package host
 
 import (
+	"crypto/tls"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
@@ -26,6 +27,9 @@ type Options struct {
 	// WrapTun is nil in product builds; hosted tests stall the actual packet
 	// reader without suspending the separate control/lease goroutines.
 	WrapTun func(platform.TunDevice) platform.TunDevice
+	// ProbeTLS is set only by hosted fault builds with a private fixture CA.
+	ProbeTLS   *tls.Config
+	ProbeError func() error // hosted dial-stage exhaustion injection; nil in product
 }
 
 func (o Options) Stage(name string) {

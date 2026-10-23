@@ -254,6 +254,16 @@ type Prober interface {
 	Probe(context.Context, string, string) (ProbeResult, error)
 }
 
+type ProbeRequest struct {
+	Operator      string
+	Target        string
+	Quick, Custom bool
+}
+
+type ConfiguredProber interface {
+	ProbeConfigured(context.Context, string, ProbeRequest) (ProbeResult, error)
+}
+
 type Echoer interface {
 	Echo(context.Context, string, netip.Addr, []byte) ([]byte, error)
 }

@@ -77,7 +77,7 @@ func assertNativeExitRetention(t *testing.T, data, instance string) {
 		t.Fatal("manager collection did not preserve the actual main exit", state, err)
 	}
 	out, err := host.ReadOutcome(data, instance)
-	if err != nil || out.Systemd == nil || out.Systemd.Code != "exited" || out.Systemd.Status != "0" || out.Systemd.Result != "success" {
+	if err != nil || out.Systemd == nil || out.Systemd.Code != "exited" || out.Systemd.Status != "0" || out.Systemd.Result != "success" || out.BootID == "" || out.BootID != state.ManagerBootID {
 		t.Fatal("clean exit was not recorded by matching ExecStopPost", out, err)
 	}
 	t.Logf("NATIVE_SYSTEMD_RETAINED invocation=%s exit=%+v", out.InvocationID, out.Systemd)

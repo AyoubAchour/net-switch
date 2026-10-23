@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"maps"
 	"net/netip"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -56,6 +55,7 @@ type Routes struct {
 	objects     *objects
 	tun         *wintun.Session
 	lines       []platform.Line
+	configured  map[string]bool
 	bindings    atomic.Pointer[bindingTable]
 	active      atomic.Bool
 	capture     []journal.Fingerprint
@@ -205,7 +205,15 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 }
 
 func (r *Routes) Bindings() map[string]Adapter {
-	return maps.Clone(*r.bindings.Load())
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]Adapter, len(r.configured))
+	for id, a := range *r.bindings.Load() {
+		if r.configured[id] {
+			out[id] = a
+		}
+	}
+	return out // stats stay bounded by configured lines, not historical flow IDs
 }
 
 func (r *Routes) TunStats() wintun.Stats {
@@ -244,11 +252,16 @@ func (r *Routes) Prepare(ctx context.Context, lines []platform.Line) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	b, err := r.resolve(lines)
+	wanted := make(map[string]bool, len(lines))
+	for _, l := range lines {
+		wanted[l.ID] = true
+	}
+	retained := retainLineSelectors(lines, r.lines, r.Table)
+	b, err := r.resolve(retained)
 	if err != nil {
 		return err
 	}
-	r.lines = slices.Clone(lines)
+	r.lines, r.configured = retained, wanted
 	r.bindings.Store(&b)
 	return nil
 }
@@ -281,6 +294,15 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 		case <-tick.C:
 		}
 		r.mu.Lock()
+		if r.Table != nil {
+			kept := r.lines[:0]
+			for _, l := range r.lines {
+				if r.configured[l.ID] || r.Table.ReferencesLine(l.ID) {
+					kept = append(kept, l)
+				}
+			}
+			r.lines = kept
+		}
 		b, err := r.resolve(r.lines)
 		old := r.bindings.Load()
 		if err == nil {

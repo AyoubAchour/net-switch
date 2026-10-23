@@ -23,6 +23,7 @@ type tcpSocket struct {
 	fd             int
 	native, closed bool
 	local, remote  netip.AddrPort
+	release        func()
 }
 
 // Dialing and probes use Go's ordinary TCP connection. Once the relay takes
@@ -148,6 +149,9 @@ func (s *tcpSocket) Close() error {
 		return net.ErrClosed
 	}
 	s.closed = true
+	if s.release != nil {
+		defer s.release()
+	}
 	if s.native {
 		return unix.Close(s.fd)
 	}

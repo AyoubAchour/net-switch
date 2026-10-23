@@ -1,110 +1,40 @@
-//go:build linux
-
 package linux
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"io"
-	"mime"
 	"net"
-	"net/http"
 	"net/netip"
-	"strings"
-	"time"
+	"syscall"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/engine/probe"
 )
 
 func (p *Platform) Probe(ctx context.Context, line, operator string) (platform.ProbeResult, error) {
-	started := time.Now()
-	view := p.bindings.Load()
-	if view == nil || !view.capturing {
+	return p.ProbeConfigured(ctx, line, platform.ProbeRequest{Operator: operator})
+}
+
+func (p *Platform) ProbeConfigured(ctx context.Context, line string, r platform.ProbeRequest) (platform.ProbeResult, error) {
+	if view := p.bindings.Load(); view == nil || !view.capturing {
 		return platform.ProbeResult{Outcome: "engineUnavailable", Error: "routing engine is not running"}, nil
 	}
-	quick := strings.HasPrefix(operator, "quick:")
-	operator = strings.TrimPrefix(operator, "quick:")
-	operator = strings.ToLower(operator)
-	var url, media, ip string
-	switch strings.ToLower(operator) {
-	case "cloudflare":
-		ip = "1.1.1.1"
-		url = "https://1.1.1.1/cdn-cgi/trace"
-		media = "text/plain"
-	case "google":
-		ip = "8.8.8.8"
-		url = "https://8.8.8.8/resolve?name=example.com&type=A"
-		media = "application/json"
-	case "quad9":
-		ip = "9.9.9.9"
-		media = "application/dns-message"
-		query := []byte{0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}
-		url = "https://9.9.9.9/dns-query?dns=" + base64.RawURLEncoding.EncodeToString(query)
-	default:
-		return platform.ProbeResult{}, errors.New("unknown probe operator")
-	}
-	duration := 10 * time.Second
-	if quick {
-		duration = 3 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(ctx, duration)
-	defer cancel()
-	result := func(ok bool, err error) (platform.ProbeResult, error) {
-		r := platform.ProbeResult{OK: ok, Outcome: "lineFailed", Latency: time.Since(started)}
-		if ok {
-			r.Outcome = "ok"
+	return probe.Run(ctx, r, probe.Options{TLS: p.ProbeTLS, Unavailable: probeUnavailable,
+		Dial: func(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
+			if p.ProbeError != nil {
+				if err := p.ProbeError(); err != nil {
+					return nil, err
+				}
+			}
+			return p.DialTCP(ctx, line, dst)
+		}})
+}
+
+func probeUnavailable(err error) bool {
+	for _, errno := range []error{syscall.EMFILE, syscall.ENFILE, syscall.ENOBUFS, syscall.ENOMEM, syscall.EADDRINUSE, syscall.EADDRNOTAVAIL} {
+		if errors.Is(err, errno) {
+			return true
 		}
-		if err != nil {
-			r.Error = err.Error()
-		}
-		return r, nil
 	}
-	if quick {
-		c, err := p.DialTCP(ctx, line, netip.MustParseAddrPort(ip+":443"))
-		if err != nil {
-			return result(false, err)
-		}
-		c.Close()
-		return result(true, nil)
-	}
-	transport := &http.Transport{Proxy: nil, ForceAttemptHTTP2: true, DisableKeepAlives: true, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-		dst, err := netip.ParseAddrPort(address)
-		if err != nil {
-			return nil, err
-		}
-		return p.DialTCP(ctx, line, dst)
-	}}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return result(false, err)
-	}
-	req.Header.Set("Accept", media)
-	resp, err := client.Do(req)
-	if err != nil {
-		return result(false, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 16385))
-	if err != nil {
-		return result(false, err)
-	}
-	typeName, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
-	ok := resp.StatusCode == 200 && typeName == media && len(body) <= 16384
-	switch operator {
-	case "cloudflare":
-		ok = ok && strings.Contains(string(body), "ip=")
-	case "google":
-		var answer struct{ Status *int }
-		ok = ok && json.Unmarshal(body, &answer) == nil && answer.Status != nil && *answer.Status == 0
-	case "quad9":
-		ok = ok && resp.ProtoMajor == 2 && len(body) >= 12
-	}
-	if !ok {
-		return result(false, errors.New("HTTPS probe response did not match the operator's success contract"))
-	}
-	return result(true, nil)
+	return false
 }

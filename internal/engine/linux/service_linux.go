@@ -87,6 +87,8 @@ func ServeHosted(parent context.Context, socket, dir string, options host.Option
 	forwarding, cancelForwarding := context.WithCancel(ctx)
 	defer cancelForwarding()
 	p.ctx = forwarding
+	p.ProbeTLS = options.ProbeTLS
+	p.ProbeError = options.ProbeError
 	if err := pingPermission(); err != nil {
 		log.Print(err)
 	}

@@ -127,11 +127,12 @@ func TestTotalsSnapshotStableAcrossCloseAndNewTraffic(t *testing.T) {
 	checkTotalsPages(t, f, f.Totals())
 }
 
-func TestTotalsSharesSnapshotBudgetAndExpiresWithoutLosingAccounting(t *testing.T) {
+func TestTotalsCannotStarveFlowSnapshotsAndExpireWithoutLosingAccounting(t *testing.T) {
 	f := table(t, Defaults())
 	for i := range 80 {
 		admit(t, f, "tcp", fmt.Sprint(i)).Close()
 	}
+	live := admit(t, f, "tcp", "live")
 	now := time.Now()
 	f.now = func() time.Time { return now }
 	first, err := f.PageTotals("")
@@ -143,8 +144,12 @@ func TestTotalsSharesSnapshotBudgetAndExpiresWithoutLosingAccounting(t *testing.
 			t.Fatal(err)
 		}
 	}
-	if _, err := f.Page(""); err != ErrBudget {
-		t.Fatal("flows bypassed totals count budget", err)
+	if page, err := f.Page(""); err != nil || len(page.Flows) != 1 {
+		t.Fatal("unacked totals starved flow listing", page, err)
+	}
+	live.Close()
+	if f.Stats().TotalsSnapshotBytes > f.limits.SnapshotBytes/2 {
+		t.Fatal("totals consumed flow headroom")
 	}
 	if _, err := f.PageTotals(""); err != ErrBudget {
 		t.Fatal("totals bypassed count budget", err)
@@ -153,7 +158,7 @@ func TestTotalsSharesSnapshotBudgetAndExpiresWithoutLosingAccounting(t *testing.
 	if _, err := f.AckTotals(first.Receipt); err == nil {
 		t.Fatal("expired totals snapshot accepted")
 	}
-	if f.Stats().SnapshotBytes != 0 {
+	if f.Stats().SnapshotBytes != 0 || f.Stats().TotalsSnapshotBytes != 0 {
 		t.Fatal("expired reservations leaked")
 	}
 	checkTotalsPages(t, f, f.Totals())

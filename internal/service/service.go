@@ -34,6 +34,7 @@ type Status struct {
 	ManagerCode       string `json:"managerCode,omitempty"`
 	ManagerStatus     string `json:"managerStatus,omitempty"`
 	ManagerInvocation string `json:"managerInvocation,omitempty"`
+	ManagerBootID     string `json:"managerBootId,omitempty"`
 	MainExitSource    string `json:"mainExitSource,omitempty"`
 }
 

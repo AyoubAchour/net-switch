@@ -19,12 +19,14 @@ import (
 )
 
 type tunFixture struct {
-	line, target string
-	dial         func(context.Context, string, string) (net.Conn, error)
-	exchange     func(*testing.T, net.Conn)
-	installed    func(*testing.T)
-	clean        func(*testing.T)
-	audit        func(*testing.T) // additional untimed OS inventory
+	line, target               string
+	churnLine, seen, churnSeen string // Linux's independent second physical path
+	dial                       func(context.Context, string, string) (net.Conn, error)
+	exchange                   func(*testing.T, net.Conn)
+	installed                  func(*testing.T)
+	clean                      func(*testing.T)
+	audit                      func(*testing.T) // additional untimed OS inventory
+	probe                      func(*testing.T, string) nativeProbeFixture
 }
 
 func tunServices(t *testing.T, config lifecycle.Config, owner actor) {

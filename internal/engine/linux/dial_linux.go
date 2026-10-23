@@ -33,10 +33,16 @@ func bindSocket(raw syscall.RawConn, l lineState) error {
 	return errors.Join(control, err)
 }
 func (p *Platform) DialTCP(ctx context.Context, id string, dst netip.AddrPort) (platform.TCPConn, error) {
-	l, err := p.binding(id, dst.Addr().Is6())
+	l, release, err := p.acquireBinding(id, dst.Addr().Is6())
 	if err != nil {
 		return nil, err
 	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	d := net.Dialer{Control: func(_, _ string, raw syscall.RawConn) error { return bindSocket(raw, l) }}
 	c, err := d.DialContext(ctx, "tcp", dst.String())
 	if err != nil {
@@ -48,7 +54,8 @@ func (p *Platform) DialTCP(ctx context.Context, id string, dst netip.AddrPort) (
 		tcp.Close()
 		return nil, err
 	}
-	return &tcpSocket{TCPConn: tcp, raw: raw}, nil
+	handedOff = true
+	return &tcpSocket{TCPConn: tcp, raw: raw, release: release}, nil
 }
 
 func (p *Platform) OpenUDP(ctx context.Context, id string, v6 bool) (platform.UDPConn, error) {
@@ -63,10 +70,16 @@ func (p *Platform) OpenUDP(ctx context.Context, id string, v6 bool) (platform.UD
 
 func (p *Platform) OpenUDPTo(ctx context.Context, id string, dst netip.AddrPort) (platform.UDPConn, error) {
 	v6 := dst.Addr().Is6()
-	l, err := p.binding(id, v6)
+	l, release, err := p.acquireBinding(id, v6)
 	if err != nil {
 		return nil, err
 	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -118,7 +131,8 @@ func (p *Platform) OpenUDPTo(ctx context.Context, id string, dst netip.AddrPort)
 		return nil, err
 	}
 	routeLost := func() bool { _, err := p.binding(id, v6); return err != nil }
-	return &udpSocket{conn: c, raw: raw, v6: v6, errors: make(chan platform.DatagramError, 1), done: make(chan struct{}), routeLost: routeLost, route: &p.udpRoute}, nil
+	handedOff = true
+	return &udpSocket{conn: c, raw: raw, v6: v6, errors: make(chan platform.DatagramError, 1), done: make(chan struct{}), routeLost: routeLost, route: &p.udpRoute, release: release}, nil
 }
 
 type udpSocket struct {
@@ -127,6 +141,8 @@ type udpSocket struct {
 	v6               bool
 	writeMu, errorMu sync.Mutex
 	once             sync.Once
+	release          func()
+	closeErr         error
 	errors           chan platform.DatagramError
 	done             chan struct{}
 	handler          func(platform.DatagramError)
@@ -146,7 +162,14 @@ type routeCounters struct {
 
 // Stats reports the platform's UDP route-error outcomes.
 func (p *Platform) Stats() any {
-	return struct{ UDPRouteUnreachable, UDPRouteDropped uint64 }{p.udpRoute.unreachable.Load(), p.udpRoute.dropped.Load()}
+	v := struct {
+		UDPRouteUnreachable, UDPRouteDropped uint64
+		LineSlots, ConfiguredLines           int
+	}{UDPRouteUnreachable: p.udpRoute.unreachable.Load(), UDPRouteDropped: p.udpRoute.dropped.Load()}
+	if view := p.bindings.Load(); view != nil {
+		v.LineSlots, v.ConfiguredLines = len(view.lines), view.configured
+	}
+	return v
 }
 
 // errRouteDropped is a route error the line's binding doesn't confirm. The
@@ -154,7 +177,16 @@ func (p *Platform) Stats() any {
 var errRouteDropped = fmt.Errorf("unconfirmed UDP route error: %w", platform.ErrDatagramDropped)
 
 func (s *udpSocket) LocalAddr() netip.AddrPort { return s.conn.LocalAddr().(*net.UDPAddr).AddrPort() }
-func (s *udpSocket) Close() error              { s.once.Do(func() { close(s.done) }); return s.conn.Close() }
+func (s *udpSocket) Close() error {
+	s.once.Do(func() {
+		close(s.done)
+		s.closeErr = s.conn.Close()
+		if s.release != nil {
+			s.release()
+		}
+	})
+	return s.closeErr
+}
 func (s *udpSocket) SetErrorHandler(handler func(platform.DatagramError)) {
 	s.errorMu.Lock()
 	s.handler = handler
@@ -478,10 +510,11 @@ func (s *udpSocket) ReadError(ctx context.Context) (platform.DatagramError, erro
 }
 
 func (p *Platform) Echo(ctx context.Context, id string, dst netip.Addr, request []byte) ([]byte, error) {
-	l, err := p.binding(id, dst.Is6())
+	l, release, err := p.acquireBinding(id, dst.Is6())
 	if err != nil {
 		return nil, err
 	}
+	defer release()
 	proto, family := unix.IPPROTO_ICMP, unix.AF_INET
 	if dst.Is6() {
 		proto, family = unix.IPPROTO_ICMPV6, unix.AF_INET6

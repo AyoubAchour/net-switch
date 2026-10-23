@@ -21,6 +21,7 @@ type Outcome struct {
 	// systemd can unload an inactive unit and forget ExecMainStatus. Only its
 	// matching ExecStopPost invocation may supply the retained main result.
 	InvocationID string       `json:"invocationId,omitempty"`
+	BootID       string       `json:"bootId,omitempty"`
 	Systemd      *SystemdExit `json:"systemd,omitempty"`
 }
 
@@ -64,6 +65,9 @@ func ReadOutcome(data, instance string) (Outcome, error) {
 	}
 	if result.InvocationID != "" && !ValidInvocationID(result.InvocationID) {
 		return result, errors.New("invalid service invocation")
+	}
+	if result.BootID != "" && !ValidInvocationID(result.BootID) {
+		return result, errors.New("invalid outcome boot identity")
 	}
 	if result.Systemd != nil && (!ValidInvocationID(result.InvocationID) || !result.Systemd.Valid()) {
 		return result, errors.New("invalid retained systemd exit")
