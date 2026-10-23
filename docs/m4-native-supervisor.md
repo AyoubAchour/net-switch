@@ -16,10 +16,16 @@ not establish a larger TIME_WAIT count after the fill. Neither endpoint
 counts nor a hypothesized kernel reference is used as ownership authority.
 
 The decision recorded in the spec is now shared by retirement and creation:
-no present matching Wintun devnode and ERROR_NOT_FOUND for the recorded LUID
+no present matching Wintun devnode and ERROR_NOT_FOUND or ERROR_FILE_NOT_FOUND for the recorded LUID
 in both IP families means absent. NDIS status is not consulted. Unknown or
 different LUIDs, a foreign GUID using our alias, and query errors refuse the
 operation. Confirmation retains its five-second cap and the caller deadline.
+
+[GetIpInterfaceEntry](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getipinterfaceentry)
+distinguishes a missing address family from a LUID that no longer exists;
+both are absence. An unreadable foreign Wintun registry key is skipped only
+when its exact `SWD\WINTUN\{GUID}` instance ID proves a different GUID.
+Uncertain or matching identity fails closed with the device named in the error.
 
 A small atomic, boot-bound adapter identity file beside the journal preserves
 the last created LUID after journal compaction and across engine process exit.

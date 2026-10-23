@@ -41,7 +41,7 @@ func adapterPresent(guid, alias string, luid uint64, rows []adapterRow, pnp func
 		if err == nil {
 			return true, nil
 		}
-		if !errors.Is(err, windows.ERROR_NOT_FOUND) {
+		if !errors.Is(err, windows.ERROR_NOT_FOUND) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
 			return true, err
 		}
 	}
@@ -79,19 +79,43 @@ func presentWintunDevice(guid string) (bool, error) {
 		if err != nil {
 			return true, err
 		}
-		key, err := set.OpenDevRegKey(device, windows.DICS_FLAG_GLOBAL, 0, windows.DIREG_DRV, windows.KEY_QUERY_VALUE)
-		if err != nil {
-			return true, err
+		instance, instanceErr := set.DeviceInstanceID(device)
+		if instanceErr != nil {
+			instance = fmt.Sprintf("devinst:%d", device.DevInst)
 		}
-		id, _, err := registry.Key(key).GetStringValue("NetCfgInstanceId")
-		registry.Key(key).Close()
-		if err != nil {
-			return true, err
+		id := ""
+		key, readErr := set.OpenDevRegKey(device, windows.DICS_FLAG_GLOBAL, 0, windows.DIREG_DRV, windows.KEY_QUERY_VALUE)
+		if readErr == nil {
+			id, _, readErr = registry.Key(key).GetStringValue("NetCfgInstanceId")
+			registry.Key(key).Close()
 		}
-		if strings.EqualFold(id, guid) {
-			return true, nil
+		present, err := wintunDeviceMatches(guid, instance, id, instanceErr, readErr)
+		if present || err != nil {
+			return true, err
 		}
 	}
+}
+
+// Wintun uses the requested GUID as the software-device instance ID. Only
+// that exact, parseable form proves an unreadable device belongs elsewhere.
+// A readable registry identity remains authoritative even if the instance
+// string differs (including older or unexpected device naming conventions).
+func wintunDeviceMatches(guid, instance, id string, instanceErr, readErr error) (bool, error) {
+	if readErr == nil {
+		parsed, err := windows.GUIDFromString(id)
+		if err == nil {
+			return strings.EqualFold(parsed.String(), guid), nil
+		}
+		readErr = fmt.Errorf("invalid NetCfgInstanceId: %w", err)
+	}
+	const prefix = "SWD\\WINTUN\\"
+	if instanceErr == nil && len(instance) > len(prefix) && strings.EqualFold(instance[:len(prefix)], prefix) {
+		parsed, err := windows.GUIDFromString(instance[len(prefix):])
+		if err == nil && !strings.EqualFold(parsed.String(), guid) {
+			return false, nil
+		}
+	}
+	return true, fmt.Errorf("cannot identify present Wintun device %q: %w", instance, errors.Join(instanceErr, readErr))
 }
 
 func (o *objects) rememberAdapter(luid uint64) error {
