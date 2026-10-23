@@ -124,8 +124,31 @@ func (s *Server) handle(ctx context.Context, r Request, c *connection) Reply {
 	if err != nil {
 		reply.Result = nil
 		reply.Error = err.Error()
+		var cleanup *explicitStopFailure
+		if errors.As(err, &cleanup) && s.OnCleanupFailure != nil {
+			notify := sync.OnceFunc(func() { s.OnCleanupFailure(cleanup.error) })
+			if c == nil {
+				notify()
+			} else {
+				// Give the failed stop its reply-before-exit ordering, but a
+				// controller that stops reading cannot hold failed capture alive.
+				timer := time.AfterFunc(TerminalDeliveryTimeout, notify)
+				reply.afterWrite = func() { timer.Stop(); notify() }
+			}
+		}
 	}
 	return reply
+}
+
+type explicitStopFailure struct{ error }
+
+func (e *explicitStopFailure) Unwrap() error { return e.error }
+
+func (s *Server) explicitStop(ctx context.Context) error {
+	if err := s.runtime.Stop(platform.WithCleanupOwner(ctx)); err != nil {
+		return &explicitStopFailure{err}
+	}
+	return nil
 }
 func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, error) {
 	switch r.Method {
@@ -194,7 +217,7 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 	}
 	if r.Method == "stop" && s.stopping && r.Instance == s.Instance && r.Epoch == s.epoch {
 		s.mu.Unlock()
-		err := s.runtime.Stop(ctx)
+		err := s.explicitStop(ctx)
 		s.mu.Lock()
 		if err == nil {
 			s.stopped = true
@@ -283,7 +306,7 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 	case "stop":
 		s.stopping = true
 		s.mu.Unlock()
-		err := s.runtime.Stop(ctx)
+		err := s.explicitStop(ctx)
 		s.mu.Lock()
 		if err != nil {
 			return nil, err

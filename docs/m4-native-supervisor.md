@@ -32,7 +32,16 @@ the last created LUID after journal compaction and across engine process exit.
 It is written under the lifetime lock before adapter creation is acknowledged;
 failure rolls back through the existing journal. It is historical evidence,
 never authorization to remove a live device. Missing history cannot authorize
-ignoring an existing row. The 20-cycle harness captures the row immediately
+the create guard to ignore an existing row. Recovery alone, under the lifetime
+lock and a durable adapter record, can recover a missing/stale LUID from an
+exact-GUID row plus the exact present SWD instance and matching registry GUID.
+It persists that identity before removal and rechecks the device identity at
+removal. With no present device, a lingering exact-GUID row may supply history
+only when both IP families are absent. Alias collisions, ambiguous rows and
+query failures still refuse. In-process live adapters retain strict LUID
+matching. Corrupt history is logged and treated as missing; a failed history
+write never advances the in-memory identity or retires the journal intent.
+The 20-cycle harness captures the row immediately
 before the next create, checks PnP/IP re-arrival, and reports LUID reuse.
 
 On c2ebd23f, acceptance artifacts 12530156353 (ARM64) and 12528636617
@@ -118,6 +127,17 @@ applied consistently to both paths; query errors never count as absence.
 The `m4_native` service now hosts one verified native child. This implements
 option (e), recorded in spec §3.4. Control cutover and restart/backoff/latch
 policy remain in the later cutover PR. The host never respawns a child.
+
+Explicit protocol Stop now owns its cleanup failure report. A failed stop
+first writes the error reply through the unbuffered transport, then reports
+fatal cleanup failure to the service. A disconnected or stalled reader cannot
+prevent exit: the same notification has a two-second delivery bound. The
+outcome file remains authoritative for final cleanup/exit classification, but
+does not replace the immediate error reply. Adapter-loss and lease terminal
+paths keep their existing reporters.
+The host also gives failure exits the existing bounded 500 ms public-relay
+drain; previously only clean exit 0/3 received that opportunity. Forced kills
+still cancel immediately, and cleanup/exit classification is unchanged.
 
 ## Ownership and transport
 

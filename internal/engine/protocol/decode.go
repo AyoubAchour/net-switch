@@ -41,10 +41,11 @@ type Request struct {
 	Adapter json.RawMessage `json:"adapter,omitempty"`
 }
 type Reply struct {
-	ID     string `json:"id"`
-	Result any    `json:"result,omitempty"`
-	Error  string `json:"error,omitempty"`
-	stop   bool
+	ID         string `json:"id"`
+	Result     any    `json:"result,omitempty"`
+	Error      string `json:"error,omitempty"`
+	stop       bool
+	afterWrite func()
 }
 type Event = flowapi.Event
 

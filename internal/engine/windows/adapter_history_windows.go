@@ -5,6 +5,7 @@ package winengine
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -30,7 +31,8 @@ func (s *diskJournal) adapterHistory(boot string) (uint64, error) {
 	}
 	var record adapterHistory
 	if len(b) > 1024 || json.Unmarshal(b, &record) != nil || record.GUID != wintun.DefaultGUID || record.LUID == 0 || record.Boot == "" {
-		return 0, errors.New("invalid adapter identity history")
+		log.Printf("invalid adapter identity history %q; recovering without historical LUID", s.file.Path+".adapter")
+		return 0, nil
 	}
 	if record.Boot != boot {
 		return 0, nil

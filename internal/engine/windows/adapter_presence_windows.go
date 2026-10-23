@@ -49,22 +49,36 @@ func adapterPresent(guid, alias string, luid uint64, rows []adapterRow, pnp func
 }
 
 func nativeAdapterPresent(guid, alias string, luid uint64) (bool, error) {
+	rows, err := nativeAdapterRows()
+	if err != nil {
+		return true, err
+	}
+	return adapterPresent(guid, alias, luid, rows, func() (bool, error) { return presentWintunDevice(guid) }, nativeIPInterface)
+}
+
+func nativeIPInterface(luid uint64, family uint16) error {
+	row := windows.MibIpInterfaceRow{Family: family, InterfaceLuid: luid}
+	return windows.GetIpInterfaceEntry(&row)
+}
+
+func nativeAdapterRows() ([]adapterRow, error) {
 	var table *windows.MibIfTable2
 	if err := windows.GetIfTable2Ex(windows.MibIfTableNormal, &table); err != nil {
-		return true, err
+		return nil, err
 	}
 	rows := make([]adapterRow, 0, table.NumEntries)
 	for _, r := range unsafe.Slice(&table.Table[0], table.NumEntries) {
 		rows = append(rows, adapterRow{r.InterfaceGuid.String(), windows.UTF16ToString(r.Alias[:]), r.InterfaceLuid})
 	}
 	windows.FreeMibTable(unsafe.Pointer(table))
-	return adapterPresent(guid, alias, luid, rows, func() (bool, error) { return presentWintunDevice(guid) }, func(luid uint64, family uint16) error {
-		row := windows.MibIpInterfaceRow{Family: family, InterfaceLuid: luid}
-		return windows.GetIpInterfaceEntry(&row)
-	})
+	return rows, nil
 }
 
 func presentWintunDevice(guid string) (bool, error) {
+	return inspectWintunDevice(guid, false)
+}
+
+func inspectWintunDevice(guid string, exact bool) (bool, error) {
 	class, _ := windows.GUIDFromString("{4D36E972-E325-11CE-BFC1-08002BE10318}")
 	set, err := windows.SetupDiGetClassDevsEx(&class, "SWD\\Wintun", 0, windows.DIGCF_PRESENT, 0, "")
 	if err != nil {
@@ -90,10 +104,51 @@ func presentWintunDevice(guid string) (bool, error) {
 			registry.Key(key).Close()
 		}
 		present, err := wintunDeviceMatches(guid, instance, id, instanceErr, readErr)
+		if exact && present && err == nil && (instanceErr != nil || !strings.EqualFold(instance, "SWD\\WINTUN\\"+guid)) {
+			return true, fmt.Errorf("recovery device instance does not match journal GUID: %q", instance)
+		}
 		if present || err != nil {
 			return true, err
 		}
 	}
+}
+
+// Called only while replaying a durable adapter record under the lifetime lock,
+// never from the create guard or while an in-process adapter handle is live.
+func recoveredAdapterLUID(guid, alias string, prior uint64, rows []adapterRow, exactDevice func() (bool, error), ip func(uint64, uint16) error) (uint64, bool, error) {
+	var candidate uint64
+	for _, row := range rows {
+		if row.alias == alias && !strings.EqualFold(row.guid, guid) {
+			return 0, false, errors.New("foreign adapter alias during journal recovery")
+		}
+		if !strings.EqualFold(row.guid, guid) {
+			continue
+		}
+		if row.luid == 0 || (candidate != 0 && candidate != row.luid) {
+			return 0, false, errors.New("ambiguous adapter rows during journal recovery")
+		}
+		candidate = row.luid
+	}
+	if candidate == 0 {
+		return prior, false, nil
+	}
+	present, err := exactDevice()
+	if err != nil {
+		return 0, false, err
+	}
+	if present {
+		return candidate, true, nil
+	}
+	// No device exists. Only a fully retired exact-GUID row can supply the
+	// missing historical identity; a functioning IP interface is not adopted.
+	stillPresent, err := adapterPresent(guid, alias, candidate, rows, func() (bool, error) { return false, nil }, ip)
+	if err != nil {
+		return 0, false, err
+	}
+	if stillPresent {
+		return 0, false, errors.New("IP interface remains without verified recovery device")
+	}
+	return candidate, false, nil
 }
 
 // Wintun uses the requested GUID as the software-device instance ID. Only
@@ -123,12 +178,12 @@ func (o *objects) rememberAdapter(luid uint64) error {
 		return errors.New("adapter has zero LUID")
 	}
 	previous := o.adapterLUID
-	o.adapterLUID = luid
 	if o.saveAdapterLUID != nil {
 		if err := o.saveAdapterLUID(luid); err != nil {
 			return fmt.Errorf("persist adapter identity: %w", err)
 		}
 	}
+	o.adapterLUID = luid
 	if hostedTraceEnabled() {
 		fmt.Printf("WINDOWS ADAPTER ARRIVAL previous_luid=%d luid=%d reused=%t guid=%s\n", previous, luid, previous == luid, wintun.DefaultGUID)
 	}

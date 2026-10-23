@@ -366,8 +366,30 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 			return err
 		}
 		oldLUID := o.all.adapterLUID
+		adoptedPresent := false
+		if o.all.recovering && o.all.adapter == nil {
+			rows, err := nativeAdapterRows()
+			if err != nil {
+				return err
+			}
+			oldLUID, adoptedPresent, err = recoveredAdapterLUID(fp["guid"], fp["name"], oldLUID, rows,
+				func() (bool, error) { return inspectWintunDevice(fp["guid"], true) }, nativeIPInterface)
+			if err != nil {
+				return err
+			}
+			if oldLUID != 0 && oldLUID != o.all.adapterLUID {
+				if err := o.all.rememberAdapter(oldLUID); err != nil {
+					return err
+				}
+			}
+		}
 		if o.all.adapter != nil {
 			oldLUID = o.all.adapter.LUID()
+			if oldLUID != o.all.adapterLUID {
+				if err := o.all.rememberAdapter(oldLUID); err != nil {
+					return err
+				}
+			}
 		}
 		if _, err := nativeAdapterPresent(fp["guid"], fp["name"], oldLUID); err != nil {
 			return err
@@ -382,7 +404,11 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 			}
 		}
 		defer o.all.timings.begin("adapter.RecoverAfterCrash")()
-		if err := wintun.RecoverAfterCrash(wintun.Config{Name: fp["name"], GUID: fp["guid"]}); err != nil {
+		recoverAdapter := wintun.RecoverAfterCrash
+		if adoptedPresent {
+			recoverAdapter = wintun.RecoverJournaledAdapter
+		}
+		if err := recoverAdapter(wintun.Config{Name: fp["name"], GUID: fp["guid"]}); err != nil {
 			return err
 		}
 		// PnP plus both IP families, exactly as in the creation guard. NDIS

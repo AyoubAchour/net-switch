@@ -350,7 +350,9 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 		return result
 	} // never clean ownership while child is alive
 	log(fmt.Sprintf("NATIVE_TERMINATED instance=%s child_pid=%d at=%s forced=%t", instance, p.pid, time.Now().UTC().Format(time.RFC3339Nano), raw.Forced))
-	if result == nil && !raw.Forced && (raw.Code == 0 || raw.Code == 3) {
+	// A completed failed Stop also carries a final error reply. Preserve the
+	// same bounded public-relay drain before cancellation on failure exits.
+	if !raw.Forced {
 		drained := make(chan struct{})
 		go func() { clients.Wait(); close(drained) }()
 		select {

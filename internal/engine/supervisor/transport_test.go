@@ -11,13 +11,19 @@ import (
 )
 
 func TestRelayPreservesFinalFrameBeforeEOF(t *testing.T) {
+	for _, want := range []string{"{\"id\":\"stop\",\"result\":true}\n", "{\"id\":\"stop\",\"error\":\"cleanup failed\"}\n"} {
+		t.Run(want, func(t *testing.T) { testFinalFrame(t, want) })
+	}
+}
+
+func testFinalFrame(t *testing.T, want string) {
+	t.Helper()
 	client, public := net.Pipe()
 	private, engine := net.Pipe()
 	defer client.Close()
 	defer engine.Close()
 	done := make(chan struct{})
 	go func() { Relay(context.Background(), public, private); close(done) }()
-	want := "{\"id\":\"stop\",\"result\":true}\n"
 	go func() { Write(engine, []byte(want)); engine.Close() }()
 	client.SetReadDeadline(time.Now().Add(time.Second))
 	got, err := bufio.NewReader(client).ReadString('\n')
