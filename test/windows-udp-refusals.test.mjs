@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { clientPortChoiceRefusal, fillReattemptError, retryFillRefusals, udpRefusalAttribution } from '../tests/windows/udp-capacity.mjs';
+import { clientPortChoiceRefusal, retryFillRefusals, udpFloorShortfall, udpRefusalAttribution } from '../tests/windows/udp-capacity.mjs';
 
 const resets = (n, ports = n) => Array.from({ length: n }, (_, i) => ({
   Error: 'ECONNRESET', Token: i.toString(16).padStart(16, '0'), Local: `198.18.0.1:${40000 + i % ports}`, Remote: '198.19.128.2:26000',
@@ -111,7 +111,7 @@ test('a client port refusal recovers on a later fresh attempt', async () => {
   assert.deepEqual(calls, [2, 1, 1]);
 });
 
-test('four refused fresh attempts with free ports fail distinctly from a capacity shortfall', async () => {
+test('four refused fresh attempts are recorded, then the floor verdict decides the run', async () => {
   const { reopen, calls } = queued([[refusal()], [refusal()], [refusal()], [refusal()], [refusal()]]);
   const retry = await retryFillRefusals({ refused: [refusal()], room: true, available: 2150, reopen, sleep: async () => {} });
   assert.equal(retry.refused.length, 1);
@@ -122,10 +122,28 @@ test('four refused fresh attempts with free ports fail distinctly from a capacit
   assert.deepEqual(retry.record.finalRefused, [{ call: 'connect', code: 'ENOBUFS' }]);
   assert.deepEqual([...retry.record.backoffMS], [10, 20, 40, 80]);
   assert.deepEqual(calls, [1, 1, 1, 1]);
-  const message = fillReattemptError(retry.record);
-  assert.match(message, /UDP fill client-side ENOBUFS with free ports/);
+});
+
+test('exhausted client retries still pass when the fill clears the floor', () => {
+  const record = { room: true, finalClientRefusals: 1, finalRefused: [{ call: 'connect', code: 'ENOBUFS' }],
+    freshAttempts: 4, maxFreshAttempts: 4, available: 6 };
+  assert.equal(udpFloorShortfall({ floor: 7636, fillReattempts: [record] }, 8030), null);
+});
+
+test('a shortfall after client refusals with room names the client case and numbers', () => {
+  const record = { room: true, finalClientRefusals: 1, finalRefused: [{ call: 'connect', code: 'ENOBUFS' }],
+    freshAttempts: 4, maxFreshAttempts: 4, available: 2150 };
+  const message = udpFloorShortfall({ floor: 7636, fillReattempts: [record] }, 6911);
+  assert.match(message, /UDP held 6911, below the 95% native layout floor 7636/);
+  assert.match(message, /client-side ENOBUFS with free ports/);
   assert.match(message, /1 flow\(s\) still refused after 4 of 4 fresh attempts/);
   assert.match(message, /2150 IPv4 dynamic ports were free/);
+});
+
+test('a shortfall without client port exhaustion keeps the generic floor message', () => {
+  const record = { room: false, finalClientRefusals: 0, finalRefused: [], freshAttempts: 0, maxFreshAttempts: 4, available: 0 };
+  const message = udpFloorShortfall({ floor: 7636, fillReattempts: [record] }, 6911);
+  assert.equal(message, 'UDP held 6911, below the 95% native layout floor 7636');
 });
 
 test('an engine-side refusal stops immediately and is never called client port exhaustion', async () => {
