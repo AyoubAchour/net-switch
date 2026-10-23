@@ -68,7 +68,7 @@ func Save(path string, value any) error {
 	return SyncDirectory(filepath.Dir(path))
 }
 func Read(path string, value any) error {
-	b, err := os.ReadFile(path)
+	b, err := readStoreFile(path)
 	if err != nil {
 		return err
 	}
