@@ -17,6 +17,8 @@ recorded in the spec belongs to PR 1c.
 The fenced, idempotent `probe` request accepts `line`, `target` (literal IP:port),
 `quick`, and `custom`, alongside its `opId`, epoch and instance. Existing named
 `operator` requests remain supported; supplying both operator and target fails.
+The legacy `operator: "IP:port"` shorthand (also with `quick:`) is deliberately
+rejected. Custom callers must send `target` and explicit `quick`/`custom` options.
 `hello` advertises `probe-options` when supported.
 
 Quick checks complete a bound TCP connect within three seconds. Full checks use
@@ -24,7 +26,19 @@ the existing Control response rules in `internal/linecheck`, with a ten-second
 bound. Custom targets use HEAD, accept any HTTP response status, and never follow
 redirects. Named targets keep their GET paths and operator-specific validation.
 Local socket/resource exhaustion returns `engineUnavailable`; remote refusal,
-TLS errors and network timeouts return `lineFailed`.
+TLS errors and network timeouts return `lineFailed`. Linux `EADDRNOTAVAIL` counts
+as ephemeral-port exhaustion only while the latest published binding has both a
+default route and a usable source address of the target family. Missing routes,
+missing sources and failed duplicate-address detection are line failures; the
+route monitor refreshes that evidence every second.
+
+Every completed result includes `kind: "quick" | "full"`, including failures and
+engine-unavailable results. Successful latency is `latencyMs`, a fractional
+millisecond value; failures omit it. No duration in nanoseconds goes over IPC.
+**PR 2 integration:** Control must require the expected kind before accepting a
+result (quick never restores a line requiring full HTTPS), and drop a delayed
+result if its originating engine instance is no longer current. That instance
+check belongs in Control and is not implemented here.
 
 The real Go transport detaches dial deadlines to support connection reuse. The
 probe explicitly retains its own deadline and cancellation on that dial, so a
@@ -56,19 +70,33 @@ A Linux slot remains reserved while a line is configured, a resolved admission
 uses it, or a TCP/UDP/ICMP/probe socket holds it. Retirement tombstones the old
 published binding, deletes journaled selectors before routes, and only then
 permits slot reuse. A failed reconciliation retains that deletion barrier.
-App-facing TIME_WAIT accounting alone does not hold a physical slot. Exhaustion
-means 255 slots are still occupied, not 255 historical identities since startup.
+Allocation rotates through all 255 slots. Any slot used by a socket also stays
+unavailable for at least 60 seconds after its latest userspace close, covering
+ordinary kernel FIN/retransmission tails. This is a reuse floor, not a claim that
+every kernel tail ends within 60 seconds. Unused configuration-only slots do not
+need that delay. Exhaustion returns a retryable diagnostic when all slots are
+occupied or cooling down; it never requires restarting. App-facing TIME_WAIT
+accounting alone does not keep a physical binding alive.
 Windows retains removed selectors while live admissions need physical-loss
-monitoring, then prunes them. Aggregate status reports configured bindings only.
+monitoring, then prunes them. Aggregate status reports configured bindings only,
+from an immutable published snapshot. Neither bindings nor TUN counters wait on
+the route monitor's adapter/firewall lock.
 
 Flow listings and totals each have four snapshot slots. Totals may use at most
 half the existing aggregate snapshot-byte budget, leaving room for maximum-size
 flow listings. Ten-second expiry releases reservations without discarding any
-unacknowledged accounting. The generation and acknowledgement contract from PR
-1a is unchanged.
+unacknowledged accounting. A fresh full totals read replaces the current
+controller's oldest snapshot when a slot or byte limit would otherwise prevent
+it. Reattach drops the fenced controller's snapshots immediately. Superseded
+cursors and receipts fail explicitly; counters and generations stay intact for
+the next full read. Only an exact, completed acknowledgement retires accounting.
 
 The shared disposable-account helper also checks the actual Windows logon token
-is unelevated and has no linked elevated token, and checks Linux's root-side
+is unelevated and has no linked elevated token. It also allows only the five
+standard-user token privileges (change-notify, shutdown, undock, working-set and
+time-zone), whether enabled or disabled. This check applies with UAC on or off;
+direct debug/backup or other admin rights fail independently of elevation type.
+The Linux helper checks the root-side
 `sudo -n -l -U` result for an explicit no-commands outcome. Both lifecycle suites
 use these checks. Linux outcome records include the kernel boot ID; a previous
 boot's clean result cannot become the current service's exit status.
@@ -89,3 +117,7 @@ References used for contracts: [SOCKS5](https://www.rfc-editor.org/rfc/rfc1928.h
 [Windows token elevation types](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-token_elevation_type),
 [sudo command listing](https://github.com/sudo-project/sudo/blob/main/plugins/sudoers/display.c),
 and [sudo-rs command listing](https://github.com/trifectatechfoundation/sudo-rs/blob/main/src/sudo/pipeline/list.rs).
+Kernel references: [connect errors](https://man7.org/linux/man-pages/man2/connect.2.html),
+[TCP close timers](https://www.kernel.org/doc/html/latest/networking/ip-sysctl.html),
+and [IPv6 retransmit routing retains the socket mark and bound interface](https://github.com/torvalds/linux/blob/master/net/ipv6/inet6_connection_sock.c).
+Windows token rights: [privilege constants](https://learn.microsoft.com/en-us/windows/win32/secauthz/privilege-constants).

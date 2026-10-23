@@ -214,7 +214,11 @@ func (s *Session) Probe(ctx context.Context, opID string, line engine.LineID, op
 	if err := s.d.do(ctx, req, &r); err != nil {
 		return engine.ProbeResult{}, err
 	}
-	return engine.ProbeResult{OK: r.OK, Latency: r.Latency, Error: r.Error}, nil
+	result := engine.ProbeResult{OK: r.OK, Error: r.Error}
+	if r.LatencyMS != nil {
+		result.Latency = time.Duration(*r.LatencyMS * float64(time.Millisecond))
+	}
+	return result, nil
 }
 
 // Predict implements engine.Controller.

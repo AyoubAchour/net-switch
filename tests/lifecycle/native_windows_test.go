@@ -136,6 +136,9 @@ func newActor(t *testing.T, name string) actor {
 	if err := checkActorToken(elevationType, token.IsElevated()); err != nil {
 		t.Fatal(err)
 	}
+	if err := checkActorTokenPrivileges(token); err != nil {
+		t.Fatal("disposable account rights", err)
+	}
 	t.Logf("ACTOR_TOKEN name=%s elevation_type=%d unsplit=true", name, elevationType)
 	t.Logf("standard user %s enrolled=%s", name, user.User.Sid.String())
 	a.sid = user.User.Sid.String()
@@ -202,6 +205,47 @@ func checkActorToken(kind uint32, elevated bool) error {
 	if kind != 1 || elevated { // TokenElevationTypeDefault: no linked token
 		return fmt.Errorf("disposable token must be unelevated and unsplit: type=%d elevated=%t", kind, elevated)
 	}
+	return nil
+}
+
+// Check every token, including UAC-off tokens where "Default" is not evidence
+// against directly granted admin rights. Disabled privileges still count: the
+// process can enable them without elevating. These five are standard-user rights.
+func checkActorTokenPrivileges(token windows.Token) error {
+	allowed := map[windows.LUID]string{}
+	for _, name := range []string{"SeChangeNotifyPrivilege", "SeShutdownPrivilege", "SeUndockPrivilege", "SeIncreaseWorkingSetPrivilege", "SeTimeZonePrivilege"} {
+		var id windows.LUID
+		if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr(name), &id); err != nil {
+			return err
+		}
+		allowed[id] = name
+	}
+	var size uint32
+	err := windows.GetTokenInformation(token, windows.TokenPrivileges, nil, 0, &size)
+	if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || size < 4 || size > 64<<10 {
+		return fmt.Errorf("query token privileges: size=%d error=%v", size, err)
+	}
+	words := make([]uint64, (size+7)/8)
+	if err := windows.GetTokenInformation(token, windows.TokenPrivileges, (*byte)(unsafe.Pointer(&words[0])), uint32(len(words)*8), &size); err != nil {
+		return err
+	}
+	privileges := (*windows.Tokenprivileges)(unsafe.Pointer(&words[0]))
+	if size < 4 || uint64(size) > uint64(len(words)*8) || uint64(privileges.PrivilegeCount)*uint64(unsafe.Sizeof(windows.LUIDAndAttributes{}))+4 > uint64(size) {
+		return fmt.Errorf("invalid token privileges: size=%d count=%d", size, privileges.PrivilegeCount)
+	}
+	return checkActorPrivileges(privileges.AllPrivileges(), allowed)
+}
+
+func checkActorPrivileges(privileges []windows.LUIDAndAttributes, allowed map[windows.LUID]string) error {
+	var names []string
+	for _, p := range privileges {
+		name, ok := allowed[p.Luid]
+		if !ok {
+			return fmt.Errorf("unexpected privilege LUID=%+v attributes=%#x (UAC-independent check)", p.Luid, p.Attributes)
+		}
+		names = append(names, name)
+	}
+	fmt.Printf("ACTOR_PRIVILEGES standard_user_only=true rights=%q\n", names)
 	return nil
 }
 

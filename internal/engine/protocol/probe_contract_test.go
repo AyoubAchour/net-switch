@@ -2,6 +2,8 @@ package protocol
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
@@ -17,7 +19,8 @@ type configuredProbe struct {
 func (p *configuredProbe) ProbeConfigured(_ context.Context, line string, r platform.ProbeRequest) (platform.ProbeResult, error) {
 	p.request, p.line = r, line
 	p.count++
-	return platform.ProbeResult{OK: true, Outcome: "ok"}, nil
+	ms := 23.5
+	return platform.ProbeResult{OK: true, Kind: "quick", LatencyMS: &ms, Outcome: "ok"}, nil
 }
 
 func TestConfiguredProbeFieldsAreFencedAndIdempotent(t *testing.T) {
@@ -30,7 +33,10 @@ func TestConfiguredProbeFieldsAreFencedAndIdempotent(t *testing.T) {
 	r.Target = "192.0.2.1:8443"
 	r.Custom = true
 	r.Quick = true
-	call(t, s, r)
+	wire, err := json.Marshal(call(t, s, r))
+	if err != nil || !strings.Contains(string(wire), `"kind":"quick"`) || !strings.Contains(string(wire), `"latencyMs":23.5`) || strings.Contains(string(wire), `"latency":`) {
+		t.Fatal("protocol changed probe kind or latency units", string(wire), err)
+	}
 	call(t, s, r)
 	if p.count != 1 || p.line != "A" || p.request != (platform.ProbeRequest{Target: r.Target, Quick: true, Custom: true}) {
 		t.Fatal(p)

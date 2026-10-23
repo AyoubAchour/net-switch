@@ -30,7 +30,21 @@ func nativeFollowup(t *testing.T, c *nativeClient, f tunFixture, p nativeProbeFi
 		before, _ := p.seen(t)
 		var result platform.ProbeResult
 		probe := func(op string, quick bool) {
+			result = platform.ProbeResult{}
+			started := time.Now()
 			nativeMust(t, c, "probe", map[string]any{"opId": op, "line": "a1", "target": p.target, "quick": quick, "custom": true}, &result)
+			kind := "full"
+			if quick {
+				kind = "quick"
+			}
+			if result.Kind != kind || (result.OK && (result.LatencyMS == nil || *result.LatencyMS < 0 || *result.LatencyMS > float64(time.Since(started))/float64(time.Millisecond)+10)) || (!result.OK && result.LatencyMS != nil) {
+				t.Fatal("probe wire kind/latency contract", result, time.Since(started))
+			}
+		}
+		legacy, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := c.call(legacy, "probe", map[string]any{"opId": "legacy-IP-rejected", "line": "a1", "operator": p.target}, nil); err == nil {
+			t.Fatal("legacy IP operator silently ran a quick check")
 		}
 		probe("quick-custom", true)
 		if !result.OK || result.Outcome != "ok" {

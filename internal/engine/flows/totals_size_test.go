@@ -151,8 +151,11 @@ func TestTotalsCannotStarveFlowSnapshotsAndExpireWithoutLosingAccounting(t *test
 	if f.Stats().TotalsSnapshotBytes > f.limits.SnapshotBytes/2 {
 		t.Fatal("totals consumed flow headroom")
 	}
-	if _, err := f.PageTotals(""); err != ErrBudget {
-		t.Fatal("totals bypassed count budget", err)
+	if _, err := f.PageTotals(""); err != nil || len(f.totalSnapshots) != Defaults().Snapshots {
+		t.Fatal("fresh totals failed to replace oldest read within count budget", err)
+	}
+	if _, err := f.AckTotals(first.Receipt); err == nil {
+		t.Fatal("superseded receipt accepted")
 	}
 	now = now.Add(10 * time.Second)
 	if _, err := f.AckTotals(first.Receipt); err == nil {
@@ -173,5 +176,42 @@ func TestTotalsCannotStarveFlowSnapshotsAndExpireWithoutLosingAccounting(t *test
 		if _, err := f.PageTotals(cursor); err == nil {
 			t.Fatal("invalid cursor accepted", cursor)
 		}
+	}
+}
+
+func TestTotalsRestartUnderBytePressureAndReattachKeepsEveryByte(t *testing.T) {
+	f := table(t, Defaults())
+	x := admit(t, f, "tcp", "app")
+	x.Add(7, 11)
+	first, err := f.PageTotals("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bytes := f.Stats().TotalsSnapshotBytes
+	f.limits.SnapshotBytes = bytes * 2 // exactly one totals read fits its half
+	x.Add(13, 17)
+	for i := 0; i < 8; i++ {
+		page, err := f.PageTotals("")
+		if err != nil || page.Apps["app"].Bytes != (Bytes{20, 28}) || len(f.totalSnapshots) != 1 || f.Stats().TotalsSnapshotBytes != bytes {
+			t.Fatal("replacement lost accounting or grew memory", page, err, f.Stats())
+		}
+	}
+	if _, err := f.AckTotals(first.Receipt); err == nil {
+		t.Fatal("old receipt survived replacement")
+	}
+	f.SetEpoch(2)
+	if f.Stats().TotalsSnapshotBytes != 0 {
+		t.Fatal("fenced reader retained budget")
+	}
+	page, err := f.PageTotals("")
+	if err != nil || page.Apps["app"].Bytes != (Bytes{20, 28}) {
+		t.Fatal("reattach lost accounting", page, err)
+	}
+	x.Close()
+	if _, err := f.AckTotals(page.Receipt); err != nil {
+		t.Fatal(err)
+	}
+	if _, retained := f.Totals().Apps["app"]; retained {
+		t.Fatal("exact acknowledged idle generation not retired")
 	}
 }

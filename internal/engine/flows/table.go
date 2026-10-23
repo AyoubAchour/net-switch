@@ -110,7 +110,18 @@ type Table struct {
 func New(l Limits, store StateStore) *Table {
 	return &Table{limits: l, now: time.Now, store: store, flows: map[uint64]*ticket{}, apps: map[string]counts{}, totals: Totals{Apps: map[string]Bytes{}, Lines: map[string]Bytes{}}, snapshots: map[uint64]*snapshot{}, rejectApps: map[string]int{}, events: make(chan flowapi.Event, 64)}
 }
-func (t *Table) SetEpoch(epoch uint64) { t.mu.Lock(); t.epoch = epoch; t.mu.Unlock() }
+func (t *Table) SetEpoch(epoch uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if epoch != t.epoch {
+		// A fenced controller cannot finish or acknowledge these snapshots.
+		// Retained counters survive; the new controller reads them afresh.
+		for id := range t.totalSnapshots {
+			t.dropTotalsSnapshot(id)
+		}
+	}
+	t.epoch = epoch
+}
 func (t *Table) Applied() *policy.Applied {
 	t.mu.Lock()
 	defer t.mu.Unlock()

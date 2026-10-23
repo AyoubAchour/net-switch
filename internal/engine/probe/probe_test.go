@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -78,7 +79,11 @@ func TestNativeProbeTargetsAndLocalExhaustion(t *testing.T) {
 				}
 				return nil, fmt.Errorf("wrapped dial: %w", busy)
 			}})
-		if err != nil || called != 1 || v.OK || v.Outcome != "engineUnavailable" {
+		kind := "full"
+		if quick {
+			kind = "quick"
+		}
+		if err != nil || called != 1 || v.OK || v.Outcome != "engineUnavailable" || v.Kind != kind || v.LatencyMS != nil {
 			t.Fatal(v, err, called)
 		}
 	}
@@ -90,9 +95,35 @@ func TestNativeProbeTargetsAndLocalExhaustion(t *testing.T) {
 	if _, err := normalize(platform.ProbeRequest{Operator: "google", Target: "1.1.1.1:443"}); err == nil {
 		t.Fatal("conflicting target accepted")
 	}
-	for _, op := range []string{"quick:cloudflare", "quick:google", "quick:quad9", "192.0.2.1:8443"} {
+	for _, op := range []string{"192.0.2.1:8443", "quick:192.0.2.1:8443", "unknown"} {
+		if _, err := normalize(platform.ProbeRequest{Operator: op}); err == nil {
+			t.Fatal("ambiguous legacy shorthand accepted", op)
+		}
+	}
+	for _, op := range []string{"quick:cloudflare", "quick:google", "quick:quad9"} {
 		if r, err := normalize(platform.ProbeRequest{Operator: op}); err != nil || !r.Quick {
 			t.Fatal(r, err)
 		}
+	}
+}
+
+func TestProbeWireKindAndMilliseconds(t *testing.T) {
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	o := Options{Elapsed: func() time.Duration { return 23500 * time.Microsecond }, Dial: func(context.Context, netip.AddrPort) (net.Conn, error) { return a, nil }}
+	r, err := Run(context.Background(), platform.ProbeRequest{Target: "192.0.2.1:443", Quick: true}, o)
+	if err != nil || r.Kind != "quick" || r.LatencyMS == nil || *r.LatencyMS != 23.5 {
+		t.Fatal(r, err)
+	}
+	wire, err := json.Marshal(r)
+	if err != nil || !strings.Contains(string(wire), `"latencyMs":23.5`) || strings.Contains(string(wire), `"latency":`) {
+		t.Fatal(string(wire), err)
+	}
+	o.Dial = func(context.Context, netip.AddrPort) (net.Conn, error) { return nil, ErrUnavailable }
+	r, err = Run(context.Background(), platform.ProbeRequest{Target: "192.0.2.1:443", Custom: true}, o)
+	wire, marshalErr := json.Marshal(r)
+	if err != nil || marshalErr != nil || r.Kind != "full" || r.Outcome != "engineUnavailable" || strings.Contains(string(wire), "latency") {
+		t.Fatal(string(wire), err, marshalErr)
 	}
 }

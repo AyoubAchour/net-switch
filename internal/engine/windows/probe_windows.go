@@ -18,12 +18,12 @@ func (d *Dialer) Probe(ctx context.Context, line, operator string) (platform.Pro
 }
 
 func (d *Dialer) ProbeConfigured(ctx context.Context, line string, r platform.ProbeRequest) (platform.ProbeResult, error) {
-	if !d.Routes.active.Load() {
-		return platform.ProbeResult{Outcome: "engineUnavailable", Error: "routing engine is not running"}, nil
-	}
 	started := winclock.Now()
 	return probe.Run(ctx, r, probe.Options{TLS: d.ProbeTLS, Elapsed: func() time.Duration { return winclock.Since(started) }, Unavailable: probeUnavailable,
 		Dial: func(ctx context.Context, dst netip.AddrPort) (net.Conn, error) {
+			if !d.Routes.active.Load() {
+				return nil, probe.ErrUnavailable
+			}
 			if d.ProbeError != nil {
 				if err := d.ProbeError(); err != nil {
 					return nil, err

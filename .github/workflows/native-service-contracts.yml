@@ -64,7 +64,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          go test -v -count=1 -run '^Test(ProbeUnavailable|RetiredLine)' ./internal/engine/windows
+          go test -v -count=1 -run '^Test(ProbeUnavailable|RetiredLine|RouteStats|WindowsStatsStayBounded)' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           foreach ($variant in @('product', 'faults')) {
             if ($env:NATIVE_FAULTS_ONLY -eq '1' -and $variant -eq 'product') { continue }
@@ -92,7 +92,7 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          go test -v -count=1 -run '^Test(LineSlot|ProbeUnavailable)' ./internal/engine/linux
+          go test -v -count=1 -run '^Test(LineSlot|ProbeUnavailable|DeprecatedAddresses)' ./internal/engine/linux
           for variant in product faults; do
             if [ "$NATIVE_FAULTS_ONLY" = 1 ] && [ "$variant" = product ]; then continue; fi
             export NETSWITCH_NATIVE_FAULTS=0

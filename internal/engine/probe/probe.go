@@ -25,6 +25,8 @@ type Options struct {
 	TLS *tls.Config
 }
 
+var ErrUnavailable = errors.New("routing engine is not running")
+
 func normalize(r platform.ProbeRequest) (platform.ProbeRequest, error) {
 	if r.Target != "" && r.Operator != "" {
 		return r, errors.New("choose a probe target or operator")
@@ -40,8 +42,7 @@ func normalize(r platform.ProbeRequest) (platform.ProbeRequest, error) {
 		case "quad9":
 			r.Target = "9.9.9.9:443"
 		default:
-			// Preserve the old native IP:port shorthand as a TCP check.
-			r.Target, r.Quick, r.Custom = op, true, true
+			return r, errors.New("unknown probe operator; custom checks require target and explicit quick/custom options")
 		}
 	}
 	address, err := netip.ParseAddrPort(r.Target)
@@ -58,8 +59,10 @@ func Run(ctx context.Context, request platform.ProbeRequest, o Options) (platfor
 		return platform.ProbeResult{}, err
 	}
 	bound := 10 * time.Second
+	kind := "full"
 	if r.Quick {
 		bound = 3 * time.Second
+		kind = "quick"
 	}
 	ctx, cancel := context.WithTimeout(ctx, bound)
 	defer cancel()
@@ -68,12 +71,15 @@ func Run(ctx context.Context, request platform.ProbeRequest, o Options) (platfor
 		o.Elapsed = func() time.Duration { return time.Since(started) }
 	}
 	result := func(err error) (platform.ProbeResult, error) {
-		v := platform.ProbeResult{OK: err == nil, Outcome: "ok", Latency: o.Elapsed()}
+		v := platform.ProbeResult{OK: err == nil, Kind: kind, Outcome: "ok"}
 		if err != nil {
 			v.Outcome, v.Error = "lineFailed", err.Error()
-			if errors.Is(err, context.Canceled) || (o.Unavailable != nil && o.Unavailable(err)) {
+			if errors.Is(err, ErrUnavailable) || errors.Is(err, context.Canceled) || (o.Unavailable != nil && o.Unavailable(err)) {
 				v.Outcome = "engineUnavailable"
 			}
+		} else {
+			ms := float64(o.Elapsed()) / float64(time.Millisecond)
+			v.LatencyMS = &ms
 		}
 		return v, nil
 	}

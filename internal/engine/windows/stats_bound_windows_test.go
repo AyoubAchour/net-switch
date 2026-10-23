@@ -44,7 +44,11 @@ func TestWindowsStatsStayBoundedWithoutTrace(t *testing.T) {
 			LUID: math.MaxUint64, Index4: math.MaxUint32, Index6: math.MaxUint32, Addresses: addresses, Valid: addresses, Up: true, MTU: math.MaxUint32, Metric: math.MaxUint32}
 	}
 	routes := &Routes{Instance: strings.Repeat("i", 32), timings: &phaseTimings{values: map[string]phaseTiming{}}}
-	routes.bindings.Store(&bindings)
+	routes.configured = map[string]bool{}
+	for id := range bindings {
+		routes.configured[id] = true
+	}
+	routes.publishBindings(bindings)
 	for i := range 64 {
 		routes.timings.values[fmt.Sprintf("engine.stop.phase-%02d-%s", i, strings.Repeat("n", 24))] = phaseTiming{math.MaxUint64, math.MaxUint64, math.MaxUint64}
 	}

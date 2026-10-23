@@ -3,11 +3,17 @@ package linux
 import (
 	"errors"
 	"sync/atomic"
+	"time"
 )
 
 // A tombstone prevents an old published binding from acquiring a socket after
 // the route writer retires its slot. Dials never wait for netlink or fsync.
-type lineLease struct{ users atomic.Int64 }
+type lineLease struct {
+	users    atomic.Int64
+	closedAt atomic.Pointer[time.Time]
+}
+
+const lineSlotQuiet = 60 * time.Second
 
 func (l *lineLease) hold() bool {
 	if l == nil {
@@ -22,6 +28,14 @@ func (l *lineLease) hold() bool {
 }
 func (l *lineLease) release() {
 	if l != nil {
+		// Publish before dropping the final pin. The kernel may continue the
+		// closed socket's FIN/retransmissions after userspace releases its fd.
+		now := time.Now()
+		for previous := l.closedAt.Load(); previous == nil || now.After(*previous); previous = l.closedAt.Load() {
+			if l.closedAt.CompareAndSwap(previous, &now) {
+				break
+			}
+		}
 		l.users.Add(-1)
 	}
 }
@@ -38,6 +52,11 @@ func (p *Platform) retireLines(wanted map[string]bool) bool {
 			continue
 		}
 		if line.lease.retire() {
+			if line.lease != nil {
+				if closed := line.lease.closedAt.Load(); closed != nil {
+					p.slotQuiet[line.N] = closed.Add(lineSlotQuiet)
+				}
+			}
 			delete(p.lines, id)
 			changed = true
 			p.slotsDirty = true
@@ -46,15 +65,19 @@ func (p *Platform) retireLines(wanted map[string]bool) bool {
 	return changed
 }
 
-func freeLineSlot(lines map[string]lineState) int {
+func (p *Platform) freeLineSlot(lines map[string]lineState, now time.Time) int {
 	var used [256]bool
 	for _, line := range lines {
 		if line.N > 0 && line.N < len(used) {
 			used[line.N] = true
 		}
 	}
-	for n := 1; n < len(used); n++ {
-		if !used[n] {
+	// Rotate across the whole 255-slot range. Never immediately reuse a
+	// socket-bearing slot: its last close also imposes a 60-second floor.
+	for step := 1; step < len(used); step++ {
+		n := (p.lastSlot+step-1)%255 + 1
+		if !used[n] && !now.Before(p.slotQuiet[n]) {
+			p.lastSlot = n
 			return n
 		}
 	}

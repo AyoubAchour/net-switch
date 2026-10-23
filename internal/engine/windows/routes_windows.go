@@ -49,23 +49,25 @@ func (r *Routes) StopPhase(name string) func() {
 }
 
 type Routes struct {
-	Instance    string
-	mu          sync.Mutex
-	session     *journal.Session
-	objects     *objects
-	tun         *wintun.Session
-	lines       []platform.Line
-	configured  map[string]bool
-	bindings    atomic.Pointer[bindingTable]
-	active      atomic.Bool
-	capture     []journal.Fingerprint
-	permissions []journal.Creation
-	cancel      context.CancelFunc
-	done        chan struct{}
-	Table       *flows.Table
-	Fatal       func(error)
-	timings     *phaseTimings
-	trace       *packetTrace
+	Instance      string
+	mu            sync.Mutex
+	session       *journal.Session
+	objects       *objects
+	tun           *wintun.Session
+	lines         []platform.Line
+	configured    map[string]bool
+	bindings      atomic.Pointer[bindingTable]
+	statsBindings atomic.Pointer[bindingTable]
+	statsTun      atomic.Pointer[wintun.Session]
+	active        atomic.Bool
+	capture       []journal.Fingerprint
+	permissions   []journal.Creation
+	cancel        context.CancelFunc
+	done          chan struct{}
+	Table         *flows.Table
+	Fatal         func(error)
+	timings       *phaseTimings
+	trace         *packetTrace
 }
 
 func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Routes, error) {
@@ -189,6 +191,7 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 		return nil, err
 	}
 	r.tun = s
+	r.statsTun.Store(s)
 	r.capture = nil
 	for _, prefix := range CapturePrefixes() {
 		fp := maps.Clone(base)
@@ -205,24 +208,30 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 }
 
 func (r *Routes) Bindings() map[string]Adapter {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	if view := r.statsBindings.Load(); view != nil {
+		return maps.Clone(*view)
+	}
+	return nil
+}
+
+// Called by the route writer; readers never wait for adapter/WFP checks.
+func (r *Routes) publishBindings(b bindingTable) {
 	out := make(map[string]Adapter, len(r.configured))
-	for id, a := range *r.bindings.Load() {
+	for id, a := range b {
 		if r.configured[id] {
 			out[id] = a
 		}
 	}
-	return out // stats stay bounded by configured lines, not historical flow IDs
+	view := bindingTable(out)
+	r.bindings.Store(&b)
+	r.statsBindings.Store(&view)
 }
 
 func (r *Routes) TunStats() wintun.Stats {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.tun == nil {
-		return wintun.Stats{}
+	if tun := r.statsTun.Load(); tun != nil {
+		return tun.Stats() // Session.Stats itself never waits for driver teardown
 	}
-	return r.tun.Stats()
+	return wintun.Stats{}
 }
 
 func (r *Routes) resolve(lines []platform.Line) (bindingTable, error) {
@@ -262,7 +271,7 @@ func (r *Routes) Prepare(ctx context.Context, lines []platform.Line) error {
 		return err
 	}
 	r.lines, r.configured = retained, wanted
-	r.bindings.Store(&b)
+	r.publishBindings(b)
 	return nil
 }
 func (r *Routes) Capture(ctx context.Context) error {
@@ -306,7 +315,7 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 		b, err := r.resolve(r.lines)
 		old := r.bindings.Load()
 		if err == nil {
-			r.bindings.Store(&b)
+			r.publishBindings(b)
 			if r.Table != nil {
 				closeLost(r.Table, *old, b)
 			}
@@ -403,6 +412,7 @@ func (r *Routes) Cleanup(ctx context.Context) (err error) {
 		r.capture = nil
 		r.permissions = nil
 		r.tun = nil
+		r.statsTun.Store(nil)
 	}
 	return err
 }

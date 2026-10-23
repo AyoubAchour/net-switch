@@ -94,6 +94,7 @@ func TestDeprecatedAddressesStayOnTheirLine(t *testing.T) {
 		{0, true},
 		{unix.IFA_F_DEPRECATED, true},
 		{unix.IFA_F_TENTATIVE, false},
+		{unix.IFA_F_DADFAILED, false},
 		{unix.IFA_F_DEPRECATED | unix.IFA_F_TENTATIVE, false},
 	} {
 		if got := usableAddress(c.flags, v6, false); got != c.usable {

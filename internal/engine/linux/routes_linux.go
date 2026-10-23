@@ -65,6 +65,8 @@ type Platform struct {
 	configured           map[string]bool
 	lineUsed             func(string) bool
 	slotsDirty           bool
+	lastSlot             int
+	slotQuiet            [256]time.Time
 	owned                map[string]ownedObject
 	captureOwned         map[string]ownedObject
 	captureOrder         []ownedObject
@@ -400,9 +402,9 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 			next[line.ID] = previous
 			continue
 		}
-		n := freeLineSlot(next)
+		n := p.freeLineSlot(next, time.Now())
 		if n == 0 {
-			return errors.New("all line slots are still configured or held by live sockets")
+			return errors.New("line slots are in use or within the 60-second closed-socket quiet period; retry without restarting")
 		}
 		var name string
 		var index int
@@ -910,13 +912,13 @@ func lineChanges(old, current map[string]lineState) (down []string, removed []li
 }
 
 // usableAddress says whether a netlink address belongs in a line's addresses.
-// A tentative IPv6 address (duplicate detection still running) does not. A
+// A tentative or failed-DAD IPv6 address does not. A
 // deprecated one (IFA_F_DEPRECATED: its preferred lifetime ended, its valid
 // lifetime not) stays: existing flows keep using it (RFC 4862 5.5.4), and
 // the kernel already avoids it for new sources (RFC 6724 rule 3), so it is
 // never reported removed until it is actually gone.
 func usableAddress(flags int, ip netip.Addr, ipv4Only bool) bool {
-	return flags&unix.IFA_F_TENTATIVE == 0 && (!ipv4Only || ip.Is4() || ip.Is4In6())
+	return flags&(unix.IFA_F_TENTATIVE|unix.IFA_F_DADFAILED) == 0 && (!ipv4Only || ip.Is4() || ip.Is4In6())
 }
 func (p *Platform) Quiesce() {
 	p.routeMu.Lock()
@@ -949,6 +951,7 @@ func (p *Platform) Cleanup(ctx context.Context) error {
 		p.lines = map[string]lineState{}
 		p.configured = nil
 		p.slotsDirty = false
+		p.lastSlot, p.slotQuiet = 0, [256]time.Time{}
 		p.capturing = false
 		p.allocated = false
 	}
