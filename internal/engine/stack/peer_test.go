@@ -114,6 +114,7 @@ type peer struct {
 	setupGate          <-chan struct{}
 	setupEntered       chan struct{}
 	afterWrite         func()
+	trace              *closeTrace
 }
 
 type peerControl struct {
@@ -126,6 +127,11 @@ func (c peerControl) Begin(proto string, tuple platform.Tuple) (flowapi.Ticket, 
 	if err != nil {
 		return ticket, err
 	}
+	// Wrap the base ticket so the other wrappers keep their exact behaviour
+	// while every retain/release call passes through the trace.
+	if c.peer.trace != nil {
+		ticket = c.peer.trace.wrap(ticket, tuple)
+	}
 	if c.peer.fixedSendBuffer != 0 {
 		ticket = &fixedBufferTicket{Ticket: ticket, send: c.peer.fixedSendBuffer}
 	}
@@ -133,6 +139,20 @@ func (c peerControl) Begin(proto string, tuple platform.Tuple) (flowapi.Ticket, 
 		ticket = &setupBufferTicket{Ticket: ticket, gate: c.peer.setupGate, entered: c.peer.setupEntered}
 	}
 	return ticket, nil
+}
+
+// The two observer methods are probed by the forwarder's admissionTrace type
+// assertion. They are no-ops unless this peer's test installed a trace.
+func (c peerControl) TimeWaitPolicy(id gv.TransportEndpointID, ep tcpip.Endpoint, ticket flowapi.Ticket) {
+	if c.peer.trace != nil {
+		c.peer.trace.TimeWaitPolicy(id, ep, ticket)
+	}
+}
+
+func (c peerControl) Release(id gv.TransportEndpointID, state tcp.EndpointState, ticket flowapi.Ticket) {
+	if c.peer.trace != nil {
+		c.peer.trace.Release(id, state, ticket)
+	}
 }
 
 type setupBufferTicket struct {

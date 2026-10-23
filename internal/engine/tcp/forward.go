@@ -403,8 +403,10 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 		ticket.EndTimeWait()
 	})
+	f.tracePolicy(id, ep, ticket)
 	c := &relay.connection
 	c.id, c.ep, c.ticket, c.clock, c.last = id, ep, ticket, f.stack.Clock(), f.stack.Clock().Now()
+	c.forward = f
 	relay.c = c
 	f.mu.Lock()
 	if f.ctx.Err() != nil || closedState(ep) {
