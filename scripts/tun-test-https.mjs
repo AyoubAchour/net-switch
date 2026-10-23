@@ -10,15 +10,24 @@ import path from 'node:path';
 import { buildEngineConfig, freePort } from '../lib/engine.mjs';
 import { hostedOnly, run } from '../tests/windows/testisp/harness.mjs';
 
+// The harness default of 60 s expired in job 120165918557 on windows-11-arm.
+// Apart from the cold powershell.exe start, this call loads the PKI module
+// that mounts Cert:, so it needs more room than a plain command. The job
+// warms powershell.exe first; this deadline also covers that first load.
+const CERTIFICATE_TIMEOUT_MS = 120_000;
+
 export async function localHttps(address) {
   hostedOnly();
   const passphrase = randomBytes(24).toString('hex');
+  const started = Date.now();
   const result = await run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
     path.resolve('scripts/tun-test-certificate.ps1')], {
+    timeout: CERTIFICATE_TIMEOUT_MS,
     // Control runs under pwsh. Let Windows PowerShell build its own module path
     // so its Security provider can mount Cert:, rather than inheriting PS7's.
     env: { NETSWITCH_TEST_CERT_PASSWORD: passphrase, PSModulePath: undefined },
   });
+  console.log(`TLS certificate ready in ${Date.now() - started} ms`);
   const identity = JSON.parse(result.stdout);
   const ca = `-----BEGIN CERTIFICATE-----\n${identity.cert}\n-----END CERTIFICATE-----\n`;
   const seen = [];
