@@ -89,6 +89,18 @@ jobs:
           node-version: '24'
           architecture: ${{ matrix.arch }}
           package-manager-cache: false
+      # The first powershell.exe start on windows-11-arm can take 22-28 s,
+      # longer than the 20 s deadline inside the shipped readers the parity
+      # suite compares against. Start it once here, outside every test
+      # deadline, so parity and the later routing steps do not pay it.
+      - name: Warm up Windows PowerShell 5.1
+        run: |
+          $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $started = Get-Date
+          & $powershell -NoProfile -NonInteractive -Command 'exit 0'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $elapsed = ((Get-Date) - $started).TotalSeconds
+          "Windows PowerShell 5.1 started in $([math]::Round($elapsed, 1)) s"
       - name: Build Go control with commit identity
         run: go build -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o bin/netswitch.exe ./cmd/netswitch
       - name: Native Win32 parity
