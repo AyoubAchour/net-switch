@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import net from 'node:net';
+import { emptyFillEvidence, openWithClientReattempt, windowsErrorName } from './tcp-fill.mjs';
 
 assert(process.send, 'Use the hosted capacity runner');
 const sockets = [];
@@ -35,6 +36,8 @@ function echo(socket, value, timeout = 1000) {
 }
 async function openOne({ host, port, localPort, timeout = 1000 }) {
   const started = performance.now();
+  const tuple = (address, number) => address.includes(':') ? `[${address}]:${number}` : `${address}:${number}`;
+  const remote = tuple(host, port);
   const socket = net.connect({ host, port, ...(localPort ? { localAddress: '198.18.0.1', localPort } : {}) });
   try {
     await new Promise((resolve, reject) => {
@@ -47,35 +50,48 @@ async function openOne({ host, port, localPort, timeout = 1000 }) {
     const ended = performance.now();
     return { socket, ms: ended - started, startMS: started, endMS: ended };
   } catch (error) {
+    const ended = performance.now(), at = new Date().toISOString();
+    // Keep the app's own error. Acceptance x64 job 120239285886 failed on one
+    // client connect and could not say which Windows error it was.
+    const local = socket.localPort && socket.localAddress ? tuple(socket.localAddress, socket.localPort)
+      : (localPort ? tuple('198.18.0.1', localPort) : null);
     socket.destroy();
-    const ended = performance.now();
-    return { failure: { code: error.code ?? 'DEADLINE', call: error.syscall, message: error.message, ms: ended - started, startMS: started, endMS: ended } };
+    return { failure: { source: 'client', code: error.code ?? 'DEADLINE', name: windowsErrorName(error.code ?? 'DEADLINE'),
+      errno: error.errno ?? null, call: error.syscall, message: error.message, local, remote, at,
+      ms: ended - started, startMS: started, endMS: ended }, ms: ended - started, startMS: started, endMS: ended };
   }
 }
-process.on('message', async ({ id, command, host, ports, count, localPort = 45000, keep = false, timeout = 1000, all = false }) => {
+process.on('message', async ({ id, command, host, ports, count, localPort = 45000, keep = false, timeout = 1000, all = false, batch = 0 }) => {
   try {
     if (command === 'open') {
       // Filling to the OS limit stops at the first refused batch; recovery
       // (all) attempts every flow once, so each refusal is its own record.
       // Each attempt's own start and end on this process's clock, so a
       // reopen is timed alone and a re-attempt from its original start.
+      // The ordinary fill gives a client-side port allocation refusal one
+      // reported re-attempt on a fresh socket (SYSTEM-DESIGN 5.9 amended);
+      // recovery already re-attempts its refused first attempts in the parent.
+      const fill = emptyFillEvidence();
       const failures = [], attempts = [];
-      let opened = 0;
+      let opened = 0, batches = 0;
       for (let n = 0; n < count; n += 32) {
+        batches++;
         await Promise.all(Array.from({ length: Math.min(32, count - n) }, async (_, k) => {
-          const { socket, failure, startMS, endMS } = await openOne({ host, port: ports[(sockets.length + k) % ports.length], timeout });
-          if (failure) {
-            failures.push(failure);
-            attempts.push({ startMS: failure.startMS, endMS: failure.endMS, ok: false });
+          const open = () => openOne({ host, port: ports[(sockets.length + k) % ports.length], timeout });
+          const result = all ? await open() : await openWithClientReattempt({ open, evidence: fill,
+            request: id, batch: batch + batches - 1, attempt: n + k });
+          if (result.failure) {
+            failures.push(result.failure);
+            attempts.push({ startMS: result.startMS, endMS: result.endMS, ok: false });
           } else {
-            hold(socket);
+            hold(result.socket);
             opened++;
-            attempts.push({ startMS, endMS, ok: true });
+            attempts.push({ startMS: result.startMS, endMS: result.endMS, ok: true });
           }
         }));
         if (failures.length && !all) break;
       }
-      process.send({ id, result: { ...status(), opened, failures, attempts } });
+      process.send({ id, result: { ...status(), opened, failures, attempts, batches, fill } });
     } else if (command === 'probe') {
       // A fixed app-side port outside the dynamic pool lets this SYN reach
       // the engine even when an ordinary app cannot allocate another port.

@@ -10,6 +10,7 @@ import { hostedOnly, run, until } from './testisp/harness.mjs';
 import { engineBindDelta, flowReconciliation, holdUDPCapacity, largeUDPReplies, nativeUDPCapacity, portRecoveryGate, reopenTimings,
   udpRecoveryCycles } from './udp-capacity.mjs';
 import { captureHeap } from './heap-profile.mjs';
+import { emptyFillEvidence, mergeFillEvidence } from './tcp-fill.mjs';
 
 async function nativeRefusalBaseline(host) {
   const listener = net.createServer();
@@ -294,11 +295,25 @@ export async function capacity({ server, harness, directory, line }) {
     const admissionsBefore = await engineStats();
     const unknownTCP = (stats) => stats.flows.AdmittedUnknown - stats.flows.AdmittedUnknownUDP;
     let held = 1, firstLimit;
+    // Client-side allocation refusals in the fill: reported by errno and
+    // re-attempted once on a fresh socket (SYSTEM-DESIGN 5.9 amended). Kept
+    // on progress so a failure before the tail still has them.
+    const tcpFill = progress.tcpFill = emptyFillEvidence();
+    let tcpBatch = 0, tcpReattemptsReported = 0;
     // Both halves allocate from the same unchanged Windows ephemeral pool.
     // Internal engine ceilings remain 65,536 total / 8,192 per app.
     while (held < 65536 && !firstLimit) {
       for (const app of children) {
-        const result = await app.call('open', { ...target, count: 256, timeout: refusalLimitMs });
+        const result = await app.call('open', { ...target, count: 256, timeout: refusalLimitMs, batch: tcpBatch });
+        tcpBatch += result.batches ?? Math.ceil(result.attempts.length / 32);
+        mergeFillEvidence(tcpFill, result.fill);
+        if (tcpFill.records.length > tcpReattemptsReported) {
+          tcpReattemptsReported = tcpFill.records.length;
+          console.log(`WINDOWS TCP FILL CLIENT REFUSALS ${JSON.stringify({
+            clientFirstRefusals: tcpFill.clientFirstRefusals, clientReattempts: tcpFill.clientReattempts,
+            clientReattemptSuccesses: tcpFill.clientReattemptSuccesses, clientReattemptFailures: tcpFill.clientReattemptFailures,
+            clientFinalRefusals: tcpFill.clientFinalRefusals, last: tcpFill.records.at(-1) })}`);
+        }
         assert.equal(result.lost, 0, 'A previously admitted capacity socket was cut');
         held += result.opened;
         assert(result.held <= 8192);
@@ -311,7 +326,10 @@ export async function capacity({ server, harness, directory, line }) {
     assert(firstLimit?.length, 'Expected the runner OS limit before the internal ceiling');
     assert(firstLimit.every((failure) => ['ENOBUFS', 'EADDRINUSE', 'ECONNREFUSED', 'ECONNRESET'].includes(failure.code)),
       `The limit was a stall or unrelated failure: ${JSON.stringify(firstLimit)}`);
-    assert(held >= floor, `Held ${held}, below 95% of this runner's isolated two-half layout ${layoutCapacity}: ${JSON.stringify(nativeSamples)}`);
+    assert(held >= floor, `Held ${held}, below 95% of this runner's isolated two-half layout ${layoutCapacity}: ` +
+      JSON.stringify({ nativeSamples, firstLimit, clientFirstRefusals: tcpFill.clientFirstRefusals,
+        clientReattempts: tcpFill.clientReattempts, clientReattemptSuccesses: tcpFill.clientReattemptSuccesses,
+        clientReattemptFailures: tcpFill.clientReattemptFailures, clientFinalRefusals: tcpFill.clientFinalRefusals }));
     const ordinaryHeld = held;
     progress.ordinaryHeld = ordinaryHeld;
     const limitStats = await engineStats();
@@ -462,7 +480,7 @@ export async function capacity({ server, harness, directory, line }) {
     assert.equal(engineAfter.engineInstanceId, engineBefore.engineInstanceId, 'The engine restarted under port pressure');
     const last = samples.at(-1);
     const evidence = { reconciliation: progress.reconciliation, portRetries: progress.portRetries, tcpRecovery,
-      nativeSamples, layoutCapacity, floor, ordinaryHeld, held, firstLimit, extraAdmissions, refusals,
+      nativeSamples, layoutCapacity, floor, ordinaryHeld, held, firstLimit, tcpFill, extraAdmissions, refusals,
       udp: progress.udp, largeUDP: progress.largeUDP,
       baselineHeap: progress.baselineHeap, heldHeap: progress.heldHeap, recoveryHeap: progress.recoveryHeap,
       oldRuntimeBudgetWouldPass: progress.oldRuntimeBudgetWouldPass && progress.udp.oldRuntimeBudgetWouldPass,
