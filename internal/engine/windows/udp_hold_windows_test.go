@@ -231,3 +231,25 @@ func TestUDPGenerationHoldCannotReusePositiveSnapshot(t *testing.T) {
 		t.Fatalf("new setup reused an earlier generation: %+v %v", owner, err)
 	}
 }
+
+func TestUDPReconcileDistinguishesFailedIdentityFromChangedIdentity(t *testing.T) {
+	o := NewOwners()
+	key := netip.MustParseAddrPort("192.0.2.1:40000")
+	o.readUDP = func(context.Context, uint32, *[]uint64) ([]byte, error) {
+		return udpHoldTable([]netip.AddrPort{key}, 123, 1000), nil
+	}
+	o.identify = func(uint32) (platform.Owner, error) { return platform.Owner{}, windows.ERROR_ACCESS_DENIED }
+	rows, err := o.Snapshot(t.Context(), []netip.AddrPort{key})
+	want := platform.Owner{Generation: (socketOwner{123, 1000}).generation(), IdentityUnavailable: true}
+	if err != nil || rows[key] != want {
+		t.Fatalf("native generation lost with transient process error: %+v %v", rows, err)
+	}
+	if failures := o.Stats().Failures; len(failures) != 1 || failures[0].Kind != "udp-reconcile-process" {
+		t.Fatal("identity query failure was not recorded")
+	}
+	o.identify = func(uint32) (platform.Owner, error) { return platform.Owner{PID: 123, AppID: "changed"}, nil }
+	rows, err = o.Snapshot(t.Context(), []netip.AddrPort{key})
+	if err != nil || rows[key].IdentityUnavailable || rows[key].AppID != "changed" {
+		t.Fatalf("a real identity was masked as a transient failure: %+v %v", rows, err)
+	}
+}

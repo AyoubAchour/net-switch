@@ -339,6 +339,7 @@ func (d *Dialer) OpenFlowUDP(ctx context.Context, line string, v6 bool, flow pla
 		}
 		err = &net.OpError{Op: "listen", Net: network, Addr: net.UDPAddrFromAddrPort(local), Err: err}
 		if portLimit(err) {
+			err = errors.Join(platform.ErrPortExhausted, err)
 			total := d.udpExhaustions.Add(1)
 			d.captureUDPAllocationFailure(line, source, a, err)
 			second := time.Now().Unix()

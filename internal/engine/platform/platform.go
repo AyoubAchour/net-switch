@@ -62,6 +62,9 @@ type Owner struct {
 	Path       string `json:"path"`
 	AppID      string `json:"id"`
 	Generation string `json:"socketGeneration"`
+	// A complete Windows snapshot proved PID:created, but process identity
+	// could not be read. This is validation evidence, never an admission ID.
+	IdentityUnavailable bool `json:"-"`
 }
 
 type OwnerLookup interface {
@@ -104,6 +107,10 @@ type TCPConn interface {
 // TryRead/TryWrite, addresses, shutdown, linger and Close, not blocking I/O or
 // deadlines. An adapter may release its original Go poll descriptor at transfer.
 var ErrWouldBlock = errors.New("socket would block")
+
+// ErrPortExhausted marks a final native port-allocation refusal, not a retry
+// or an arbitrary socket error. Wrapping preserves the original OS errno.
+var ErrPortExhausted = errors.New("native port exhaustion")
 
 // ErrDatagramDropped is a local resource drop or an asynchronous error already
 // handled using its original destination. Count it without inventing an ICMP

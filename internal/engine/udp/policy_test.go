@@ -120,7 +120,7 @@ func TestPacketArrivingAfterRejectFlushIsAlsoRejected(t *testing.T) {
 	b.Lock()
 	s := b.m[local]
 	b.Unlock()
-	s.rejectPending(owner.AppID)
+	s.rejectPending(owner.AppID, "policy-or-owner-budget")
 	await(t, out)
 	send(n, dest, []byte("after flush"))
 	await(t, out)

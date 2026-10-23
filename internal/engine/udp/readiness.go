@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 )
 
@@ -195,7 +194,7 @@ func (r *readySession) step() {
 				if errors.As(err, &big) {
 					mtu = big.MTU
 				}
-				n.out.Send(packet.Unreachable(d.original, mtu))
+				n.refuseDatagram(s.source, d.destination, d.payload, d.original, mtu, "send", "ready-send")
 			}
 		} else {
 			n.Dropped.Add(1)

@@ -52,6 +52,7 @@ type session struct {
 	active, closed  bool
 	rejected        bool
 	rejectApp       string
+	rejectReason    string
 	rejectedAt      time.Time
 	socket          platform.UDPConn
 	wake            chan struct{}
@@ -65,8 +66,9 @@ type shard struct {
 	negative map[netip.AddrPort]refusedSession
 }
 type refusedSession struct {
-	owner platform.Owner
-	at    time.Time
+	owner  platform.Owner
+	at     time.Time
+	reason string
 }
 type NAT struct {
 	ctx                                                              context.Context
@@ -89,6 +91,8 @@ type NAT struct {
 	PeakQueuePackets, PeakQueueBytes                                 atomic.Uint64
 	OpenFailed                                                       atomic.Uint64
 	GenerationMissing                                                atomic.Uint64
+	ReconcileIdentityFallbacks                                       atomic.Uint64
+	refusals                                                         refusalLog
 }
 
 func New(ctx context.Context, s *stack.Stack, c flowapi.Controller, o platform.OwnerLookup, i platform.UDPIdentity, d platform.LineDialer, out flowapi.DatagramOutput, mtu int) *NAT {
@@ -203,8 +207,8 @@ func (n *NAT) receive(source, destination netip.AddrPort, ownedBytes int, copyPa
 			if n.now().Sub(denied.at) < RejectLifetime {
 				b.Unlock()
 				if n.control.AllowReject(denied.owner.AppID) {
-					_, raw, _ := copyPacket()
-					n.out.Send(packet.Unreachable(raw, 0))
+					payload, raw, _ := copyPacket()
+					n.refuseDatagram(source, destination, payload, raw, 0, denied.reason, "negative-cache")
 				} else {
 					n.Dropped.Add(1)
 				}
@@ -217,8 +221,8 @@ func (n *NAT) receive(source, destination netip.AddrPort, ownedBytes int, copyPa
 			b.Unlock()
 			n.Rejected.Add(1)
 			if n.control.AllowReject("") {
-				_, raw, _ := copyPacket()
-				n.out.Send(packet.Unreachable(raw, 0))
+				payload, raw, _ := copyPacket()
+				n.refuseDatagram(source, destination, payload, raw, 0, "admission", "begin")
 			} else {
 				n.Dropped.Add(1)
 			}
@@ -233,10 +237,11 @@ func (n *NAT) receive(source, destination netip.AddrPort, ownedBytes int, copyPa
 	b.Unlock()
 	if s.rejected {
 		app := s.rejectApp
+		reason := s.rejectReason
 		s.mu.Unlock()
 		if n.control.AllowReject(app) {
-			_, raw, _ := copyPacket()
-			n.out.Send(packet.Unreachable(raw, 0))
+			payload, raw, _ := copyPacket()
+			n.refuseDatagram(source, destination, payload, raw, 0, reason, "rejected-session")
 		} else {
 			n.Dropped.Add(1)
 		}
@@ -399,13 +404,13 @@ func (s *session) run() {
 		if reporter, ok := n.control.(interface{ Emit(flowapi.Event) }); ok {
 			reporter.Emit(flowapi.Event{Type: "log", Message: fmt.Sprintf("UDP setup has no socket generation: source=%s lookup=%v", s.source, err)})
 		}
-		s.refuseSetup(owner.AppID)
+		s.refuseSetup(owner.AppID, "generation")
 		return
 	}
 	decision, err := s.ticket.Resolve(owner)
 	if err != nil {
 		n.Rejected.Add(1)
-		s.rejectPending(owner.AppID)
+		s.rejectPending(owner.AppID, "policy-or-owner-budget")
 		return
 	}
 	var socket platform.UDPConn
@@ -436,7 +441,11 @@ func (s *session) run() {
 		if observer, ok := n.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil {
 			observer.LineError(decision.Line, err)
 		}
-		s.refuseSetup(owner.AppID)
+		reason := "socket-open"
+		if errors.Is(err, platform.ErrPortExhausted) {
+			reason = "port-exhaustion"
+		}
+		s.refuseSetup(owner.AppID, reason)
 		return
 	}
 	s.mu.Lock()
@@ -496,9 +505,9 @@ func (s *session) run() {
 				} else if n.control.AllowReject(owner.AppID) {
 					var big *platform.TooBig
 					if errors.As(err, &big) {
-						n.out.Send(packet.Unreachable(d.original, big.MTU))
+						n.refuseDatagram(s.source, d.destination, d.payload, d.original, big.MTU, "send", "blocking-send")
 					} else {
-						n.out.Send(packet.Unreachable(d.original, 0))
+						n.refuseDatagram(s.source, d.destination, d.payload, d.original, 0, "send", "blocking-send")
 					}
 				}
 			} else {
@@ -509,7 +518,7 @@ func (s *session) run() {
 	}
 }
 
-func (s *session) rejectPending(app string) {
+func (s *session) rejectPending(app, reason string) {
 	// Failed setups must disappear from counts and pagination before any
 	// refusal is observable. Suppression has its own bounded, timer-free cache.
 	s.ticket.Retire()
@@ -530,7 +539,7 @@ func (s *session) rejectPending(app string) {
 			}
 			delete(b.negative, oldest)
 		}
-		b.negative[s.source] = refusedSession{owner: s.owner, at: s.n.now()}
+		b.negative[s.source] = refusedSession{owner: s.owner, at: s.n.now(), reason: reason}
 	}
 	b.Unlock()
 	defer s.mu.Unlock()
@@ -538,10 +547,11 @@ func (s *session) rejectPending(app string) {
 	// if close has not yet removed the session from its shard.
 	s.rejected = true
 	s.rejectApp = app
+	s.rejectReason = reason
 	s.rejectedAt = s.n.now()
 	for _, d := range s.queue {
 		if s.n.control.AllowReject(app) {
-			s.n.out.Send(packet.Unreachable(d.original, 0))
+			s.n.refuseDatagram(s.source, d.destination, d.payload, d.original, 0, reason, "pending")
 		} else {
 			s.n.Dropped.Add(1)
 		}
@@ -551,12 +561,17 @@ func (s *session) rejectPending(app string) {
 	s.queue = nil
 }
 
-func (s *session) refuseSetup(app string) {
+func (s *session) refuseSetup(app, reason string) {
+	if reason == "port-exhaustion" {
+		s.n.refusals.mu.Lock()
+		s.n.refusals.portSetups++
+		s.n.refusals.mu.Unlock()
+	}
 	s.n.Rejected.Add(1)
 	if ticket, ok := s.ticket.(interface{ RefuseSetup() }); ok {
 		ticket.RefuseSetup()
 	}
-	s.rejectPending(app)
+	s.rejectPending(app, reason)
 }
 
 func (s *session) read(ctx context.Context) {
@@ -619,6 +634,6 @@ func (s *session) errorReply(e platform.DatagramError) {
 	app := s.owner.AppID
 	s.mu.Unlock()
 	if fresh && s.n.control.AllowReject(app) {
-		s.n.out.Send(packet.Unreachable(packet.UDP(s.source, e.Destination, e.Payload), e.MTU))
+		s.n.refuseDatagram(s.source, e.Destination, e.Payload, packet.UDP(s.source, e.Destination, e.Payload), e.MTU, "peer-error", "error-queue")
 	}
 }

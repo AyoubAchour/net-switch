@@ -13,6 +13,9 @@ func same(a, b platform.Owner) bool {
 	if a.Generation == "" || a.Generation != b.Generation {
 		return false
 	}
+	if b.IdentityUnavailable {
+		return true // Windows PID:created was freshly checked, identity read failed.
+	}
 	// Identity expiry is an admission decision, not a socket replacement.
 	// A fresh dump may identify that same socket later; keep its unknown-owner
 	// policy until it closes. Generations include the native socket identity
@@ -121,6 +124,9 @@ func (n *NAT) Reconcile(ctx context.Context) {
 		owner, ok := owners[s.source]
 		valid := ok && same(s.owner, owner)
 		if valid && !s.closed {
+			if owner.IdentityUnavailable && s.owner.AppID != "" {
+				n.ReconcileIdentityFallbacks.Add(1)
+			}
 			s.validated = started
 		}
 		s.mu.Unlock()

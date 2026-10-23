@@ -196,25 +196,48 @@ export function engineBindDelta(before, after, protocol) {
     finalRefusals, finalRefusalsSeen: seen, otherProtocolFinalFailures: (protocol === 'tcp' ? udp : tcp).finalFailures };
 }
 
-// Each open batch has its own counter window, including a failed first attempt
-// before a retry. One earlier exhausted bind cannot explain unrelated resets.
+// Match actual refused datagrams, not raw attempt counts to bind counts. A new
+// client socket can reuse a port whose earlier refusal is still cached. Its
+// distinct token must have its own engine record carrying that cached cause.
 export function udpRefusalAttribution(attempts, before, after) {
   const delta = (key) => (after[key] ?? 0) - (before[key] ?? 0);
   const lookup = (key) => (after.ownerLookup?.[key] ?? 0) - (before.ownerLookup?.[key] ?? 0);
-  const clientResets = attempts.filter((item) => ['ECONNRESET', 'ECONNREFUSED'].includes(item.Error)).length;
+  const resetAttempts = attempts.filter((item) => ['ECONNRESET', 'ECONNREFUSED'].includes(item.Error));
+  const clientResets = resetAttempts.length;
   const portExhaustions = delta('udpSocketExhaustions');
   const generationRefusals = delta('udpGenerationMissing');
   const identityRefusals = ['Unknown', 'UnknownUDP'].reduce((n, key) => n +
     (after.flows?.RefusedUDP?.[key] ?? 0) - (before.flows?.RefusedUDP?.[key] ?? 0), 0);
   const binds = engineBindDelta(before, after, 'udp');
+  const prior = before.udpRefusalDatagrams, current = after.udpRefusalDatagrams;
+  const recorded = current?.recent?.filter((r) => r.sequence > (prior?.count ?? 0) && r.sequence <= current.count) ?? [];
+  const used = new Set(), matched = [], unmatched = [];
+  for (const item of resetAttempts) {
+    const hash = /^[0-9a-f]{16}$/i.test(item.Token ?? '') ? createHash('sha256')
+      .update(Buffer.concat([Buffer.from('NSUDPCAP'), Buffer.from(item.Token, 'hex')])).digest('hex') : null;
+    const receipt = recorded.find((r) => r.sent === true && !used.has(r.sequence) && r.source === item.Local &&
+      r.destination === item.Remote && hash && r.payloadSHA256 === hash);
+    if (!receipt) unmatched.push({ token: item.Token, source: item.Local });
+    else { used.add(receipt.sequence); matched.push(receipt); }
+  }
+  const nonExhaustion = matched.filter((r) => r.reason !== 'port-exhaustion');
+  const paths = {};
+  for (const r of matched) paths[r.path] = (paths[r.path] ?? 0) + 1;
+  const newPortSetups = (current?.portExhaustionSetups ?? 0) - (prior?.portExhaustionSetups ?? 0);
+  const hasEvidence = Number.isSafeInteger(prior?.count) && Number.isSafeInteger(current?.count) &&
+    Number.isSafeInteger(prior?.portExhaustionSetups) && Number.isSafeInteger(current?.portExhaustionSetups);
   return { clientResets, portExhaustions, generationRefusals, identityRefusals,
+    distinctResetSources: new Set(resetAttempts.map((item) => item.Local)).size,
+    newPortSetups, paths, matched, unmatched, nonExhaustion,
     ownerGenerationRefusals: lookup('udpGenerationRefusals'),
     identityExpiredWithGeneration: lookup('udpIdentityExpiredGeneration'), holds: lookup('udpHolds'),
     heldGenerations: lookup('udpHeldGenerations'), failures: after.ownerLookup?.failures ?? [], binds,
-    // Identity expiry with a generation is an admission, not a refusal. Every
-    // client reset must instead have its own final exhausted engine bind.
-    passed: generationRefusals === 0 && lookup('udpGenerationRefusals') === 0 && identityRefusals === 0 &&
-      clientResets === portExhaustions && binds.finalFailures === portExhaustions };
+    // Cached port exhaustion remains the original cause, never a fresh bind.
+    // Every new exhausted setup still requires a native exhaustion counter.
+    // Missing/truncated evidence and any other cause fail even at the limit.
+    passed: hasEvidence && unmatched.length === 0 && nonExhaustion.length === 0 &&
+      generationRefusals === 0 && lookup('udpGenerationRefusals') === 0 && identityRefusals === 0 &&
+      newPortSetups === portExhaustions && binds.finalFailures === portExhaustions };
 }
 
 // One record per reopen from the attempts' own clock (one client process, so

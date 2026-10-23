@@ -838,7 +838,14 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (result ma
 		families[family] = true
 	}
 	for family := range families {
-		b, err := readOwnerTable(ctx, udpTable, family, udpOwnerModule)
+		var b []byte
+		var err error
+		if o.readUDP != nil {
+			var scratch []uint64
+			b, err = o.readUDP(ctx, family, &scratch)
+		} else {
+			b, err = readOwnerTable(ctx, udpTable, family, udpOwnerModule)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -866,15 +873,19 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (result ma
 		}
 		result, ok := processes[row.pid]
 		if !ok {
-			result.owner, result.err = o.process(row.pid)
+			identify := o.process
+			if o.identify != nil {
+				identify = o.identify
+			}
+			result.owner, result.err = identify(row.pid)
 			processes[row.pid] = result
 			o.noteFailure("udp-reconcile-process", stage, key, "", result.err)
 		}
 		owner := result.owner
 		if result.err != nil {
-			// A live native generation still validates an unknown admission.
-			// Known admissions continue to fail identity comparison normally.
-			owner = platform.Owner{}
+			// PID:created proves the socket and its process survived. A failed
+			// path query is not evidence that a known identity changed.
+			owner = platform.Owner{IdentityUnavailable: true}
 		}
 		owner.Generation = row.generation()
 		out[key] = owner

@@ -22,6 +22,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	ntcp "github.com/AyoubAchour/net-switch/internal/engine/tcp"
 	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
+	"github.com/AyoubAchour/net-switch/internal/engine/udp"
 )
 
 // widestStats is Engine.Stats with its bounded lists at their bounds and
@@ -167,8 +168,8 @@ func TestStatsReplyStaysBoundedAtEveryLimit(t *testing.T) {
 	}
 	budget := protocol.MessageLimit / 4
 	t.Logf("stats reply at every flow limit: %d bytes (handshake detail would be %d); limit %d, budget %d", len(line), detail, protocol.MessageLimit, budget)
-	if len(line) > budget {
-		t.Fatalf("the shared stats reply takes %d bytes at the flow limits; keep it within %d", len(line), budget)
+	if len(line)+udp.RefusalStatsBudget > budget {
+		t.Fatalf("the shared stats reply takes %d bytes plus %d reserved for refusal evidence; keep it within %d", len(line), udp.RefusalStatsBudget, budget)
 	}
 }
 
