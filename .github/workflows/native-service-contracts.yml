@@ -88,6 +88,28 @@ jobs:
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             } finally { Pop-Location }
           }
+      - name: Atomic child launch and supervised registrar containment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $proof = Join-Path $PWD 'dist/native-child'
+          go build -trimpath -buildvcs=false -o (Join-Path $proof 'netswitch-engine.exe') ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -tags netswitch_handlecheck -c -o (Join-Path $proof 'winchild.test.exe') ./internal/platform/winchild
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -tags netswitch_handlecheck -c -o (Join-Path $proof 'wintun.test.exe') ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory $proof
+          $env:NETSWITCH_CHILD_CI = '1'
+          $env:NETSWITCH_WINTUN_CI = '1'
+          $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE = Join-Path $proof 'netswitch-engine.exe'
+          $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE).Hash.ToLowerInvariant()
+          "CONTAINMENT_BINARY $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256"
+          & (Join-Path $proof 'winchild.test.exe') '-test.v' '-test.timeout=2m'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & (Join-Path $proof 'wintun.test.exe') '-test.v' '-test.timeout=5m' '-test.run=^TestWintunSupervisorContainment$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Installed Linux services, product and fault builds
         if: runner.os == 'Linux'
         shell: bash

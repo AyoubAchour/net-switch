@@ -57,7 +57,7 @@ var (
 	registrarExecutable   = os.Executable
 	registrarCommand      = RegistrarMode
 	registrarExtraEnv     []string
-	registrarBeforeResume func(pid uint32)
+	registrarBeforeResume func(pid uint32, job windows.Handle)
 	registrarStartTimeout = 15 * time.Second
 	registrarClose        = func(o winhandle.Owner, site string) error { return o.HandleClose(site) }
 )
@@ -374,8 +374,12 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 	var pi windows.ProcessInformation
 	// Created suspended and already in the kill-on-close job: DETACHED_PROCESS
 	// because the registrar needs no console; its I/O is the two pipes.
+	flags := uint32(windows.CREATE_SUSPENDED | windows.DETACHED_PROCESS | windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_UNICODE_ENVIRONMENT)
+	if supervisedRegistrar.Load() {
+		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
+	}
 	if err = windows.CreateProcess(app, commandLine, nil, nil, true,
-		windows.CREATE_SUSPENDED|windows.DETACHED_PROCESS|windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_UNICODE_ENVIRONMENT,
+		flags,
 		environment, nil, &si.StartupInfo, &pi); err != nil {
 		return nil, fmt.Errorf("start Wintun registrar: %w", err)
 	}
@@ -409,7 +413,7 @@ func startRegistrar(path string, r *rings) (_ *registrar, err error) {
 		return nil, abandon(errors.Join(err, registrarClose(thread, "Wintun registrar thread close")))
 	}
 	if registrarBeforeResume != nil {
-		registrarBeforeResume(pi.ProcessId) // crash-before-resume fixture exits here
+		registrarBeforeResume(pi.ProcessId, job.Handle("Wintun registrar before-resume witness"))
 	}
 	_, resumeErr := windows.ResumeThread(thread.Handle("Wintun registrar resume"))
 	if err = errors.Join(resumeErr, registrarClose(thread, "Wintun registrar thread close")); err != nil {
