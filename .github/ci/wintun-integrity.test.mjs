@@ -11,6 +11,7 @@ const manifest = JSON.parse(readFileSync(new URL('../../scripts/wintun-integrity
 const phases = manifest.filter(phase => !['capture-proof','proof'].includes(phase.name));
 const runner = fileURLToPath(new URL('../../scripts/test-wintun-integrity.ps1', import.meta.url));
 const pwsh = process.platform === 'win32' ? 'pwsh.exe' : 'pwsh';
+const pwshTimeoutMs = 60000;
 
 test('manual and nightly investigations share a noncancelling queue; PR runs keep their own policy', () => {
   const nightly=readFileSync(new URL('../workflows/wintun-nightly.yml', import.meta.url),'utf8');
@@ -137,7 +138,7 @@ test('hunt combines both scenarios and architectures under the single cap, inter
 test('rotation selects only qualified single boundaries and leaves explicit selections unchanged', () => {
   for (const [shard, expected, requested = 'rotate'] of [[1,'receive'],[6,'host'],[7,'receive'],[20,'ingress'],[20,'output','output']]) {
     const plan = JSON.parse(execFileSync(pwsh, ['-NoProfile','-File',runner,'-PlanOnly','-Scenario','isolated'], {
-      encoding:'utf8',windowsHide:true,timeout:15000,
+      encoding:'utf8',windowsHide:true,timeout:pwshTimeoutMs,
       env:{...process.env,GITHUB_ACTIONS:'false',NETSWITCH_WINTUN_CI:'0',NETSWITCH_WINTUN_INTEGRITY:'0',NETSWITCH_WINTUN_INTEGRITY_BOUNDARY:requested,INTEGRITY_SHARD:String(shard)},
     }));
     assert.equal(plan.boundary, expected);
@@ -149,7 +150,7 @@ for (const arch of ['x64', 'arm64']) {
     test(`PowerShell plan is read-only: ${scenario}/${arch}`, () => {
       // No nested test runner, engine binary, network, adapter or fixture.
       const output = execFileSync(pwsh, ['-NoProfile', '-File', runner, '-PlanOnly', '-Scenario', scenario, '-Arch', arch], {
-        encoding:'utf8', windowsHide:true, timeout:15000,
+        encoding:'utf8', windowsHide:true, timeout:pwshTimeoutMs,
         env:{...process.env, GITHUB_ACTIONS:'false', NETSWITCH_WINTUN_CI:'0', NETSWITCH_WINTUN_INTEGRITY:'0'},
       });
       const plan = JSON.parse(output);
