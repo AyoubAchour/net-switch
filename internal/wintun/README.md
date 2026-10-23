@@ -302,7 +302,10 @@ dispatch and serializes its own invocations. Do not launch an additional manual
 hunt alongside it if the combined work would occupy the remaining CI slots.
 
 The job summary distinguishes positive TCP byte/hash evidence, incomplete
-diagnostics, timeouts and unrelated test failures. Known recovery/throughput
+diagnostics, timeouts, failed diagnostic overhead gates and unrelated test failures.
+An overhead failure names its boundary, implementation and paired ratio in the
+final summary; successful host records at the end are not the failure location.
+Known recovery/throughput
 failure signatures are named separately. All failed exit codes remain failed;
 no general test failure is silently waived or labelled TCP corruption. Detailed
 boundary records stay in the Actions log. This workflow reports observations;

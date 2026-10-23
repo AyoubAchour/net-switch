@@ -98,7 +98,8 @@ type integrityConnection struct {
 	recent           [64]integrityRecord
 	records          uint64
 	emit             func(string, integrityFailure)
-	reference        []byte // Independent immutable oracle; never given to the sender.
+	reference        []byte         // Independent immutable oracle; never given to the sender.
+	client           netip.AddrPort // Parsed once; packet lookup must not format tuples.
 }
 
 type integrityDiagnostic struct {
@@ -208,7 +209,7 @@ func (c *integrityConnection) check(stage string, data []byte, offset int64, rec
 }
 
 type integrityPacket struct {
-	client string
+	client netip.AddrPort
 	out    bool
 	data   []byte
 	record integrityRecord
@@ -248,12 +249,12 @@ func parseIntegrityPacket(p []byte) (integrityPacket, error) {
 	}
 	src, dst := netip.AddrFrom4([4]byte(p[12:16])), netip.AddrFrom4([4]byte(p[16:20]))
 	sp, dp := binary.BigEndian.Uint16(tcp), binary.BigEndian.Uint16(tcp[2:])
-	client, server := netip.MustParseAddr("198.19.240.1"), netip.MustParseAddr("198.19.240.2")
+	client, server := netip.AddrFrom4([4]byte{198, 19, 240, 1}), netip.AddrFrom4([4]byte{198, 19, 240, 2})
 	switch {
 	case src == client && dst == server && dp == 9002:
-		result.client = netip.AddrPortFrom(src, sp).String()
+		result.client = netip.AddrPortFrom(src, sp)
 	case src == server && dst == client && sp == 9002:
-		result.client, result.out = netip.AddrPortFrom(dst, dp).String(), true
+		result.client, result.out = netip.AddrPortFrom(dst, dp), true
 	default:
 		return result, fmt.Errorf("unexpected TCP tuple %s:%d -> %s:%d", src, sp, dst, dp)
 	}
@@ -274,6 +275,11 @@ func integrityOffset(seq, isn uint32, syn bool) int64 {
 }
 
 func (d *integrityDiagnostic) newConnection(local string) *integrityConnection {
+	client, err := netip.ParseAddrPort(local)
+	if err != nil {
+		d.issue("identity", "invalid host tuple: "+local)
+		return nil
+	}
 	if len(d.connections) == integrityConnectionLimit {
 		// Keep bound transfers and their evidence. Unbound late SYNs are only
 		// handshake hints and must not consume the active-connection budget.
@@ -290,7 +296,7 @@ func (d *integrityDiagnostic) newConnection(local string) *integrityConnection {
 			return nil
 		}
 	}
-	c := &integrityConnection{Tuple: local, Server: "198.19.240.2:9002",
+	c := &integrityConnection{Tuple: local, client: client, Server: "198.19.240.2:9002",
 		Failures: make(map[string]integrityFailure), Coverage: make(map[string]integrityCoverage)}
 	if d.emit != nil {
 		c.emit = func(stage string, f integrityFailure) { d.emit(c, stage, f) }
@@ -323,19 +329,19 @@ func recoverIntegritySequence(c *integrityConnection, p integrityPacket) bool {
 
 func (d *integrityDiagnostic) connection(p integrityPacket, stage string) *integrityConnection {
 	syn := p.record.Flags&2 != 0
-	for _, c := range d.connections {
-		if c.Tuple == p.client && syn && !p.out && c.ClientKnown && c.ClientISN == p.record.Seq {
-			return c // repeated SYN, including the same packet at another boundary
-		}
-	}
 	if syn && !p.out {
 		for _, c := range d.connections {
-			if c.Tuple == p.client && c.ID != 0 && !c.ClientKnown {
+			if c.client == p.client && c.ClientKnown && c.ClientISN == p.record.Seq {
+				return c // repeated SYN, including the same packet at another boundary
+			}
+		}
+		for _, c := range d.connections {
+			if c.client == p.client && c.ID != 0 && !c.ClientKnown {
 				c.ClientISN, c.ClientKnown, c.ClientSource = p.record.Seq, true, "late_syn"
 				return c
 			}
 		}
-		c := d.newConnection(p.client)
+		c := d.newConnection(p.client.String())
 		if c != nil {
 			c.ClientISN, c.ClientKnown, c.ClientSource = p.record.Seq, true, "syn"
 		}
@@ -343,12 +349,12 @@ func (d *integrityDiagnostic) connection(p integrityPacket, stage string) *integ
 	}
 	if syn && p.out {
 		for _, c := range d.connections {
-			if c.Tuple == p.client && c.ID != 0 && !c.ClientKnown {
+			if c.client == p.client && c.ID != 0 && !c.ClientKnown {
 				c.ClientISN, c.ClientKnown, c.ClientSource = p.record.Ack-1, true, "late_synack_ack"
 				c.ServerISN, c.ServerKnown, c.ServerSource = p.record.Seq, true, "late_synack"
 				return c
 			}
-			if c.Tuple == p.client && c.ClientKnown && p.record.Ack == c.ClientISN+1 {
+			if c.client == p.client && c.ClientKnown && p.record.Ack == c.ClientISN+1 {
 				if c.ServerKnown && c.ServerISN != p.record.Seq {
 					d.issue(stage, "server ISN changed for same client SYN")
 					return nil
@@ -357,7 +363,7 @@ func (d *integrityDiagnostic) connection(p integrityPacket, stage string) *integ
 				return c
 			}
 		}
-		c := d.newConnection(p.client)
+		c := d.newConnection(p.client.String())
 		if c != nil {
 			c.ClientISN, c.ClientKnown, c.ClientSource = p.record.Ack-1, true, "synack_ack"
 			c.ServerISN, c.ServerKnown, c.ServerSource = p.record.Seq, true, "synack"
@@ -366,7 +372,7 @@ func (d *integrityDiagnostic) connection(p integrityPacket, stage string) *integ
 	}
 	var found *integrityConnection
 	for _, c := range d.connections {
-		if c.Tuple != p.client {
+		if c.client != p.client {
 			continue
 		}
 		known, isn := c.ClientKnown, c.ClientISN
@@ -410,7 +416,7 @@ func (d *integrityDiagnostic) connection(p integrityPacket, stage string) *integ
 			// evidence for an active transfer. Preserve a count, not a false failure.
 			bound := false
 			for _, c := range d.connections {
-				if c.Tuple == p.client && c.ID != 0 {
+				if c.client == p.client && c.ID != 0 {
 					bound = true
 					break
 				}
@@ -435,7 +441,7 @@ func (d *integrityDiagnostic) packetLocked(stage string, data []byte) (*integrit
 		d.issue(stage, err.Error())
 		return nil, integrityRecord{}
 	}
-	if p.client == "" {
+	if !p.client.IsValid() {
 		return nil, integrityRecord{}
 	}
 	c := d.connection(p, stage)
@@ -482,10 +488,11 @@ func (d *integrityDiagnostic) native(stage string, native, copied []byte) {
 	c, r := d.packetLocked(stage, native)
 	if bytes.Equal(native, copied) {
 		if c != nil && d.selected(stage) {
-			v := c.Coverage[stage+"_copy"]
+			copyStage := integrityCopyStage(stage)
+			v := c.Coverage[copyStage]
 			v.Records++
 			v.Bytes += uint64(r.Length)
-			c.Coverage[stage+"_copy"] = v
+			c.Coverage[copyStage] = v
 		}
 	} else {
 		cc, cr := d.packetLocked(stage+"_copy", copied)
@@ -506,6 +513,23 @@ func (d *integrityDiagnostic) native(stage string, native, copied []byte) {
 		}
 		r = integrityChecksums(r, got)
 		c.failure(stage+"_copy_equal", "copy differs at packet byte (not stream offset)", int64(i), want[i:], got[i:], r)
+	}
+}
+
+// These map keys used to allocate a new concatenated string for every packet.
+// Unknown stages are only used by synthetic tests and keep their old spelling.
+func integrityCopyStage(stage string) string {
+	switch stage {
+	case "dll_receive":
+		return "dll_receive_copy"
+	case "ours_receive":
+		return "ours_receive_copy"
+	case "dll_send":
+		return "dll_send_copy"
+	case "ours_send":
+		return "ours_send_copy"
+	default:
+		return stage + "_copy"
 	}
 }
 

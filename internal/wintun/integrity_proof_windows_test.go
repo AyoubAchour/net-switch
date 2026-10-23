@@ -38,6 +38,7 @@ func TestWintunIntegrityProof(t *testing.T) {
 	useProductionRegistrar(t, "integrity_proof_registrar")
 	t.Setenv("NETSWITCH_WINTUN_INTEGRITY_TRACE", "0")
 	qualified := 0
+	var failed []string
 	for _, boundary := range []string{"receive", "ingress", "echo", "output", "send", "host"} {
 		for _, mode := range []string{"ours", "dll"} {
 			t.Run(boundary+"/"+mode, func(t *testing.T) {
@@ -94,6 +95,7 @@ func TestWintunIntegrityProof(t *testing.T) {
 				}
 				ratios, err := integrityProofRatios(clean, observed)
 				if err != nil {
+					failed = append(failed, boundary+"/"+mode+": incomplete samples")
 					t.Error(err)
 					return
 				}
@@ -104,6 +106,7 @@ func TestWintunIntegrityProof(t *testing.T) {
 				}
 				report(t, map[string]any{"test": "integrity_overhead", "verdict": verdict, "boundary": boundary, "mode": mode, "median_diagnostic_over_clean": ratio, "pair_ratios": ratios, "clean": clean, "diagnostic": observed, "minimum_ratio": 0.80, "arch": os.Getenv("RUNNER_ARCH")})
 				if ratio < 0.80 {
+					failed = append(failed, fmt.Sprintf("%s/%s: ratio %.6f < 0.80", boundary, mode, ratio))
 					t.Errorf("diagnostic overhead too high: %s/%s throughput ratio %.3f < 0.80", boundary, mode, ratio)
 				} else {
 					qualified++
@@ -111,9 +114,9 @@ func TestWintunIntegrityProof(t *testing.T) {
 			})
 		}
 	}
-	report(t, map[string]any{"test": "integrity_proof_complete", "qualified_configurations": qualified, "expected_configurations": 12})
+	report(t, map[string]any{"test": "integrity_proof_complete", "qualified_configurations": qualified, "expected_configurations": 12, "failed_configurations": failed})
 	if qualified != 12 {
-		t.Errorf("only %d of 12 diagnostic configurations qualified", qualified)
+		t.Errorf("only %d of 12 diagnostic configurations qualified; failed gates: %v", qualified, failed)
 	}
 }
 

@@ -2,6 +2,18 @@ import assert from 'node:assert/strict';
 import {test} from 'node:test';
 import {IntegritySummary} from '../../scripts/wintun-integrity-summary.mjs';
 
+test('overhead failure survives later successful host records and identifies the failed gate',()=>{
+ const s=new IntegritySummary();
+ s.line('WINTUN_RESULT {"test":"integrity_overhead","verdict":"diagnostic_overhead_exceeded","boundary":"ingress","mode":"dll","median_diagnostic_over_clean":0.797922243414923,"minimum_ratio":0.8}');
+ s.line('WINTUN_RESULT {"test":"tcp_integrity","verdict":"ok","boundary":"host"}');
+ s.line('--- FAIL: TestWintunIntegrityProof (244s)');
+ assert.equal(s.result(1).verdict,'diagnostic_overhead_exceeded');
+ assert.deepEqual(s.result(1).failed_overhead_gates,[{boundary:'ingress',mode:'dll',ratio:0.797922243414923,minimum_ratio:0.8}]);
+ assert.equal(s.result(0).exit,1);
+ s.line('WINTUN_RESULT {"test":"tcp_payload_difference","verdict":"integrity_failure"}');
+ assert.equal(s.result(1).verdict,'integrity_failure','real corruption wins over the overhead failure');
+});
+
 test('test failures, incomplete diagnostics and positive corruption stay distinct',()=>{
  const s=new IntegritySummary();
  s.line('INTEGRITY_RUN_COMPLETE repeat=1');

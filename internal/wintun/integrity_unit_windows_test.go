@@ -523,3 +523,48 @@ func BenchmarkIntegrityNativePacket(b *testing.B) {
 		b.Fatal(d.err())
 	}
 }
+
+func TestIntegrityPacketHotPathAllocations(t *testing.T) {
+	d := newIntegrityDiagnostic()
+	var packets [8][]byte
+	var copies [8][]byte
+	var connections [8]*integrityConnection
+	for i := range packets {
+		id, port := uint64(257+i), uint16(51000+i)
+		c := integrityTestHandshake(d, port, 100, 200, id)
+		c.reference = integrityTestBody(id, 0, 8192)
+		connections[i] = c
+		packets[i] = integrityTestPacket(false, port, 101, 201, 24, c.reference)
+		copies[i] = bytes.Clone(packets[i])
+	}
+	allocations := testing.AllocsPerRun(100, func() {
+		for i, p := range packets {
+			d.native("dll_receive", p, copies[i])
+			d.packet("stack_ingress", copies[i])
+		}
+	})
+	if allocations != 0 {
+		t.Fatalf("clean packet checking allocates: %.1f per eight-stream batch", allocations)
+	}
+	if err := d.err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range connections {
+		for _, stage := range []string{"dll_receive", "dll_receive_copy", "stack_ingress"} {
+			if c.Coverage[stage].Bytes != 101*8192 {
+				t.Fatalf("lost stream coverage: %s %s %+v", c.Tuple, stage, c.Coverage[stage])
+			}
+		}
+	}
+	// Binary identity still distinguishes ports; it is not a last-stream cache.
+	packets[3][40+47] ^= 1
+	d.native("dll_receive", packets[3], copies[3])
+	if connections[3].Failures["dll_receive"].Offset != 47 {
+		t.Fatal("wrong connection or offset after interleaving")
+	}
+	for i, c := range connections {
+		if i != 3 && len(c.Failures) != 0 {
+			t.Fatal("cross-stream attribution")
+		}
+	}
+}

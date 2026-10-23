@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 // "integrity-invalid" label. Preserve the child's failure status in every case.
 export class IntegritySummary {
   corruption = 0; incomplete = 0; timeouts = 0; connections = 0; complete = false;
-  failures = []; notes = new Set();
+  failures = []; notes = new Set(); overheadFailures = [];
   line(line) {
     // SHA also catches a changed sender oracle in ordinary/profile transfers.
     if (/TCP payload hash mismatch/.test(line)) this.corruption++;
@@ -24,15 +24,20 @@ export class IntegritySummary {
     try { r = JSON.parse(line.slice(pos + 14)); } catch { this.incomplete++; return; }
     if (r.verdict === 'integrity_failure' || r.test === 'tcp_integrity_first_failure' || r.test === 'tcp_payload_difference') this.corruption++;
     if (r.verdict === 'diagnostic_incomplete') this.incomplete++;
+    if (r.test === 'integrity_overhead' && r.verdict === 'diagnostic_overhead_exceeded') {
+      const failure = {boundary:r.boundary, mode:r.mode, ratio:r.median_diagnostic_over_clean, minimum_ratio:r.minimum_ratio};
+      this.overheadFailures.push(failure);
+      this.notes.add(`Diagnostic overhead gate: ${r.boundary}/${r.mode}, ratio ${r.median_diagnostic_over_clean.toFixed(6)} < ${r.minimum_ratio}. No byte mismatch is implied.`);
+    }
     if (r.test === 'tcp_integrity') this.connections++;
     if (r.test === 'performance_sample' && r.sample?.status === 'invalid' && r.sample?.metric === 'udp_8_MBps' && r.sample?.error === 'The data is invalid.') {
       this.notes.add('DLL/host UDP sample returned invalid data; not the reported throughput-gap flake.');
     }
   }
   result(code) {
-    const verdict = this.corruption ? 'integrity_failure' : this.incomplete ? 'diagnostic_incomplete' : this.timeouts ? 'diagnostic_timeout' : code !== 0 ? 'test_failed' : !this.complete ? 'diagnostic_incomplete' : 'no_corruption_observed';
+    const verdict = this.corruption ? 'integrity_failure' : this.incomplete ? 'diagnostic_incomplete' : this.timeouts ? 'diagnostic_timeout' : this.overheadFailures.length ? 'diagnostic_overhead_exceeded' : code !== 0 ? 'test_failed' : !this.complete ? 'diagnostic_incomplete' : 'no_corruption_observed';
     return {verdict, exit: code || (verdict === 'no_corruption_observed' ? 0 : 1), diagnostic_connections: this.connections,
-      integrity_evidence_records: this.corruption, incomplete_records: this.incomplete, notes: [...this.notes], failed_tests_and_phases: this.failures};
+      integrity_evidence_records: this.corruption, incomplete_records: this.incomplete, failed_overhead_gates:this.overheadFailures, notes: [...this.notes], failed_tests_and_phases: this.failures};
   }
 }
 
