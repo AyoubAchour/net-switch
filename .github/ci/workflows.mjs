@@ -196,10 +196,13 @@ export function evaluate(source, context) {
     if (token.name === 'true' || token.name === 'false') return token.name === 'true';
     if (token.name === 'null') return null;
     if (peek('(')) {
-      at += 1; take(')');
+      at += 1;
+      const args=[];
+      if (!peek(')')) { args.push(or()); while (peek(',')) { at += 1; args.push(or()); } }
+      take(')');
       const call = context.functions?.[token.name];
       if (!call) throw new Error(`Unsupported function ${token.name}`);
-      return call();
+      return call(...args);
     }
     return token.name.split('.').reduce((value, key) => value == null ? null : value[key] ?? null, context);
   };

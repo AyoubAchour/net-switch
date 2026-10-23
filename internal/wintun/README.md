@@ -273,5 +273,206 @@ query-remove, creator death; a parked reader with no write traffic must wake and
 `NETSWITCH_WINTUN_REFERENCE=inprocess` runs the unchanged performance gate
 against the test-only in-process registration.
 
+### TCP integrity investigation (hosted CI only)
+
+Ordinary TCP performance runs also compare each existing 32 KiB receive read
+against the shared deterministic sender slice using `bytes.Equal`. They retain
+only the first difference, with stream/transfer ID, implementation, pair,
+warm-up/measurement label, received length, byte offset and up to 64 bytes
+before and after it (clipped to that read). Reading and SHA-256 continue
+unchanged. `tcp_payload_difference` emits the excerpt and both hashes before
+teardown, including partial reads. No 512 MiB receive body is retained.
+The expected slice is shared with the sender; SHA-256 remains the independent
+check if that slice itself changes. The opt-in diagnostic uses separate oracles.
+
+The small proof first runs `TestWintunCaptureProof` in an **ordinary untagged
+binary**: eight fixed alternating-order SHA-only/capture pairs per implementation,
+same shared payload and two warm-ups. It logs every matched rate and ratio;
+the per-mode median must retain 95% of SHA-only throughput. Timing-only failures
+of this separate guard are reported as `capture_invalid` within a nonfatal
+`diagnostic_invalid` mode, with zero clean exposure credit for that mode.
+The only capture bypass is a fixture field set by this hosted proof's baseline;
+normal CI has no environment switch that can silently disable the comparison.
+
+`wintun-nightly.yml` runs at 03:17 UTC once merged into the default branch.
+Eighteen shards per architecture/scenario, two cycles each, produce 72 jobs
+under one `max-parallel: 10` cap. Each boundary gets three shards per variant.
+Observed job durations predict roughly 2.5–3 hours with available runner slots;
+queue contention can extend this. Nightly and manual integrity dispatches share
+the workflow-level `wintun-integrity-hunts` group with `queue: max` and no
+cancellation. Only one diagnostic matrix runs at a time across either entry
+point, so at most ten diagnostic runners are active. GitHub queues up to 100
+pending workflows; submissions beyond that provider limit can be rejected.
+The scheduled job runs only in `AyoubAchour/net-switch`, not automatically in forks.
+
+The owner chose independent qualification **per implementation**: DLL, ours,
+and (in full jobs) inprocess each need a median paired diagnostic/clean ratio
+of at least 0.80. Boundaries are pooled within each mode, never across modes.
+The proof reports 18 pairs per mode. The final `mode_results` includes count,
+minimum, P25, median, P75, maximum, verdict and clean credit for each mode.
+Quartiles use linear interpolation; the pooled job statistic is informational.
+
+A mode below the bound is `diagnostic_invalid`, exits successfully and gets
+**zero clean exposure credit for that mode**. Other qualifying modes still count.
+Payload/hash/integrity corruption in ANY protocol or test fails the job; UDP,
+latency, ping-pong, recovery replies and registrar traffic share a stable marker.
+Natural ring corruption is evidence too; deliberate recovery fault injections
+are not confused with naturally damaged traffic. Genuinely incomplete
+diagnostics (including missing calibration, missing pairs or timeouts) fail.
+Other test failures are reported as nonfatal `test_failed`, also with zero clean
+credit. Original errors and child exit codes remain visible. No failing sample
+is discarded or used as a zero-valued rate. A passing Actions check alone does
+not mean valid exposure: use `INTEGRITY_SUMMARY.clean_exposure_connections`.
+This investigation never closes the release blocker or changes ordinary CI gates.
+
+First dispatch `ci.yml` with `wintun_integrity=true`,
+`wintun_integrity_arch=both`, `wintun_integrity_shards=2`, and
+`wintun_integrity_scenario=proof`: **four jobs total**. Both architectures share
+one matrix with `max-parallel: 10`; it is not a separate cap per architecture.
+The defaults select a two-shard proof. Do not widen exposure until it passes.
+Only diagnostic jobs run unless `regular_jobs` is explicitly set.
+It builds with `-tags=wintun_integrity` and opts in at runtime with
+`NETSWITCH_WINTUN_INTEGRITY=1`. Normal binaries compile out the ring observers;
+normal performance runs keep the original payload, warm-ups and gate.
+
+The proof measures each of six boundary choices on both implementations using
+three fixed matched clean/instrumented pairs, alternating which runs first.
+Clean means the original workload in the same binary with observers disabled.
+The 18 ratios from each implementation enter its own median. Failed/incomplete samples stay in place and prevent qualification;
+there are no retries. Wall time and heap allocation/reservation are also logged.
+Precomputing independent payload oracles happens before the transfer timer,
+and adds up to 512 MiB for eight streams in addition to sender buffers. Thus a
+passing transfer-throughput check is not a claim of identical setup/memory cost.
+
+After qualification, `isolated` and `full` scenarios support `1`, `2`, `5`,
+`10` or `20` shards per selected architecture. Select `hunt` to put **both
+scenarios in the same matrix** with the same shared ten-job cap; do not launch
+two separate ten-concurrency dispatches. Matrix order interleaves architectures
+and scenarios for each shard so every kind starts in the first wave.
+`wintun_integrity_boundary` selects
+`receive` (default), `ingress`, `echo`, `output`, `send`, or `host`. Host SHA-256
+and first-difference checks always remain enabled. The explicitly expensive
+`all` option is for follow-up localization, not a qualified low-overhead mode.
+`rotate` assigns the six qualified single-boundary choices by shard, repeating
+receive/ingress/echo/output/send/host. With 20 shards, receive and ingress each
+get four jobs per architecture/scenario; each other boundary gets three.
+The chosen boundary is fixed within a job and included in its exposure summary.
+No individual sampled run claims to have checked its unselected boundaries;
+do not combine different transfers into a single causal trace.
+
+An isolated repeat runs all 12 positions of `tcp_8_MBps`: two serial 64 MiB
+warm-ups, then eight 64 MiB streams, for both the signed DLL and our session,
+alternating which mode runs first. A full repeat replays the normal Wintun
+job: ring/recovery tests, registrar tests, ping-pong, the **entire five-metric
+performance test**, its in-process-reference comparison, lifetime/crash,
+both CPU profiles, fuzzing, and x64 race/handle checks. The manifest is checked
+against the normal job's selectors and ordering. Its normal failure-dependent
+steps remain failure-dependent; later `!cancelled()` phases still execute.
+
+Each phase gets a fresh process, as in the original job. Each performance
+pair shares one adapter across all metrics and modes; each fixture starts a
+fresh session and stack. TCP warm-ups and measurement share that fixture's
+stack. This restores UDP and single-stream TCP activity before eight-stream
+TCP without inventing adapter reuse across unrelated tests. Kernel/host state
+can carry across phases and repeats on the same runner; the runner adds no
+driver reset or extra GC. The release registrar remains uninstrumented.
+
+There is a 45-minute execution budget inside each 75-minute job. A deadline
+starts before setup and a wrapper watchdog stops its own process tree by minute
+65 (or 48 minutes after the wrapper starts, whichever is sooner), leaving time
+to write an incomplete verdict and upload profiles. The step summary begins as
+incomplete with zero credit and is replaced only by a final complete assessment;
+a hard runner loss with no final verdict must never be credited as clean.
+A new repeat
+starts only with room for a complete case; native process-tree deadlines also
+bound builds/tools. A case that overruns fails explicitly as incomplete. The
+full performance timeout is 20 minutes for diagnostic overhead; the original
+per-transfer deadlines, sizes and warm-up counts stay unchanged. Profile
+phases use their original 24 transfers with payload diagnostics off.
+`INTEGRITY_OBSERVED_EXPOSURE` reports provisional completed-cycle counts.
+Every exposure job then calibrates its selected boundary after the original
+sequence, using three clean/diagnostic pairs per implementation: six pairs in
+isolated jobs, nine in full jobs (including inprocess). These are the paired
+diagnostic/clean ratios for that job; ours/DLL performance comparisons are not
+overhead ratios. Calibration reserves three minutes of the 45-minute budget
+(20 minutes for the explicitly expensive `all` boundary), so it does not add
+traffic or resets before the state-dependent sequence. A failed cycle still
+stops exposure; calibration is not a retry of its failed samples.
+The final summary verifies completed TCP pairs and host connection records,
+including mode attribution, keeps calibration transfers separate, and credits
+only qualifying modes in an otherwise complete clean job. Any corruption or
+incompleteness removes all clean credit. Other-test-failed jobs receive no credit.
+Distorted modes cannot borrow another mode's speed or exposure.
+
+The read-only runner/rotation plans now execute with `pwsh` on normal Ubuntu PR
+CI rather than skipping outside Windows; summary tests run there too. Release
+registrar builds check their actual build metadata for the diagnostic tag and
+an unstripped engine's `go tool nm` output for `integrityRingHook`. Stripped
+release binaries cannot be cleared from an empty symbol listing.
+An unsuccessful cycle stops repetition; no sample or pair is retried, dropped
+or replaced. Instrumented rates never enter the clean performance gate.
+
+Opt-in lifecycle records identify process, phase, shard, repeat, test path,
+adapter GUID and session. They record adapter creation/close and session
+start, joined pumps and close. Our session stats include ring cursors,
+registrar identity and recovery counters; the DLL exposes counters only.
+These observations do not assert that unobservable kernel caches were reset.
+
+The host registers each tested tuple and its independent oracle before sending
+payload. Observed SYN/SYNACKs provide sequence bases; a SYNACK can recover a
+missed SYN. If observation starts mid-flight, a unique 32-byte oracle match can
+recover a sequence base without assuming the first offset is zero. Inferred
+bases are labelled `payload_oracle`; unseen earlier traffic is not certified.
+Late unbound SYN hints cannot evict bound transfers. Payload for an unregistered
+tuple is counted separately: round 2 demonstrated late payload from a previous
+fixture, rather than a missing SYN for a current transfer. A bound stream whose
+sequence/coverage cannot be resolved is **diagnostic incomplete**, not a byte
+integrity failure. Actual byte/hash mismatches take priority if both occur.
+
+The diagnostic records each client tuple, server address and known ISNs.
+SYN consumes one sequence number; modular offsets tolerate wrap,
+retransmissions and reordering. The payload encodes a transfer/stream identity
+and block offset over the original deterministic pattern. Warm-up identities
+remain distinct. An unknown payload identity, ambiguous reused sequence range,
+fragment or malformed TCP header invalidates the diagnostic rather than
+pretending the unobserved boundary was clean. Empty late ACK/RST packets from
+previous fixtures are counted separately.
+
+The selected `WINTUN_RESULT` boundary is native receive/copy before release,
+stack ingress after packet-buffer creation, echo reads, stack output, native
+send/source before publication, or host reads. Clean data uses fast exact byte
+equality against an immutable precomputed oracle; the sender gets separate
+storage. The native copy equality check avoids rechecking identical payload
+twice. Host equality runs without the global packet-tracking lock. Pattern
+regeneration and IP/TCP checksum calculation happen only on mismatch; packet
+records explicitly say whether their checksums were checked.
+Each connection/stage retains only its first failure (offset and up to 16
+expected/actual bytes), its preceding 64 packet records, and a rolling last 64.
+There are at most 16 connection records per fixture. Successful connections
+emit identities, byte/packet counts and host hashes; failed connections also
+emit bounded history immediately on separate JSON lines, so a later timeout
+cannot erase the first bad boundary. Byte counts include retransmits.
+Native slices are never retained or accessed after release/publication.
+
+Read the first-failure records in path order, comparing the same identity and
+offset. Bad native receive narrows the issue to the host/driver/DLL receive
+side. Good native receive but bad copy identifies the wrapper. Good ingress
+with a bad echo read implicates receive/reassembly; a good echo read with bad
+output implicates sending/queueing. Good reserved send bytes with a bad host
+stream narrows it to the driver/host receive side. These observations alone do
+not prove which closed-source component is at fault, and missing coverage must
+not be called clean. A passing diagnostic does not clear the rare corruption.
+
+Samples now carry status, nullable value, original error, pair, mode and metric.
+All pair positions are reported. Any invalid sample yields an
+`integrity-invalid comparison` with its original transfer error, and no ratio
+is returned until every position is valid.
+
+The boundary ordering was checked against the
+[Wintun API contract](https://git.zx2c4.com/wintun/tree/api/wintun.h) and
+[session implementation](https://git.zx2c4.com/wintun/tree/api/session.c), and
+the vendored gVisor/gonet and local Link ownership paths. No upstream source
+was copied into this diagnostic.
+
 - [Windows high-resolution timing](https://learn.microsoft.com/en-us/windows/win32/sysinfo/acquiring-high-resolution-time-stamps)
 - [Process handle snapshot ABI reference](https://github.com/winsiderss/phnt/blob/master/ntpsapi.h)

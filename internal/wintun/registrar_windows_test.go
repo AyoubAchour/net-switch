@@ -992,7 +992,7 @@ func exchange(t *testing.T, rounds int) {
 		n, err := c.Read(reply)
 		must(t, err)
 		if !bytes.Equal(payload, reply[:n]) {
-			t.Fatal("registrar session packet corruption")
+			t.Fatal(fmt.Errorf("%w: registrar session packet corruption", errPayloadIntegrity))
 		}
 	}
 }

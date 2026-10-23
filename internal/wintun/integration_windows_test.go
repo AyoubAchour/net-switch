@@ -49,6 +49,9 @@ func must(t *testing.T, err error) {
 }
 func report(t *testing.T, value any) {
 	t.Helper()
+	if integrityHooksEnabled && os.Getenv("NETSWITCH_WINTUN_INTEGRITY_TRACE") == "1" {
+		integrityReportContext(t, value)
+	}
 	b, err := json.Marshal(value)
 	must(t, err)
 	t.Logf("WINTUN_RESULT %s", b)
@@ -101,6 +104,9 @@ func runUDPClient(t *testing.T, streams int) (float64, error) {
 	child.Env = append(os.Environ(), fmt.Sprintf("NETSWITCH_WINTUN_UDP_STREAMS=%d", streams))
 	output, err := child.CombinedOutput()
 	if err != nil {
+		if bytes.Contains(output, []byte(errPayloadIntegrity.Error())) {
+			err = errors.Join(errPayloadIntegrity, err)
+		}
 		return 0, fmt.Errorf("UDP client: %w\n%s", err, output)
 	}
 	var rate float64
@@ -134,12 +140,16 @@ type batchIO interface {
 }
 
 type fixture struct {
-	a         *Adapter
-	io        batchIO
-	stopEcho  func()
-	faults    atomic.Uint64
-	faultMu   sync.Mutex
-	lastFault error
+	mode string
+	// Only the hosted capture overhead proof sets this, for its SHA-only baseline.
+	skipPayloadCapture bool
+	integrity          *integrityDiagnostic
+	a                  *Adapter
+	io                 batchIO
+	stopEcho           func()
+	faults             atomic.Uint64
+	faultMu            sync.Mutex
+	lastFault          error
 }
 
 func (f *fixture) recordFault(err error) {
@@ -162,7 +172,12 @@ func newAdapter(t *testing.T, capacity uint32) *Adapter {
 	must(t, err)
 	a, err := Create(Config{Name: "NsRingCI", GUID: guid.String(), Capacity: capacity})
 	must(t, err)
-	t.Cleanup(func() { must(t, a.Close()) })
+	integrityAdapterState(t, a, "created", nil)
+	t.Cleanup(func() {
+		err := a.Close()
+		integrityAdapterState(t, a, "closed", err)
+		must(t, err)
+	})
 	command(t, "netsh.exe", "interface", "ipv4", "set", "interface", "NsRingCI", "dadtransmits=0", "store=active")
 	command(t, "netsh.exe", "interface", "ipv4", "set", "address", "name=NsRingCI", "source=static", "address=198.19.240.1", "mask=255.255.255.252", "gateway=none", "store=active")
 	command(t, "netsh.exe", "interface", "ipv4", "set", "subinterface", "NsRingCI", "mtu=9000", "store=active")
@@ -192,10 +207,17 @@ func newFixture(t *testing.T, mode string, capacity uint32) *fixture {
 
 func fixtureOnAdapter(t *testing.T, mode string, adapter *Adapter) *fixture {
 	t.Helper()
-	f := &fixture{a: adapter}
+	f := &fixture{a: adapter, mode: mode}
 	f.io = startIO(t, f.a, mode)
+	integrityFixtureState(t, f, mode, "started", nil)
 	f.startEcho(t)
-	t.Cleanup(func() { f.stopEcho(); must(t, f.io.Close()) })
+	t.Cleanup(func() {
+		f.stopEcho()
+		integrityFixtureState(t, f, mode, "pumps_joined", nil)
+		err := f.io.Close()
+		integrityFixtureState(t, f, mode, "closed", err)
+		must(t, err)
+	})
 	// Let Windows finish link/address activation. These are warm-up packets,
 	// explicitly outside the measured sample.
 	c := udpSocket(t)
@@ -274,6 +296,7 @@ func (f *fixture) startEcho(t *testing.T) {
 // DLL sessions exist only in tests as the signed-release comparison. Native
 // copies avoid manufacturing Go pointers from the DLL's integer return values.
 type dllSession struct {
+	integrity                             *integrityDiagnostic
 	mu                                    sync.RWMutex
 	readMu, writeMu                       sync.Mutex
 	h                                     uintptr
@@ -340,6 +363,9 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 			var size uint32
 			p, _, e := syscall.SyscallN(s.receive, s.h, uintptr(unsafe.Pointer(&size)))
 			if p == 0 {
+				if e == windows.ERROR_INVALID_DATA {
+					return i, fmt.Errorf("%w: DLL receive ring: %w", errPayloadIntegrity, e)
+				}
 				if e != windows.ERROR_NO_MORE_ITEMS {
 					return i, e
 				}
@@ -354,6 +380,9 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 			}
 			if size != 0 {
 				nativeCopy.Call(uintptr(unsafe.Pointer(&buffers[i][0])), p, uintptr(size))
+			}
+			if integrityHooksEnabled && s.integrity != nil && (s.integrity.selected("dll_receive") || integritySYN(buffers[i][:size])) {
+				s.integrity.nativeAddress("dll_receive", p, buffers[i][:size])
 			}
 			syscall.SyscallN(s.release, s.h, p)
 			sizes[i] = int(size)
@@ -413,6 +442,9 @@ func (s *dllSession) WriteBatch(packets [][]byte) (n int, err error) {
 			return n, e
 		}
 		nativeCopy.Call(p, uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)))
+		if integrityHooksEnabled && s.integrity != nil && s.integrity.selected("dll_send") {
+			s.integrity.nativeAddress("dll_send", p, b)
+		}
 		syscall.SyscallN(s.send, s.h, p)
 		n++
 	}
@@ -499,7 +531,7 @@ func TestWintunPingPong(t *testing.T) {
 						continue
 					}
 					if !bytes.Equal(payload, reply[:n]) {
-						t.Fatal("ping-pong payload corruption")
+						t.Fatal(fmt.Errorf("%w: ping-pong payload corruption", errPayloadIntegrity))
 					}
 					break
 				}
@@ -563,7 +595,7 @@ func TestWintunParallelUDP(t *testing.T) {
 	s, err := a.StartSession()
 	must(t, err)
 	defer s.Close()
-	var received, invalid atomic.Uint64
+	var received, invalid, readErrors atomic.Uint64
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -577,7 +609,7 @@ func TestWintunParallelUDP(t *testing.T) {
 			n, err := s.ReadBatch(ctx, bufs, sizes)
 			if err != nil {
 				if ctx.Err() == nil {
-					invalid.Add(1)
+					readErrors.Add(1)
 					t.Log(err)
 				}
 				return
@@ -636,9 +668,12 @@ func TestWintunParallelUDP(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	cancel()
 	<-done
-	report(t, map[string]any{"test": "parallel_udp", "arch": runtime.GOARCH, "sent": sent.Load(), "send_errors": sendErrors.Load(), "received": received.Load(), "invalid_delivered": invalid.Load(), "seconds": time.Since(start).Seconds(), "stats": s.Stats()})
-	if invalid.Load() != 0 || received.Load() < 10000 {
-		t.Fatal("invalid or insufficient delivered packets")
+	report(t, map[string]any{"test": "parallel_udp", "arch": runtime.GOARCH, "sent": sent.Load(), "send_errors": sendErrors.Load(), "read_errors": readErrors.Load(), "received": received.Load(), "invalid_delivered": invalid.Load(), "seconds": time.Since(start).Seconds(), "stats": s.Stats()})
+	if invalid.Load() != 0 {
+		t.Fatal(fmt.Errorf("%w: invalid delivered UDP packets: %d", errPayloadIntegrity, invalid.Load()))
+	}
+	if readErrors.Load() != 0 || received.Load() < 10000 {
+		t.Fatal("UDP read error or insufficient delivered packets")
 	}
 	if s.Stats().RecoveryFailures != 0 {
 		t.Fatal("session failed to recover")
@@ -708,7 +743,7 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 	n, err := c.Read(b)
 	must(t, err)
 	if string(b[:n]) != "after recovery" {
-		t.Fatal("recovery lost packet integrity")
+		t.Fatal(fmt.Errorf("%w: recovery lost packet integrity", errPayloadIntegrity))
 	}
 	f.stopEcho()
 	f.stopEcho = func() {}

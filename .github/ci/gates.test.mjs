@@ -18,6 +18,7 @@ const expected = {
     'go1-windows': 'go_windows', 'go1-linux': 'go_linux', wintun: 'wintun', linux: 'node',
     'linux-helper': 'helper', 'test-node-22': 'node', 'test-node-24': 'node', installer: 'installer', arm64: 'node',
     'control-security': 'investigation', 'testisp-reproduction': 'investigation', 'golist-oracle': 'oracle',
+    'wintun-integrity': 'investigation',
   },
   control: { windows: 'control' },
   'linux-acceptance': { linux: 'acceptance', 'release-gate': 'manual', 'trace-analysis': 'manual' },
@@ -45,6 +46,8 @@ function shouldRun(file, group, s) {
   if (group === 'investigation') {
     // Either option replaces the default TestISP investigation.
     if (s.event !== 'workflow_dispatch') return false;
+    if (s.job === 'wintun-integrity') return Boolean(s.inputs.wintun_integrity);
+    if (s.inputs.wintun_integrity) return false;
     return s.job === 'control-security' ? s.inputs.control_security : !s.inputs.control_security && !s.inputs.regular_jobs;
   }
   if (group === 'manual') {
@@ -76,7 +79,7 @@ function context(job, s) {
 
 function* scenarios(file, changes) {
   const inputSets = file === 'ci'
-    ? [false, true].flatMap(regular_jobs => [false, true].map(control_security => ({ regular_jobs, control_security, packet_capture: false })))
+    ? [false, true].flatMap(regular_jobs => [false, true].flatMap(control_security => [false, true].flatMap(wintun_integrity => ['x64', 'arm64', 'both'].map(wintun_integrity_arch => ({ regular_jobs, control_security, wintun_integrity, wintun_integrity_arch, packet_capture: false })))))
     : file === 'linux-acceptance' ? acceptanceInputs : [{ run: '' }];
   // Every group alone true or alone false, plus all true and all false, so a
   // gate reading another group's output is caught as well as a wrong value.

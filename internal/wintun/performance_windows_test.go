@@ -32,6 +32,27 @@ import (
 func tcpEcho(t *testing.T, f *fixture) func() {
 	t.Helper()
 	session := f.io
+	if os.Getenv("NETSWITCH_WINTUN_INTEGRITY") == "1" {
+		if !integrityHooksEnabled {
+			t.Fatal("integrity diagnostic requires -tags=wintun_integrity")
+		}
+		f.integrity = newIntegrityDiagnostic()
+		f.integrity.boundary = os.Getenv("NETSWITCH_WINTUN_INTEGRITY_BOUNDARY")
+		if f.integrity.boundary == "" {
+			f.integrity.boundary = "receive"
+		}
+		switch f.integrity.boundary {
+		case "receive", "ingress", "echo", "output", "send", "host", "all":
+		default:
+			t.Fatal("unknown integrity boundary")
+		}
+		f.integrity.emit = func(c *integrityConnection, stage string, failure integrityFailure) {
+			reportIntegrityFailure(t, c, stage, failure)
+		}
+		if s, ok := session.(*dllSession); ok {
+			s.integrity = f.integrity
+		}
+	}
 	link := ns.NewLink()
 	stack, err := ns.New(link, ns.DefaultOptions())
 	must(t, err)
@@ -41,6 +62,10 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 	}
 	listener, err := gonet.ListenTCP(stack, tcpip.FullAddress{NIC: ns.NIC, Addr: address, Port: 9002}, ipv4.ProtocolNumber)
 	must(t, err)
+	detach := func() {}
+	if f.integrity != nil {
+		detach = attachIntegrityRings(t, f.integrity)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var pumps, clients sync.WaitGroup
 	pumps.Add(3)
@@ -61,6 +86,19 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 			}
 			for i := 0; i < n; i++ {
 				p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(bytes.Clone(bufs[i][:sizes[i]]))})
+				if integrityHooksEnabled && f.integrity != nil && f.integrity.selected("stack_ingress") {
+					// MakeWithData creates one owned contiguous view here. Borrow
+					// it synchronously instead of cloning the whole packet again.
+					views, skip := p.AsViewList()
+					first := views.Front()
+					if first != nil && first.Next() == nil && skip <= len(first.AsSlice()) {
+						f.integrity.packet("stack_ingress", first.AsSlice()[skip:])
+					} else {
+						v := p.ToView()
+						f.integrity.packet("stack_ingress", v.AsSlice())
+						v.Release()
+					}
+				}
 				if s, ok := session.(*Session); ok {
 					p.RXChecksumValidated = s.RXChecksumVerified(bufs[i][:sizes[i]])
 				}
@@ -76,6 +114,11 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 			n := link.ReadBatch(ctx, packets)
 			if n == 0 {
 				return
+			}
+			if integrityHooksEnabled && f.integrity != nil {
+				for _, p := range packets[:n] {
+					f.integrity.packet("stack_output", p)
+				}
 			}
 			if _, err := session.WriteBatch(packets[:n]); err != nil && ctx.Err() == nil {
 				f.recordFault(err)
@@ -96,7 +139,13 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 				defer clients.Done()
 				defer c.Close()
 				c.SetDeadline(time.Now().Add(30 * time.Second))
-				n, err := io.Copy(c, c)
+				var n int64
+				var err error
+				if integrityHooksEnabled && f.integrity != nil && f.integrity.selected("echo_read") {
+					n, err = f.integrity.echo(c)
+				} else {
+					n, err = io.Copy(c, c)
+				}
 				if err != nil && ctx.Err() == nil {
 					t.Logf("TCP echo ended: copied_bytes=%d error=%v", n, err)
 				}
@@ -111,10 +160,17 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 		link.Close()
 		pumps.Wait()
 		clients.Wait()
+		detach()
+		if f.integrity != nil {
+			f.integrity.report(t)
+			if err := f.integrity.err(); err != nil {
+				t.Error(err)
+			}
+		}
 	}
 }
 
-func tcpTransfer(t *testing.T, f *fixture, streams int) (float64, error) {
+func tcpTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float64, error) {
 	t.Helper()
 	const size = 64 << 20
 	content := make([]byte, size)
@@ -122,6 +178,30 @@ func tcpTransfer(t *testing.T, f *fixture, streams int) (float64, error) {
 		content[i] = byte(i*13 + i/251)
 	}
 	want := sha256.Sum256(content)
+	// Diagnostic payload generation is outside the timed region. Each stream
+	// keeps the original single large Write, with its own immutable content.
+	var contents [][]byte
+	var references [][]byte
+	var wants [][sha256.Size]byte
+	transfer := integrityTransferID.Add(1)
+	label := "transfer"
+	if len(phase) != 0 {
+		label = phase[0]
+	}
+	if f.integrity != nil {
+		contents = make([][]byte, streams)
+		references = make([][]byte, streams)
+		wants = make([][sha256.Size]byte, streams)
+		for stream := range streams {
+			contents[stream] = make([]byte, size)
+			id := transfer<<8 | uint64(stream+1)
+			for i := range contents[stream] {
+				contents[stream][i] = integrityByte(id, int64(i))
+			}
+			wants[stream] = sha256.Sum256(contents[stream])
+			references[stream] = bytes.Clone(contents[stream])
+		}
+	}
 	var wg sync.WaitGroup
 	var diagnosticStack sync.Once
 	failures := make(chan error, streams)
@@ -144,6 +224,10 @@ func tcpTransfer(t *testing.T, f *fixture, streams int) (float64, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			content, want := content, want
+			if f.integrity != nil {
+				content, want = contents[i], wants[i]
+			}
 			d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("198.19.240.1")}, Timeout: 5 * time.Second}
 			c, err := d.Dial("tcp4", "198.19.240.2:9002")
 			if err != nil {
@@ -152,6 +236,10 @@ func tcpTransfer(t *testing.T, f *fixture, streams int) (float64, error) {
 				return
 			}
 			defer c.Close()
+			var identity *integrityConnection
+			if f.integrity != nil {
+				identity = f.integrity.bind(c.LocalAddr().String(), transfer<<8|uint64(i+1), fmt.Sprintf("repeat%s/%s/%s/transfer%d/streams%d", os.Getenv("NETSWITCH_WINTUN_INTEGRITY_REPEAT"), t.Name(), label, transfer, streams), references[i])
+			}
 			c.SetDeadline(time.Now().Add(30 * time.Second))
 			type writeResult struct {
 				n   int64
@@ -163,7 +251,29 @@ func tcpTransfer(t *testing.T, f *fixture, streams int) (float64, error) {
 				written <- writeResult{n, err}
 			}()
 			digest := sha256.New()
-			received, err := io.CopyN(digest, c, size)
+			var receiver io.Reader = c
+			var hostReader *integrityReader
+			var capture *payloadCaptureReader
+			if f.integrity != nil {
+				hostReader = &integrityReader{reader: c, d: f.integrity, stage: "host_receive", local: c.LocalAddr().String(), connection: identity}
+				if identity != nil {
+					hostReader.fastReference = references[i]
+				}
+				receiver = hostReader
+			} else if !f.skipPayloadCapture {
+				capture = &payloadCaptureReader{reader: c, expected: content}
+				receiver = capture
+			}
+			received, err := io.CopyN(digest, receiver, size)
+			if capture != nil && capture.first != nil {
+				report(t, map[string]any{"test": "tcp_payload_difference", "verdict": "integrity_failure", "mode": f.mode,
+					"pair": performancePair(t.Name()), "test_path": t.Name(), "phase": label, "transfer_id": transfer,
+					"stream_id": i, "local": c.LocalAddr().String(), "length": received, "expected_length": size,
+					"difference": capture.first, "expected_sha256": fmt.Sprintf("%x", want), "actual_sha256": fmt.Sprintf("%x", digest.Sum(nil))})
+			}
+			if f.integrity != nil {
+				f.integrity.hashes(identity, want[:], digest.Sum(nil), received, hostReader.reads)
+			}
 			if err != nil {
 				diagnose("read", c.LocalAddr().String(), received, err)
 				c.Close()
@@ -177,7 +287,12 @@ func tcpTransfer(t *testing.T, f *fixture, streams int) (float64, error) {
 				return
 			}
 			if !bytes.Equal(digest.Sum(nil), want[:]) {
-				failures <- fmt.Errorf("TCP payload hash mismatch")
+				err := fmt.Errorf("%w: TCP payload hash mismatch: local=%s stream=%d expected=%x actual=%x", errPayloadIntegrity, c.LocalAddr(), i, want, digest.Sum(nil))
+				diagnose("hash", c.LocalAddr().String(), received, err)
+				failures <- err
+			}
+			if f.integrity != nil {
+				f.integrity.complete(identity)
 			}
 		}()
 	}
@@ -186,6 +301,9 @@ func tcpTransfer(t *testing.T, f *fixture, streams int) (float64, error) {
 	var failure error
 	for err := range failures {
 		failure = errors.Join(failure, err)
+	}
+	if f.integrity != nil {
+		failure = errors.Join(failure, f.integrity.err())
 	}
 	if failure != nil {
 		return 0, failure
@@ -244,7 +362,7 @@ func udpTraffic(t *testing.T, streams int) (float64, error) {
 					return
 				}
 				if !bytes.Equal(reply[:n], payload) {
-					failures <- fmt.Errorf("UDP echo corruption")
+					failures <- fmt.Errorf("%w: UDP echo corruption", errPayloadIntegrity)
 					return
 				}
 				received.Add(1)
@@ -321,7 +439,7 @@ func shortLatency(t *testing.T, mode string, session *Session) float64 {
 				continue
 			}
 			if !bytes.Equal(b[:n], p) {
-				t.Fatal("latency payload mismatch")
+				t.Fatal(fmt.Errorf("%w: latency payload mismatch", errPayloadIntegrity))
 			}
 			break
 		}
@@ -390,11 +508,13 @@ func pairedRatios(ours, dll []float64) ([]float64, error) {
 	if len(ours) == 0 || len(ours) != len(dll) {
 		return nil, fmt.Errorf("incomplete matched pairs: ours=%d DLL=%d", len(ours), len(dll))
 	}
-	ratios := make([]float64, len(ours))
 	for i := range ours {
 		if ours[i] <= 0 || dll[i] <= 0 || math.IsNaN(ours[i]) || math.IsNaN(dll[i]) || math.IsInf(ours[i], 0) || math.IsInf(dll[i], 0) {
 			return nil, fmt.Errorf("unusable pair %d: ours=%g DLL=%g", i, ours[i], dll[i])
 		}
+	}
+	ratios := make([]float64, len(ours))
+	for i := range ours {
 		ratios[i] = ours[i] / dll[i]
 	}
 	return ratios, nil
@@ -433,6 +553,10 @@ func TestWintunPerformance(t *testing.T) {
 		t.Fatal("unknown NETSWITCH_WINTUN_REFERENCE")
 	}
 	const pairs = 12
+	diagnostic := os.Getenv("NETSWITCH_WINTUN_INTEGRITY") == "1"
+	if diagnostic && !integrityHooksEnabled {
+		t.Fatal("integrity diagnostic requires -tags=wintun_integrity")
+	}
 	metrics := []struct {
 		name    string
 		streams int
@@ -444,11 +568,16 @@ func TestWintunPerformance(t *testing.T) {
 		{"tcp_1_MBps", 1, true},
 		{"tcp_8_MBps", 8, true},
 	}
-	results := map[string]map[string][]float64{"ours": {}, reference: {}}
+	if os.Getenv("NETSWITCH_WINTUN_INTEGRITY_FOCUS") == "tcp_8_MBps" {
+		if !diagnostic {
+			t.Fatal("focused integrity runs require diagnostic mode")
+		}
+		metrics = metrics[len(metrics)-1:]
+	}
+	results := map[string]map[string][]performanceSample{"ours": {}, reference: {}}
 	for _, metric := range metrics {
 		for _, mode := range []string{"ours", reference} {
-			// An absent/failed sample stays zero at its original pair index.
-			results[mode][metric.name] = make([]float64, pairs)
+			results[mode][metric.name] = newPerformanceSamples(pairs, mode, metric.name)
 		}
 	}
 	for trial := 0; trial < pairs; trial++ {
@@ -462,6 +591,15 @@ func TestWintunPerformance(t *testing.T) {
 				// Match the SAME metric back to back, not two whole suites.
 				for _, mode := range modes {
 					t.Run(metric.name+"/"+mode, func(t *testing.T) {
+						sample := &results[mode][metric.name][trial]
+						// Registered first, runs after fixture teardown. Setup Fatals,
+						// skips and teardown failures cannot leave a usable sample.
+						t.Cleanup(func() {
+							if (t.Failed() || t.Skipped()) && sample.cause == nil {
+								sample.finish(0, fmt.Errorf("sample setup, execution or teardown failed; see subtest error"))
+							}
+							report(t, map[string]any{"test": "performance_sample", "diagnostic": diagnostic, "sample": sample, "verdict": integrityVerdict(sample.cause)})
+						})
 						f := fixtureOnAdapter(t, mode, a)
 						if metric.tcp {
 							f.stopEcho()
@@ -469,9 +607,12 @@ func TestWintunPerformance(t *testing.T) {
 							// Identical fixed warm-up, logged and excluded from
 							// both measured samples; never retry a measured failure.
 							for warm := 0; warm < 2; warm++ {
-								rate, err := tcpTransfer(t, f, 1)
+								rate, err := tcpTransfer(t, f, 1, fmt.Sprintf("warmup%d", warm))
+								if err != nil {
+									sample.finish(0, fmt.Errorf("warmup=%d: %w", warm, err))
+								}
 								must(t, err)
-								report(t, map[string]any{"test": "tcp_warmup", "arch": runtime.GOARCH, "mode": mode, "trial": trial, "streams": metric.streams, "warmup": warm, "MBps": rate})
+								report(t, map[string]any{"test": "tcp_warmup", "diagnostic": diagnostic, "arch": runtime.GOARCH, "mode": mode, "trial": trial, "streams": metric.streams, "warmup": warm, "MBps": rate})
 							}
 						}
 						before, batchesBefore := performanceCounters(f.io)
@@ -479,7 +620,7 @@ func TestWintunPerformance(t *testing.T) {
 						var err error
 						switch {
 						case metric.tcp:
-							value, err = tcpTransfer(t, f, metric.streams)
+							value, err = tcpTransfer(t, f, metric.streams, "measured")
 						case metric.streams != 0:
 							value, err = udpTransfer(t, metric.streams)
 						default:
@@ -489,9 +630,10 @@ func TestWintunPerformance(t *testing.T) {
 						after, batchesAfter := performanceCounters(f.io)
 						packets, wakes := after.ReadPackets-before.ReadPackets, after.ReadWakes-before.ReadWakes
 						written, batches := after.WrittenPackets-before.WrittenPackets, batchesAfter-batchesBefore
+						sample.finish(value, errors.Join(err, f.fault()))
 						diagnostics := map[string]any{
-							"test": "performance", "arch": runtime.GOARCH, "trial": trial, "mode": mode,
-							"metric": metric.name, "value": value, "first": modes[0],
+							"test": "performance", "diagnostic": diagnostic, "arch": runtime.GOARCH, "trial": trial, "mode": mode,
+							"metric": metric.name, "sample": sample, "first": modes[0],
 							"read_packets": packets, "read_wakeups": wakes,
 							"read_waits":      after.ReadWaits - before.ReadWaits,
 							"written_packets": written, "write_batches": batches,
@@ -509,22 +651,24 @@ func TestWintunPerformance(t *testing.T) {
 						report(t, diagnostics)
 						// Report a failed reference too, but never turn an invalid
 						// denominator into a favorable throughput ratio.
-						must(t, errors.Join(err, f.fault()))
-						results[mode][metric.name][trial] = value
+						must(t, sample.cause)
 					})
-				}
-				own, dll := results["ours"][metric.name][trial], results[reference][metric.name][trial]
-				if own > 0 && dll > 0 {
-					report(t, map[string]any{"test": "performance_pair", "arch": runtime.GOARCH, "reference": reference, "trial": trial, "metric": metric.name, "first": modes[0], "ours": own, "dll": dll, "ratio": own / dll})
 				}
 			}
 		})
 	}
 	for _, metric := range metrics {
 		ours, dll := results["ours"][metric.name], results[reference][metric.name]
-		ratios, err := pairedRatios(ours, dll)
+		// Keep all positions, including fixture setup failures before a subtest.
+		report(t, map[string]any{"test": "performance_samples", "diagnostic": diagnostic, "metric": metric.name, "ours": ours, "dll": dll})
+		ratios, err := pairedSampleRatios(ours, dll, reference)
 		if err != nil {
-			t.Errorf("%s: %v; ours=%v %s=%v", metric.name, err, ours, reference, dll)
+			t.Errorf("%s: %v", metric.name, err)
+			continue
+		}
+		if diagnostic {
+			// Instrumented timing never enters the clean performance gate.
+			report(t, map[string]any{"test": "integrity_pairs_complete", "pairs": pairs, "metric": metric.name})
 			continue
 		}
 		ratio := median(ratios)
