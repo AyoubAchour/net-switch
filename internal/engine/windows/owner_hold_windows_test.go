@@ -134,19 +134,37 @@ func TestOwnerOverloadHold(t *testing.T) {
 		for i := range late {
 			late[i] = platform.Tuple{Source: netip.AddrPortFrom(holdTuple.Source.Addr(), uint16(40001+i)), Destination: holdTuple.Destination}
 		}
-		slowTables(o, func() time.Duration {
+		rows := tcp4Table(pid, append([]platform.Tuple{holdTuple}, late...)...)
+		o.readTCP = func(_ context.Context, family uint32, _ *[]uint64) ([]byte, error) {
 			mu.Lock()
-			defer mu.Unlock()
 			reads++
-			if reads == 1 {
-				return 200 * time.Millisecond
+			read := reads
+			mu.Unlock()
+			if read == 1 {
+				// The early lookup's own read must stay in flight until every
+				// late SYN is held: while it runs, their bound has no fresh
+				// read and the first one starts the single shared read. A
+				// fixed sleep is not robust: on a loaded Windows ARM64 runner
+				// wake-up and scheduling can push a 200 ms sleep past the
+				// 250 ms hold (job 120500237582), failing a correct hold.
+				// Waiting for all six holds keeps the read slower than the
+				// bound without spending the hold's margin on sleeping.
+				started := winclock.Now()
+				for o.tcpHolds.Load() < uint64(len(late)+1) && winclock.Since(started) < 2*ownerOverloadHold {
+					runtime.Gosched()
+				}
+			} else {
+				winclock.System.Wait(context.Background(), 40*time.Millisecond)
 			}
-			return 40 * time.Millisecond
-		}, func() []byte { return tcp4Table(pid, append([]platform.Tuple{holdTuple}, late...)...) })
+			if family == windows.AF_INET6 {
+				return []byte{0, 0, 0, 0}, nil
+			}
+			return rows, nil
+		}
 		early := make(chan error, 1)
 		go func() { _, err := o.TCP(context.Background(), holdTuple); early <- err }()
 		winclock.System.Wait(context.Background(), 20*time.Millisecond)
-		// Each of these joins the 200 ms read that started before it. The
+		// Each of these joins the slow read that started before it. The
 		// first to reach its 50 ms bound starts a 40 ms read; the others,
 		// reaching theirs while it runs, join it.
 		type outcome struct {

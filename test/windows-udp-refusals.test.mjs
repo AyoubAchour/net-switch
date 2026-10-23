@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { udpRefusalAttribution } from '../tests/windows/udp-capacity.mjs';
+import { clientPortChoiceRefusal, fillReattemptError, retryFillRefusals, udpRefusalAttribution } from '../tests/windows/udp-capacity.mjs';
 
 const resets = (n, ports = n) => Array.from({ length: n }, (_, i) => ({
   Error: 'ECONNRESET', Token: i.toString(16).padStart(16, '0'), Local: `198.18.0.1:${40000 + i % ports}`, Remote: '198.19.128.2:26000',
@@ -79,4 +79,68 @@ test('identity expiry with a generation remains admission; client connect exhaus
   after.ownerLookup.udpHolds = 31;
   after.ownerLookup.udpHeldGenerations = 31;
   assert.equal(udpRefusalAttribution([{ Error: 'ENOBUFS' }], stats(), after).passed, true);
+});
+
+const refusal = (NativeCall = 'connect', Error = 'ENOBUFS') => ({ NativeCall, Error });
+const success = () => ({ NativeCall: 'connect', Error: '' });
+const queued = (rounds) => {
+  const calls = [];
+  return { calls, reopen: async (count) => {
+    calls.push(count);
+    return { result: { attempts: rounds.shift() }, refused: [], stats: { flows: calls.length } };
+  } };
+};
+
+test('only an app bind or connect allocation failure is a retryable port choice', () => {
+  assert.equal(clientPortChoiceRefusal({ NativeCall: 'bind', Error: 'EADDRINUSE' }), true);
+  assert.equal(clientPortChoiceRefusal({ NativeCall: 'connect', Error: 'ENOBUFS' }), true);
+  assert.equal(clientPortChoiceRefusal({ NativeCall: 'send', Error: 'ENOBUFS' }), false);
+  assert.equal(clientPortChoiceRefusal({ NativeCall: 'connect', Error: 'ECONNRESET' }), false);
+  assert.equal(clientPortChoiceRefusal({ NativeCall: 'connect', Error: 'ECONNREFUSED' }), false);
+  assert.equal(clientPortChoiceRefusal(undefined), false);
+});
+
+test('a client port refusal recovers on a later fresh attempt', async () => {
+  const { reopen, calls } = queued([[refusal(), success()], [refusal()], [success()]]);
+  const retry = await retryFillRefusals({ refused: [refusal(), refusal()], room: true, available: 2150, reopen, sleep: async () => {} });
+  assert.equal(retry.refused.length, 0);
+  assert.equal(retry.record.freshAttempts, 3);
+  assert.deepEqual([...retry.record.recoveredOnFreshAttempt], [1, 0, 1, 0]);
+  assert.deepEqual(retry.record.attemptsPerRefusal, [4, 2]);
+  assert.equal(retry.record.finalClientRefusals, 0);
+  assert.deepEqual(calls, [2, 1, 1]);
+});
+
+test('four refused fresh attempts with free ports fail distinctly from a capacity shortfall', async () => {
+  const { reopen, calls } = queued([[refusal()], [refusal()], [refusal()], [refusal()], [refusal()]]);
+  const retry = await retryFillRefusals({ refused: [refusal()], room: true, available: 2150, reopen, sleep: async () => {} });
+  assert.equal(retry.refused.length, 1);
+  assert.equal(retry.record.freshAttempts, 4);
+  assert.deepEqual([...retry.record.recoveredOnFreshAttempt], [0, 0, 0, 0]);
+  assert.deepEqual(retry.record.attemptsPerRefusal, [5]);
+  assert.equal(retry.record.finalClientRefusals, 1);
+  assert.deepEqual(retry.record.finalRefused, [{ call: 'connect', code: 'ENOBUFS' }]);
+  assert.deepEqual([...retry.record.backoffMS], [10, 20, 40, 80]);
+  assert.deepEqual(calls, [1, 1, 1, 1]);
+  const message = fillReattemptError(retry.record);
+  assert.match(message, /UDP fill client-side ENOBUFS with free ports/);
+  assert.match(message, /1 flow\(s\) still refused after 4 of 4 fresh attempts/);
+  assert.match(message, /2150 IPv4 dynamic ports were free/);
+});
+
+test('an engine-side refusal stops immediately and is never called client port exhaustion', async () => {
+  const { reopen, calls } = queued([[refusal('connect', 'ECONNRESET')], [success()]]);
+  const retry = await retryFillRefusals({ refused: [refusal('connect', 'ECONNRESET')], room: true, available: 900, reopen, sleep: async () => {} });
+  assert.equal(calls.length, 1);
+  assert.equal(retry.record.freshAttempts, 1);
+  assert.equal(retry.record.finalClientRefusals, 0);
+  assert.equal(retry.record.finalOtherRefusals, 1);
+});
+
+test('a full pool gets no fresh attempt', async () => {
+  const { reopen, calls } = queued([]);
+  const retry = await retryFillRefusals({ refused: [refusal()], room: false, available: 0, reopen, sleep: async () => {} });
+  assert.equal(calls.length, 0);
+  assert.equal(retry.record.freshAttempts, 0);
+  assert.equal(retry.record.finalClientRefusals, 1);
 });
