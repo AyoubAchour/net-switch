@@ -114,10 +114,16 @@ func (t *Table) expireSnapshots(now time.Time) {
 	}
 	for id, s := range t.totalSnapshots {
 		if !now.Before(s.expires) {
-			t.gauges.SnapshotBytes -= s.bytes
-			delete(t.totalSnapshots, id)
+			t.dropTotalsSnapshot(id)
 		}
 	}
+}
+
+func (t *Table) dropTotalsSnapshot(id uint64) {
+	s := t.totalSnapshots[id]
+	t.gauges.SnapshotBytes -= s.bytes
+	t.gauges.TotalsSnapshotBytes -= s.bytes
+	delete(t.totalSnapshots, id) // immutable read only; never accounting counters
 }
 
 func totalsID(value string) (uint64, string, error) {
@@ -138,7 +144,7 @@ func (t *Table) PageTotals(cursor string) (TotalsPage, error) {
 	index := 0
 	nonce := ""
 	if cursor == "" {
-		if len(t.snapshots)+len(t.totalSnapshots) >= t.limits.Snapshots {
+		if t.limits.Snapshots <= 0 {
 			return TotalsPage{}, ErrBudget
 		}
 		// Account for maps, sorted entries and their immutable strings before
@@ -155,7 +161,10 @@ func (t *Table) PageTotals(cursor string) (TotalsPage, error) {
 				bytes += 640 + int64(len(f.record.Owner.AppID)+len(f.record.Line))
 			}
 		}
-		if bytes > t.limits.SnapshotBytes-t.gauges.SnapshotBytes {
+		// Totals have their own slots and at most half the aggregate byte
+		// budget. Unacked receipts cannot starve flow listing; Defaults reserves
+		// enough in the other half for two maximum-size flow snapshots.
+		if bytes > t.limits.SnapshotBytes/2 || bytes > t.limits.SnapshotBytes-(t.gauges.SnapshotBytes-t.gauges.TotalsSnapshotBytes) {
 			return TotalsPage{}, ErrBudget
 		}
 		var entropy [16]byte
@@ -163,7 +172,20 @@ func (t *Table) PageTotals(cursor string) (TotalsPage, error) {
 			return TotalsPage{}, err
 		}
 		nonce = hex.EncodeToString(entropy[:])
+		// A fresh full read supersedes this controller's oldest read only
+		// under pressure. SetEpoch already discards a fenced controller's reads.
+		// Old cursors/receipts fail explicitly; unacknowledged bytes remain exact.
+		for len(t.totalSnapshots) >= t.limits.Snapshots || bytes > t.limits.SnapshotBytes/2-t.gauges.TotalsSnapshotBytes || bytes > t.limits.SnapshotBytes-t.gauges.SnapshotBytes {
+			oldest := ^uint64(0)
+			for id := range t.totalSnapshots {
+				if id < oldest {
+					oldest = id
+				}
+			}
+			t.dropTotalsSnapshot(oldest)
+		}
 		t.gauges.SnapshotBytes += bytes
+		t.gauges.TotalsSnapshotBytes += bytes
 		v := t.totalsLocked()
 		entries := make([]totalEntry, 0, len(v.Apps)+len(v.Lines))
 		for _, app := range []bool{true, false} {
@@ -277,7 +299,6 @@ func (t *Table) AckTotals(receipt string) (TotalsAck, error) {
 			result.Lines++
 		}
 	}
-	t.gauges.SnapshotBytes -= s.bytes
-	delete(t.totalSnapshots, id)
+	t.dropTotalsSnapshot(id)
 	return result, nil
 }

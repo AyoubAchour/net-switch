@@ -4,8 +4,11 @@ package lifecycle
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -92,7 +95,31 @@ func (r *stalledReader) ReadPacket(ctx context.Context, b []byte) (int, error) {
 	}
 }
 
-func configureNativeProof(data string, options *host.Options) {
+func configureNativeProof(data string, options *host.Options) error {
+	var probeExhausted atomic.Bool
+	options.ProbeError = func() error {
+		if !probeExhausted.Swap(false) {
+			return nil
+		}
+		if runtime.GOOS == "windows" {
+			return syscall.Errno(10024)
+		} // WSAEMFILE
+		return syscall.EMFILE
+	}
+	if f, err := os.Open(filepath.Join(data, "probe-test-ca.pem")); err == nil {
+		b, readErr := io.ReadAll(io.LimitReader(f, (64<<10)+1))
+		closeErr := f.Close()
+		if err := errors.Join(readErr, closeErr); err != nil {
+			return err
+		}
+		roots := x509.NewCertPool()
+		if len(b) > 64<<10 || !roots.AppendCertsFromPEM(b) {
+			return errors.New("invalid hosted probe CA")
+		}
+		options.ProbeTLS = &tls.Config{RootCAs: roots}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	options.Configure = func(server *protocol.Server, table *flows.Table) {
 		server.TestFault = func(_ context.Context, b json.RawMessage) (any, error) {
 			var request struct {
@@ -100,6 +127,10 @@ func configureNativeProof(data string, options *host.Options) {
 			}
 			if err := json.Unmarshal(b, &request); err != nil {
 				return nil, err
+			}
+			if request.Kind == "probe-exhaustion" {
+				probeExhausted.Store(true)
+				return true, nil
 			}
 			if request.Kind == "kernel-sandbox" {
 				return nativeKernelSandboxEvidence(server.Instance)
@@ -135,6 +166,7 @@ func configureNativeProof(data string, options *host.Options) {
 	options.WrapTun = func(tun platform.TunDevice) platform.TunDevice {
 		return &stalledReader{TunDevice: tun, data: data}
 	}
+	return nil
 }
 
 // Hosted-only: attempt write opens without writing any bytes. This executes

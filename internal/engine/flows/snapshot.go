@@ -49,7 +49,7 @@ func (t *Table) page(cursor string, all bool) (Page, error) {
 	index := 0
 	var counted *Counted
 	if cursor == "" {
-		if len(t.snapshots)+len(t.totalSnapshots) >= t.limits.Snapshots {
+		if len(t.snapshots) >= t.limits.Snapshots {
 			return Page{}, ErrBudget
 		}
 		listed := func(f *ticket) bool { return !f.retired && (all || f.resolved) }

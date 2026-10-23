@@ -8,6 +8,28 @@ import (
 )
 
 func TestNativeActorAccountChecks(t *testing.T) {
+	standard, admin := windows.LUID{LowPart: 101}, windows.LUID{LowPart: 102}
+	allowed := map[windows.LUID]string{standard: "standard-test-right"}
+	if err := checkActorPrivileges([]windows.LUIDAndAttributes{{Luid: standard}}, allowed); err != nil {
+		t.Fatal(err)
+	}
+	for _, flags := range []uint32{0, windows.SE_PRIVILEGE_ENABLED} {
+		// UAC off can produce an unsplit, unelevated token with admin rights.
+		if checkActorToken(1, false) != nil {
+			t.Fatal("invalid UAC-off fixture")
+		}
+		if err := checkActorPrivileges([]windows.LUIDAndAttributes{{Luid: admin, Attributes: flags}}, allowed); err == nil {
+			t.Fatal("direct admin right accepted", flags)
+		}
+	}
+	for _, tc := range []struct {
+		kind            uint32
+		elevated, allow bool
+	}{{1, false, true}, {1, true, false}, {2, true, false}, {3, false, false}, {0, false, false}} {
+		if err := checkActorToken(tc.kind, tc.elevated); (err == nil) != tc.allow {
+			t.Fatal("split/elevated token classification", tc, err)
+		}
+	}
 	ptr := func(s string) *uint16 {
 		t.Helper()
 		p, err := windows.UTF16PtrFromString(s)

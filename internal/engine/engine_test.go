@@ -136,6 +136,33 @@ func TestNativeErrorStatusSurvivesStopUntilTheNextStart(t *testing.T) {
 	if state, _ := e.LiveState(); state != "on" || e.LastError() != "" {
 		t.Fatal("new start retained stale failure", state, e.LastError())
 	}
+	lost := errors.New("adapter lost")
+	accepted := make(chan struct{})
+	e.OnTunError = func(err error) bool {
+		if err != lost {
+			t.Error(err)
+		}
+		close(accepted)
+		return true
+	}
+	e.fail(e.link, lost)
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("adapter loss not accepted")
+	}
+	if err := e.Stop(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := e.LiveState(); state != "error" || e.LastError() != lost.Error() {
+		t.Fatal("adapter-loss tail lost sticky error", state, e.LastError())
+	}
+	if _, err := e.Start(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ := e.LiveState(); state != "on" || e.LastError() != "" {
+		t.Fatal(state, e.LastError())
+	}
 }
 
 type batchTun struct {

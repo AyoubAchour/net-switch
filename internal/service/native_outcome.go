@@ -40,6 +40,11 @@ func readNativeOutcome(data string, state Status, err error) Status {
 		return state
 	}
 	state.Cleanup, state.LastError = outcome.State, outcome.Error
+	if state.ManagerBootID != "" && state.ManagerBootID != outcome.BootID {
+		state.Cleanup = "unknown"
+		state.LastError = "native cleanup belongs to another or unknown boot"
+		return state
+	}
 	if state.ManagerInvocation != "" && state.ManagerInvocation != outcome.InvocationID {
 		state.Cleanup = "unknown"
 		state.LastError = "native cleanup belongs to another service invocation"
@@ -49,6 +54,10 @@ func readNativeOutcome(data string, state Status, err error) Status {
 	// use the manager result retained by this native instance's ExecStopPost.
 	// Never replace a signal, another invocation, or a live manager result.
 	if !state.MainExitKnown && state.ManagerCode == "0" && state.ManagerStatus == "0" && state.ManagerInvocation == "" && state.ManagerResult == "success" && outcome.Systemd != nil {
+		if state.ManagerBootID == "" || outcome.BootID == "" {
+			state.LastError = "retained native exit has no matching boot identity"
+			return state
+		}
 		state.MainExitCode, state.MainExitKnown = outcome.Systemd.ExitCode()
 		state.MainExitSource = "systemd-stop-post"
 		state.ManagerResult = outcome.Systemd.Result

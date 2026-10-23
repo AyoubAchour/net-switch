@@ -29,6 +29,10 @@ type Request struct {
 	StartedBefore uint64          `json:"startedBefore,omitempty"`
 	Line          string          `json:"line,omitempty"`
 	Operator      string          `json:"operator,omitempty"`
+	Target        string          `json:"target,omitempty"`
+	Quick         bool            `json:"quick,omitempty"`
+	Custom        bool            `json:"custom,omitempty"`
+	Listen        string          `json:"listen,omitempty"`
 	App           string          `json:"app,omitempty"`
 	Fault         json.RawMessage `json:"fault,omitempty"`
 	// Adapter is the temporary milestone-two compatibility payload. It is
@@ -58,7 +62,7 @@ func Decode(b []byte) (Request, error) {
 	if d.Decode(&extra) != io.EOF {
 		return r, errors.New("trailing JSON")
 	}
-	if r.ID == "" || len(r.ID) > 128 || len(r.OpID) > 128 || len(r.Cursor) > 128 || len(r.Receipt) > 128 || len(r.App) > 512 || len(r.Line) > 64 || len(r.Operator) > 256 {
+	if r.ID == "" || len(r.ID) > 128 || len(r.OpID) > 128 || len(r.Cursor) > 128 || len(r.Receipt) > 128 || len(r.App) > 512 || len(r.Line) > 64 || len(r.Operator) > 256 || len(r.Target) > 256 || len(r.Listen) > 128 {
 		return r, errors.New("invalid request fields")
 	}
 	return r, nil

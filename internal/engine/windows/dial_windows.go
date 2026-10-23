@@ -4,6 +4,7 @@ package winengine
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -26,6 +27,8 @@ import (
 )
 
 type Dialer struct {
+	ProbeTLS       *tls.Config
+	ProbeError     func() error
 	Routes         *Routes
 	pool           *readiness
 	udp            *udpReadiness

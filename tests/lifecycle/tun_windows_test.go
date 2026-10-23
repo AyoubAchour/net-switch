@@ -73,6 +73,21 @@ func prepareTUN(t *testing.T, dir, data string) tunFixture {
 	var tunIndex uint32
 	return tunFixture{
 		line: "TestISP", target: "198.19.128.2:" + port, dial: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, exchange: checkEcho,
+		probe: func(t *testing.T, data string) nativeProbeFixture {
+			proof := windowsNativeProbe(t, data, address)
+			_, probePort, _ := net.SplitHostPort(proof.target)
+			r, _ := http.NewRequest("POST", state.Control+"/targets", strings.NewReader(fmt.Sprintf(`{"ports":[%s,%s]}`, port, probePort)))
+			r.Header.Set("Authorization", "Bearer "+token)
+			response, err := (&http.Client{Timeout: 5 * time.Second}).Do(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response.Body.Close()
+			if response.StatusCode != 200 {
+				t.Fatal("probe target mapping", response.StatusCode)
+			}
+			return proof
+		},
 		installed: func(t *testing.T) {
 			index, routes, err := nativeTUNState(0)
 			if err != nil || index == 0 || routes == 0 {

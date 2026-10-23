@@ -205,6 +205,10 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 	// Allocate the completion service before any capture can start. A failure
 	// here leaves ordinary OS routing in place instead of rejecting every flow.
 	dialer, err := NewDialer(routes)
+	if dialer != nil {
+		dialer.ProbeTLS = options.ProbeTLS
+		dialer.ProbeError = options.ProbeError
+	}
 	options.Stage("dialer-created")
 	if err != nil {
 		return fmt.Errorf("initialize Windows socket readiness: %w", err)

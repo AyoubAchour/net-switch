@@ -19,6 +19,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/AyoubAchour/net-switch/internal/engine/testproxy"
 )
 
 const Lease = 30 * time.Second
@@ -128,7 +129,7 @@ func (s *Server) handle(ctx context.Context, r Request, c *connection) Reply {
 }
 func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, error) {
 	switch r.Method {
-	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "adapterForgetLane":
+	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "adapterForgetLane", "testProxy":
 		// A new controller cannot overtake an accepted mutation. Renewals
 		// remain independent of adapter file/HTTP work and disk flushes.
 		s.mutation.Lock()
@@ -142,6 +143,12 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 	if r.Method == "hello" {
 		status := s.status()
 		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": status.Applied, "status": status, "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks", "terminal-stop", "status", "paged-totals", "totals-ack"}}
+		if _, ok := s.prober.(platform.ConfiguredProber); ok {
+			v["capabilities"] = append(v["capabilities"].([]string), "probe-options")
+		}
+		if testproxy.Enabled {
+			v["capabilities"] = append(v["capabilities"].([]string), "test-proxy")
+		}
 		s.mu.Unlock()
 		if adapter, ok := s.runtime.(AdapterRuntime); ok {
 			v["capabilities"] = []string{"singbox-adapter-v1", "revisions", "lease"}
@@ -199,6 +206,17 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		s.mu.Unlock()
 		return nil, err
 	}
+	if r.Method == "testProxy" {
+		s.mu.Unlock()
+		return s.effect(ctx, r, func() (any, error) {
+			if runtime, ok := s.runtime.(interface {
+				StartTestProxy(context.Context, string) (testproxy.Status, error)
+			}); ok {
+				return runtime.StartTestProxy(ctx, r.Listen)
+			}
+			return nil, testproxy.ErrDisabled
+		})
+	}
 	if r.Method == "probe" {
 		s.mu.Unlock()
 		return s.effect(ctx, r, func() (any, error) {
@@ -213,6 +231,12 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 			}
 			p, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
+			if configured, ok := s.prober.(platform.ConfiguredProber); ok {
+				return configured.ProbeConfigured(p, r.Line, platform.ProbeRequest{Operator: r.Operator, Target: r.Target, Quick: r.Quick, Custom: r.Custom})
+			}
+			if r.Target != "" || r.Quick || r.Custom {
+				return nil, errors.New("configured probes unavailable")
+			}
 			return s.prober.Probe(p, r.Line, r.Operator)
 		})
 	}

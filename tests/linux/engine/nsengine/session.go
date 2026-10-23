@@ -207,14 +207,26 @@ func (s *Session) CloseFlows(ctx context.Context, opID string, sel engine.Select
 }
 
 // Probe implements engine.Controller.
-func (s *Session) Probe(ctx context.Context, opID string, line engine.LineID, operator string) (engine.ProbeResult, error) {
+func (s *Session) Probe(ctx context.Context, opID string, line engine.LineID, request engine.ProbeRequest) (engine.ProbeResult, error) {
 	req := s.request("probe")
-	req.OpID, req.Line, req.Operator = opID, string(line), operator
+	req.OpID, req.Line = opID, string(line)
+	req.Target, req.Quick, req.Custom = request.Target, request.Quick, request.Custom
 	var r platform.ProbeResult
 	if err := s.d.do(ctx, req, &r); err != nil {
 		return engine.ProbeResult{}, err
 	}
-	return engine.ProbeResult{OK: r.OK, Latency: r.Latency, Error: r.Error}, nil
+	kind := "full"
+	if request.Quick {
+		kind = "quick"
+	}
+	if r.Kind != kind {
+		return engine.ProbeResult{}, fmt.Errorf("probe returned kind %q, requested %q", r.Kind, kind)
+	}
+	result := engine.ProbeResult{OK: r.OK, Kind: r.Kind, Error: r.Error}
+	if r.LatencyMS != nil {
+		result.Latency = time.Duration(*r.LatencyMS * float64(time.Millisecond))
+	}
+	return result, nil
 }
 
 // Predict implements engine.Controller.

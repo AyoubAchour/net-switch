@@ -106,6 +106,8 @@ func prepareTUN(t *testing.T, _, data string) tunFixture {
 	}
 	return tunFixture{
 		line: "eth-a", target: "198.51.100.10:7002", dial: dial,
+		churnLine: "eth-b", seen: topo.Lines[0].Public4.String(), churnSeen: topo.Lines[1].Public4.String(),
+		probe: func(t *testing.T, data string) nativeProbeFixture { return linuxNativeProbe(t, data, n.InetDir()) },
 		exchange: func(t *testing.T, c net.Conn) {
 			c.SetDeadline(time.Now().Add(5 * time.Second))
 			if _, err := fmt.Fprint(c, "ping lifecycle\n"); err != nil {

@@ -66,6 +66,7 @@ func serveProbes(dir string, rec *recorder) error {
 		return &valid, nil
 	}}}
 	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.add(Record{Kind: "probe-http", Src: r.RemoteAddr, Dst: r.Host, Data: r.Method + " " + r.URL.Path})
 		switch mode() {
 		case "redirect":
 			http.Redirect(w, r, "https://1.1.1.1/cdn-cgi/trace", http.StatusFound)

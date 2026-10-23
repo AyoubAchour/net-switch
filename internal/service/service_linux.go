@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/AyoubAchour/net-switch/internal/engine/host"
 )
 
 func unit(name string) string {
@@ -133,6 +135,13 @@ func Query(name string) (Status, error) {
 	out.ManagerResult = values["Result"]
 	out.ManagerCode, out.ManagerStatus = values["ExecMainCode"], values["ExecMainStatus"]
 	out.ManagerInvocation = values["InvocationID"]
+	if name == Engine {
+		boot, bootErr := host.CurrentBootID()
+		if bootErr != nil {
+			return out, bootErr
+		}
+		out.ManagerBootID = boot
+	}
 	return nativeOutcome(name, out), err
 }
 func SetOwner(string) error              { return nil }

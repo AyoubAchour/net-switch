@@ -4,6 +4,26 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import vm from 'node:vm';
+import { capacityHealthProbe } from '../tests/windows/capacity.mjs';
+
+test('capacity health sends an explicit custom TCP check to its echo peer', async () => {
+  for (const host of ['198.19.128.2', '2001:db8::2']) {
+    let calls = 0;
+    const result = await capacityHealthProbe({ api: async (route, request) => {
+      calls++;
+      assert.equal(route, 'engine-command');
+      assert.equal(request.method, 'probe');
+      assert.equal(request.fields.operator, undefined, 'engine rejects IP-as-operator');
+      assert.deepEqual({ ...request.fields, opId: 'id' }, {
+        opId: 'id', line: 'test-line', target: `${host.includes(':') ? `[${host}]` : host}:7000`, quick: true, custom: true,
+      });
+      assert.match(request.fields.opId, /^[0-9a-f-]{36}$/);
+      return { ok: false, kind: 'quick', outcome: 'engineUnavailable' };
+    } }, 'test-line', { host, ports: [7000, 7001] });
+    assert.equal(calls, 1);
+    assert.equal(result.outcome, 'engineUnavailable');
+  }
+});
 
 const driver = (await readFile(new URL('../tests/windows/engine-driver.mjs', import.meta.url), 'utf8')).replaceAll('\r\n', '\n');
 
@@ -50,7 +70,12 @@ function controller() {
       switch (method) {
       case 'stats': return stats({ engine: { bindings: structuredClone(bindings) } });
       case 'totals': return { lines: {} };
-      case 'probe': return probe(fields);
+      case 'probe':
+        assert.equal(fields.operator, undefined, 'health must send typed targets, not operator shorthand');
+        assert.equal(typeof fields.quick, 'boolean');
+        assert.equal(fields.custom, false, 'named checks must retain their operator-specific HTTPS criteria');
+        assert(['1.1.1.1:443', '8.8.8.8:443', '9.9.9.9:443'].includes(fields.target));
+        return probe(fields);
       case 'start':
       case 'apply': {
         await beforeApply(fields.revision);
@@ -94,8 +119,8 @@ test('health preserves a line added and pinned during an earlier line probe', { 
   assert.equal(c.saved.revision, 1);
   assert.equal(c.evidence.applies.length, 1);
   const entered = deferred(), release = deferred();
-  c.setProbe(async ({ line, operator }) => {
-    if (line === 'main' && operator === 'quick:cloudflare') {
+  c.setProbe(async ({ line, target, quick }) => {
+    if (line === 'main' && target === '1.1.1.1:443' && quick) {
       entered.resolve();
       await release.promise;
     }
@@ -134,7 +159,8 @@ test('health preserves a line added and pinned during an earlier line probe', { 
 const ok = { ok: true, outcome: 'ok' };
 const failed = { ok: false, outcome: 'lineFailed', error: 'controlled line failure' };
 const probes = (c, start, line) => c.evidence.commands.slice(start)
-  .filter(({ method, fields }) => method === 'probe' && fields.line === line).map(({ fields }) => fields.operator);
+  .filter(({ method, fields }) => method === 'probe' && fields.line === line).map(({ fields }) =>
+    `${fields.quick ? 'quick:' : ''}${{ '1.1.1.1:443': 'cloudflare', '8.8.8.8:443': 'google', '9.9.9.9:443': 'quad9' }[fields.target]}`);
 const healthLogs = (c) => c.evidence.logs.filter((line) => line.startsWith('LINE HEALTH '))
   .map((line) => JSON.parse(line.slice('LINE HEALTH '.length)));
 
@@ -180,9 +206,9 @@ test('health fences failed probe results after queued pin and line-order changes
   ]) {
     const revision = c.saved.revision;
     const entered = deferred(), release = deferred(), queueEntered = deferred(), queueRelease = deferred();
-    c.setProbe(async ({ line, operator }) => {
+    c.setProbe(async ({ line, target }) => {
       if (line !== 'second') return ok;
-      if (operator === 'quad9') { entered.resolve(); await release.promise; }
+      if (target === '9.9.9.9:443') { entered.resolve(); await release.promise; }
       return failed;
     });
     const sampling = c.health();
@@ -233,14 +259,14 @@ test('current interface, route, missing-binding and probe failures still fail ov
 
     c.setBinding('second', {});
     // A passing quick probe alone still cannot recover a down line.
-    c.setProbe(async ({ line, operator }) => line === 'second' && operator === 'cloudflare' ? failed : ok);
+    c.setProbe(async ({ line, target, quick }) => line === 'second' && target === '1.1.1.1:443' && !quick ? failed : ok);
     const checking = c.evidence.commands.length;
     await c.health();
     assert.equal(second.up, false);
     assert.equal(c.saved.revision, revision + 1);
     assert.deepEqual(probes(c, checking, 'second'), ['quick:cloudflare', 'cloudflare']);
     // The full probe, not the quick result, determines recovery as before.
-    c.setProbe(async ({ line, operator }) => line === 'second' && operator === 'quick:cloudflare' ? failed : ok);
+    c.setProbe(async ({ line, target, quick }) => line === 'second' && target === '1.1.1.1:443' && quick ? failed : ok);
     const recovering = c.evidence.commands.length;
     await c.health();
     assert.equal(second.up, true);
@@ -299,9 +325,9 @@ test('a pending probe cannot commit across engine identity, epoch, stop or readi
   const revision = c.saved.revision;
   for (const fields of [{ instance: 'engine-2' }, { epoch: 2 }, { stopping: true }, { ready: false }]) {
     const entered = deferred(), release = deferred();
-    c.setProbe(async ({ line, operator }) => {
+    c.setProbe(async ({ line, target }) => {
       if (line !== 'second') return ok;
-      if (operator === 'quad9') { entered.resolve(); await release.promise; }
+      if (target === '9.9.9.9:443') { entered.resolve(); await release.promise; }
       return failed;
     });
     const sampling = c.health();

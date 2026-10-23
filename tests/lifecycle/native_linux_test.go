@@ -129,6 +129,22 @@ func checkedLinuxActor(name string) (*user.User, error) {
 	if err != nil || len(fields) < 2 || fields[0] != name || fields[1] != "L" {
 		return nil, fmt.Errorf("%s does not have the expected locked password: passwd_status=%q error=%v", name, strings.TrimSpace(string(b)), err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "-l", "-U", name)
+	cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+	b, err = cmd.CombinedOutput()
+	exit := 0
+	if err != nil {
+		var failed *exec.ExitError
+		if !errors.As(err, &failed) {
+			return nil, fmt.Errorf("query disposable account sudo rights: %w", err)
+		}
+		exit = failed.ExitCode()
+	}
+	if !noSudoCommands(name, string(b), exit) {
+		return nil, fmt.Errorf("%s sudo rights are not empty: exit=%d output=%q", name, exit, b)
+	}
 	return u, nil
 }
 

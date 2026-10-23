@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"maps"
 	"net/netip"
-	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,22 +49,25 @@ func (r *Routes) StopPhase(name string) func() {
 }
 
 type Routes struct {
-	Instance    string
-	mu          sync.Mutex
-	session     *journal.Session
-	objects     *objects
-	tun         *wintun.Session
-	lines       []platform.Line
-	bindings    atomic.Pointer[bindingTable]
-	active      atomic.Bool
-	capture     []journal.Fingerprint
-	permissions []journal.Creation
-	cancel      context.CancelFunc
-	done        chan struct{}
-	Table       *flows.Table
-	Fatal       func(error)
-	timings     *phaseTimings
-	trace       *packetTrace
+	Instance      string
+	mu            sync.Mutex
+	session       *journal.Session
+	objects       *objects
+	tun           *wintun.Session
+	lines         []platform.Line
+	configured    map[string]bool
+	bindings      atomic.Pointer[bindingTable]
+	statsBindings atomic.Pointer[bindingTable]
+	statsTun      atomic.Pointer[wintun.Session]
+	active        atomic.Bool
+	capture       []journal.Fingerprint
+	permissions   []journal.Creation
+	cancel        context.CancelFunc
+	done          chan struct{}
+	Table         *flows.Table
+	Fatal         func(error)
+	timings       *phaseTimings
+	trace         *packetTrace
 }
 
 func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Routes, error) {
@@ -189,6 +191,7 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 		return nil, err
 	}
 	r.tun = s
+	r.statsTun.Store(s)
 	r.capture = nil
 	for _, prefix := range CapturePrefixes() {
 		fp := maps.Clone(base)
@@ -205,16 +208,30 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 }
 
 func (r *Routes) Bindings() map[string]Adapter {
-	return maps.Clone(*r.bindings.Load())
+	if view := r.statsBindings.Load(); view != nil {
+		return maps.Clone(*view)
+	}
+	return nil
+}
+
+// Called by the route writer; readers never wait for adapter/WFP checks.
+func (r *Routes) publishBindings(b bindingTable) {
+	out := make(map[string]Adapter, len(r.configured))
+	for id, a := range b {
+		if r.configured[id] {
+			out[id] = a
+		}
+	}
+	view := bindingTable(out)
+	r.bindings.Store(&b)
+	r.statsBindings.Store(&view)
 }
 
 func (r *Routes) TunStats() wintun.Stats {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.tun == nil {
-		return wintun.Stats{}
+	if tun := r.statsTun.Load(); tun != nil {
+		return tun.Stats() // Session.Stats itself never waits for driver teardown
 	}
-	return r.tun.Stats()
+	return wintun.Stats{}
 }
 
 func (r *Routes) resolve(lines []platform.Line) (bindingTable, error) {
@@ -244,12 +261,17 @@ func (r *Routes) Prepare(ctx context.Context, lines []platform.Line) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	b, err := r.resolve(lines)
+	wanted := make(map[string]bool, len(lines))
+	for _, l := range lines {
+		wanted[l.ID] = true
+	}
+	retained := retainLineSelectors(lines, r.lines, r.Table)
+	b, err := r.resolve(retained)
 	if err != nil {
 		return err
 	}
-	r.lines = slices.Clone(lines)
-	r.bindings.Store(&b)
+	r.lines, r.configured = retained, wanted
+	r.publishBindings(b)
 	return nil
 }
 func (r *Routes) Capture(ctx context.Context) error {
@@ -281,10 +303,19 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 		case <-tick.C:
 		}
 		r.mu.Lock()
+		if r.Table != nil {
+			kept := r.lines[:0]
+			for _, l := range r.lines {
+				if r.configured[l.ID] || r.Table.ReferencesLine(l.ID) {
+					kept = append(kept, l)
+				}
+			}
+			r.lines = kept
+		}
 		b, err := r.resolve(r.lines)
 		old := r.bindings.Load()
 		if err == nil {
-			r.bindings.Store(&b)
+			r.publishBindings(b)
 			if r.Table != nil {
 				closeLost(r.Table, *old, b)
 			}
@@ -381,6 +412,7 @@ func (r *Routes) Cleanup(ctx context.Context) (err error) {
 		r.capture = nil
 		r.permissions = nil
 		r.tun = nil
+		r.statsTun.Store(nil)
 	}
 	return err
 }

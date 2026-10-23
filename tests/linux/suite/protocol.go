@@ -397,11 +397,13 @@ func probePerLine(e *Env) {
 	}
 	e.SetLanes(map[engine.LineID]engine.LineID{"b": "a"})
 	since := time.Now().UnixMilli()
-	okA, err := s.Probe(e.Ctx(), "probe-a", "a", "quick:cloudflare")
+	// This case tests the physical binding with TCP only; TLS has its own case.
+	request := engine.ProbeRequest{Target: "1.1.1.1:443", Quick: true, Custom: false}
+	okA, err := s.Probe(e.Ctx(), "probe-a", "a", request)
 	e.T.Check(err == nil && okA.OK, "line a's probe passes (%+v, %v)", okA, err)
-	failB, err := s.Probe(e.Ctx(), "probe-b", "b", "quick:cloudflare")
+	failB, err := s.Probe(e.Ctx(), "probe-b", "b", request)
 	e.T.Check(err == nil && !failB.OK && failB.Error != "", "line b's probe fails though b's lane points at a (%+v, %v)", failB, err)
-	again, err := s.Probe(e.Ctx(), "probe-b", "b", "quick:cloudflare")
+	again, err := s.Probe(e.Ctx(), "probe-b", "b", request)
 	e.T.Check(err == nil && again == failB, "repeating the operation id returns the recorded result (%+v, %v)", again, err)
 	probes := Select(e.Records(), func(r inet.Record) bool { return r.Kind == "tcp" && r.T >= since && strings.HasSuffix(r.Dst, ":443") })
 	e.T.Check(len(probes) == 1 && topo.LineOfText(probes[0].Src) == "a", "the probe servers saw exactly one probe, line a's (%d, lines %s)", len(probes), Describe(RecordLines(probes)))

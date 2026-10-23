@@ -244,14 +244,25 @@ type UDPNotifications interface {
 }
 
 type ProbeResult struct {
-	OK      bool          `json:"ok"`
-	Outcome string        `json:"outcome,omitempty"`
-	Latency time.Duration `json:"latency"`
-	Error   string        `json:"error,omitempty"`
+	OK        bool     `json:"ok"`
+	Kind      string   `json:"kind"` // quick TCP or full HTTPS; never interchangeable
+	Outcome   string   `json:"outcome,omitempty"`
+	LatencyMS *float64 `json:"latencyMs,omitempty"`
+	Error     string   `json:"error,omitempty"`
 }
 
 type Prober interface {
 	Probe(context.Context, string, string) (ProbeResult, error)
+}
+
+type ProbeRequest struct {
+	Operator      string
+	Target        string
+	Quick, Custom bool
+}
+
+type ConfiguredProber interface {
+	ProbeConfigured(context.Context, string, ProbeRequest) (ProbeResult, error)
 }
 
 type Echoer interface {
