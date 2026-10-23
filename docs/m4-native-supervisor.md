@@ -35,6 +35,16 @@ never authorization to remove a live device. Missing history cannot authorize
 ignoring an existing row. The 20-cycle harness captures the row immediately
 before the next create, checks PnP/IP re-arrival, and reports LUID reuse.
 
+On c2ebd23f, acceptance artifacts 12530156353 (ARM64) and 12528636617
+(x64), `server-output.log`, each contain 25 adapter arrivals. The initial
+arrival has previous_luid=0 and reused=false; all 24 subsequent arrivals on
+each architecture have reused=true, LUID 14918723538255872. Thus 48/48
+re-arrivals reused the recorded identity, including all 20 cycles per runner.
+Retain the single recorded LUID; no set of historical LUIDs is needed for
+the observed behavior. An unrecognized different LUID continues to fail closed.
+Routing-off min/median/max was 95/107/259 ms on ARM64 and 109/133/225 ms
+on x64, comfortably within the stop budget.
+
 The follow-up reference inventory is read-only. When PnP is absent but the normal row remains,
 the harness starts a separate eight-second inventory helper. It reports the
 matching host/child/registrar/harness process tree, system handle object IDs,
