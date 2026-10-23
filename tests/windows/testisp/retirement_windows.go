@@ -105,6 +105,13 @@ func retirementPnPPresent() (bool, error) {
 			return false, err
 		}
 		if strings.EqualFold(id, wintun.DefaultGUID) {
+			// Capture the device's native name before removal; later file-handle
+			// names can be compared without opening the Wintun device ourselves.
+			object, objectErr := set.DeviceRegistryProperty(device, windows.SPDRP_PHYSICAL_DEVICE_OBJECT_NAME)
+			instance, instanceErr := set.DeviceInstanceID(device)
+			interfaceClass, _ := windows.GUIDFromString("{CAC88484-7515-4C03-82E6-71A87ABAC361}")
+			paths, pathErr := windows.CM_Get_Device_Interface_List(instance, &interfaceClass, windows.CM_GET_DEVICE_INTERFACE_LIST_PRESENT)
+			referenceRecord("pnp-device", map[string]any{"guid": id, "deviceObject": object, "objectError": fmt.Sprint(objectErr), "instance": instance, "instanceError": fmt.Sprint(instanceErr), "devicePaths": paths, "devicePathError": fmt.Sprint(pathErr)})
 			return true, nil
 		}
 	}

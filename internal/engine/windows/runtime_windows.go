@@ -215,6 +215,9 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 		return fmt.Errorf("initialize Windows socket readiness: %w", err)
 	}
 	closeDialer := sync.OnceValue(dialer.Close)
+	if hostedTraceEnabled() {
+		routes.objects.retirementReferences = dialer.retirementReferences
+	}
 	defer func() {
 		if !shutdownComplete {
 			err = joinShutdownError(err, closeDialer())

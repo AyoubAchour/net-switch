@@ -52,7 +52,23 @@ async function retirementObserver() {
   // continues after a failed stop, without extending the service's deadline.
   let ready;
   const first = new Promise(resolve => { ready = resolve; });
-  child.stdout.on('data', chunk => { process.stdout.write(chunk); ready(); });
+  let references, pending = '';
+  child.stdout.on('data', chunk => {
+    process.stdout.write(chunk);
+    pending += chunk.toString();
+    const lines = pending.split('\n'); pending = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('ADAPTER_VIEW ')) continue;
+      const view = JSON.parse(line.slice('ADAPTER_VIEW '.length));
+      ready();
+      // Only after PnP disappearance with a lingering IP Helper row. Keep
+      // duplicate-handle diagnostics out of ordinary fast removal entirely.
+      if (!references && view.pnpPresent === false && view.pnpError === '<nil>' && view.table0?.length) {
+        references = run(path.resolve('dist/windows-test/testisp.exe'), ['observe-references'], { timeout: 8000 })
+          .then(result => console.log(result.stdout), error => console.error('ADAPTER_REFERENCE_INVENTORY_INCOMPLETE', error.message));
+      }
+    }
+  });
   child.stderr.on('data', chunk => process.stderr.write(chunk));
   const timer = setTimeout(() => child.kill(), 35_000);
   const done = new Promise(resolve => {
@@ -60,7 +76,7 @@ async function retirementObserver() {
     child.on('close', code => { clearTimeout(timer); ready(); console.log(`ADAPTER_VIEW_EXIT ${code}`); resolve(); });
   });
   await first;
-  return () => done;
+  return async () => { await done; await references; };
 }
 const udpSizes = [64, 1200, 1800, 8192, 12000, ...(options.profile === 'v1' ? [65000] : [])];
 

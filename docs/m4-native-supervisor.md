@@ -2,6 +2,45 @@
 
 ## Adapter removal: evidence still required
 
+The follow-up reference inventory is read-only and local-only until the
+current acceptance run finishes. When PnP is absent but the normal row remains,
+the harness starts a separate eight-second inventory helper. It reports the
+matching host/child/registrar/harness process tree, system handle object IDs,
+file-object names, and both families' owning-PID TCP/UDP endpoints bound to
+the TUN addresses. Device instance, physical object name and interface paths
+are recorded before close. Handle-table/name reads are racing snapshots, not
+ownership authority. Remote name queries temporarily duplicate handles and
+can therefore delay removal themselves; their interval is explicitly logged
+and the helper is killed at its bound. Do not attribute removal latency during
+that interval to the engine. Endpoints retain exact counts with 256 details
+per table; handle inventory stops with an explicit incomplete error at 8192
+selected handles or 64 MiB of system table. A blocked name query is reported
+as incomplete, never as no surviving handles.
+
+At the first 250 ms of a lingering row, a trace-only engine snapshot records
+TCP submitted/completed I/O, live registrations, pending OVERLAPPED state,
+UDP registrations, socket handle IDs and live goroutines. TryLock failures
+are recorded rather than blocking cleanup; details and stacks are bounded.
+
+Code audit: `Engine.stopLocked` cancels flows and joins TCP, UDP, TUN pumps
+and the session before journal cleanup. `socketWatch.Detach` waits for the
+CancelIoEx completion before unpinning; UDP detaches WSAEventSelect before
+closing its socket. The completion port and UDP shard workers themselves
+remain until `shutdownTail.finalize` calls `Dialer.Close`, after runtime Stop.
+Their existence alone does not prove a live socket: both pool close functions
+refuse live registrations. The registrar owns the only explicit Wintun device
+open in product code, and session close joins its process exit.
+
+One additional surviving reference is concrete in the supervised path:
+the host retains its connected, TUN-bound health UDP socket until the entire
+supervisor returns. Non-running status clears cached index/port but does not
+disconnect that socket. It is a candidate for installed-service teardown, but
+cannot explain standalone acceptance, which does not start the supervisor.
+No teardown or absence-rule change is justified as the demonstrated fix yet;
+the inventories must identify what remains in the failing standalone path.
+[Microsoft's surprise-removal contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/handling-an-irp-mn-surprise-removal-request)
+confirms that an open device handle can prevent the final remove IRP.
+
 ARM64 job 120561072134 joined the session in 69 ms but exhausted the
 five-second IP Helper confirmation. This disproves session retirement as a
 complete explanation of the remaining failure. No new absence criterion is

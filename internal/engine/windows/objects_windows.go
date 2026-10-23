@@ -28,12 +28,13 @@ func uintField(fp journal.Fingerprint, key string) uint64 {
 }
 
 type objects struct {
-	adapter    *wintun.Adapter
-	recovering bool
-	timings    *phaseTimings
-	wfp        windows.Handle
-	wfpBatch   bool
-	wfpCreates int
+	adapter              *wintun.Adapter
+	recovering           bool
+	timings              *phaseTimings
+	wfp                  windows.Handle
+	wfpBatch             bool
+	wfpCreates           int
+	retirementReferences func()
 }
 type object struct {
 	all  *objects
@@ -394,6 +395,8 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 		// Keep the durable ownership record until the same view used by Create
 		// confirms absence. Never adopt or remove a replacement to make progress.
 		defer o.all.timings.begin("adapter.retirement.confirm")()
+		observed := false
+		began := time.Now()
 		return awaitAdapterRemoval(ctx, func() (bool, error) {
 			var table *windows.MibIfTable2
 			if err := windows.GetIfTable2Ex(windows.MibIfTableNormal, &table); err != nil {
@@ -402,6 +405,10 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 			defer windows.FreeMibTable(unsafe.Pointer(table))
 			for _, row := range unsafe.Slice(&table.Table[0], table.NumEntries) {
 				if strings.EqualFold(row.InterfaceGuid.String(), fp["guid"]) {
+					if !observed && time.Since(began) >= 250*time.Millisecond && o.all.retirementReferences != nil {
+						observed = true
+						o.all.retirementReferences()
+					}
 					if oldLUID != 0 && row.InterfaceLuid != oldLUID {
 						return false, errors.New("adapter identity changed during retirement; refusing replacement")
 					}

@@ -56,6 +56,8 @@ func main() {
 		err = recoverDevice()
 	case "observe-retirement":
 		err = observeRetirement()
+	case "observe-references":
+		err = observeReferences()
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
