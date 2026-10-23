@@ -5,6 +5,7 @@ package wintun
 import (
 	"errors"
 	"fmt"
+	"runtime/metrics"
 	"strings"
 	"sync"
 	"testing"
@@ -82,6 +83,30 @@ func newThreadIDs(before, after map[uint32]bool) int {
 		}
 	}
 	return n
+}
+
+// runtimeThreads reports how many OS threads the Go runtime owns, from the
+// runtime's own bookkeeping (/sched/threads/total:threads, computed from
+// mcount minus the extra Ms in runtime/metrics.go). It reports a new M before
+// its OS thread exists: mcommoninit adds the M to allm while preemption is
+// disabled and the thread is started only afterwards (runtime/proc.go). Extra
+// Ms, used for callbacks on threads the runtime did not create, are excluded.
+//
+// This matters because the runtime gives every new M native handles that a
+// handle diff cannot tell from a registrar's: minit creates two
+// high-resolution timers and a wait completion packet (runtime/os_windows.go
+// minit) and the M's first park creates its two semaphore events through
+// semacreate (runtime/os_windows.go, called from lock_sema.go). Wintun job
+// 120219177139 failed on exactly those five handles with no new thread handle
+// and no new thread ID to attribute them to.
+func runtimeThreads(t *testing.T) uint64 {
+	t.Helper()
+	sample := []metrics.Sample{{Name: "/sched/threads/total:threads"}}
+	metrics.Read(sample)
+	if kind := sample[0].Value.Kind(); kind != metrics.KindUint64 {
+		t.Fatalf("runtime thread metric is %v, want uint64", kind)
+	}
+	return sample[0].Value.Uint64()
 }
 
 // newLiveThreads counts handles in after but not before that are threads of
@@ -185,8 +210,10 @@ func TestWintunRegistrarStartupCloseErrors(t *testing.T) {
 				})
 			}
 			warmRuntimeThreads()
+			time.Sleep(10 * time.Millisecond) // let every warmed M park and create its semaphore events
 			before := handleSnapshot(t)
 			beforeThreads := processThreads(t)
+			beforeRuntimeThreads := runtimeThreads(t)
 			r, err := allocateRings(MinCapacity)
 			must(t, err)
 			defer r.close()
@@ -217,22 +244,43 @@ func TestWintunRegistrarStartupCloseErrors(t *testing.T) {
 			child = 0
 			must(t, childCloseErr)
 			must(t, r.close())
+			// Give an M the pass just started time to park: it creates its two
+			// semaphore events only when it first parks, and they belong to
+			// this measurement rather than the next one.
+			time.Sleep(10 * time.Millisecond)
 			after := handleSnapshot(t)
+			afterRuntimeThreads := runtimeThreads(t)
 			kinds := newHandleKinds(t, before, after)
-			// A new OS thread in this process (Go runtime or Windows thread
-			// pool) brings its own handles: run 39587194026 saw exactly one
-			// thread, two events, two high-resolution timers and one wait
-			// completion packet. Attribute at most two new events to each
-			// new handle that is a live thread of this process; any other
-			// event, and every other kind, is still a leak. New threads are
-			// counted both by handle and by thread ID; the larger count wins.
-			threads := max(newLiveThreads(t, before, after), newThreadIDs(beforeThreads, processThreads(t)))
-			events := kinds["Event"]
-			if threadEvents := min(events, 2*threads); threadEvents != 0 {
-				t.Logf("new events attributed to %d new live thread(s) of this process: %d of %d old_pass=false", threads, threadEvents, events)
-				kinds["Event"] -= threadEvents
+			// A new Go M brings its own handles, and the registrar creates
+			// none of those kinds: every M gets two high-resolution timers and
+			// a wait completion packet from minit (runtime/os_windows.go) and
+			// two semaphore events from semacreate the first time it parks
+			// (runtime/os_windows.go, called from lock_sema.go). Count the Ms
+			// from the runtime's thread count, which sees a new M even when no
+			// new thread handle or thread ID is visible, and from the
+			// timer/packet pair itself, which also sees an extra M whose
+			// thread handle dropm closes again. Attribute at most one M's set
+			// per M; any other handle, and any excess over that set, is a leak.
+			runtimeMs := 0
+			if afterRuntimeThreads > beforeRuntimeThreads {
+				runtimeMs = int(afterRuntimeThreads - beforeRuntimeThreads)
 			}
-			for _, kind := range []string{"Section", "Job", "File", "Pipe", "Process", "Event", "unreadable"} {
+			liveThreads := newLiveThreads(t, before, after)
+			threadIDs := newThreadIDs(beforeThreads, processThreads(t))
+			timerMs := min(kinds["IRTimer"]/2, kinds["WaitCompletionPacket"])
+			ms := max(runtimeMs, liveThreads, threadIDs, timerMs)
+			for _, attributable := range []struct {
+				kind string
+				per  int
+			}{{"Event", 2}, {"IRTimer", 2}, {"WaitCompletionPacket", 1}} {
+				if n := min(kinds[attributable.kind], attributable.per*ms); n != 0 {
+					kinds[attributable.kind] -= n
+				}
+			}
+			if ms != 0 {
+				t.Logf("attributed one runtime M's handles to %d M(s) (runtime threads=%d handle=%d id=%d timer pair=%d) old_pass=false", ms, runtimeMs, liveThreads, threadIDs, timerMs)
+			}
+			for _, kind := range []string{"Section", "Job", "File", "Pipe", "Process", "Event", "IRTimer", "WaitCompletionPacket", "unreadable"} {
 				if kinds[kind] != 0 {
 					if !enforce {
 						t.Logf("warm-up pass new handles %v old_pass=false (not enforced; the second pass is)", kinds)
