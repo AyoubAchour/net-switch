@@ -43,6 +43,48 @@ const selectionTarget = () => localSelection ? tlsResponder.target : publicTarge
 const selectionDestination = () => localSelection ? tlsResponder.destination : publicDestination;
 const appDeviceIDs = new Set();
 const destinationCount = (stats, destination) => stats.destinations?.[destination] ?? 0;
+
+async function adapterView() {
+  const result = await run(path.resolve('dist/windows-test/testisp.exe'), ['observe-retirement', 'once']);
+  const line = result.stdout.split('\n').find(value => value.startsWith('ADAPTER_VIEW '));
+  assert(line, 'Missing adapter identity observation');
+  return JSON.parse(line.slice('ADAPTER_VIEW '.length));
+}
+
+async function retirementObserver() {
+  if (options.profile !== 'v1') return async () => {};
+  const child = spawn(path.resolve('dist/windows-test/testisp.exe'), ['observe-retirement'],
+    { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  // The first sample must precede stop. Sampling runs in another process and
+  // continues after a failed stop, without extending the service's deadline.
+  let ready;
+  const first = new Promise(resolve => { ready = resolve; });
+  let references, pending = '';
+  child.stdout.on('data', chunk => {
+    process.stdout.write(chunk);
+    pending += chunk.toString();
+    const lines = pending.split('\n'); pending = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('ADAPTER_VIEW ')) continue;
+      const view = JSON.parse(line.slice('ADAPTER_VIEW '.length));
+      ready();
+      // Only after PnP disappearance with a lingering IP Helper row. Keep
+      // duplicate-handle diagnostics out of ordinary fast removal entirely.
+      if (!references && view.pnpPresent === false && view.pnpError === '<nil>' && view.table0?.length) {
+        references = run(path.resolve('dist/windows-test/testisp.exe'), ['observe-references'], { timeout: 8000 })
+          .then(result => console.log(result.stdout), error => console.error('ADAPTER_REFERENCE_INVENTORY_INCOMPLETE', error.message));
+      }
+    }
+  });
+  child.stderr.on('data', chunk => process.stderr.write(chunk));
+  const timer = setTimeout(() => child.kill(), 35_000);
+  const done = new Promise(resolve => {
+    child.on('error', error => { clearTimeout(timer); console.error('ADAPTER_VIEW_ERROR', error); ready(); resolve(); });
+    child.on('close', code => { clearTimeout(timer); ready(); console.log(`ADAPTER_VIEW_EXIT ${code}`); resolve(); });
+  });
+  await first;
+  return async () => { await done; await references; };
+}
 const udpSizes = [64, 1200, 1800, 8192, 12000, ...(options.profile === 'v1' ? [65000] : [])];
 
 async function applied(route, body, matches) {
@@ -865,10 +907,33 @@ try {
     const cycles = [], snapshots = [];
     for (let n = 1; n <= 20; n++) {
       const phases = {}, started = performance.now(), eventStart = serverOutput.events.length;
-      await timedPhase(phases, 'routingOffMs', () => server.api('routing', { on: false }));
+      const finishObservation = n === 1 ? await retirementObserver() : async () => {};
+      try { await timedPhase(phases, 'routingOffMs', () => server.api('routing', { on: false })); }
+      catch (error) {
+        error.evidence = { cycle: n, phases, native: serverOutput.events.slice(eventStart) };
+        throw error;
+      }
+      finally { await finishObservation(); }
       snapshots.push({ cycle: n, ...await timedPhase(phases, 'stoppedChecksMs', stoppedSnapshot) });
+      const beforeArrival = options.profile === 'v1' ? await adapterView() : null;
+      if (beforeArrival?.table0?.length) {
+        assert.equal(beforeArrival.pnpPresent, false);
+        assert.equal(beforeArrival.pnpError, '<nil>');
+        for (const row of beforeArrival.table0) {
+          assert.equal(row.ipInterface2.present, false);
+          assert.equal(row.ipInterface23.present, false);
+          assert.equal(row.addressCount, 0);
+        }
+      }
       await timedPhase(phases, 'routingOnMs', () => server.api('routing', { on: true }));
       await timedPhase(phases, 'routingReadyMs', () => server.on());
+      if (beforeArrival?.table0?.length) {
+        const afterArrival = await adapterView();
+        assert.equal(afterArrival.pnpPresent, true);
+        assert(afterArrival.table0.some(row => row.ipInterface2.present && row.ipInterface23.present));
+        console.log(`WINDOWS LINGERING ROW RECREATE ${JSON.stringify({ cycle: n, before: beforeArrival, after: afterArrival,
+          reusedLUID: afterArrival.table0.some(row => beforeArrival.table0.some(old => old.luid === row.luid)) })}`);
+      }
       rememberAppDevices(await timedPhase(phases, 'runningPnPCheckMs', pnpDevices));
       await timedPhase(phases, 'firstFlowMs', async () => {
         try { return await client('open', { target: responder.virtual }); } catch (error) {
@@ -977,7 +1042,21 @@ try {
     await report.test('OS port limit refuses cleanly, preserves flows and recovers within the 512 MiB budget', 'parity', async () => {
       await client('close');
       const { capacity } = await import('./capacity.mjs');
-      return capacity({ server, harness, directory: dir, line: second.id });
+      return capacity({ server, harness, directory: dir, line: second.id, stopHeld: async (held) => {
+        assert(held.tcp > 0 && held.udp > 0, 'Loaded stop needs independently reconciled TCP flows and UDP sessions');
+        console.log(`WINDOWS LOADED STOP BEGIN ${JSON.stringify(held)}`);
+        const finishObservation = await retirementObserver();
+        const began = performance.now();
+        let stopMs;
+        try { await server.api('routing', { on: false }); stopMs = performance.now() - began; }
+        finally { await finishObservation(); }
+        assert(stopMs < 20_000, `Loaded stop exceeded service budget: ${stopMs} ms`);
+        const cleanup = await stoppedSnapshot();
+        const direct = await harness.probe();
+        const evidence = { ...held, stopMs, cleanup, direct };
+        console.log(`WINDOWS LOADED STOP ${JSON.stringify(evidence)}`);
+        return evidence;
+      } });
     });
     report.pendingMilestone('service lifecycle and hung worker', 2, 'The engine process is real; SCM installation, recovery actions and Control worker jobs are the separate lifecycle milestone.');
     report.pendingMilestone('installer migration from 0.3.0/0.3.1, update rollback and uninstall', 5, 'Release remains blocked on the installer milestone. Existing installer smoke tests remain required.');
@@ -993,7 +1072,15 @@ try {
   if (restoreDNS) try { await network('dns-restore', dnsAdapter); } catch (error) { console.error(error); process.exitCode = 1; }
   if (worker?.exitCode === null && worker.connected) worker.disconnect();
   if (quicServer?.exitCode === null) quicServer.kill();
-  if (server?.child.exitCode === null) try { await server.quit(); } catch (error) { console.error(error); process.exitCode = 1; }
+  if (server?.child.exitCode === null) {
+    const finishObservation = await retirementObserver();
+    const began = performance.now(), eventStart = serverOutput.events.length;
+    let completed = false;
+    try { await server.quit(); completed = true; } catch (error) { console.error(error); process.exitCode = 1; }
+    finally { console.log(`WINDOWS FINAL QUIT ${JSON.stringify({ elapsedMs: performance.now() - began, completed,
+      native: serverOutput.events.slice(eventStart).filter(event => event.operation === 'stop') })}`);
+      await finishObservation(); }
+  }
   // Check before TestISP's Wintun shutdown can erase an orphan. Only the same
   // non-present IDs observed while our engine was running may use this baseline
   // exemption. The normal 0.3.x stop also terminates its child on Windows.

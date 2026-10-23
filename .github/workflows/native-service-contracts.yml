@@ -2,10 +2,10 @@ name: Native service contracts
 
 on:
   pull_request:
-    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'scripts/run-native-proof.mjs', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
   push:
     branches: [main]
-    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
+    paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'scripts/run-native-proof.mjs', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
   workflow_dispatch:
     inputs:
       runner:
@@ -58,15 +58,16 @@ jobs:
           go test -v -count=1 ./internal/engine ./internal/engine/host ./internal/engine/protocol ./internal/engine/flows ./internal/engine/probe ./internal/engine/testproxy ./internal/service
           go test -v -count=1 -tags lifecycle_test ./internal/engine/testproxy
           go test -tags lifecycle_test -run '^$' -fuzz '^FuzzProxyHandshake$' -fuzztime=5s ./internal/engine/testproxy
-          go test -v -count=1 -tags lifecycle_test -run '^TestNative(ReadFault|ManagerExit)' ./internal/lifecycle
-          go test -v -count=1 -run '^TestNative(Stall|TCPInfo|Actor)' ./tests/lifecycle
+          go test -v -count=1 -tags lifecycle_test -run '^TestNative(ReadFault|Readers|ManagerExit|Health)' ./internal/lifecycle
+          go test -v -count=1 -run '^TestNative(Stall|TCPInfo|Actor|HeldFlow|LoadFixture)' ./tests/lifecycle
       - name: Windows process diagnostic build contracts
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $buildCases = @(
-            @{ Tags = ''; Tests = @('TestProductNoProcessDiagnostics') },
+              @{ Tags = ''; Tests = @('TestProductNoProcessDiagnostics', 'TestPrivatePipeACLBeforePIDCheck', 'TestAdapterRetirementPrecedesJournalClosure', 'TestAdapterRetirementHonorsCancellation', 'TestAdapterRetirementMayOutliveTwoSeconds', 'TestAdapterPresenceUsesPnPAndBothIPFamilies', 'TestAdapterHistorySurvivesProcessAndJournalCheckpoint', 'TestAdapterCreateAfterRowFullyDisappears', 'TestUnreadableForeignWintunDoesNotBlockPresence', 'TestAdapterIntentRecoversBeforeHistoryWasSaved', 'TestAdapterRecoveryOnlyAdoptsVerifiedIdentity', 'TestCorruptAdapterHistoryIsReplaced', 'TestAdapterHistoryFailureDoesNotAdvanceMemory') },
+            @{ Tags = ''; Tests = @('TestAdapterLossContractCleansJournalAndNativeHandleBeforeReceipt', 'TestAdapterLossHandoffIsIdempotentAndLeavesOtherErrorsFatal', 'TestServeTailTerminalDecisionAndLateFailures', 'TestServeTailExplicitStopWinsAndFlushesReplyBeforeClose', 'TestServeTailLeaseCleanupAfterFailedStopWins', 'TestServeTailExplicitStopUnresponsiveControllerIsBounded', 'TestServeTailNoControllerStillReturnsAdapterLoss', 'TestRuntimeStopAfterLossLatchRetriesCancelledCleanup', 'TestServeTailDefersFinalizationUntilTimedOutProbeActuallyJoins') },
             @{ Tags = 'netswitch_handlecheck'; Tests = @('TestUDPPortSpaceDiagnosisReadsHostedSettings', 'TestPortConfigurationMatchesNativeProvider') }
           )
           foreach ($buildCase in $buildCases) {
@@ -106,7 +107,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             Push-Location tests/lifecycle
             try {
-              & (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') run-hosted
+              node (Join-Path $env:GITHUB_WORKSPACE 'scripts/run-native-proof.mjs') "native-$variant" (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') run-hosted
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             } finally { Pop-Location }
           }
@@ -128,9 +129,9 @@ jobs:
           $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE = Join-Path $proof 'netswitch-engine.exe'
           $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE).Hash.ToLowerInvariant()
           "CONTAINMENT_BINARY $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE $env:NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256"
-          & (Join-Path $proof 'winchild.test.exe') '-test.v' '-test.timeout=2m'
+          node scripts/run-native-proof.mjs launch (Join-Path $proof 'winchild.test.exe') '-test.v' '-test.timeout=2m'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & (Join-Path $proof 'wintun.test.exe') '-test.v' '-test.timeout=5m' '-test.run=^Test(WintunSupervisorContainment|RegistrarBusyRetryOnlyUnclaimedRegistration)$'
+          node scripts/run-native-proof.mjs containment-retry (Join-Path $proof 'wintun.test.exe') '-test.v' '-test.timeout=5m' '-test.run=^Test(WintunSupervisorContainment|RegistrarBusyRetryOnlyUnclaimedRegistration)$'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Installed Linux services, product and fault builds
         if: runner.os == 'Linux'
@@ -149,7 +150,7 @@ jobs:
             done
             go test -c -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" ./tests/lifecycle
             sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"
-            (cd tests/lifecycle && sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR,NETSWITCH_NATIVE_CI,NETSWITCH_NATIVE_FAULTS "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v '-test.run=^TestNativeEngineService$' -test.timeout=12m)
+            (cd tests/lifecycle && sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR,NETSWITCH_NATIVE_CI,NETSWITCH_NATIVE_FAULTS "$(command -v node)" "$GITHUB_WORKSPACE/scripts/run-native-proof.mjs" "native-$variant" "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v '-test.run=^TestNativeEngineService$' -test.timeout=12m)
           done
       - name: Linux service evidence
         if: always() && runner.os == 'Linux'

@@ -124,12 +124,35 @@ func (s *Server) handle(ctx context.Context, r Request, c *connection) Reply {
 	if err != nil {
 		reply.Result = nil
 		reply.Error = err.Error()
+		var cleanup *explicitStopFailure
+		if errors.As(err, &cleanup) && s.OnCleanupFailure != nil {
+			notify := sync.OnceFunc(func() { s.OnCleanupFailure(cleanup.error) })
+			if c == nil {
+				notify()
+			} else {
+				// Give the failed stop its reply-before-exit ordering, but a
+				// controller that stops reading cannot hold failed capture alive.
+				timer := time.AfterFunc(TerminalDeliveryTimeout, notify)
+				reply.afterWrite = func() { timer.Stop(); notify() }
+			}
+		}
 	}
 	return reply
 }
+
+type explicitStopFailure struct{ error }
+
+func (e *explicitStopFailure) Unwrap() error { return e.error }
+
+func (s *Server) explicitStop(ctx context.Context) error {
+	if err := s.runtime.Stop(platform.WithCleanupOwner(ctx)); err != nil {
+		return &explicitStopFailure{err}
+	}
+	return nil
+}
 func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, error) {
 	switch r.Method {
-	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "adapterForgetLane", "testProxy":
+	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "adapterForgetLane", "testProxy", "testFault":
 		// A new controller cannot overtake an accepted mutation. Renewals
 		// remain independent of adapter file/HTTP work and disk flushes.
 		s.mutation.Lock()
@@ -194,7 +217,7 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 	}
 	if r.Method == "stop" && s.stopping && r.Instance == s.Instance && r.Epoch == s.epoch {
 		s.mu.Unlock()
-		err := s.runtime.Stop(ctx)
+		err := s.explicitStop(ctx)
 		s.mu.Lock()
 		if err == nil {
 			s.stopped = true
@@ -254,7 +277,13 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		if s.TestFault == nil {
 			return nil, errors.New("test faults unavailable in production")
 		}
-		return s.TestFault(ctx, r.Fault)
+		fault := s.TestFault
+		// A restart fault can wait for a registrar ACK consumed by the same
+		// private pump that calls Supervision. Never hold its protocol lock
+		// across external work. The mutation lock still fences the operation.
+		s.mu.Unlock()
+		defer s.mu.Lock()
+		return fault(ctx, r.Fault)
 	case "renew":
 		s.expires = s.now().Add(Lease)
 		return true, nil
@@ -277,7 +306,7 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 	case "stop":
 		s.stopping = true
 		s.mu.Unlock()
-		err := s.runtime.Stop(ctx)
+		err := s.explicitStop(ctx)
 		s.mu.Lock()
 		if err != nil {
 			return nil, err
@@ -434,7 +463,7 @@ func (s *Server) CheckLease(ctx context.Context) error {
 		return nil
 	}
 	s.mu.Unlock()
-	err := s.runtime.Stop(ctx)
+	err := s.runtime.Stop(platform.WithCleanupOwner(ctx))
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err == nil {

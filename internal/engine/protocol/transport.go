@@ -96,6 +96,9 @@ func (s *Server) Serve(ctx context.Context, rw io.ReadWriteCloser) error {
 			case c.replies <- reply:
 			case <-ctx.Done():
 				<-c.slots
+				if reply.afterWrite != nil {
+					reply.afterWrite()
+				}
 			}
 		})
 	}
@@ -191,6 +194,9 @@ func (c *connection) write(ctx context.Context, w io.Writer) error {
 		}
 		if reply {
 			<-c.slots
+			if done := value.(Reply).afterWrite; done != nil {
+				done()
+			}
 			if value.(Reply).stop && c.stopped != nil {
 				c.stopped()
 			}

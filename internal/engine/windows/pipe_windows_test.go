@@ -108,8 +108,12 @@ func deniedPipeClient() error {
 	if err := mediumPeerIdentity(); err != nil {
 		return err
 	}
-	p, _ := windows.UTF16PtrFromString(EnginePipe)
-	h, err := windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
+	name, access := EnginePipe, uint32(windows.GENERIC_READ|windows.GENERIC_WRITE)
+	if private := os.Getenv("NETSWITCH_PRIVATE_PIPE_DENIED"); private != "" {
+		name, access = private, windows.FILE_READ_DATA|windows.FILE_WRITE_DATA|windows.FILE_READ_ATTRIBUTES|windows.SYNCHRONIZE
+	}
+	p, _ := windows.UTF16PtrFromString(name)
+	h, err := windows.CreateFile(p, access, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
 	if err == nil {
 		winhandle.Open(h, "denied pipe probe unexpectedly opened").HandleClose("denied pipe probe close")
 		return errors.New("medium deny-only peer opened the engine pipe")
@@ -119,6 +123,34 @@ func deniedPipeClient() error {
 	}
 	fmt.Println("Medium integrity, Administrators deny-only, not elevated: engine pipe denied access")
 	return nil
+}
+
+func TestPrivatePipeACLBeforePIDCheck(t *testing.T) {
+	hosted(t)
+	// Deliberately disclose the exact name. No Accept runs, so the PID check
+	// cannot explain the denial: it must come from the pipe's SYSTEM ACL.
+	nonce := "c48ca730ffb44240acf9a380e837f234"
+	listener, err := ListenChildPipe(nonce, uint32(os.Getpid()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	token := restrictedPeerToken(t)
+	defer token.Close()
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	child := exec.CommandContext(ctx, self)
+	child.Env = append(os.Environ(), "NETSWITCH_PIPE_DENIED_CHILD=1", "NETSWITCH_PRIVATE_PIPE_DENIED="+EnginePipe+".child."+nonce)
+	child.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(token.owner.Handle("private pipe negative peer")), CreationFlags: windows.DETACHED_PROCESS, HideWindow: true}
+	output, err := child.CombinedOutput()
+	t.Logf("known_private_name=true accept_called=false %s", output)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 type peerToken struct {

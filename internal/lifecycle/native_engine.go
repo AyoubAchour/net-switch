@@ -15,7 +15,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/settings"
 )
 
-func nativeEngineService(ctx context.Context, ready func(), c Config, log func(string)) error {
+func runNativeChild(ctx context.Context, ready func(), c Config, log func(string), configure func(*host.Options)) error {
 	run, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
@@ -66,6 +66,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, log func(s
 	if err := configureNativeProof(c.Data, &options); err != nil {
 		return err
 	}
+	configure(&options)
 	// Native Serve owns the OS lifetime lock and cleanup. Acquiring the old
 	// adapter lock here would deadlock Linux startup on the same engine.lock.
 	err = serveNative(run, c.Data, options)
@@ -101,6 +102,9 @@ func writeOutcome(data string, out host.Outcome) error {
 	}
 	if len(out.Error) > 4096 {
 		out.Error = out.Error[:4096]
+	}
+	if out.Child != nil && len(out.Child.Error) > 1024 {
+		out.Child.Error = out.Child.Error[:1024]
 	}
 	return saveNative(path, out)
 }

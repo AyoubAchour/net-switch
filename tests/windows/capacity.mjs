@@ -143,7 +143,7 @@ async function waitForReturnedPorts({ engineStats, before, released, target, nat
   }
 }
 
-export async function capacity({ server, harness, directory, line }) {
+export async function capacity({ server, harness, directory, line, stopHeld }) {
   hostedOnly();
   const target = await harness.control('capacity', {});
   const children = [];
@@ -507,6 +507,7 @@ export async function capacity({ server, harness, directory, line }) {
       workingSetPerFlow: last.processMemory.workingSetBytes / (held + progress.udp.held),
       gcCPUppm: last.gcCPUppm,
       capWindowGCShare: (last.gcCPUNanos - samples[0].gcCPUNanos) / Math.max(1, last.totalCPUNanos - samples[0].totalCPUNanos) };
+    if (stopHeld) evidence.stopWithHeld = await stopHeld({ tcp: afterRecovery.tcp, udp: afterRecovery.udp });
     console.log(`WINDOWS OS-LIMIT CAPACITY RESULT ${JSON.stringify(evidence)}`);
     return evidence;
   } catch (error) {

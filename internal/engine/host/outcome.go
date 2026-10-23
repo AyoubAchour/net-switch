@@ -5,24 +5,36 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/AyoubAchour/net-switch/internal/sharedfile"
 )
 
 type Outcome struct {
-	Instance string `json:"engineInstanceId"`
-	State    string `json:"state"` // running, pending, complete, failed
-	Reason   string `json:"reason,omitempty"`
-	Error    string `json:"error,omitempty"`
+	Child    *ChildOutcome `json:"child,omitempty"`
+	Instance string        `json:"engineInstanceId"`
+	State    string        `json:"state"` // running, pending, complete, failed
+	Reason   string        `json:"reason,omitempty"`
+	Error    string        `json:"error,omitempty"`
 	// systemd can unload an inactive unit and forget ExecMainStatus. Only its
 	// matching ExecStopPost invocation may supply the retained main result.
 	InvocationID string       `json:"invocationId,omitempty"`
 	BootID       string       `json:"bootId,omitempty"`
 	Systemd      *SystemdExit `json:"systemd,omitempty"`
+}
+
+type ChildOutcome struct {
+	HostHealthPasses   uint64 `json:"hostHealthPasses,omitempty"`
+	HostHealthFailures uint64 `json:"hostHealthFailures,omitempty"`
+	HostLogsDropped    uint64 `json:"hostLogsDropped,omitempty"`
+	PID                uint32 `json:"pid"`
+	Code               uint32 `json:"code"`
+	Forced             bool   `json:"forced"`
+	Completed          bool   `json:"completed"`
+	Error              string `json:"error,omitempty"`
 }
 
 func OutcomePath(data, instance string) (string, error) {
@@ -39,12 +51,7 @@ func ReadOutcome(data, instance string) (Outcome, error) {
 	if err != nil {
 		return result, err
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return result, err
-	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, (32<<10)+1))
+	b, err := sharedfile.ReadFile(path, 32<<10)
 	if err != nil {
 		return result, err
 	}

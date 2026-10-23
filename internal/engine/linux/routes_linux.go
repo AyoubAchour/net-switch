@@ -87,13 +87,14 @@ type Platform struct {
 	ProbeError     func() error
 }
 type bindingSnapshot struct {
+	tunIndex   int
 	lines      map[string]lineState
 	capturing  bool
 	configured int
 }
 
 func (p *Platform) publishBindings() {
-	view := &bindingSnapshot{lines: make(map[string]lineState, len(p.lines)), capturing: p.capturing, configured: len(p.configured)}
+	view := &bindingSnapshot{lines: make(map[string]lineState, len(p.lines)), capturing: p.capturing, configured: len(p.configured), tunIndex: p.tunSpec.Index}
 	for id, l := range p.lines {
 		view.lines[id] = l
 	}

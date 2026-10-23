@@ -7,6 +7,9 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 )
 
+// AwakeNow is the same clock used by the child lease and host failure window.
+func AwakeNow() time.Time { return leaseNow() }
+
 // Status separates loaded forwarding from durable history and diagnostics.
 // It never contains policy/flow arrays, so its wire size is fixed.
 type Status struct {
@@ -35,4 +38,21 @@ func (s *Server) status() Status {
 		out.State, out.Applied = "on", applied
 	}
 	return out
+}
+
+// Supervision is accessible only to the hosting bootstrap, never as a public
+// protocol method. The host does not infer health from this status response.
+func (s *Server) Supervision() (string, int, uint16, int64, uint64) {
+	status := s.status()
+	s.mu.Lock()
+	epoch := s.epoch
+	s.mu.Unlock()
+	if r, ok := s.runtime.(interface{ ForwardingCheck() (int, uint16) }); ok {
+		index, port := r.ForwardingCheck()
+		if status.State == "on" && status.Applied == nil {
+			index, port = 0, 0
+		}
+		return status.State, index, port, status.Started.UnixNano(), epoch
+	}
+	return status.State, 0, 0, status.Started.UnixNano(), epoch
 }

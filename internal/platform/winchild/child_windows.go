@@ -327,6 +327,17 @@ func (p *Process) Resume() error {
 	return err
 }
 
+// Alive is a readiness snapshot through the pinned handle, never a PID lookup.
+func (p *Process) Alive() (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closing {
+		return false, os.ErrClosed
+	}
+	state, err := windows.WaitForSingleObject(p.process.Handle("guarded child readiness check"), 0)
+	return err == nil && state == uint32(windows.WAIT_TIMEOUT), err
+}
+
 func (p *Process) observe() {
 	_, err := windows.WaitForSingleObject(p.process.Handle("guarded child exit wait"), windows.INFINITE)
 	var code uint32

@@ -49,25 +49,27 @@ func (r *Routes) StopPhase(name string) func() {
 }
 
 type Routes struct {
-	Instance      string
-	mu            sync.Mutex
-	session       *journal.Session
-	objects       *objects
-	tun           *wintun.Session
-	lines         []platform.Line
-	configured    map[string]bool
-	bindings      atomic.Pointer[bindingTable]
-	statsBindings atomic.Pointer[bindingTable]
-	statsTun      atomic.Pointer[wintun.Session]
-	active        atomic.Bool
-	capture       []journal.Fingerprint
-	permissions   []journal.Creation
-	cancel        context.CancelFunc
-	done          chan struct{}
-	Table         *flows.Table
-	Fatal         func(error)
-	timings       *phaseTimings
-	trace         *packetTrace
+	retirementError func() error
+	healthIndex     atomic.Uint32
+	Instance        string
+	mu              sync.Mutex
+	session         *journal.Session
+	objects         *objects
+	tun             *wintun.Session
+	lines           []platform.Line
+	configured      map[string]bool
+	bindings        atomic.Pointer[bindingTable]
+	statsBindings   atomic.Pointer[bindingTable]
+	statsTun        atomic.Pointer[wintun.Session]
+	active          atomic.Bool
+	capture         []journal.Fingerprint
+	permissions     []journal.Creation
+	cancel          context.CancelFunc
+	done            chan struct{}
+	Table           *flows.Table
+	Fatal           func(error)
+	timings         *phaseTimings
+	trace           *packetTrace
 }
 
 func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Routes, error) {
@@ -95,6 +97,14 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 	s, err := j.Open(ctx, boot, instance)
 	if err != nil {
 		return nil, err
+	}
+	if disk, ok := store.(*diskJournal); ok {
+		o.adapterLUID, err = disk.adapterHistory(boot)
+		if err != nil {
+			s.Close()
+			return nil, err
+		}
+		o.saveAdapterLUID = func(luid uint64) error { return disk.saveAdapterHistory(boot, luid) }
 	}
 	if err := s.Cleanup(ctx); err != nil {
 		s.Close()
@@ -138,6 +148,7 @@ func (r *Routes) openTun(ctx context.Context) (platform.TunDevice, error) {
 		return nil, err
 	}
 	base := journal.Fingerprint{"guid": wintun.DefaultGUID, "luid": number(luid), "index": number(uint64(index))}
+	r.healthIndex.Store(index)
 	var setup []journal.Creation
 	for _, family := range []uint16{windows.AF_INET, windows.AF_INET6} {
 		fp := maps.Clone(base)
@@ -395,14 +406,17 @@ func (r *Routes) Cleanup(ctx context.Context) (err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if tun := r.tun; tun != nil {
-		// Join even if journal reading or a mutation fails. The adapter's
-		// Remove also joins before destroying its device, so native rings
-		// cannot outlive the final stop acknowledgement or lose an error.
-		defer func() {
-			finish := r.timings.begin("tun.session.join.wait")
-			err = errors.Join(err, tun.Close())
-			finish()
-		}()
+		// No WFP transaction or adapter mutation may overlap registrar exit.
+		// This also covers direct Routes.Close and recovery/rollback callers.
+		finish := r.timings.begin("tun.session.join.wait")
+		joinErr := tun.Close()
+		if joinErr == nil && r.retirementError != nil {
+			joinErr = r.retirementError()
+		}
+		finish()
+		if joinErr != nil {
+			return fmt.Errorf("native session retirement failed before journal cleanup: %w", joinErr)
+		}
 	}
 	r.objects.recovering = true
 	err = r.session.Cleanup(ctx)

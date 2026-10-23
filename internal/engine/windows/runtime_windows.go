@@ -199,6 +199,7 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 		}
 	}()
 	routes.timings.record("state.directory", stateElapsed)
+	routes.retirementError = options.RetirementError
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	owners := NewOwners()
@@ -214,6 +215,9 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 		return fmt.Errorf("initialize Windows socket readiness: %w", err)
 	}
 	closeDialer := sync.OnceValue(dialer.Close)
+	if hostedTraceEnabled() {
+		routes.objects.retirementReferences = dialer.retirementReferences
+	}
 	defer func() {
 		if !shutdownComplete {
 			err = joinShutdownError(err, closeDialer())
@@ -238,7 +242,7 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 		return tun, err
 	}
 	e := engine.New(ctx, engine.Dependencies{OpenTun: openTun, Routes: routes, Dialer: dialer, Owners: owners, Identities: owners,
-		SilentSYNDiagnostics: true},
+		SilentSYNDiagnostics: true, HealthKey: options.HealthKey},
 		flows.Defaults(), history)
 	loss := newAdapterLoss()
 	e.OnTunError = loss.handle
@@ -271,7 +275,11 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 			err = joinShutdownError(err, stopProfile())
 		}
 	}()
-	pipe, err := ListenPipe(EnginePipe, standalone)
+	listen := options.Listen
+	if listen == nil {
+		listen = func() (host.Listener, error) { return ListenPipe(EnginePipe, standalone) }
+	}
+	pipe, err := listen()
 	options.Stage("pipe-created")
 	if err != nil {
 		return err

@@ -58,6 +58,14 @@ func waitNativeCleanup(t *testing.T, fixture tunFixture, data, instance string) 
 	}
 }
 
+func nativeOwnershipIDs(t *testing.T, data, instance string) map[string]bool {
+	ids := map[string]bool{}
+	for _, r := range nativeLiveRecords(t, data, instance) {
+		ids[r.ID] = true
+	}
+	return ids
+}
+
 func assertNativeExitRetention(t *testing.T, data, instance string) {
 	t.Helper()
 	// list-units does not load the unit. Wait for actual collection so the

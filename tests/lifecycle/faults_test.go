@@ -26,6 +26,11 @@ func arm(t *testing.T, data, point string) {
 	if err := os.WriteFile(filepath.Join(data, "fault-"+point), []byte("hosted test only\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := os.Remove(filepath.Join(data, "fault-"+point)); err != nil && !os.IsNotExist(err) {
+			t.Error(err)
+		}
+	})
 }
 func barrier(t *testing.T, data, point string) uint32 {
 	t.Helper()

@@ -169,6 +169,7 @@ func Install(c Config) error {
 		"netswitch-engine.service": "[Unit]\nDescription=Net Switch Engine\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch-engine") + " service --data " + quoted(c.Data) + "\nExecStopPost=" + run("netswitchctl") + " cleanup --engine --data " + quoted(c.Data) + "\nRestart=no\nKillMode=mixed\nTimeoutStopSec=30s\nCapabilityBoundingSet=" + readCapabilities + "\nDeviceAllow=/dev/net/tun rw\n" + common,
 	}
 	if c.Native {
+		units["netswitch-engine.service"] += "WatchdogSec=8s\nWatchdogSignal=SIGKILL\nNotifyAccess=main\n"
 		units["netswitch-engine.service"] += nativeStateMetadata(c.Data)
 		// The journal-owned TUN is created after this mount namespace, with a
 		// fresh name per instance. A missing per-device ReadWritePaths entry

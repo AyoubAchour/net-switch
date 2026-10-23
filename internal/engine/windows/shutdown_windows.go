@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 )
 
@@ -74,7 +75,7 @@ func serveUntilStopped(parent context.Context, s shutdownTail) (err error) {
 			// its reply-before-close rule, without running terminal finalizers.
 			cancelStop()
 			stop, cancelStop = context.WithTimeout(context.Background(), 15*time.Second)
-			err = joinShutdownError(err, s.runtime.Stop(stop))
+			err = joinShutdownError(err, s.runtime.Stop(platform.WithCleanupOwner(stop)))
 			deliveryCtx, cancelDelivery := context.WithTimeout(context.Background(), protocol.TerminalDeliveryTimeout)
 			select {
 			case <-s.server.Done():
@@ -94,7 +95,7 @@ func serveUntilStopped(parent context.Context, s shutdownTail) (err error) {
 			}
 		}
 	} else {
-		err = joinShutdownError(err, s.runtime.Stop(stop))
+		err = joinShutdownError(err, s.runtime.Stop(platform.WithCleanupOwner(stop)))
 	}
 	cancelStop()
 	s.cancel()

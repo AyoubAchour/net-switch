@@ -101,7 +101,12 @@ try {
       # These arguments contain no spaces; Start-Process therefore preserves
       # each selector. Pin the process handle before waiting (including a
       # failed exit), and bound the whole process, not only Go's test timer.
-      $process = Start-Process -FilePath $phase.program -ArgumentList $arguments -WorkingDirectory $PWD.Path -NoNewWindow -PassThru
+      $program = $phase.program
+      if ($phase.proof) {
+        $arguments = @('scripts/run-native-proof.mjs', $phase.proof, $program) + $arguments
+        $program = 'node'
+      }
+      $process = Start-Process -FilePath $program -ArgumentList $arguments -WorkingDirectory $PWD.Path -NoNewWindow -PassThru
       $null = $process.Handle
       Write-Output "INTEGRITY_PHASE_PROCESS scenario=$Scenario repeat=$repeat phase=$name pid=$($process.Id)"
       if (-not $process.WaitForExit(($seconds + 15) * 1000)) {

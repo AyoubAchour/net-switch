@@ -3,11 +3,18 @@
 package host
 
 import (
+	"context"
 	"crypto/tls"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"io"
 )
+
+type Listener interface {
+	Accept(context.Context) (io.ReadWriteCloser, error)
+	Close() error
+}
 
 type State interface {
 	flows.StateStore
@@ -16,6 +23,11 @@ type State interface {
 }
 
 type Options struct {
+	// Listen replaces only the transport. The child retains all protocol state.
+	Listen func() (Listener, error)
+	// HealthKey enables the private, TUN-bound forwarding endpoint for a child.
+	// It is delivered over inherited capabilities, never the public protocol.
+	HealthKey []byte
 	// OpenState runs only after the native lifetime lock has been acquired.
 	OpenState func(instance string) (State, error)
 	// Ready runs after the authenticated listener and its workers exist.
@@ -27,6 +39,9 @@ type Options struct {
 	// WrapTun is nil in product builds; hosted tests stall the actual packet
 	// reader without suspending the separate control/lease goroutines.
 	WrapTun func(platform.TunDevice) platform.TunDevice
+	// RetirementError injects a cached session-close failure in hosted proofs.
+	// It is nil in product builds and is never installed by manager recovery.
+	RetirementError func() error
 	// ProbeTLS is set only by hosted fault builds with a private fixture CA.
 	ProbeTLS   *tls.Config
 	ProbeError func() error // hosted dial-stage exhaustion injection; nil in product

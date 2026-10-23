@@ -7,11 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"net/netip"
 	"runtime"
 	"strconv"
-	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/journal"
@@ -26,12 +27,15 @@ func uintField(fp journal.Fingerprint, key string) uint64 {
 }
 
 type objects struct {
-	adapter    *wintun.Adapter
-	recovering bool
-	timings    *phaseTimings
-	wfp        windows.Handle
-	wfpBatch   bool
-	wfpCreates int
+	adapter              *wintun.Adapter
+	recovering           bool
+	timings              *phaseTimings
+	wfp                  windows.Handle
+	wfpBatch             bool
+	wfpCreates           int
+	retirementReferences func()
+	adapterLUID          uint64
+	saveAdapterLUID      func(uint64) error
 }
 type object struct {
 	all  *objects
@@ -220,27 +224,12 @@ func (o object) Inspect(ctx context.Context, fp journal.Fingerprint) (journal.Fi
 		if o.all.recovering {
 			return maps.Clone(fp), true, nil
 		}
-		var table *windows.MibIfTable2
-		if err := windows.GetIfTable2Ex(windows.MibIfTableNormal, &table); err != nil {
-			return nil, false, err
+		present, err := nativeAdapterPresent(fp["guid"], fp["name"], o.all.adapterLUID)
+		other := maps.Clone(fp)
+		if present {
+			other["foreignLuid"] = number(o.all.adapterLUID)
 		}
-		defer windows.FreeMibTable(unsafe.Pointer(table))
-		for _, r := range unsafe.Slice(&table.Table[0], table.NumEntries) {
-			if strings.EqualFold(r.InterfaceGuid.String(), fp["guid"]) {
-				// A present adapter we did not create is not ours to remove.
-				other := maps.Clone(fp)
-				other["foreignLuid"] = number(r.InterfaceLuid)
-				return other, true, nil
-			}
-			if windows.UTF16ToString(r.Alias[:]) == fp["name"] {
-				other := maps.Clone(fp)
-				other["guid"] = r.InterfaceGuid.String()
-				return other, true, nil
-			}
-		}
-		// Recovery is entered only after loading an existing durable record
-		// under the lifetime lock. Remove verifies the phantom's GUID again.
-		return maps.Clone(fp), o.all.recovering, nil
+		return other, present, err
 	}
 	match, err := interfaceMatches(fp)
 	if err != nil || !match {
@@ -319,6 +308,9 @@ func (o object) Create(ctx context.Context, fp journal.Fingerprint) error {
 	if o.kind == "adapter" {
 		a, err := wintun.Create(wintun.Config{Name: fp["name"], GUID: fp["guid"], TunnelType: "NetSwitch", MTU: 9000})
 		o.all.adapter = a
+		if err == nil {
+			err = o.all.rememberAdapter(a.LUID())
+		}
 		return err
 	}
 	match, err := interfaceMatches(fp)
@@ -366,6 +358,42 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 	}
 	switch o.kind {
 	case "adapter":
+		// Publish fingerprint-checked WFP deletions before removing their
+		// interface. Do not hold the BFE transaction across device retirement
+		// or its IP Helper confirmation. Durable intents remain until the
+		// entire cleanup succeeds, so a crash can replay missing objects safely.
+		if err := o.all.commitFirewallBatch(); err != nil {
+			return err
+		}
+		oldLUID := o.all.adapterLUID
+		adoptedPresent := false
+		if o.all.recovering && o.all.adapter == nil {
+			rows, err := nativeAdapterRows()
+			if err != nil {
+				return err
+			}
+			oldLUID, adoptedPresent, err = recoveredAdapterLUID(fp["guid"], fp["name"], oldLUID, rows,
+				func() (bool, error) { return inspectWintunDevice(fp["guid"], true) }, nativeIPInterface)
+			if err != nil {
+				return err
+			}
+			if oldLUID != 0 && oldLUID != o.all.adapterLUID {
+				if err := o.all.rememberAdapter(oldLUID); err != nil {
+					return err
+				}
+			}
+		}
+		if o.all.adapter != nil {
+			oldLUID = o.all.adapter.LUID()
+			if oldLUID != o.all.adapterLUID {
+				if err := o.all.rememberAdapter(oldLUID); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := nativeAdapterPresent(fp["guid"], fp["name"], oldLUID); err != nil {
+			return err
+		}
 		if o.all.adapter != nil {
 			finish := o.all.timings.begin("adapter.close")
 			err := o.all.adapter.Close()
@@ -376,7 +404,26 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 			}
 		}
 		defer o.all.timings.begin("adapter.RecoverAfterCrash")()
-		return wintun.RecoverAfterCrash(wintun.Config{Name: fp["name"], GUID: fp["guid"]})
+		recoverAdapter := wintun.RecoverAfterCrash
+		if adoptedPresent {
+			recoverAdapter = wintun.RecoverJournaledAdapter
+		}
+		if err := recoverAdapter(wintun.Config{Name: fp["name"], GUID: fp["guid"]}); err != nil {
+			return err
+		}
+		// PnP plus both IP families, exactly as in the creation guard. NDIS
+		// TIME_WAIT rows do not prove that the adapter remains functional.
+		defer o.all.timings.begin("adapter.retirement.confirm")()
+		observed := false
+		began := time.Now()
+		return awaitAdapterRemoval(ctx, func() (bool, error) {
+			present, err := nativeAdapterPresent(fp["guid"], fp["name"], oldLUID)
+			if present && !observed && time.Since(began) >= 250*time.Millisecond && o.all.retirementReferences != nil {
+				observed = true
+				o.all.retirementReferences()
+			}
+			return present, err
+		})
 	case "route":
 		r := routeRow(fp)
 		return ignoreMissing(api("DeleteIpForwardEntry2", uintptr(unsafe.Pointer(&r))))
@@ -398,4 +445,36 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 		return setDNS(fp, uint32(uintField(fp, "before")))
 	}
 	return errors.New("unknown object")
+}
+
+func awaitAdapterRemoval(parent context.Context, present func() (bool, error)) (result error) {
+	// Registrar retirement is bounded at 2+5 s. Reserve the remaining part
+	// of the 15 s service shutdown for journal/IPC completion; never spend
+	// the host's entire 20 s stopping bound on this one confirmation.
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	started, polls := time.Now(), 0
+	defer func() {
+		log.Printf("WINDOWS ADAPTER RETIREMENT arch=%s elapsed=%s polls=%d confirmed=%t error=%v", runtime.GOARCH, time.Since(started), polls, result == nil, result)
+	}()
+	for {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("adapter removal not confirmed by IP Helper: %w", err)
+		}
+		polls++
+		found, err := present()
+		if err != nil {
+			return fmt.Errorf("inspect retiring adapter: %w", err)
+		}
+		if !found {
+			return nil
+		}
+		timer := time.NewTimer(25 * time.Millisecond)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("adapter removal not confirmed by IP Helper: %w", ctx.Err())
+		}
+	}
 }

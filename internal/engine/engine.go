@@ -28,6 +28,7 @@ import (
 )
 
 type Dependencies struct {
+	HealthKey  []byte
 	OpenTun    func(context.Context) (platform.TunDevice, error)
 	Routes     platform.RouteManager
 	Dialer     platform.LineDialer
@@ -45,23 +46,25 @@ type Engine struct {
 	// ordinary cleanup and OnFatal path. Install before starting the engine.
 	OnTunError func(error) bool
 
-	OnFatal   func(error)
-	mu        sync.Mutex
-	root      context.Context
-	deps      Dependencies
-	Table     *flows.Table
-	limits    flows.Limits
-	cancel    context.CancelFunc
-	tun       platform.TunDevice
-	stack     *gv.Stack
-	link      *ns.Link
-	tcp       *ntcp.Forwarder
-	udp       *udp.NAT
-	testProxy *testproxy.Server
-	pumps     sync.WaitGroup
-	lastError error
-	lines     []platform.Line
-	live      atomic.Pointer[liveState]
+	OnFatal    func(error)
+	mu         sync.Mutex
+	root       context.Context
+	deps       Dependencies
+	Table      *flows.Table
+	limits     flows.Limits
+	cancel     context.CancelFunc
+	tun        platform.TunDevice
+	stack      *gv.Stack
+	link       *ns.Link
+	tcp        *ntcp.Forwarder
+	udp        *udp.NAT
+	testProxy  *testproxy.Server
+	health     *forwardingCheck
+	healthInfo atomic.Pointer[forwardingInfo]
+	pumps      sync.WaitGroup
+	lastError  error
+	lines      []platform.Line
+	live       atomic.Pointer[liveState]
 }
 
 type liveState struct {
@@ -139,6 +142,9 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	}
 	e.link = link
 	e.stack = s
+	if err := e.startForwardingCheck(); err != nil {
+		return rollback(err)
+	}
 	// A disconnected controller does not own the forwarding lifetime. The
 	// service context and protocol lease do; reattach keeps these flows alive.
 	run, cancel := context.WithCancel(e.root)
@@ -252,7 +258,7 @@ func (e *Engine) fail(link *ns.Link, err error) {
 			return
 		}
 		e.lastError = err
-		cleanup := e.stopLocked(context.Background())
+		cleanup := e.stopLocked(platform.WithCleanupOwner(context.Background()))
 		e.lastError = errors.Join(err, cleanup)
 		e.Table.Emit(flowapi.Event{Type: "fatal", Message: e.lastError.Error()})
 		if e.OnFatal != nil {
@@ -319,6 +325,11 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 		e.testProxy.Close()
 		e.testProxy = nil
 	}
+	if e.health != nil {
+		e.health.Close()
+		e.health = nil
+	}
+	e.healthInfo.Store(nil)
 	e.Table.Unload()
 	e.Table.CloseAll()
 	finish()
@@ -343,8 +354,8 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	if e.tun != nil {
 		if starter, ok := e.tun.(platform.TunCloseStarter); ok {
 			// The cancelled I/O context wakes the pumps. Complete socket
-			// cancellation before native device teardown; device close still
-			// overlaps the journal's fingerprint checks and route cleanup.
+			// cancellation before native device teardown. Join that teardown
+			// before journal mutations can hold OS locks needed by the registrar.
 			beginTun = starter.BeginClose
 			joinTun = e.tun.Close
 		} else {
@@ -368,6 +379,9 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	finish = phase("tun-begin")
 	beginTun()
 	finish()
+	finish = phase("tun-join")
+	joined := joinTun()
+	finish()
 	finish = phase("link-close")
 	if e.link != nil {
 		e.link.Close()
@@ -384,7 +398,7 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	if e.deps.Routes != nil {
 		cleanup = e.deps.Routes.Cleanup(ctx)
 	}
-	err := errors.Join(cleanup, joinTun())
+	err := errors.Join(joined, cleanup)
 	status := "off"
 	if err != nil {
 		e.lastError = errors.Join(e.lastError, err)
@@ -394,6 +408,15 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 		lastError = Clip(e.lastError.Error(), 4096)
 	}
 	e.live.Store(&liveState{status: status, lastError: lastError})
+	// A failed stop can still own capture. It is not an idle configuration
+	// error that may wait for Control's backoff while its lease is renewed.
+	// Service runtimes route this nonblocking signal to process exit; their
+	// supervisor/manager recovers the retained journal after ownership ends.
+	// A caller already owning terminal delivery reports the returned error
+	// itself; a competing generic fatal would cut off that receipt.
+	if err != nil && e.OnFatal != nil && !platform.CleanupOwned(ctx) {
+		e.OnFatal(err)
+	}
 	return err
 }
 

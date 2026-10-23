@@ -4,6 +4,7 @@ package winengine
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ var errPeerRefused = errors.New("engine pipe peer refused")
 type Pipe struct {
 	name       string
 	standalone bool
+	peerPID    uint32
 	mu         sync.Mutex
 	pending    winhandle.Owner
 	closed     bool
@@ -43,6 +45,21 @@ func ListenPipe(name string, standalone bool) (*Pipe, error) {
 	p.pending = h
 	return p, nil
 }
+
+func ListenChildPipe(nonce string, hostPID uint32) (*Pipe, error) {
+	if b, err := hex.DecodeString(nonce); err != nil || len(b) != 16 || hostPID == 0 {
+		return nil, errors.New("invalid private engine endpoint")
+	}
+	p := &Pipe{name: EnginePipe + ".child." + nonce, first: true, peerPID: hostPID}
+	h, err := p.create()
+	if err != nil {
+		return nil, err
+	}
+	p.pending = h
+	return p, nil
+}
+
+func PeerRefused(err error) bool { return errors.Is(err, errPeerRefused) }
 
 func (p *Pipe) create() (winhandle.Owner, error) {
 	acl := "D:P(A;;GA;;;SY)"
@@ -125,6 +142,13 @@ func (p *Pipe) Accept(ctx context.Context) (io.ReadWriteCloser, error) {
 	if err := authenticatePipe(h.Handle("engine pipe authenticate"), p.standalone); err != nil {
 		windows.DisconnectNamedPipe(h.Handle("engine pipe refused peer"))
 		return nil, fmt.Errorf("%w: %v", errPeerRefused, err)
+	}
+	if p.peerPID != 0 {
+		var pid uint32
+		if err := windows.GetNamedPipeClientProcessId(h.Handle("private engine peer"), &pid); err != nil || pid != p.peerPID {
+			windows.DisconnectNamedPipe(h.Handle("private engine refused peer"))
+			return nil, fmt.Errorf("%w: private peer PID=%d expected=%d error=%v", errPeerRefused, pid, p.peerPID, err)
+		}
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()

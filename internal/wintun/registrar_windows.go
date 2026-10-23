@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"strings"
@@ -161,6 +162,7 @@ func (g *registrar) exitCode() uint32 {
 // our own escalation kill is engine-initiated, so neither counts as owner death.
 // Both reasons are still an adapter-lost session; this only sets the diagnostic.
 func (g *registrar) retire(closeHandle func(windows.Handle) error) (exited, lostBeforeStop bool, err error) {
+	started := winclock.Now()
 	preStop := g.alreadyExited()
 	err = g.control.Close("Wintun registrar control close", closeHandle)
 	exited = g.wait(registrarStopTimeout)
@@ -174,6 +176,7 @@ func (g *registrar) retire(closeHandle func(windows.Handle) error) (exited, lost
 	if exited {
 		code = g.exitCode()
 	}
+	log.Printf("WINTUN REGISTRAR RETIRE pid=%d elapsed=%s pre_exited=%t eof_requested=true exit_observed=%t escalated=%t exit_code=%d", g.reply.PID, winclock.Since(started), preStop, exited, escalated, code)
 	lostBeforeStop = preStop || (exited && !escalated && code != 0)
 	err = errors.Join(err, g.job.Close("Wintun registrar job close", closeHandle),
 		g.process.Close("Wintun registrar process close", closeHandle))

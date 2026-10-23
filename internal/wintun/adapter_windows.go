@@ -303,6 +303,18 @@ func RecoverAfterCrash(config Config) error {
 }
 
 func recoverAfterCrash(config Config) (int, error) {
+	return recoverAdapterDevice(config, false)
+}
+
+// RecoverJournaledAdapter requires the caller's durable adapter intent and
+// lifetime lock. Unlike generic crash cleanup it may remove a present device,
+// but only after rechecking both its exact instance ID and registry GUID.
+func RecoverJournaledAdapter(config Config) error {
+	_, err := recoverAdapterDevice(config, true)
+	return err
+}
+
+func recoverAdapterDevice(config Config, journaled bool) (int, error) {
 	if config.GUID == "" || config.Name == "" {
 		return 0, fmt.Errorf("crash recovery requires the journaled adapter name and GUID")
 	}
@@ -333,20 +345,29 @@ func recoverAfterCrash(config Config) (int, error) {
 		if readErr != nil || !strings.EqualFold(id, guid.String()) {
 			continue
 		}
+		if journaled {
+			instance, err := set.DeviceInstanceID(dev)
+			if err != nil {
+				return 0, err
+			}
+			if !strings.EqualFold(instance, "SWD\\WINTUN\\"+guid.String()) {
+				return 0, fmt.Errorf("journal recovery instance mismatch: %s", instance)
+			}
+		}
 		var status, problem uint32
 		err = windows.CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0)
 		// The owner has exited, but Windows removes a dead creator's software
 		// device asynchronously: right after the crash it can still be present
 		// (ARM64 run 39574636242). Wait a bounded time for that removal; an
 		// adapter still present afterwards is refused as before.
-		for deadline := time.Now().Add(crashRemovalWait); err == nil && time.Now().Before(deadline); {
+		for deadline := time.Now().Add(crashRemovalWait); !journaled && err == nil && time.Now().Before(deadline); {
 			time.Sleep(50 * time.Millisecond)
 			err = windows.CM_Get_DevNode_Status(&status, &problem, dev.DevInst, 0)
 		}
-		if err == nil {
+		if err == nil && !journaled {
 			return 0, fmt.Errorf("refusing crash cleanup of present adapter %s", config.GUID)
 		}
-		if !errors.Is(err, windows.CR_NO_SUCH_DEVNODE) {
+		if err != nil && !errors.Is(err, windows.CR_NO_SUCH_DEVNODE) {
 			return 0, fmt.Errorf("check crashed Wintun device: %w", err)
 		}
 		instance, err := set.DeviceInstanceID(dev)

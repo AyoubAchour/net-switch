@@ -6,9 +6,11 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -19,7 +21,9 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/AyoubAchour/net-switch/internal/engine/supervisor"
 )
 
 // This fault only exists in hosted-test builds. The arm/hit/release files are
@@ -28,6 +32,18 @@ type stalledReader struct {
 	platform.TunDevice
 	data      string
 	ioContext context.Context
+	stalled   atomic.Bool
+	resets    atomic.Uint32
+}
+
+func (r *stalledReader) Close() error {
+	err := r.TunDevice.Close()
+	if runtime.GOOS == "linux" {
+		if _, fault := os.Stat(filepath.Join(r.data, "fault-native-retirement")); fault == nil {
+			err = errors.Join(err, errors.New("hosted session retirement failure"))
+		}
+	}
+	return err
 }
 
 // Preserve the native device's fast paths, cancellation and counters while
@@ -45,6 +61,7 @@ func (r *stalledReader) BindIOContext(ctx context.Context) {
 	}
 }
 func (r *stalledReader) BeginClose() {
+	nativeProofDelay(r.data, "stop")
 	if device, ok := r.TunDevice.(platform.TunCloseStarter); ok {
 		device.BeginClose()
 	}
@@ -55,7 +72,11 @@ func (r *stalledReader) RXChecksumVerified(p []byte) bool {
 }
 func (r *stalledReader) WriteBatch(packets [][]byte) (int, error) {
 	if device, ok := r.TunDevice.(platform.BatchWriter); ok {
-		return device.WriteBatch(packets)
+		n, err := device.WriteBatch(packets)
+		for _, p := range packets[:min(len(packets), max(0, n))] {
+			r.observeReset(p)
+		}
+		return n, err
 	}
 	ctx := r.ioContext
 	if ctx == nil {
@@ -65,8 +86,29 @@ func (r *stalledReader) WriteBatch(packets [][]byte) (int, error) {
 		if err := r.TunDevice.WritePacket(ctx, p); err != nil {
 			return i, err
 		}
+		r.observeReset(p)
 	}
 	return len(packets), nil
+}
+
+func (r *stalledReader) WritePacket(ctx context.Context, p []byte) error {
+	err := r.TunDevice.WritePacket(ctx, p)
+	if err == nil {
+		r.observeReset(p)
+	}
+	return err
+}
+func (r *stalledReader) observeReset(p []byte) {
+	if !r.stalled.Load() || len(p) < 40 || p[0]>>4 != 4 || p[9] != 6 {
+		return
+	}
+	ihl := int(p[0]&15) * 4
+	if ihl < 20 || len(p) < ihl+20 || p[ihl+13]&4 == 0 {
+		return
+	}
+	if r.resets.Add(1) <= 8 {
+		log.Printf("NATIVE_STALL_RST written=true pid=%d at=%s src=%v:%d dst=%v:%d", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano), p[12:16], binary.BigEndian.Uint16(p[ihl:]), p[16:20], binary.BigEndian.Uint16(p[ihl+2:]))
+	}
 }
 
 func (r *stalledReader) ReadPacket(ctx context.Context, b []byte) (int, error) {
@@ -78,6 +120,8 @@ func (r *stalledReader) ReadPacket(ctx context.Context, b []byte) (int, error) {
 	if os.Rename(arm, arm+".consumed") != nil {
 		return n, nil
 	}
+	r.stalled.Store(true)
+	log.Printf("NATIVE_READ_STALLED pid=%d at=%s bytes=%d", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano), n)
 	if err := Save(filepath.Join(r.data, "native-forwarding-hit.json"), map[string]any{"pid": os.Getpid(), "bytes": n}); err != nil {
 		return 0, err
 	}
@@ -96,6 +140,12 @@ func (r *stalledReader) ReadPacket(ctx context.Context, b []byte) (int, error) {
 }
 
 func configureNativeProof(data string, options *host.Options) error {
+	options.RetirementError = func() error {
+		if _, err := os.Stat(filepath.Join(data, "fault-native-retirement")); err == nil {
+			return errors.New("hosted session retirement failure")
+		}
+		return nil
+	}
 	var probeExhausted atomic.Bool
 	options.ProbeError = func() error {
 		if !probeExhausted.Swap(false) {
@@ -121,12 +171,29 @@ func configureNativeProof(data string, options *host.Options) error {
 		return err
 	}
 	options.Configure = func(server *protocol.Server, table *flows.Table) {
-		server.TestFault = func(_ context.Context, b json.RawMessage) (any, error) {
+		server.TestFault = func(ctx context.Context, b json.RawMessage) (any, error) {
 			var request struct {
-				Kind string `json:"kind"`
+				Kind     string          `json:"kind"`
+				Revision policy.Revision `json:"revision"`
 			}
 			if err := json.Unmarshal(b, &request); err != nil {
 				return nil, err
+			}
+			if request.Kind == "restart-routing" {
+				return true, server.RestartForTest(ctx, request.Revision)
+			}
+			if request.Kind == "idle-error" {
+				return true, server.IdleErrorForTest(ctx)
+			}
+			if request.Kind == "log-flood" {
+				logger, ok := log.Writer().(*supervisor.Log)
+				if !ok {
+					return nil, errors.New("child bounded logger unavailable")
+				}
+				for range 512 {
+					logger.Write(make([]byte, 4096))
+				}
+				return map[string]uint64{"dropped": logger.Dropped.Load()}, nil
 			}
 			if request.Kind == "probe-exhaustion" {
 				probeExhausted.Store(true)
@@ -164,9 +231,49 @@ func configureNativeProof(data string, options *host.Options) error {
 		_ = os.WriteFile(filepath.Join(data, "native-startup-stacks.txt"), b[:n], 0600)
 	})
 	options.WrapTun = func(tun platform.TunDevice) platform.TunDevice {
+		nativeProofDelay(data, "start")
 		return &stalledReader{TunDevice: tun, data: data}
 	}
 	return nil
+}
+
+func nativeProofDelay(data, phase string) {
+	path := filepath.Join(data, "fault-native-"+phase+"-delay")
+	var milliseconds int
+	if Read(path, &milliseconds) != nil || milliseconds < 1 || milliseconds > 60000 {
+		return
+	}
+	if os.Rename(path, path+".consumed") != nil {
+		return
+	}
+	log.Printf("NATIVE_LIFECYCLE_DELAY phase=%s milliseconds=%d pid=%d", phase, milliseconds, os.Getpid())
+	time.Sleep(time.Duration(milliseconds) * time.Millisecond)
+}
+
+func nativeProofBeforeReady(data string) error {
+	if _, err := os.Stat(filepath.Join(data, "fault-native-startup-exit")); err == nil {
+		return errors.New("hosted startup death before readiness")
+	}
+	return nil
+}
+func nativeProofLogSink(ctx context.Context, data string, report func(string)) func(string) {
+	return func(s string) {
+		path := filepath.Join(data, "fault-native-log-sink")
+		if _, err := os.Stat(path); err == nil {
+			_ = Save(path+".hit", map[string]int{"pid": os.Getpid()})
+			for {
+				if _, err := os.Stat(path); os.IsNotExist(err) {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(50 * time.Millisecond):
+				}
+			}
+		}
+		report(s)
+	}
 }
 
 // Hosted-only: attempt write opens without writing any bytes. This executes

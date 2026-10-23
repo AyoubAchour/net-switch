@@ -169,6 +169,14 @@ func assertNativeOwnedLeftovers(t *testing.T, data, instance string) {
 	t.Logf("NATIVE_LEFTOVERS instance=%s persistent_wfp=%d live_journal_records=%d", instance, len(live), len(records))
 }
 
+func nativeOwnershipIDs(t *testing.T, data, instance string) map[string]bool {
+	ids := map[string]bool{}
+	for _, r := range nativeFirewallRecords(t, data, instance) {
+		ids[r.ID] = true
+	}
+	return ids
+}
+
 func pauseNativeRecovery(t *testing.T) func() {
 	t.Helper()
 	m, err := mgr.Connect()
