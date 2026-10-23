@@ -865,7 +865,11 @@ try {
     const cycles = [], snapshots = [];
     for (let n = 1; n <= 20; n++) {
       const phases = {}, started = performance.now(), eventStart = serverOutput.events.length;
-      await timedPhase(phases, 'routingOffMs', () => server.api('routing', { on: false }));
+      try { await timedPhase(phases, 'routingOffMs', () => server.api('routing', { on: false })); }
+      catch (error) {
+        error.evidence = { cycle: n, phases, native: serverOutput.events.slice(eventStart) };
+        throw error;
+      }
       snapshots.push({ cycle: n, ...await timedPhase(phases, 'stoppedChecksMs', stoppedSnapshot) });
       await timedPhase(phases, 'routingOnMs', () => server.api('routing', { on: true }));
       await timedPhase(phases, 'routingReadyMs', () => server.on());

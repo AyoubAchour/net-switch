@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"net/netip"
 	"runtime"
@@ -425,13 +426,21 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 	return errors.New("unknown object")
 }
 
-func awaitAdapterRemoval(parent context.Context, present func() (bool, error)) error {
-	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
+func awaitAdapterRemoval(parent context.Context, present func() (bool, error)) (result error) {
+	// Confirmation is part of the existing graceful stop, not a separate
+	// two-second operation. A tighter caller cleanup deadline still wins.
+	// Keep ownership live throughout: a pending observation is not failure.
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
 	defer cancel()
+	started, polls := time.Now(), 0
+	defer func() {
+		log.Printf("WINDOWS ADAPTER RETIREMENT arch=%s elapsed=%s polls=%d confirmed=%t error=%v", runtime.GOARCH, time.Since(started), polls, result == nil, result)
+	}()
 	for {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("adapter removal not confirmed by IP Helper: %w", err)
 		}
+		polls++
 		found, err := present()
 		if err != nil {
 			return fmt.Errorf("inspect retiring adapter: %w", err)

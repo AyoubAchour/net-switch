@@ -186,7 +186,8 @@ Adapter removal now verifies absence in the same
 [IP Helper interface table](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2ex)
 used by creation, before allowing the journal's removed checkpoint. This is
 option A: no ownership continuation or adoption exception. Polling is read-only,
-bounded by the caller's deadline and two seconds; a changed LUID is refused,
+bounded by the caller's deadline and the existing 20-second graceful-stop
+ceiling; a changed LUID is refused,
 and timeout or inspection failure retains the ownership records. Existing
 object refusals now name the object kind, and retirement has a separate timing.
 
@@ -196,6 +197,21 @@ fresh traffic, and health for 23 seconds; final stop requires no leftovers.
 Pure tests verify that delayed disappearance keeps journal records live and
 that replacement/error/cancellation cannot silently retire ownership. Both
 Windows hosted jobs require the retirement tests' PASS lines.
+
+On 8e497723, x64 acceptance completed all 20 cycles, with confirmation taking
+54.16–63.43 ms, then failed during final cleanup after the capacity workload.
+ARM64 failed at the first cycle's stop. Both errors hit the added two-second
+confirmation cutoff; those failures only establish a lower bound, not an
+eventual removal time. That separate cutoff is removed: pending confirmation
+continues within the existing stop budget and keeps ownership live. Shorter
+caller deadlines, including supervisor recovery, still take precedence. A
+regression keeps confirmation pending for 2.1 seconds and requires success;
+cancellation and ownership-retention tests remain strict. Each completion now
+logs architecture, elapsed time, poll count and outcome so hosted runs measure
+the slow tail rather than censoring it at two seconds. Slow-tail completion
+times on both architectures still require the new hosted run; 20 seconds is
+the existing stop ceiling, not a newly measured removal bound. Cycle-stop
+failures now include the native phase evidence; the 20-cycle gate is unchanged.
 
 The Linux acceptance `routes.default-route-removed` failure in job
 120435827572 uses the namespace launcher's standalone `run` command, not the

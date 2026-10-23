@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/journal"
 )
@@ -72,5 +73,18 @@ func TestAdapterRetirementHonorsCancellation(t *testing.T) {
 	err := awaitAdapterRemoval(ctx, func() (bool, error) { cancel(); return true, nil })
 	if !errors.Is(err, context.Canceled) {
 		t.Fatal("retirement ignored caller deadline", err)
+	}
+}
+
+func TestAdapterRetirementMayOutliveTwoSeconds(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	started := time.Now()
+	err := awaitAdapterRemoval(ctx, func() (bool, error) { return time.Since(started) < 2100*time.Millisecond, nil })
+	if err != nil {
+		t.Fatal("pending removal became a premature stop failure", err)
+	}
+	if time.Since(started) < 2100*time.Millisecond {
+		t.Fatal("absence was not actually confirmed")
 	}
 }
