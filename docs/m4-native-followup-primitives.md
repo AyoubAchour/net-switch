@@ -40,6 +40,15 @@ result (quick never restores a line requiring full HTTPS), and drop a delayed
 result if its originating engine instance is no longer current. That instance
 check belongs in Control and is not implemented here.
 
+Harness caller audit: Windows capacity probes its plain TCP echo peer with
+`target, quick:true, custom:true`. Windows driver health and Linux's binding
+case use explicit quick TCP checks; their HTTPS validation/recovery cases use
+`quick:false, custom:false` to keep the named endpoints' response rules. The
+Linux session accepts a typed request and rejects a mismatched result kind.
+TestISP's CLI probe independently performs verified HTTPS, while capacity-client
+probes are direct TCP exchanges; neither sends an engine protocol request.
+Only the deliberate rejection tests still send an IP address as `operator`.
+
 The real Go transport detaches dial deadlines to support connection reuse. The
 probe explicitly retains its own deadline and cancellation on that dial, so a
 cancelled request cannot leave an unbounded socket attempt behind. Test CA and

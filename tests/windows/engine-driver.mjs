@@ -337,18 +337,20 @@ async function health() {
       snapshot.reason = !binding ? 'missing-binding' : !binding.up ? 'interface-down' :
         !binding.default4 ? 'no-default4' : 'probe';
       if (up) {
-        const probe = async (operator) => {
+        const probe = async (operator, quick = false) => {
+          const target = { cloudflare: '1.1.1.1:443', google: '8.8.8.8:443', quad9: '9.9.9.9:443' }[operator];
+          const label = quick ? `quick:${operator}` : operator;
           let result;
-          try { result = await command('probe', { opId: randomUUID(), line: line.id, operator }); }
+          try { result = await command('probe', { opId: randomUUID(), line: line.id, target, quick, custom: false }); }
           catch (error) {
-            snapshot.probes.push({ operator, outcome: 'command-error', error: error.message });
+            snapshot.probes.push({ operator: label, outcome: 'command-error', error: error.message });
             throw error;
           }
-          snapshot.probes.push({ operator, ...result });
+          snapshot.probes.push({ operator: label, ...result });
           if (result.outcome === 'engineUnavailable') throw new Error(result.error);
           return result;
         };
-        const quick = await probe('quick:cloudflare');
+        const quick = await probe('cloudflare', true);
         if (snapshot.previousUp && quick.ok) continue;
         if (!snapshot.previousUp) up = (await probe('cloudflare')).ok;
         else {

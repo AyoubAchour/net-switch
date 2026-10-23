@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
@@ -16,6 +17,41 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
 )
+
+func TestProbeUsesTypedTargetAndChecksReturnedKind(t *testing.T) {
+	for _, request := range []engine.ProbeRequest{
+		{Target: "192.0.2.1:7000", Quick: true, Custom: true},
+		{Target: "1.1.1.1:443", Quick: true, Custom: false},
+		{Target: "9.9.9.9:443", Quick: false, Custom: false},
+		{Target: "[2001:db8::1]:8443", Quick: false, Custom: true},
+	} {
+		kind := "full"
+		if request.Quick {
+			kind = "quick"
+		}
+		returnedKind := kind
+		d := New("unused")
+		d.call = func(_ context.Context, r protocol.Request) ([]byte, error) {
+			if r.Method != "probe" || r.OpID != "check" || r.Line != "a" || r.Operator != "" || r.Target != request.Target || r.Quick != request.Quick || r.Custom != request.Custom {
+				t.Fatal("probe options changed on the wire", r, request)
+			}
+			ms := 23.5
+			return json.Marshal(protocol.Reply{ID: r.ID, Result: platform.ProbeResult{OK: true, Kind: returnedKind, Outcome: "ok", LatencyMS: &ms}})
+		}
+		s := &Session{d: d}
+		result, err := s.Probe(context.Background(), "check", "a", request)
+		if err != nil || !result.OK || result.Kind != kind || result.Latency != 23500*time.Microsecond {
+			t.Fatal(result, err)
+		}
+		returnedKind = "quick"
+		if kind == "quick" {
+			returnedKind = "full"
+		}
+		if result, err := s.Probe(context.Background(), "check", "a", request); err == nil || result.OK {
+			t.Fatal("wrong check kind accepted", result, err)
+		}
+	}
+}
 
 // runtime is the smallest protocol.Runtime: the flow table alone.
 type runtime struct{ table *flows.Table }

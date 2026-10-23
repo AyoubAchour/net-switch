@@ -278,9 +278,16 @@ type Totals struct {
 	LineGenerations map[LineID]string
 }
 
+// ProbeRequest makes the check type explicit at every harness call site (4.5).
+type ProbeRequest struct {
+	Target        string
+	Quick, Custom bool
+}
+
 // ProbeResult is probe's answer (4.5).
 type ProbeResult struct {
 	OK      bool
+	Kind    string
 	Latency time.Duration
 	Error   string
 }
@@ -375,8 +382,8 @@ type Controller interface {
 	// CloseFlows is closeFlows{opId, selector, startedBefore}; startedBefore
 	// 0 means no cutoff.
 	CloseFlows(ctx context.Context, opID string, sel Selector, startedBefore uint64) (CloseResult, error)
-	// Probe is probe{opId, line, operator} (4.5).
-	Probe(ctx context.Context, opID string, line LineID, operator string) (ProbeResult, error)
+	// Probe is probe{opId, line, target, quick, custom} (4.5).
+	Probe(ctx context.Context, opID string, line LineID, request ProbeRequest) (ProbeResult, error)
 	Predict(ctx context.Context, app App) (Prediction, error)
 	Stats(ctx context.Context) (Stats, error)
 	InjectFault(ctx context.Context, f Fault) (FaultAck, error)

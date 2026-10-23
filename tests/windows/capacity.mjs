@@ -11,6 +11,14 @@ import { engineBindDelta, flowReconciliation, holdUDPCapacity, largeUDPReplies, 
   udpRecoveryCycles } from './udp-capacity.mjs';
 import { captureHeap } from './heap-profile.mjs';
 
+// The capacity peer is a plain TCP echo endpoint. This check tests local
+// socket allocation under pressure, not HTTPS or line recovery.
+export function capacityHealthProbe(server, line, target) {
+  const host = net.isIPv6(target.host) ? `[${target.host}]` : target.host;
+  return server.api('engine-command', { method: 'probe', fields: {
+    opId: randomUUID(), line, target: `${host}:${target.ports[0]}`, quick: true, custom: true } });
+}
+
 async function nativeRefusalBaseline(host) {
   const listener = net.createServer();
   listener.listen(0, host);
@@ -348,8 +356,8 @@ export async function capacity({ server, harness, directory, line }) {
     assert.equal(progress.wrongLine.unknownTCPAdmissions, 0, 'A capacity SYN lost its owner and left on the default line');
     assert(refusedStats.socketResources.exhaustions >= 128, 'Native bind failures were not counted');
     assert(refusedStats.tcpDialFailed - limitStats.tcpDialFailed >= 128, 'Refused app flows were not counted by the engine');
-    const health = await server.api('engine-command', { method: 'probe', fields: {
-      opId: randomUUID(), line, operator: `${target.host}:${target.ports[0]}` } });
+    const health = await capacityHealthProbe(server, line, target);
+    assert.equal(health.kind, 'quick', 'Capacity health must exercise TCP allocation only');
     assert.equal(health.outcome, 'engineUnavailable', 'Local port exhaustion was treated as line failure');
     const portStats = await until(async () => {
       const stats = await engineStats();
