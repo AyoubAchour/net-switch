@@ -57,7 +57,9 @@ The host starts checking at readiness, with three seconds per probe and an
 18-second continuous-failure window. Healthy forwarding resets the window.
 Only running, loaded forwarding is judged. Starting has a separate 35-second
 deadline (including the registrar's 15 seconds); stopping has 20 seconds.
-An error has 30 seconds for Control recovery or child exit. These lifecycle
+An idle error has no lifecycle deadline while the lease is live, just like off;
+Control's backoff/latch may keep it idle indefinitely. Lease expiry still ends
+the child. Starting and stopping lifecycle
 deadlines terminate directly, without adding another forwarding-failure window.
 Off means no forwarding is requested; a responsive status/renewal never proves
 active forwarding health. A change of start timestamp, epoch, index or port
@@ -186,8 +188,9 @@ Adapter removal now verifies absence in the same
 [IP Helper interface table](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2ex)
 used by creation, before allowing the journal's removed checkpoint. This is
 option A: no ownership continuation or adoption exception. Polling is read-only,
-bounded by the caller's deadline and the existing 20-second graceful-stop
-ceiling; a changed LUID is refused,
+bounded by the caller's deadline and five seconds, leaving room for registrar
+retirement and journal completion within the 15-second service cleanup and
+20-second host stopping bounds; a changed LUID is refused,
 and timeout or inspection failure retains the ownership records. Existing
 object refusals now name the object kind, and retirement has a separate timing.
 
@@ -212,6 +215,40 @@ the slow tail rather than censoring it at two seconds. Slow-tail completion
 times on both architectures still require the new hosted run; 20 seconds is
 the existing stop ceiling, not a newly measured removal bound. Cycle-stop
 failures now include the native phase evidence; the 20-cycle gate is unchanged.
+
+The later ARM64 rerun (job 120524427900) exhausted even that larger cap, so
+the timer increase did not fix the underlying shutdown problem. Its captured
+stack is a **10 ms phase snapshot**, not a deadline snapshot: `timings.begin`
+arms it at 10 ms. It shows journal Cleanup overlapping Session.maintain waiting
+on the registrar's process handle. `registrar.wait` waits for process exit,
+not an IPC ACK: retire closes the control writer, waits two seconds for EOF
+exit, then kills the verified registrar job and waits up to five seconds.
+The registrar waits on control-pipe EOF and leaves device-handle cleanup to
+process exit. The log contains no registrar-process stack and therefore cannot
+prove where its kernel exit was blocked or that it remained blocked for 20 s.
+
+Shutdown now joins the session before any journal mutation, removing the
+overlap with WFP transactions and adapter removal. Windows Routes.Cleanup also
+joins first for direct callers and refuses journal mutation if retirement
+fails. Fingerprint-checked WFP deletions commit before adapter removal and
+absence confirmation, rather than holding the BFE transaction across that wait;
+the original journal intents remain until all cleanup succeeds. A pure
+regression fails on the previous engine ordering and passes on
+the new order. Ownership and absence checks are unchanged. Registrar retirement
+now reports its elapsed time, observed process exit, escalation and exit code;
+phase stack records report their actual age. Hosted proof of the ARM64 outcome
+is still required; the missing registrar stack is not presented as a proved
+kernel wait cycle.
+
+Bootstrap readiness is again 15 seconds: it precedes routing startup and the
+registrar's separate startup allowance. The 35-second bound applies only to
+the routing `starting` state. The installed idle-error proof renews the lease
+for 65 seconds, preserves the child PID, and then recovers routing in that child.
+The x64 rerun (120524428050) also failed final cleanup after its capacity case.
+Acceptance now explicitly stops with the independently reconciled TCP and UDP
+cohorts still live, before fixture close. It requires acknowledgement inside
+20 seconds, the existing strict stopped snapshot and fresh direct traffic.
+All capacity/recovery assertions still run first; none are waived by this stop.
 
 The Linux acceptance `routes.default-route-removed` failure in job
 120435827572 uses the namespace launcher's standalone `run` command, not the

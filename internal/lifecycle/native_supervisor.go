@@ -183,7 +183,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 	instance := ""
 	var raw nativeResult
 	gotExit := false
-	startup := time.NewTimer(nativeStartBound)
+	startup := time.NewTimer(15 * time.Second) // bootstrap precedes routing/registrar startup
 	select {
 	case m := <-h.ready:
 		instance = m.Instance

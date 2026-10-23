@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 )
@@ -17,4 +18,15 @@ func (e *Engine) RestartForTest(ctx context.Context, r policy.Revision) error {
 	}
 	_, err := e.Start(ctx, r)
 	return err
+}
+
+func (e *Engine) IdleErrorForTest(ctx context.Context) error {
+	if err := e.Stop(ctx); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lastError = errors.New("hosted idle configuration error")
+	e.live.Store(&liveState{status: "error", lastError: e.lastError.Error()})
+	return nil
 }

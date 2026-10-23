@@ -52,7 +52,7 @@ func (p *phaseTimings) begin(name string) func() {
 		timer := time.AfterFunc(10*time.Millisecond, func() {
 			b := make([]byte, 256<<10)
 			n := runtime.Stack(b, true)
-			record, _ := json.Marshal(map[string]any{"operation": "stop-wait", "phase": name, "stacks": string(b[:n])})
+			record, _ := json.Marshal(map[string]any{"operation": "stop-wait", "phase": name, "elapsedNanos": uint64(winclock.Since(started)), "stacks": string(b[:n])})
 			log.Printf("WINDOWS LIFECYCLE %s", record)
 		})
 		return func() { timer.Stop(); finish() }

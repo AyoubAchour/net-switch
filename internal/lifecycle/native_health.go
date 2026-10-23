@@ -61,9 +61,7 @@ func (h *nativeForwardingHealth) lifecycle(state string, now time.Time) error {
 		bound = nativeStartBound
 	case "stopping":
 		bound = nativeStopBound
-	case "error":
-		bound = 30 * time.Second // Control recovery or lease-driven exit
-	case "off", "on":
+	case "off", "on", "error": // a live lease permits idle config-error recovery
 	default:
 		return fmt.Errorf("unknown native lifecycle state %q", state)
 	}

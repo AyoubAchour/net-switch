@@ -10,11 +10,11 @@ import (
 )
 
 func TestNativeHealthLifecycleDeadlines(t *testing.T) {
-	for _, state := range []string{"starting", "stopping", "error"} {
+	for _, state := range []string{"starting", "stopping"} {
 		t.Run(state, func(t *testing.T) {
 			var h nativeForwardingHealth
 			now := time.Unix(100, 0)
-			bound := map[string]time.Duration{"starting": nativeStartBound, "stopping": nativeStopBound, "error": 30 * time.Second}[state]
+			bound := map[string]time.Duration{"starting": nativeStartBound, "stopping": nativeStopBound}[state]
 			if err := h.lifecycle(state, now); err != nil {
 				t.Fatal(err)
 			}
@@ -34,6 +34,16 @@ func TestNativeHealthLifecycleDeadlines(t *testing.T) {
 				t.Fatal("old transition deadline leaked", err)
 			}
 		})
+	}
+}
+
+func TestNativeHealthIdleErrorSurvivesControlBackoff(t *testing.T) {
+	var h nativeForwardingHealth
+	now := time.Unix(100, 0)
+	for second := 0; second <= 90; second++ {
+		if err := h.lifecycle("error", now.Add(time.Duration(second)*time.Second)); err != nil {
+			t.Fatal("idle configuration error counted as engine failure", second, err)
+		}
 	}
 }
 

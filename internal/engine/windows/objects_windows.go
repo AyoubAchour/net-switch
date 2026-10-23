@@ -368,6 +368,13 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 	}
 	switch o.kind {
 	case "adapter":
+		// Publish fingerprint-checked WFP deletions before removing their
+		// interface. Do not hold the BFE transaction across device retirement
+		// or its IP Helper confirmation. Durable intents remain until the
+		// entire cleanup succeeds, so a crash can replay missing objects safely.
+		if err := o.all.commitFirewallBatch(); err != nil {
+			return err
+		}
 		var oldLUID uint64
 		if o.all.adapter != nil {
 			oldLUID = o.all.adapter.LUID()
@@ -427,10 +434,10 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 }
 
 func awaitAdapterRemoval(parent context.Context, present func() (bool, error)) (result error) {
-	// Confirmation is part of the existing graceful stop, not a separate
-	// two-second operation. A tighter caller cleanup deadline still wins.
-	// Keep ownership live throughout: a pending observation is not failure.
-	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
+	// Registrar retirement is bounded at 2+5 s. Reserve the remaining part
+	// of the 15 s service shutdown for journal/IPC completion; never spend
+	// the host's entire 20 s stopping bound on this one confirmation.
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	started, polls := time.Now(), 0
 	defer func() {

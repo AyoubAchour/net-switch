@@ -18,6 +18,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/lifecycle"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
@@ -48,6 +49,34 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 		return c, held
 	}
 	if faults {
+		t.Run("idle-error-survives-live-lease-backoff", func(t *testing.T) {
+			c, _ := start(t)
+			nativeMust(t, c, "testFault", map[string]any{"fault": map[string]any{"kind": "idle-error"}}, nil)
+			fixture.clean(t)
+			for until := time.Now().Add(65 * time.Second); time.Now().Before(until); {
+				nativeMust(t, c, "renew", nil, nil)
+				var state protocol.Status
+				nativeMust(t, c, "status", nil, &state)
+				if state.State != "error" || uint32(state.PID) != c.pid {
+					t.Fatal("idle error killed or replaced child", state)
+				}
+				time.Sleep(time.Second)
+			}
+			rev.N++
+			nativeMust(t, c, "start", map[string]any{"revision": rev}, nil)
+			fresh, err := fixture.dial(ctx, "tcp4", fixture.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { fresh.Close() })
+			nativeEcho(t, fresh, "recovered-idle-error")
+			fresh.Close()
+			nativeMust(t, c, "stop", nil, nil)
+			if err := service.WaitStopped(ctx, service.Engine); err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("NATIVE_IDLE_ERROR child_pid=%d seconds=65 lease_renewed=true recovered=true", c.pid)
+		})
 		t.Run("forwarding-health-under-load", func(t *testing.T) {
 			c, _ := start(t)
 			var peers []net.Conn

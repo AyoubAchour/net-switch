@@ -354,8 +354,8 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	if e.tun != nil {
 		if starter, ok := e.tun.(platform.TunCloseStarter); ok {
 			// The cancelled I/O context wakes the pumps. Complete socket
-			// cancellation before native device teardown; device close still
-			// overlaps the journal's fingerprint checks and route cleanup.
+			// cancellation before native device teardown. Join that teardown
+			// before journal mutations can hold OS locks needed by the registrar.
 			beginTun = starter.BeginClose
 			joinTun = e.tun.Close
 		} else {
@@ -379,6 +379,9 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	finish = phase("tun-begin")
 	beginTun()
 	finish()
+	finish = phase("tun-join")
+	joined := joinTun()
+	finish()
 	finish = phase("link-close")
 	if e.link != nil {
 		e.link.Close()
@@ -395,7 +398,7 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	if e.deps.Routes != nil {
 		cleanup = e.deps.Routes.Cleanup(ctx)
 	}
-	err := errors.Join(cleanup, joinTun())
+	err := errors.Join(joined, cleanup)
 	status := "off"
 	if err != nil {
 		e.lastError = errors.Join(e.lastError, err)

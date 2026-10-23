@@ -397,14 +397,14 @@ func (r *Routes) Cleanup(ctx context.Context) (err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if tun := r.tun; tun != nil {
-		// Join even if journal reading or a mutation fails. The adapter's
-		// Remove also joins before destroying its device, so native rings
-		// cannot outlive the final stop acknowledgement or lose an error.
-		defer func() {
-			finish := r.timings.begin("tun.session.join.wait")
-			err = errors.Join(err, tun.Close())
-			finish()
-		}()
+		// No WFP transaction or adapter mutation may overlap registrar exit.
+		// This also covers direct Routes.Close and recovery/rollback callers.
+		finish := r.timings.begin("tun.session.join.wait")
+		joinErr := tun.Close()
+		finish()
+		if joinErr != nil {
+			return fmt.Errorf("native session retirement failed before journal cleanup: %w", joinErr)
+		}
 	}
 	r.objects.recovering = true
 	err = r.session.Cleanup(ctx)

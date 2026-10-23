@@ -18,3 +18,11 @@ func (s *Server) RestartForTest(ctx context.Context, r policy.Revision) error {
 	}
 	return runtime.RestartForTest(ctx, r)
 }
+
+func (s *Server) IdleErrorForTest(ctx context.Context) error {
+	runtime, ok := s.runtime.(interface{ IdleErrorForTest(context.Context) error })
+	if !ok {
+		return errors.New("runtime has no hosted idle error")
+	}
+	return runtime.IdleErrorForTest(ctx)
+}

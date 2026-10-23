@@ -981,7 +981,19 @@ try {
     await report.test('OS port limit refuses cleanly, preserves flows and recovers within the 512 MiB budget', 'parity', async () => {
       await client('close');
       const { capacity } = await import('./capacity.mjs');
-      return capacity({ server, harness, directory: dir, line: second.id });
+      return capacity({ server, harness, directory: dir, line: second.id, stopHeld: async (held) => {
+        assert(held.tcp > 0 && held.udp > 0, 'Loaded stop needs independently reconciled TCP flows and UDP sessions');
+        console.log(`WINDOWS LOADED STOP BEGIN ${JSON.stringify(held)}`);
+        const began = performance.now();
+        await server.api('routing', { on: false });
+        const stopMs = performance.now() - began;
+        assert(stopMs < 20_000, `Loaded stop exceeded service budget: ${stopMs} ms`);
+        const cleanup = await stoppedSnapshot();
+        const direct = await harness.probe();
+        const evidence = { ...held, stopMs, cleanup, direct };
+        console.log(`WINDOWS LOADED STOP ${JSON.stringify(evidence)}`);
+        return evidence;
+      } });
     });
     report.pendingMilestone('service lifecycle and hung worker', 2, 'The engine process is real; SCM installation, recovery actions and Control worker jobs are the separate lifecycle milestone.');
     report.pendingMilestone('installer migration from 0.3.0/0.3.1, update rollback and uninstall', 5, 'Release remains blocked on the installer milestone. Existing installer smoke tests remain required.');

@@ -166,6 +166,9 @@ func configureNativeProof(data string, options *host.Options) error {
 			if request.Kind == "restart-routing" {
 				return true, server.RestartForTest(ctx, request.Revision)
 			}
+			if request.Kind == "idle-error" {
+				return true, server.IdleErrorForTest(ctx)
+			}
 			if request.Kind == "log-flood" {
 				logger, ok := log.Writer().(*supervisor.Log)
 				if !ok {
