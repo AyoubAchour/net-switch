@@ -334,10 +334,9 @@ func TestHTTPAdmissionRefusesOverLimitUsersAndDrainsOnClose(t *testing.T) {
 			c.Close()
 		}
 	}()
-	deadline := time.Now().Add(time.Second)
 	refused := 0
 	for i, c := range conns {
-		c.SetReadDeadline(deadline)
+		c.SetReadDeadline(time.Now().Add(time.Second))
 		_, err := c.Read(make([]byte, 1))
 		eof := errors.Is(err, io.EOF)
 		if eof {
