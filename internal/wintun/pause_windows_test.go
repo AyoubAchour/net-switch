@@ -465,7 +465,7 @@ func measureSessionDelay(t *testing.T, f *fixture, s *Session, c *net.UDPConn, p
 	end := ticks()
 	monitor.inflight.Store(0)
 	if string(reply[:n]) != string(payload) {
-		t.Fatal("injected trip payload mismatch")
+		t.Fatal(fmt.Errorf("%w: injected trip payload mismatch", errPayloadIntegrity))
 	}
 	monitor.finish(t)
 	return &sessionDelayAttempt{Number: number, Start: start, End: end, Samples: monitor.samples, Gaps: monitor.gaps, Queued: before}

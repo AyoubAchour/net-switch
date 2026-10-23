@@ -31,6 +31,25 @@ func integrityProofQualified(ratios []float64) bool {
 	return len(ratios) != 0 && median(ratios) >= 0.80
 }
 
+type integrityModeOverhead struct {
+	Pairs   int      `json:"pairs"`
+	Median  *float64 `json:"median_diagnostic_over_clean"`
+	Verdict string   `json:"verdict"`
+}
+
+func integrityModeResult(ratios []float64, expected int) integrityModeOverhead {
+	r := integrityModeOverhead{Pairs: len(ratios), Verdict: "diagnostic_incomplete"}
+	if len(ratios) != expected || expected == 0 {
+		return r
+	}
+	m := median(ratios)
+	r.Median, r.Verdict = &m, "valid"
+	if !integrityProofQualified(ratios) {
+		r.Verdict = "diagnostic_invalid"
+	}
+	return r
+}
+
 func integrityProofScope(scenario, boundary string) ([]string, []string, error) {
 	boundaries := []string{"receive", "ingress", "echo", "output", "send", "host"}
 	modes := []string{"ours", "dll"}
@@ -54,7 +73,7 @@ func integrityProofScope(scenario, boundary string) ([]string, []string, error) 
 
 // A qualification test, not corruption exposure. Compare the original clean
 // workload to the actual instrumented workload, with no discarded samples or
-// retries. The job-wide median of all paired ratios must retain >=80%.
+// retries. Each mode's median across its paired ratios must retain >=80%.
 func TestWintunIntegrityProof(t *testing.T) {
 	requireRunner(t)
 	if !integrityHooksEnabled {
@@ -68,6 +87,7 @@ func TestWintunIntegrityProof(t *testing.T) {
 	must(t, err)
 	completed := 0
 	var allRatios []float64
+	modeRatios := make(map[string][]float64)
 	for _, boundary := range boundaries {
 		for _, mode := range modes {
 			t.Run(boundary+"/"+mode, func(t *testing.T) {
@@ -129,17 +149,24 @@ func TestWintunIntegrityProof(t *testing.T) {
 				}
 				report(t, map[string]any{"test": "integrity_overhead", "verdict": "observed", "boundary": boundary, "mode": mode, "median_diagnostic_over_clean": median(ratios), "pair_ratios": ratios, "clean": clean, "diagnostic": observed, "minimum_ratio": 0.80, "arch": os.Getenv("RUNNER_ARCH")})
 				allRatios = append(allRatios, ratios...)
+				modeRatios[mode] = append(modeRatios[mode], ratios...)
 				completed++
 			})
 		}
 	}
 	expected := len(boundaries) * len(modes)
 	verdict := "valid"
+	modeResults := make(map[string]integrityModeOverhead)
+	for _, mode := range modes {
+		r := integrityModeResult(modeRatios[mode], len(boundaries)*3)
+		modeResults[mode] = r
+		if r.Verdict == "diagnostic_invalid" {
+			verdict = "diagnostic_invalid"
+		}
+	}
 	if completed != expected {
 		verdict = "diagnostic_incomplete"
 		t.Errorf("%v: only %d/%d configurations measured", errDiagnosticIncomplete, completed, expected)
-	} else if !integrityProofQualified(allRatios) {
-		verdict = "diagnostic_invalid"
 	}
 	var overallMedian any
 	if completed == expected {
@@ -147,13 +174,31 @@ func TestWintunIntegrityProof(t *testing.T) {
 	}
 	report(t, map[string]any{"test": "integrity_proof_complete", "verdict": verdict, "completed_configurations": completed,
 		"expected_configurations": expected, "boundaries": boundaries, "modes": modes, "expected_pairs": expected * 3, "pair_ratios": allRatios,
-		"median_diagnostic_over_clean": overallMedian, "minimum_ratio": 0.80})
+		"median_diagnostic_over_clean": overallMedian, "qualification_scope": "per_mode", "mode_results": modeResults, "minimum_ratio": 0.80})
 }
 
-func TestIntegrityJobOverheadBound(t *testing.T) {
+func TestIntegrityModesIndependent(t *testing.T) {
+	for _, slow := range []string{"ours", "dll", "inprocess"} {
+		for _, mode := range []string{"ours", "dll", "inprocess"} {
+			ratios := []float64{1, 1, 1}
+			want := "valid"
+			if mode == slow {
+				ratios, want = []float64{.7, .7, .7}, "diagnostic_invalid"
+			}
+			if got := integrityModeResult(ratios, 3); got.Verdict != want {
+				t.Fatalf("%s masked %s: %+v", mode, slow, got)
+			}
+		}
+	}
+	if r := integrityModeResult([]float64{1, 1}, 3); r.Median != nil || r.Verdict != "diagnostic_incomplete" {
+		t.Fatal(r)
+	}
+}
+
+func TestIntegrityModeOverheadBound(t *testing.T) {
 	// Actual failed ARM64 ingress/ours samples from job 120245044279.
 	if integrityProofQualified([]float64{0.7877527415460567, 1.0051356856412232, 0.7857552788965874}) {
-		t.Fatal("job-wide median below 0.80 accepted")
+		t.Fatal("mode median below 0.80 accepted")
 	}
 	// One faster observation must not hide a consistently >20% slower path.
 	for _, ratios := range [][]float64{{0.79, 0.79, 0.79}, {0.79, 1.2, 0.79}, nil} {
@@ -164,10 +209,10 @@ func TestIntegrityJobOverheadBound(t *testing.T) {
 	if !integrityProofQualified([]float64{0.8, 0.8, 0.8}) {
 		t.Fatal("exact 20% boundary changed")
 	}
-	// The owner now chooses the median of every pair in the JOB. One slow
-	// boundary is reported in the spread but no longer gates the job alone.
+	// Each mode pools its boundary pairs. A slow boundary remains visible in
+	// the spread, but cannot be diluted by another implementation's speed.
 	ratios := []float64{0.7877527415460567, 1.0051356856412232, 0.7857552788965874}
-	for range 33 {
+	for range 15 {
 		ratios = append(ratios, 0.9)
 	}
 	if !integrityProofQualified(ratios) {

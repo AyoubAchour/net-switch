@@ -56,10 +56,11 @@ permissions:
   contents: read
 
 # A newer commit on the same pull request replaces the older run. Runs on main
-# and manual runs get a group of their own, so they never queue behind or
-# cancel each other.
+# and ordinary manual runs get their own groups. Integrity dispatches share
+# the nightly's queue across branches/workflows, leaving at least half the pool.
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && 'wintun-integrity-hunts' || github.event_name == 'pull_request' && format('ci-pr-{0}', github.ref) || format('ci-run-{0}', github.run_id) }}
+  queue: ${{ github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && 'max' || 'single' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -607,7 +608,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity
     name: TCP integrity / ${{ matrix.runner }} / ${{ matrix.scenario }} / ${{ matrix.shard }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       max-parallel: 10
@@ -631,6 +632,8 @@ jobs:
       run:
         shell: pwsh
     steps:
+      - name: Reserve time for the final integrity verdict
+        run: '"INTEGRITY_JOB_DEADLINE_MS=$([DateTimeOffset]::UtcNow.AddMinutes(65).ToUnixTimeMilliseconds())" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
@@ -666,6 +669,10 @@ jobs:
         run: |
           go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o dist/registrar-release/netswitch-engine.exe ./cmd/netswitch-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -trimpath -buildvcs=false -o dist/registrar-release/netswitch-engine-audit.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check-wintun-release.mjs dist/registrar-release/netswitch-engine.exe dist/registrar-release/netswitch-engine-audit.exe ./bin/wintun.test.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $engine = (Resolve-Path dist/registrar-release/netswitch-engine.exe).Path
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant()
           "Release registrar from $env:GITHUB_SHA, SHA-256 $hash"
@@ -691,6 +698,7 @@ jobs:
         run: node scripts/wintun-integrity-summary.mjs
       - name: Keep full-sequence CPU profiles
         if: always() && matrix.scenario == 'full'
+        timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: wintun-integrity-${{ runner.arch }}-${{ matrix.scenario }}-${{ matrix.shard }}-profiles
@@ -732,6 +740,10 @@ jobs:
           go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o dist/registrar-release/netswitch-engine.exe ./cmd/netswitch-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go version -m dist/registrar-release/netswitch-engine.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -trimpath -buildvcs=false -o dist/registrar-release/netswitch-engine-audit.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check-wintun-release.mjs dist/registrar-release/netswitch-engine.exe dist/registrar-release/netswitch-engine-audit.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $engine = (Resolve-Path dist/registrar-release/netswitch-engine.exe).Path
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant()

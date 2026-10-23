@@ -362,7 +362,7 @@ func udpTraffic(t *testing.T, streams int) (float64, error) {
 					return
 				}
 				if !bytes.Equal(reply[:n], payload) {
-					failures <- fmt.Errorf("UDP echo corruption")
+					failures <- fmt.Errorf("%w: UDP echo corruption", errPayloadIntegrity)
 					return
 				}
 				received.Add(1)
@@ -439,7 +439,7 @@ func shortLatency(t *testing.T, mode string, session *Session) float64 {
 				continue
 			}
 			if !bytes.Equal(b[:n], p) {
-				t.Fatal("latency payload mismatch")
+				t.Fatal(fmt.Errorf("%w: latency payload mismatch", errPayloadIntegrity))
 			}
 			break
 		}

@@ -104,6 +104,9 @@ func runUDPClient(t *testing.T, streams int) (float64, error) {
 	child.Env = append(os.Environ(), fmt.Sprintf("NETSWITCH_WINTUN_UDP_STREAMS=%d", streams))
 	output, err := child.CombinedOutput()
 	if err != nil {
+		if bytes.Contains(output, []byte(errPayloadIntegrity.Error())) {
+			err = errors.Join(errPayloadIntegrity, err)
+		}
 		return 0, fmt.Errorf("UDP client: %w\n%s", err, output)
 	}
 	var rate float64
@@ -360,6 +363,9 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 			var size uint32
 			p, _, e := syscall.SyscallN(s.receive, s.h, uintptr(unsafe.Pointer(&size)))
 			if p == 0 {
+				if e == windows.ERROR_INVALID_DATA {
+					return i, fmt.Errorf("%w: DLL receive ring: %w", errPayloadIntegrity, e)
+				}
 				if e != windows.ERROR_NO_MORE_ITEMS {
 					return i, e
 				}
@@ -525,7 +531,7 @@ func TestWintunPingPong(t *testing.T) {
 						continue
 					}
 					if !bytes.Equal(payload, reply[:n]) {
-						t.Fatal("ping-pong payload corruption")
+						t.Fatal(fmt.Errorf("%w: ping-pong payload corruption", errPayloadIntegrity))
 					}
 					break
 				}
@@ -589,7 +595,7 @@ func TestWintunParallelUDP(t *testing.T) {
 	s, err := a.StartSession()
 	must(t, err)
 	defer s.Close()
-	var received, invalid atomic.Uint64
+	var received, invalid, readErrors atomic.Uint64
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -603,7 +609,7 @@ func TestWintunParallelUDP(t *testing.T) {
 			n, err := s.ReadBatch(ctx, bufs, sizes)
 			if err != nil {
 				if ctx.Err() == nil {
-					invalid.Add(1)
+					readErrors.Add(1)
 					t.Log(err)
 				}
 				return
@@ -662,9 +668,12 @@ func TestWintunParallelUDP(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	cancel()
 	<-done
-	report(t, map[string]any{"test": "parallel_udp", "arch": runtime.GOARCH, "sent": sent.Load(), "send_errors": sendErrors.Load(), "received": received.Load(), "invalid_delivered": invalid.Load(), "seconds": time.Since(start).Seconds(), "stats": s.Stats()})
-	if invalid.Load() != 0 || received.Load() < 10000 {
-		t.Fatal("invalid or insufficient delivered packets")
+	report(t, map[string]any{"test": "parallel_udp", "arch": runtime.GOARCH, "sent": sent.Load(), "send_errors": sendErrors.Load(), "read_errors": readErrors.Load(), "received": received.Load(), "invalid_delivered": invalid.Load(), "seconds": time.Since(start).Seconds(), "stats": s.Stats()})
+	if invalid.Load() != 0 {
+		t.Fatal(fmt.Errorf("%w: invalid delivered UDP packets: %d", errPayloadIntegrity, invalid.Load()))
+	}
+	if readErrors.Load() != 0 || received.Load() < 10000 {
+		t.Fatal("UDP read error or insufficient delivered packets")
 	}
 	if s.Stats().RecoveryFailures != 0 {
 		t.Fatal("session failed to recover")
@@ -734,7 +743,7 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 	n, err := c.Read(b)
 	must(t, err)
 	if string(b[:n]) != "after recovery" {
-		t.Fatal("recovery lost packet integrity")
+		t.Fatal(fmt.Errorf("%w: recovery lost packet integrity", errPayloadIntegrity))
 	}
 	f.stopEcho()
 	f.stopEcho = func() {}

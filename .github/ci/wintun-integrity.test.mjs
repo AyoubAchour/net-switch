@@ -10,6 +10,36 @@ const normal = readWorkflow(workflowText).jobs.get('wintun');
 const manifest = JSON.parse(readFileSync(new URL('../../scripts/wintun-integrity-sequence.json', import.meta.url), 'utf8'));
 const phases = manifest.filter(phase => !['capture-proof','proof'].includes(phase.name));
 const runner = fileURLToPath(new URL('../../scripts/test-wintun-integrity.ps1', import.meta.url));
+const pwsh = process.platform === 'win32' ? 'pwsh.exe' : 'pwsh';
+
+test('manual and nightly investigations share a noncancelling queue; PR runs keep their own policy', () => {
+  const nightly=readFileSync(new URL('../workflows/wintun-nightly.yml', import.meta.url),'utf8');
+  const block=workflowText.split('\nconcurrency:\n')[1].split('\njobs:')[0];
+  const expr=key=>new RegExp(`  ${key}: \\$\\{\\{ (.*) \\}\\}`).exec(block)[1];
+  const ctx={github:{event_name:'workflow_dispatch',ref:'refs/heads/proof',run_id:123},inputs:{wintun_integrity:true},functions:{format:(s,...args)=>s.replace(/\{(\d+)\}/g,(_,i)=>args[Number(i)])}};
+  assert.equal(evaluate(expr('group'),ctx),'wintun-integrity-hunts');
+  assert.equal(evaluate(expr('queue'),ctx),'max');
+  assert.equal(evaluate(expr('cancel-in-progress'),ctx),false);
+  assert.match(nightly,/group: wintun-integrity-hunts\s+queue: max\s+cancel-in-progress: false/);
+  ctx.github.event_name='pull_request';
+  assert.equal(evaluate(expr('queue'),ctx),'single');
+  assert.equal(evaluate(expr('cancel-in-progress'),ctx),true);
+  assert.equal(evaluate(expr('group'),ctx),'ci-pr-refs/heads/proof');
+  ctx.github.event_name='workflow_dispatch';ctx.inputs.wintun_integrity=false;
+  assert.equal(evaluate(expr('group'),ctx),'ci-run-123');
+  assert.equal(evaluate(expr('queue'),ctx),'single');
+  assert.match(nightly,/if: github.repository == 'AyoubAchour\/net-switch'/);
+});
+
+test('investigations leave time to report incomplete and scripts run in normal PR CI',()=>{
+  const job=readWorkflow(workflowText).jobs.get('wintun-integrity');
+  assert.match(workflowText.split('  wintun-integrity:\n')[1].split('\n  wintun:')[0],/timeout-minutes: 75/);
+  assert.match(job.steps[0].run,/AddMinutes\(65\)/);
+  const changes=readWorkflow(workflowText).jobs.get('changes');
+  assert.ok(changes.steps.some(s=>s.run?.includes('node --test .github/ci/*.test.mjs')));
+  // No platform skip: Ubuntu's pwsh actually runs the read-only plan cases.
+  assert.equal(pwsh,process.platform==='win32'?'pwsh.exe':'pwsh');
+});
 
 test('nightly uses the qualified sequence with one shared cap and no ordinary CI jobs', () => {
   const text = readFileSync(new URL('../workflows/wintun-nightly.yml', import.meta.url), 'utf8');
@@ -102,9 +132,9 @@ test('hunt combines both scenarios and architectures under the single cap, inter
   assert.match(matrix, /always\(\) && matrix\.scenario == 'full'/);
 });
 
-test('rotation selects only qualified single boundaries and leaves explicit selections unchanged', {skip:process.platform !== 'win32'}, () => {
+test('rotation selects only qualified single boundaries and leaves explicit selections unchanged', () => {
   for (const [shard, expected, requested = 'rotate'] of [[1,'receive'],[6,'host'],[7,'receive'],[20,'ingress'],[20,'output','output']]) {
-    const plan = JSON.parse(execFileSync('pwsh.exe', ['-NoProfile','-File',runner,'-PlanOnly','-Scenario','isolated'], {
+    const plan = JSON.parse(execFileSync(pwsh, ['-NoProfile','-File',runner,'-PlanOnly','-Scenario','isolated'], {
       encoding:'utf8',windowsHide:true,timeout:15000,
       env:{...process.env,GITHUB_ACTIONS:'false',NETSWITCH_WINTUN_CI:'0',NETSWITCH_WINTUN_INTEGRITY:'0',NETSWITCH_WINTUN_INTEGRITY_BOUNDARY:requested,INTEGRITY_SHARD:String(shard)},
     }));
@@ -114,9 +144,9 @@ test('rotation selects only qualified single boundaries and leaves explicit sele
 
 for (const arch of ['x64', 'arm64']) {
   for (const scenario of ['proof', 'isolated', 'full']) {
-    test(`PowerShell plan is read-only: ${scenario}/${arch}`, { skip: process.platform !== 'win32' }, () => {
+    test(`PowerShell plan is read-only: ${scenario}/${arch}`, () => {
       // No nested test runner, engine binary, network, adapter or fixture.
-      const output = execFileSync('pwsh.exe', ['-NoProfile', '-File', runner, '-PlanOnly', '-Scenario', scenario, '-Arch', arch], {
+      const output = execFileSync(pwsh, ['-NoProfile', '-File', runner, '-PlanOnly', '-Scenario', scenario, '-Arch', arch], {
         encoding:'utf8', windowsHide:true, timeout:15000,
         env:{...process.env, GITHUB_ACTIONS:'false', NETSWITCH_WINTUN_CI:'0', NETSWITCH_WINTUN_INTEGRITY:'0'},
       });

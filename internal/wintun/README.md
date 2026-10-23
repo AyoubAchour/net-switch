@@ -290,7 +290,7 @@ binary**: eight fixed alternating-order SHA-only/capture pairs per implementatio
 same shared payload and two warm-ups. It logs every matched rate and ratio;
 the per-mode median must retain 95% of SHA-only throughput. Timing-only failures
 of this separate guard are reported as `capture_invalid` within a nonfatal
-`diagnostic_invalid` job, with zero clean exposure credit.
+`diagnostic_invalid` mode, with zero clean exposure credit for that mode.
 The only capture bypass is a fixture field set by this hosted proof's baseline;
 normal CI has no environment switch that can silently disable the comparison.
 
@@ -298,18 +298,26 @@ normal CI has no environment switch that can silently disable the comparison.
 Eighteen shards per architecture/scenario, two cycles each, produce 72 jobs
 under one `max-parallel: 10` cap. Each boundary gets three shards per variant.
 Observed job durations predict roughly 2.5–3 hours with available runner slots;
-queue contention can extend this. The nightly workflow also allows manual
-dispatch and serializes its own invocations. Do not launch an additional manual
-hunt alongside it if the combined work would occupy the remaining CI slots.
+queue contention can extend this. Nightly and manual integrity dispatches share
+the workflow-level `wintun-integrity-hunts` group with `queue: max` and no
+cancellation. Only one diagnostic matrix runs at a time across either entry
+point, so at most ten diagnostic runners are active. GitHub queues up to 100
+pending workflows; submissions beyond that provider limit can be rejected.
+The scheduled job runs only in `AyoubAchour/net-switch`, not automatically in forks.
 
-The owner chose a job-wide qualification rule: the median of **all paired
-diagnostic/clean ratios in that job**, with the 0.80 bound unchanged. Individual
-boundaries are still reported, but no longer gate the job separately. The final
-summary includes pair count, minimum, 25th percentile, median, 75th percentile,
-maximum and count below 0.80; quartiles use linear interpolation.
+The owner chose independent qualification **per implementation**: DLL, ours,
+and (in full jobs) inprocess each need a median paired diagnostic/clean ratio
+of at least 0.80. Boundaries are pooled within each mode, never across modes.
+The proof reports 18 pairs per mode. The final `mode_results` includes count,
+minimum, P25, median, P75, maximum, verdict and clean credit for each mode.
+Quartiles use linear interpolation; the pooled job statistic is informational.
 
-A complete job below the bound is `diagnostic_invalid`, exits successfully and
-gets **zero clean exposure credit**. Corruption evidence and genuinely incomplete
+A mode below the bound is `diagnostic_invalid`, exits successfully and gets
+**zero clean exposure credit for that mode**. Other qualifying modes still count.
+Payload/hash/integrity corruption in ANY protocol or test fails the job; UDP,
+latency, ping-pong, recovery replies and registrar traffic share a stable marker.
+Natural ring corruption is evidence too; deliberate recovery fault injections
+are not confused with naturally damaged traffic. Genuinely incomplete
 diagnostics (including missing calibration, missing pairs or timeouts) fail.
 Other test failures are reported as nonfatal `test_failed`, also with zero clean
 credit. Original errors and child exit codes remain visible. No failing sample
@@ -330,7 +338,7 @@ normal performance runs keep the original payload, warm-ups and gate.
 The proof measures each of six boundary choices on both implementations using
 three fixed matched clean/instrumented pairs, alternating which runs first.
 Clean means the original workload in the same binary with observers disabled.
-All 36 ratios enter the job median. Failed/incomplete samples stay in place and prevent qualification;
+The 18 ratios from each implementation enter its own median. Failed/incomplete samples stay in place and prevent qualification;
 there are no retries. Wall time and heap allocation/reservation are also logged.
 Precomputing independent payload oracles happens before the transfer timer,
 and adds up to 512 MiB for eight streams in addition to sender buffers. Thus a
@@ -369,7 +377,13 @@ TCP without inventing adapter reuse across unrelated tests. Kernel/host state
 can carry across phases and repeats on the same runner; the runner adds no
 driver reset or extra GC. The release registrar remains uninstrumented.
 
-There is a 45-minute execution budget inside each 60-minute job. A new repeat
+There is a 45-minute execution budget inside each 75-minute job. A deadline
+starts before setup and a wrapper watchdog stops its own process tree by minute
+65 (or 48 minutes after the wrapper starts, whichever is sooner), leaving time
+to write an incomplete verdict and upload profiles. The step summary begins as
+incomplete with zero credit and is replaced only by a final complete assessment;
+a hard runner loss with no final verdict must never be credited as clean.
+A new repeat
 starts only with room for a complete case; native process-tree deadlines also
 bound builds/tools. A case that overruns fails explicitly as incomplete. The
 full performance timeout is 20 minutes for diagnostic overhead; the original
@@ -385,9 +399,16 @@ overhead ratios. Calibration reserves three minutes of the 45-minute budget
 traffic or resets before the state-dependent sequence. A failed cycle still
 stops exposure; calibration is not a retry of its failed samples.
 The final summary verifies completed TCP pairs and host connection records,
-keeps calibration transfers separate, and credits observed exposure only when
-the entire job is valid and clean. Distorted runs and other-test-failed runs
-cannot inflate clean exposure; their observations and failure evidence remain.
+including mode attribution, keeps calibration transfers separate, and credits
+only qualifying modes in an otherwise complete clean job. Any corruption or
+incompleteness removes all clean credit. Other-test-failed jobs receive no credit.
+Distorted modes cannot borrow another mode's speed or exposure.
+
+The read-only runner/rotation plans now execute with `pwsh` on normal Ubuntu PR
+CI rather than skipping outside Windows; summary tests run there too. Release
+registrar builds check their actual build metadata for the diagnostic tag and
+an unstripped engine's `go tool nm` output for `integrityRingHook`. Stripped
+release binaries cannot be cleared from an empty symbol listing.
 An unsuccessful cycle stops repetition; no sample or pair is retried, dropped
 or replaced. Instrumented rates never enter the clean performance gate.
 

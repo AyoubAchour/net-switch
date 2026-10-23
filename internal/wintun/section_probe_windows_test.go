@@ -300,7 +300,7 @@ func runSectionOwnerProbe(t *testing.T, adapter *Adapter, mode string) {
 		n, err := client.Read(reply[:])
 		must(t, err)
 		if !bytes.Equal(payload, reply[:n]) {
-			t.Fatal("shared-section packet corruption")
+			t.Fatal(fmt.Errorf("%w: shared-section packet corruption", errPayloadIntegrity))
 		}
 	}
 	f.stopEcho()
