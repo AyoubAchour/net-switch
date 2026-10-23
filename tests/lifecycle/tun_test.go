@@ -166,7 +166,7 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 				var j struct {
 					Failures []int64 `json:"failures"`
 				}
-				return readJournal(filepath.Join(config.Data, "control-journal.json"), &j) == nil && len(j.Failures) >= hang
+				return lifecycle.Read(filepath.Join(config.Data, "control-journal.json"), &j) == nil && len(j.Failures) >= hang
 			})
 			if hang < 5 {
 				wait(t, "new working engine after hang", 45*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
@@ -192,7 +192,7 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 			var j struct {
 				Failures []int64 `json:"failures"`
 			}
-			if err := readJournal(filepath.Join(config.Data, "control-journal.json"), &j); err != nil {
+			if err := lifecycle.Read(filepath.Join(config.Data, "control-journal.json"), &j); err != nil {
 				t.Fatalf("could not read the control journal: %v", err)
 			}
 			if len(j.Failures) != hang {
