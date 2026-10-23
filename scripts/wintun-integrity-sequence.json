@@ -16,6 +16,10 @@
     "args": ["-test.run=^Test(RegistrarRefusesWithoutInheritedCapabilities|RegistrarReplyPreservesReadError|SessionCloseReportsRetirementError|SessionCorruptionYieldsToConfirmedOwnerLoss(CleanRetire)?|SessionCorruptionYieldsToPreStopDriverRelease|SessionLossSentinels|WintunRegistrar(Session|Loss|DeviceFileGuardNegativeControl|PostRegisterFailureCleanup|NoDeviceFileThroughRecovery|JobReapsBeforeResume|StartupFaults|StartupCloseErrors|EngineCrash|ProductionEngine|SurpriseRemovalReleasesCrossProcessRegistration|EngineCrashReleasesRealRegistration))$"]
   },
   {
+    "name": "supervisor-containment", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 300,
+    "args": ["-test.run=^TestWintunSupervisorContainment$"]
+  },
+  {
     "name": "ping-pong", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 600, "runAfterFailure": true,
     "args": ["-test.run=^TestWintunPingPong$"]
   },
