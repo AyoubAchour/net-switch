@@ -64,6 +64,32 @@ func closedState(ep interface{ State() uint32 }) bool {
 	return state == gtcp.StateClose || state == gtcp.StateError
 }
 
+// admissionTrace is an optional diagnostic sink. A forwarder probes its
+// controller at the two places that decide a retained slot: installing the
+// endpoint's TIME_WAIT policy and releasing admission. Production controllers
+// do not implement it, so each probe is one failed interface assertion with no
+// allocation. Tests use it to show which ticket bound an endpoint and which
+// ticket a release touched.
+type admissionTrace interface {
+	TimeWaitPolicy(id stack.TransportEndpointID, ep tcpip.Endpoint, ticket flowapi.Ticket)
+	Release(id stack.TransportEndpointID, state gtcp.EndpointState, ticket flowapi.Ticket)
+}
+
+func (f *Forwarder) tracePolicy(id stack.TransportEndpointID, ep tcpip.Endpoint, ticket flowapi.Ticket) {
+	if tr, ok := f.control.(admissionTrace); ok {
+		tr.TimeWaitPolicy(id, ep, ticket)
+	}
+}
+
+func (c *connection) traceRelease(state gtcp.EndpointState) {
+	if c.forward == nil {
+		return
+	}
+	if tr, ok := c.forward.control.(admissionTrace); ok {
+		tr.Release(c.id, state, c.ticket)
+	}
+}
+
 // After both directions end, queued or retransmittable payload still consumes
 // a live slot. A FIN by itself consumes the bounded retained-endpoint budget.
 func (c *connection) releaseAdmission() {
@@ -71,6 +97,7 @@ func (c *connection) releaseAdmission() {
 		return
 	}
 	state := gtcp.EndpointState(c.ep.State())
+	c.traceRelease(state)
 	switch state {
 	case gtcp.StateClose, gtcp.StateError:
 		c.ticket.Retire()

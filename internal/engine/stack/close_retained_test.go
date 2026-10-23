@@ -24,6 +24,7 @@ func TestCloseRetainedCap(t *testing.T) {
 			limits := flows.Defaults()
 			limits.Flows, limits.PerApp, limits.TimeWait = 1, 1, 1
 			p := newPeerOptions(t, false, limits, ns.DefaultOptions())
+			p.trace = &closeTrace{}
 			p.open(1000)
 			p.upload([]byte("first"))
 			firstACK := p.prepareFinalACK(simultaneous)
@@ -41,7 +42,7 @@ func TestCloseRetainedCap(t *testing.T) {
 			}
 			p.inject(secondACK)
 			if state := tcp.EndpointState(second.State()); state != tcp.StateClose {
-				t.Fatal("overflow FIN ACK did not close cleanly", state)
+				t.Fatalf("overflow FIN ACK did not close cleanly %s\n%s", state, p.trace.dump(p.table.Stats(), first, second))
 			}
 			if g := p.table.Stats(); g.ClosingOverflow != 0 || g.ClosingOverflowPeak != 1 {
 				t.Fatal("FIN ACK leaked overflow accounting", g)

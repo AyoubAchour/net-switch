@@ -17,6 +17,7 @@ type connection struct {
 	ready            atomic.Pointer[readyRelay]
 	ep               tcpip.Endpoint
 	ticket           flowapi.Ticket
+	forward          *Forwarder
 	up, down         atomic.Uint64
 	lastUp, lastDown uint64
 	last             time.Time
