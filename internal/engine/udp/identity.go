@@ -10,7 +10,20 @@ import (
 )
 
 func same(a, b platform.Owner) bool {
-	return a.Generation != "" && a.Generation == b.Generation && a.PID == b.PID && a.StartTime == b.StartTime && a.AppID == b.AppID
+	if a.Generation == "" || a.Generation != b.Generation {
+		return false
+	}
+	if b.IdentityUnavailable {
+		return true // Windows PID:created was freshly checked, identity read failed.
+	}
+	// Identity expiry is an admission decision, not a socket replacement.
+	// A fresh dump may identify that same socket later; keep its unknown-owner
+	// policy until it closes. Generations include the native socket identity
+	// (Linux cookie; Windows PID and endpoint creation time).
+	if a.PID == 0 && a.StartTime == 0 && a.AppID == "" {
+		return true
+	}
+	return a.PID == b.PID && a.StartTime == b.StartTime && a.AppID == b.AppID
 }
 
 func (n *NAT) sessions() []*session {
@@ -111,6 +124,9 @@ func (n *NAT) Reconcile(ctx context.Context) {
 		owner, ok := owners[s.source]
 		valid := ok && same(s.owner, owner)
 		if valid && !s.closed {
+			if owner.IdentityUnavailable && s.owner.AppID != "" {
+				n.ReconcileIdentityFallbacks.Add(1)
+			}
 			s.validated = started
 		}
 		s.mu.Unlock()

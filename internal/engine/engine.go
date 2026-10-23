@@ -463,6 +463,8 @@ func (e *Engine) Stats() any {
 		s["udpReadErrors"] = e.udp.ReadErrors.Load()
 		s["udpOpenFailed"] = e.udp.OpenFailed.Load()
 		s["udpGenerationMissing"] = e.udp.GenerationMissing.Load()
+		s["udpRefusalDatagrams"] = e.udp.RefusalStats()
+		s["udpReconcileIdentityFallbacks"] = e.udp.ReconcileIdentityFallbacks.Load()
 		s["udpNegativeEntries"] = uint64(e.udp.NegativeCacheSize())
 		s["udpPeakQueuePackets"] = e.udp.PeakQueuePackets.Load()
 		s["udpPeakQueueBytes"] = e.udp.PeakQueueBytes.Load()

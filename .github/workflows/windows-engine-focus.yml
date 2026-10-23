@@ -22,6 +22,10 @@ on:
         description: Run only the held hostile ownership-folder regressions
         type: boolean
         default: false
+      capacityOnly:
+        description: Run the capacity profile on the selected branch
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -160,21 +164,21 @@ jobs:
           go test -race -count=1 -v ./internal/engine ./internal/engine/windows ./internal/engine/tcp ./internal/engine/udp ./internal/engine/flows ./internal/winclock ./internal/winlock ./internal/winhandle ./internal/journal
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Cold owner latency at 1950–2100 actual TCP rows
-        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && !endsWith(github.ref, '-ports') && (steps.build.outcome == 'success' || env.FOCUS_NATIVE_ONLY == 'true') }}
+        if: ${{ !cancelled() && !inputs.capacityOnly && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && !endsWith(github.ref, '-ports') && (steps.build.outcome == 'success' || env.FOCUS_NATIVE_ONLY == 'true') }}
         env:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
           go test -count=1 -v -run '^TestOwnerSteadyColdTiming$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Attribute at least 995 of 1000 cold burst sockets
-        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && !endsWith(github.ref, '-ports') && (steps.build.outcome == 'success' || env.FOCUS_NATIVE_ONLY == 'true') }}
+        if: ${{ !cancelled() && !inputs.capacityOnly && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && !endsWith(github.ref, '-ports') && (steps.build.outcome == 'success' || env.FOCUS_NATIVE_ONLY == 'true') }}
         env:
           NETSWITCH_LOOKUP_GATE: '1'
         run: |
           go test -count=1 -v -run '^TestOwnerColdBurstTiming$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Real TUN 1.0 acceptance and flow-cap measurement
-        if: ${{ !cancelled() && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.capacityOnly && !endsWith(github.ref, '-lifecycle') && !endsWith(github.ref, '-udp') && !endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
         env:
           NETSWITCH_ENGINE_TEST_TRACE: '1'
           NETSWITCH_ENGINE_HEAP_CAPTURE: '1'
@@ -196,14 +200,14 @@ jobs:
           node tests/windows/udp-control-matrix.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Owner-table class and read time at 13,700–14,800 TCP rows
-        if: ${{ !cancelled() && !inputs.udpMatrix && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.udpMatrix && (inputs.capacityOnly || endsWith(github.ref, '-capacity')) && steps.build.outcome == 'success' }}
         env:
           NETSWITCH_OWNER_READ_GATE: '1'
         run: |
           go test -count=1 -v -timeout=10m -run '^TestOwner(ConnectionsClassKeepsSynSent|ReadTimeAtPortLimit|OverloadHold)$' ./internal/engine/windows
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Measure real held flows without waiting for unrelated cases
-        if: ${{ !cancelled() && !inputs.udpMatrix && endsWith(github.ref, '-capacity') && steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.udpMatrix && (inputs.capacityOnly || endsWith(github.ref, '-capacity')) && steps.build.outcome == 'success' }}
         env:
           NETSWITCH_ENGINE_TEST_TRACE: '1'
           NETSWITCH_ENGINE_HEAP_CAPTURE: '1'

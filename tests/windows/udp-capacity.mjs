@@ -196,6 +196,50 @@ export function engineBindDelta(before, after, protocol) {
     finalRefusals, finalRefusalsSeen: seen, otherProtocolFinalFailures: (protocol === 'tcp' ? udp : tcp).finalFailures };
 }
 
+// Match actual refused datagrams, not raw attempt counts to bind counts. A new
+// client socket can reuse a port whose earlier refusal is still cached. Its
+// distinct token must have its own engine record carrying that cached cause.
+export function udpRefusalAttribution(attempts, before, after) {
+  const delta = (key) => (after[key] ?? 0) - (before[key] ?? 0);
+  const lookup = (key) => (after.ownerLookup?.[key] ?? 0) - (before.ownerLookup?.[key] ?? 0);
+  const resetAttempts = attempts.filter((item) => ['ECONNRESET', 'ECONNREFUSED'].includes(item.Error));
+  const clientResets = resetAttempts.length;
+  const portExhaustions = delta('udpSocketExhaustions');
+  const generationRefusals = delta('udpGenerationMissing');
+  const identityRefusals = ['Unknown', 'UnknownUDP'].reduce((n, key) => n +
+    (after.flows?.RefusedUDP?.[key] ?? 0) - (before.flows?.RefusedUDP?.[key] ?? 0), 0);
+  const binds = engineBindDelta(before, after, 'udp');
+  const prior = before.udpRefusalDatagrams, current = after.udpRefusalDatagrams;
+  const recorded = current?.recent?.filter((r) => r.sequence > (prior?.count ?? 0) && r.sequence <= current.count) ?? [];
+  const used = new Set(), matched = [], unmatched = [];
+  for (const item of resetAttempts) {
+    const hash = /^[0-9a-f]{16}$/i.test(item.Token ?? '') ? createHash('sha256')
+      .update(Buffer.concat([Buffer.from('NSUDPCAP'), Buffer.from(item.Token, 'hex')])).digest('hex') : null;
+    const receipt = recorded.find((r) => r.sent === true && !used.has(r.sequence) && r.source === item.Local &&
+      r.destination === item.Remote && hash && r.payloadSHA256 === hash);
+    if (!receipt) unmatched.push({ token: item.Token, source: item.Local });
+    else { used.add(receipt.sequence); matched.push(receipt); }
+  }
+  const nonExhaustion = matched.filter((r) => r.reason !== 'port-exhaustion');
+  const paths = {};
+  for (const r of matched) paths[r.path] = (paths[r.path] ?? 0) + 1;
+  const newPortSetups = (current?.portExhaustionSetups ?? 0) - (prior?.portExhaustionSetups ?? 0);
+  const hasEvidence = Number.isSafeInteger(prior?.count) && Number.isSafeInteger(current?.count) &&
+    Number.isSafeInteger(prior?.portExhaustionSetups) && Number.isSafeInteger(current?.portExhaustionSetups);
+  return { clientResets, portExhaustions, generationRefusals, identityRefusals,
+    distinctResetSources: new Set(resetAttempts.map((item) => item.Local)).size,
+    newPortSetups, paths, matched, unmatched, nonExhaustion,
+    ownerGenerationRefusals: lookup('udpGenerationRefusals'),
+    identityExpiredWithGeneration: lookup('udpIdentityExpiredGeneration'), holds: lookup('udpHolds'),
+    heldGenerations: lookup('udpHeldGenerations'), failures: after.ownerLookup?.failures ?? [], binds,
+    // Cached port exhaustion remains the original cause, never a fresh bind.
+    // Every new exhausted setup still requires a native exhaustion counter.
+    // Missing/truncated evidence and any other cause fail even at the limit.
+    passed: hasEvidence && unmatched.length === 0 && nonExhaustion.length === 0 &&
+      generationRefusals === 0 && lookup('udpGenerationRefusals') === 0 && identityRefusals === 0 &&
+      newPortSetups === portExhaustions && binds.finalFailures === portExhaustions };
+}
+
 // One record per reopen from the attempts' own clock (one client process, so
 // one clock): a first-attempt success is timed alone; each refused first
 // attempt is paired, in start order, with one re-attempt and timed from its
@@ -467,18 +511,38 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
       }
       return refused;
     };
+    let previousStats = evidence.before;
+    evidence.refusalAttribution = [];
+    const open = async (app, count) => {
+      const result = await app.call('open', { ...target, count });
+      const stats = await engineStats();
+      const attribution = udpRefusalAttribution(result.attempts, previousStats, stats);
+      previousStats = stats;
+      // Retain all original attempts, even when attribution stops the test.
+      const refused = admit(app, result);
+      Object.assign(evidence, { held, attempts });
+      if (refused.length || attribution.holds || !attribution.passed) {
+        evidence.refusalAttribution.push(attribution);
+        console.log(`WINDOWS UDP REFUSAL ATTRIBUTION ${JSON.stringify(attribution)}`);
+      }
+      if (!attribution.passed) {
+        evidence.failed = refused;
+        evidence.portSpaceAtFailure = await udpPortSpaceAtFailure().catch((error) => ({ error: String(error) }));
+        console.log(`WINDOWS UDP PORT SPACE AT FAILURE ${JSON.stringify(evidence.portSpaceAtFailure)}`);
+      }
+      assert(attribution.passed, `UDP refusal was not exclusively native port exhaustion: ${JSON.stringify(attribution)}`);
+      return { result, refused, stats };
+    };
     while (!failed.length && held < 16384) {
       for (const app of clients) {
-        const result = await app.call('open', { ...target, count: 128 });
-        let refused = admit(app, result);
+        let { result, refused, stats } = await open(app, 128);
         if (refused.length) {
           const space = await udpPortSpaceAtFailure().catch((error) => ({ error: String(error) }));
           const available = space.families?.find((item) => item.family === family)?.available;
           const room = space.state === 'complete' && available >= 2 * refused.length;
           const record = { held, available, room, refused: refused.map((item) => ({ call: item.NativeCall, code: item.Error })) };
           if (room) {
-            const retry = await app.call('open', { ...target, count: refused.length });
-            refused = admit(app, retry);
+            ({ refused, stats } = await open(app, refused.length));
             record.reattemptFailures = refused.map((item) => ({ call: item.NativeCall, code: item.Error }));
           }
           evidence.fillReattempts.push(record);
@@ -487,7 +551,6 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
         }
         failed.push(...refused);
         assert(result.held <= 4096, 'UDP fixture exceeded the per-app cap');
-        const stats = await engineStats();
         console.log(`WINDOWS UDP ADMISSION ${JSON.stringify({ held, flows: stats.flows, heapBytes: stats.heapBytes,
           stackBytes: stats.stackBytes, runtimeBytes: stats.runtimeBytes, goroutines: stats.goroutines, gcCPUppm: stats.gcCPUppm })}`);
         evidence.oldRuntimeBudgetWouldPass &&= stats.runtimeBytes <= 512 * 1024 * 1024;
@@ -515,6 +578,7 @@ export async function holdUDPCapacity({ server, harness, directory, line, native
     assert(held >= evidence.floor, `UDP held ${held}, below the 95% native layout floor ${evidence.floor}`);
     assert.equal(evidence.portSpaceAtFailure.state, 'complete', 'The failed allocation lacks complete port-space evidence');
     const atLimit = await engineStats();
+    console.log(`WINDOWS UDP GENERATION HOLD ${JSON.stringify(atLimit.ownerLookup)}`);
     if (failed.some((item) => ['ECONNRESET', 'ECONNREFUSED'].includes(item.Error))) {
       assert(atLimit.udpSocketExhaustions > evidence.before.udpSocketExhaustions,
         'A UDP refusal was not caused by native port exhaustion');

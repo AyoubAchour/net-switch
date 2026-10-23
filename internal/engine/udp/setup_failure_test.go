@@ -31,7 +31,7 @@ func TestDestroyFinishesAcrossFailedSetupCachePublication(t *testing.T) {
 		b.m = map[netip.AddrPort]*session{local: s}
 		// Destroy has obtained s under the shard lock. Before it acquires
 		// s.mu, setup fails, publishes the cache entry and finishes cleanup.
-		s.rejectPending(owner.AppID)
+		s.rejectPending(owner.AppID, "socket-open")
 		s.close()
 		if len(b.m) != 0 || len(b.negative) != 1 {
 			t.Fatal("fixture did not publish the failed setup cache")
