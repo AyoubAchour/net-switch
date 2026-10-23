@@ -68,7 +68,7 @@ func Relay(parent context.Context, public, child io.ReadWriteCloser) {
 					continue
 				default:
 				}
-				deadline := time.NewTimer(250 * time.Millisecond)
+				deadline := time.NewTimer(time.Second)
 				select {
 				case queue <- line:
 					deadline.Stop()

@@ -152,8 +152,8 @@ func NativeChildCommand(args []string) error {
 						channel.Close()
 						continue
 					}
-					state, index, port := s.Supervision()
-					if err := channel.Send(context.Background(), supervisor.Message{Kind: "state", Seq: msg.Seq, State: state, Index: index, Port: port, Instance: s.Instance}); err != nil {
+					state, index, port, started, epoch := s.Supervision()
+					if err := channel.Send(context.Background(), supervisor.Message{Kind: "state", Seq: msg.Seq, State: state, Index: index, Port: port, Instance: s.Instance, Started: started, Epoch: epoch}); err != nil {
 						channel.Close()
 					}
 				default:

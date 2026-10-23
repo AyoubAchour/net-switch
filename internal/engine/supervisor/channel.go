@@ -14,6 +14,8 @@ const PrivateLimit = 16 << 10
 // Only inherited pipe capabilities carry these messages. Public native IPC
 // never parses this envelope. At most one request is in flight per direction.
 type Message struct {
+	Started  int64  `json:"started,omitempty"`
+	Epoch    uint64 `json:"epoch,omitempty"`
 	Seq      uint64 `json:"seq,omitempty"`
 	Kind     string `json:"kind"`
 	PID      uint32 `json:"pid,omitempty"`

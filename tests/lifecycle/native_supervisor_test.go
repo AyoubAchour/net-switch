@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,6 +47,141 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 		return c, held
 	}
 	if faults {
+		t.Run("forwarding-health-under-load", func(t *testing.T) {
+			c, _ := start(t)
+			var peers []net.Conn
+			for range 8 {
+				peer, err := fixture.dial(ctx, "tcp4", fixture.target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				peers = append(peers, peer)
+				t.Cleanup(func() { peer.Close() })
+			}
+			var workers sync.WaitGroup
+			var bytes atomic.Uint64
+			errors := make(chan error, 8)
+			until := time.Now().Add(60 * time.Second)
+			for _, peer := range peers {
+				workers.Go(func() {
+					payload := make([]byte, 32<<10)
+					reply := make([]byte, len(payload))
+					for time.Now().Before(until) {
+						peer.SetDeadline(time.Now().Add(5 * time.Second))
+						if _, err := peer.Write(payload); err != nil {
+							errors <- err
+							return
+						}
+						if _, err := io.ReadFull(peer, reply); err != nil {
+							errors <- err
+							return
+						}
+						bytes.Add(uint64(len(reply)))
+					}
+				})
+			}
+			workers.Wait()
+			close(errors)
+			for err := range errors {
+				t.Error("load flow", err)
+			}
+			nativeMust(t, c, "stop", nil, nil)
+			if err := service.WaitStopped(ctx, service.Engine); err != nil {
+				t.Fatal(err)
+			}
+			out, err := host.ReadOutcome(data, c.instance)
+			if err != nil || out.Child == nil || out.Child.Forced || !out.Child.Completed || out.Child.HostHealthPasses == 0 || bytes.Load() == 0 {
+				t.Fatal("load watchdog evidence", out, err)
+			}
+			t.Logf("NATIVE_HEALTH_LOAD seconds=60 streams=8 echoed_bytes=%d passes=%d failures=%d retries=0", bytes.Load(), out.Child.HostHealthPasses, out.Child.HostHealthFailures)
+		})
+		for _, hang := range []bool{false, true} {
+			name := "slow-start-and-clean-stop"
+			if hang {
+				name = "starting-hang-is-bounded"
+			}
+			t.Run(name, func(t *testing.T) {
+				if err := service.Start(ctx, service.Engine); err != nil {
+					t.Fatal(err)
+				}
+				c, _ := attachNative(t, ctx, data)
+				t.Cleanup(func() {
+					stop, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+					defer cancel()
+					if err := service.Stop(stop, service.Engine); err != nil {
+						t.Error(err)
+					}
+				})
+				delay := 33000
+				if hang {
+					delay = 60000
+				}
+				path := filepath.Join(data, "fault-native-start-delay")
+				if err := lifecycle.Save(path, delay); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Remove(path) })
+				call, cancel := context.WithTimeout(ctx, 45*time.Second)
+				defer cancel()
+				began := time.Now()
+				err := c.call(call, "start", map[string]any{"revision": rev}, nil)
+				if hang {
+					if err == nil {
+						t.Fatal("hung start succeeded")
+					}
+					wait(t, "starting deadline terminates service", max(time.Second, 42*time.Second-time.Since(began)), func() bool { s, e := service.Query(service.Engine); return e == nil && s.Stopped })
+					out, e := host.ReadOutcome(data, c.instance)
+					if e != nil || out.Child == nil || !out.Child.Forced || !strings.Contains(out.Child.Error, "lifecycle deadline exceeded: starting") {
+						t.Fatal("wrong start failure", out, e)
+					}
+					waitNativeCleanup(t, fixture, data, c.instance)
+					t.Logf("NATIVE_START_BOUND elapsed=%s", time.Since(began))
+					return
+				}
+				if err != nil {
+					t.Fatal("slow legitimate start", err)
+				}
+				wait(t, "slow start health", 10*time.Second, func() bool { return nativeSupervisorEvent(data, "NATIVE_HEALTH", c.instance) != "" })
+				path = filepath.Join(data, "fault-native-stop-delay")
+				if err := lifecycle.Save(path, 15000); err != nil {
+					t.Fatal(err)
+				}
+				c.stopLease()
+				stop, done := context.WithTimeout(ctx, 25*time.Second)
+				defer done()
+				if err := c.call(stop, "stop", nil, nil); err != nil {
+					t.Fatal("long clean stop", err)
+				}
+				if err := service.WaitStopped(stop, service.Engine); err != nil {
+					t.Fatal(err)
+				}
+				out, e := host.ReadOutcome(data, c.instance)
+				if e != nil || out.Child == nil || out.Child.Forced || !out.Child.Completed || out.Child.Code != 0 {
+					t.Fatal("clean stop became crash", out, e)
+				}
+			})
+		}
+		t.Run("same-child-routing-restart-health", func(t *testing.T) {
+			c, _ := start(t)
+			wait(t, "initial forwarding healthy", 10*time.Second, func() bool { return nativeSupervisorEvent(data, "NATIVE_HEALTH", c.instance) != "" })
+			rev.N++ // retain monotonic durable history for all following cases
+			nativeMust(t, c, "testFault", map[string]any{"fault": map[string]any{"kind": "restart-routing", "revision": rev}}, nil)
+			// More than the complete failure window. A cached old port must
+			// fail this case, even if the ordinary TCP echo remains healthy.
+			for range 23 {
+				time.Sleep(time.Second)
+				nativeMust(t, c, "renew", nil, nil)
+			}
+			nativeMust(t, c, "stop", nil, nil)
+			if err := service.WaitStopped(ctx, service.Engine); err != nil {
+				t.Fatal(err)
+			}
+			out, err := host.ReadOutcome(data, c.instance)
+			if err != nil || out.Child == nil || out.Child.Forced || out.Child.HostHealthPasses < 20 {
+				t.Fatal("health did not survive routing restart", out, err)
+			}
+			t.Logf("NATIVE_RESTART_HEALTH child_pid=%d passes=%d", c.pid, out.Child.HostHealthPasses)
+		})
 		t.Run("startup-death-before-readiness", func(t *testing.T) {
 			path := filepath.Join(data, "fault-native-startup-exit")
 			if err := os.WriteFile(path, []byte("armed"), 0600); err != nil {
@@ -129,6 +266,10 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 			if err != nil {
 				t.Fatal(err)
 			}
+			wait(t, "host forwarding check passes before fault", 10*time.Second, func() bool {
+				return nativeSupervisorEvent(data, "NATIVE_HEALTH", c.instance) != ""
+			})
+			t.Log(nativeSupervisorEvent(data, "NATIVE_HEALTH", c.instance))
 			childGone, _, resumeChild := pinNativeChild(t, c.pid)
 			hostGone, _, resumeHost := pinNativeChild(t, manager.PID)
 			childSuspended, hostSuspended := false, false
@@ -187,7 +328,7 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 				bound = 42 * time.Second
 			}
 			if mode == "host-and-child" && runtime.GOOS == "windows" {
-				observeUntilNativeExit(t, held, childGone, observer, sent, 43*time.Second, false)
+				observeUntilNativeExit(t, held, childGone, observer, sent, 43*time.Second, false, data, c.instance)
 				if childGone() || hostGone() {
 					t.Fatal("accepted simultaneous-suspension case unexpectedly ended")
 				}
@@ -202,7 +343,7 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 			} else if mode == "host" {
 				wait(t, "child exits despite suspended host", bound, childGone)
 			} else {
-				observeUntilNativeExit(t, held, childGone, observer, sent, bound, true)
+				observeUntilNativeExit(t, held, childGone, observer, sent, bound, true, data, c.instance)
 			}
 			if mode == "host" && runtime.GOOS == "windows" {
 				fixture.clean(t)
@@ -212,6 +353,15 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 			}
 			wait(t, "supervisor finishes", max(time.Second, bound-recovery.elapsed()), func() bool { s, err := service.Query(service.Engine); return err == nil && s.Stopped })
 			waitNativeCleanup(t, fixture, data, c.instance)
+			for _, event := range []string{"NATIVE_TERMINATE", "NATIVE_TERMINATED", "NATIVE_CLEANED"} {
+				line := nativeSupervisorEvent(data, event, c.instance)
+				at, ok := nativeSupervisorEventTime(line)
+				if ok {
+					t.Logf("NATIVE_PHASE event=%s since_fault=%s %s", event, at.Sub(recovery.start), line)
+				} else {
+					t.Logf("NATIVE_PHASE event=%s host_record_absent=true", event)
+				}
+			}
 			nativeFreshFlow(t, fixture, ctx, mode, recovery, bound)
 			if mode == "whole-child" || mode == "read-pump" {
 				out, err := host.ReadOutcome(data, c.instance)
@@ -241,10 +391,12 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 	}
 }
 
-func observeUntilNativeExit(t *testing.T, conn net.Conn, gone func() bool, observer nativeSocketObservation, sent time.Time, bound time.Duration, expectExit bool) {
+func observeUntilNativeExit(t *testing.T, conn net.Conn, gone func() bool, observer nativeSocketObservation, sent time.Time, bound time.Duration, expectExit bool, data, instance string) {
 	t.Helper()
 	began := time.Now()
 	gaveUp := false
+	var terminalAt time.Time
+	var terminalProblem error
 	for time.Since(began) < bound && !gone() {
 		if gaveUp {
 			time.Sleep(50 * time.Millisecond)
@@ -253,12 +405,18 @@ func observeUntilNativeExit(t *testing.T, conn net.Conn, gone func() bool, obser
 		conn.SetReadDeadline(time.Now().Add(250 * time.Millisecond))
 		var b [1]byte
 		n, err := conn.Read(b[:])
-		if gone() {
-			break
-		} // termination may reset the old stream; record only before it
+		observed := time.Now()
 		kind, problem := stallReadDisposition(n, err, observer.verifyGiveUp)
 		if problem != nil {
-			t.Fatal(problem)
+			observer.sample("terminal-read")
+			t.Logf("NATIVE_HELD_END at=%s since_send=%s bytes=%d error=%v child_gone=%t", observed.UTC().Format(time.RFC3339Nano), observed.Sub(sent), n, err, gone())
+			// Logs may be delivered asynchronously. Compare the event's own
+			// timestamp, never the time its log line finally became readable.
+			if n != 0 {
+				t.Error("data delivered during stall", problem)
+			}
+			terminalAt, terminalProblem = observed, problem
+			gaveUp = true // continue measuring kill and cleanup even on failure
 		}
 		if kind == "os-give-up" {
 			gaveUp = true
@@ -268,5 +426,52 @@ func observeUntilNativeExit(t *testing.T, conn net.Conn, gone func() bool, obser
 	}
 	if expectExit && !gone() {
 		t.Fatal("watchdog did not terminate child inside bound", bound)
+	}
+	if terminalProblem != nil {
+		decision := nativeSupervisorEvent(data, "NATIVE_TERMINATE", instance)
+		if !nativeTerminationPrecedes(decision, terminalAt) {
+			t.Error("held flow ended before proved termination", terminalProblem, decision)
+		}
+	}
+}
+
+func nativeSupervisorEvent(data, event, instance string) string {
+	for _, name := range []string{"NetSwitchEngine.log", "NetSwitchEngine.log.old"} {
+		b, _ := os.ReadFile(filepath.Join(data, name))
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.Contains(line, event+" instance="+instance+" ") {
+				return line
+			}
+		}
+	}
+	return ""
+}
+func nativeTerminationPrecedes(line string, observed time.Time) bool {
+	at, ok := nativeSupervisorEventTime(line)
+	return ok && !at.After(observed)
+}
+func nativeSupervisorEventTime(line string) (time.Time, bool) {
+	for _, field := range strings.Fields(line) {
+		if strings.HasPrefix(field, "at=") {
+			at, err := time.Parse(time.RFC3339Nano, strings.TrimPrefix(field, "at="))
+			return at, err == nil
+		}
+	}
+	return time.Time{}, false
+}
+
+func TestNativeHeldFlowRequiresEarlierTermination(t *testing.T) {
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		line string
+		want bool
+	}{
+		{"", false}, {"at=invalid", false},
+		{"at=" + now.Add(time.Nanosecond).Format(time.RFC3339Nano), false},
+		{"at=" + now.Add(-time.Nanosecond).Format(time.RFC3339Nano), true},
+	} {
+		if nativeTerminationPrecedes(test.line, now) != test.want {
+			t.Fatal(test)
+		}
 	}
 }

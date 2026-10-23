@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -15,6 +16,7 @@ type engineHealth interface {
 
 type healthWatch struct {
 	failedFor time.Duration
+	limit     time.Duration
 }
 
 func (w *healthWatch) check(ctx context.Context, engine engineHealth, now func() time.Time) error {
@@ -26,12 +28,20 @@ func (w *healthWatch) check(ctx context.Context, engine engineHealth, now func()
 		w.failedFor = 0
 		return nil
 	}
+	var terminal *nativeTransitionTimeout
+	if errors.As(err, &terminal) {
+		return err
+	}
 	// A single request that spans standby must not turn eight sleeping hours
 	// into a full failure window before queued resume notifications run. Count
 	// at most its three-second probe budget (at least one host watch tick).
 	w.failedFor += min(max(now().Sub(started), time.Second), 3*time.Second)
-	if w.failedFor >= 20*time.Second {
-		return fmt.Errorf("routing engine health check failed continuously for 20 seconds: %w", err)
+	limit := w.limit
+	if limit == 0 {
+		limit = 20 * time.Second
+	}
+	if w.failedFor >= limit {
+		return fmt.Errorf("routing engine health check failed continuously for %s: %w", limit, err)
 	}
 	return nil
 }

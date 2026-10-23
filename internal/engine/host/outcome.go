@@ -27,13 +27,14 @@ type Outcome struct {
 }
 
 type ChildOutcome struct {
-	HostHealthPasses uint64 `json:"hostHealthPasses,omitempty"`
-	HostLogsDropped  uint64 `json:"hostLogsDropped,omitempty"`
-	PID              uint32 `json:"pid"`
-	Code             uint32 `json:"code"`
-	Forced           bool   `json:"forced"`
-	Completed        bool   `json:"completed"`
-	Error            string `json:"error,omitempty"`
+	HostHealthPasses   uint64 `json:"hostHealthPasses,omitempty"`
+	HostHealthFailures uint64 `json:"hostHealthFailures,omitempty"`
+	HostLogsDropped    uint64 `json:"hostLogsDropped,omitempty"`
+	PID                uint32 `json:"pid"`
+	Code               uint32 `json:"code"`
+	Forced             bool   `json:"forced"`
+	Completed          bool   `json:"completed"`
+	Error              string `json:"error,omitempty"`
 }
 
 func OutcomePath(data, instance string) (string, error) {

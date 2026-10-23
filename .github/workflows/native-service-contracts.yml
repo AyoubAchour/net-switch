@@ -58,15 +58,15 @@ jobs:
           go test -v -count=1 ./internal/engine ./internal/engine/host ./internal/engine/protocol ./internal/engine/flows ./internal/engine/probe ./internal/engine/testproxy ./internal/service
           go test -v -count=1 -tags lifecycle_test ./internal/engine/testproxy
           go test -tags lifecycle_test -run '^$' -fuzz '^FuzzProxyHandshake$' -fuzztime=5s ./internal/engine/testproxy
-          go test -v -count=1 -tags lifecycle_test -run '^TestNative(ReadFault|ManagerExit)' ./internal/lifecycle
-          go test -v -count=1 -run '^TestNative(Stall|TCPInfo|Actor)' ./tests/lifecycle
+          go test -v -count=1 -tags lifecycle_test -run '^TestNative(ReadFault|ManagerExit|Health)' ./internal/lifecycle
+          go test -v -count=1 -run '^TestNative(Stall|TCPInfo|Actor|HeldFlow)' ./tests/lifecycle
       - name: Windows process diagnostic build contracts
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $buildCases = @(
-            @{ Tags = ''; Tests = @('TestProductNoProcessDiagnostics') },
+            @{ Tags = ''; Tests = @('TestProductNoProcessDiagnostics', 'TestPrivatePipeACLBeforePIDCheck') },
             @{ Tags = 'netswitch_handlecheck'; Tests = @('TestUDPPortSpaceDiagnosisReadsHostedSettings', 'TestPortConfigurationMatchesNativeProvider') }
           )
           foreach ($buildCase in $buildCases) {

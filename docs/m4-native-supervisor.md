@@ -33,7 +33,7 @@ power, health-state and final-outcome messages. They never accept public RPCs.
 Four public connections each have two queued frames in each direction, plus
 one reading and one writing frame. Frames retain the existing 1 MiB ceiling:
 at most 32 MiB of live relay frame storage across the host. A queue still full
-after 250 ms closes that peer; replies and accounting are never silently dropped.
+after one second closes that peer; replies and accounting are never silently dropped.
 Private messages have separate eight-slot queues and a 16 KiB frame ceiling.
 Each log sink has 64 records of at most 4 KiB. Dropped host logs are recorded in
 the outcome. Standard and gVisor child logging use the bounded sink.
@@ -53,9 +53,15 @@ network stack, output queue and TUN write pump. It needs no live internet line.
 The UDP queues are 4 KiB; stale replies cannot satisfy a later challenge.
 The endpoint exists only for a supervised child and is not the §5.11 test proxy.
 
-The host uses M2's three-second probe and approximately twenty-second continuous
-failure window. Healthy forwarding resets the window. Off means no forwarding
-is requested; a responsive status/renewal never proves active forwarding health.
+The host starts checking at readiness, with three seconds per probe and an
+18-second continuous-failure window. Healthy forwarding resets the window.
+Only running, loaded forwarding is judged. Starting has a separate 35-second
+deadline (including the registrar's 15 seconds); stopping has 20 seconds.
+An error has 30 seconds for Control recovery or child exit. These lifecycle
+deadlines terminate directly, without adding another forwarding-failure window.
+Off means no forwarding is requested; a responsive status/renewal never proves
+active forwarding health. A change of start timestamp, epoch, index or port
+rebinds/reconnects the reserved socket; it is not a child failure.
 Awake clocks, resume grace and the bounded two-minute suspend pause are retained.
 The child receives real resume events; the host never synthesizes renewals.
 
@@ -68,6 +74,22 @@ Linux adds `WatchdogSec=8s`, `WatchdogSignal=SIGKILL`, and `NotifyAccess=main`.
 Only completed supervision iterations, including failed probe timeouts, feed it.
 Watchdog/activation settings and host memory settings do not leak to the child.
 
+Systemd 255 disables its watchdog outside START_POST, RUNNING and RELOAD states
+in [`service_set_state`](https://github.com/systemd/systemd/blob/v255/src/core/service.c#L1145-L1146),
+including STOP_SIGTERM. A manager-requested stop therefore uses our bounded
+grace and the manager's stop timeout. A protocol-requested stop while systemd
+still considers the host running continues the ordinary supervision loop;
+completed stopping-state checks feed progress but do not count as forwarding.
+
+The private Windows pipe uses `D:P(A;;GA;;;SY)` even when its nonce is known.
+The kernel denies non-SYSTEM opens before the host-PID check. The nonce in argv
+is a collision-avoidance name, not authentication or a secret capability; the
+ProtectedPrefix namespace also prevents an unprivileged reader planting it.
+The hosted `TestPrivatePipeACLBeforePIDCheck` discloses the exact name to a
+Medium-integrity, Administrators-deny-only process and uses the host's actual
+minimal access mask. No server Accept runs: ACCESS_DENIED proves the ACL alone,
+before any PID check. Both Windows architectures require its PASS line.
+
 ## Outcomes and proofs
 
 The child flushes a bounded completion record without waiting for a running
@@ -77,6 +99,39 @@ Only a matching unforced completion plus successful host cleanup can propagate
 flags, cleanup failures, dropped logs and successful forwarding-check count
 remain in the instance outcome. Failed host cleanup changes a child 3 into host
 failure 1 while retaining the raw child 3.
+
+Host events carry timestamps taken at the call site, before asynchronous log
+delivery: healthy forwarding, termination decision, joined exit and completed
+cleanup. Each installed stall first requires an actual healthy forwarding
+result. Data always fails the stall observation; a reset/EOF requires an
+earlier termination event, while an OS timeout requires native socket evidence.
+Failures continue through termination/cleanup measurement instead of letting
+test cleanup destroy the evidence. The read-pump fault build records at most
+eight outgoing TCP resets with direction and timestamps, without packet bodies.
+
+The original Windows x64 failure on 889d90d6 was **not** proved to be a watchdog
+reset: child 3392 became ready at 13:23:58.763 UTC and later exited with
+`raw=0 forced=false completed=true` at 13:24:18.532 after test cleanup. There was
+no termination decision for that instance. Its reset source remains unproved;
+the strict assertion and new direction evidence stay in place. Four successful
+forwarding checks were recorded in the preceding backpressure case. The two
+zero-count exit-3 outcomes belonged to separate sub-second lifetimes.
+
+Hosted regressions cover a 33-second start, a starting hang, a 15-second clean
+stop, and routing restart inside the same child. An eight-stream, 60-second
+echo load reports completed bytes, successful probes and failed probes. No
+probe retries are introduced without those measurements.
+
+The Linux acceptance `routes.default-route-removed` failure in job
+120435827572 uses the namespace launcher's standalone `run` command, not the
+service host or child command. Standalone has no HealthKey, so no private probe
+endpoint or host watchdog runs. Route-loss handling, dial refusal and the test
+are unchanged; the sole route snapshot change adds the TUN index. The Unix
+listener refactor runs at startup, not during route refusal. A brief check of
+12 main runs found 11 green and one unrelated capacity failure; the route case
+passed in that failed run too. Latest main job 120389486146 passed the case with
+a 2 ms slowest refusal. This establishes no prior reproduction of the 3111 ms
+timing failure; it does establish that the new supervisor launch path is absent.
 
 The installed service suite retains ACL denial, durable fencing, all totals
 pages within ten seconds, policy/line/probe contracts and persistent cleanup

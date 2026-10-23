@@ -183,7 +183,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 	instance := ""
 	var raw nativeResult
 	gotExit := false
-	startup := time.NewTimer(15 * time.Second)
+	startup := time.NewTimer(nativeStartBound)
 	select {
 	case m := <-h.ready:
 		instance = m.Instance
@@ -257,9 +257,9 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 		}
 	}
 	if result == nil {
-		watch := time.NewTicker(time.Second)
+		watch := time.NewTimer(0) // first check at readiness, not one tick later
 		defer watch.Stop()
-		var health healthWatch
+		health := healthWatch{limit: 18 * time.Second}
 		var pause powerPause
 		events := service.Events(ctx)
 		service.SupervisionProgress()
@@ -268,7 +268,8 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 		for {
 			for _, event := range events.Take() {
 				if event.Suspend || event.Resume {
-					health = healthWatch{}
+					health = healthWatch{limit: 18 * time.Second}
+					probe.state = "" // restart lifecycle's awake-time window on resume
 					pause.set(event.Suspend, nativeAwake())
 				}
 				if event.Resume {
@@ -291,12 +292,19 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 			case <-events.Ready():
 				continue
 			case <-watch.C:
+				checkStarted := time.Now()
 				if pause.expired(nativeAwake()) {
-					health = healthWatch{}
+					health = healthWatch{limit: 18 * time.Second}
 				}
 				if !pause.on {
+					before := probe.success
 					result = health.check(ctx, probe, nativeAwake)
+					if probe.success != before && (before == 0 || probe.success%10 == 0) {
+						log(fmt.Sprintf("NATIVE_HEALTH instance=%s child_pid=%d passes=%d failures=%d at=%s", instance, p.pid, probe.success, probe.failures, time.Now().UTC().Format(time.RFC3339Nano)))
+					}
 				}
+				// Timed-out probes have already consumed the tick interval.
+				watch.Reset(max(0, time.Second-time.Since(checkStarted)))
 				if ctx.Err() != nil {
 					result = nil
 					break watching
@@ -327,6 +335,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 	listener.Close()
 	if !gotExit {
 		cancel()
+		log(fmt.Sprintf("NATIVE_TERMINATE instance=%s child_pid=%d at=%s", instance, p.pid, time.Now().UTC().Format(time.RFC3339Nano)))
 		result = errors.Join(result, p.kill())
 		join, cancelJoin := context.WithTimeout(context.Background(), 2*time.Second)
 		select {
@@ -340,6 +349,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 	if !gotExit {
 		return result
 	} // never clean ownership while child is alive
+	log(fmt.Sprintf("NATIVE_TERMINATED instance=%s child_pid=%d at=%s forced=%t", instance, p.pid, time.Now().UTC().Format(time.RFC3339Nano), raw.Forced))
 	if result == nil && !raw.Forced && (raw.Code == 0 || raw.Code == 3) {
 		drained := make(chan struct{})
 		go func() { clients.Wait(); close(drained) }()
@@ -374,7 +384,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 	if instance != "" {
 		out, err := host.ReadOutcome(c.Data, instance)
 		if err == nil {
-			out.Child = &host.ChildOutcome{PID: p.pid, Code: raw.Code, Forced: raw.Forced, Completed: valid, HostLogsDropped: logs.Dropped.Load(), HostHealthPasses: probe.success}
+			out.Child = &host.ChildOutcome{PID: p.pid, Code: raw.Code, Forced: raw.Forced, Completed: valid, HostLogsDropped: logs.Dropped.Load(), HostHealthPasses: probe.success, HostHealthFailures: probe.failures}
 			if result != nil {
 				out.Child.Error = result.Error()
 				out.Reason = "failure"
@@ -393,6 +403,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 	cleanupErr := cleanupNative(cleanup, c.Data)
 	cancelCleanup()
 	cleanupErr = errors.Join(cleanupErr, p.close())
+	log(fmt.Sprintf("NATIVE_CLEANED instance=%s child_pid=%d at=%s error=%v", instance, p.pid, time.Now().UTC().Format(time.RFC3339Nano), cleanupErr))
 	result = errors.Join(result, cleanupErr)
 	if instance != "" {
 		out, err := host.ReadOutcome(c.Data, instance)

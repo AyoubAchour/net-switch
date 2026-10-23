@@ -42,11 +42,17 @@ func (s *Server) status() Status {
 
 // Supervision is accessible only to the hosting bootstrap, never as a public
 // protocol method. The host does not infer health from this status response.
-func (s *Server) Supervision() (string, int, uint16) {
+func (s *Server) Supervision() (string, int, uint16, int64, uint64) {
 	status := s.status()
+	s.mu.Lock()
+	epoch := s.epoch
+	s.mu.Unlock()
 	if r, ok := s.runtime.(interface{ ForwardingCheck() (int, uint16) }); ok {
 		index, port := r.ForwardingCheck()
-		return status.State, index, port
+		if status.State == "on" && status.Applied == nil {
+			index, port = 0, 0
+		}
+		return status.State, index, port, status.Started.UnixNano(), epoch
 	}
-	return status.State, 0, 0
+	return status.State, 0, 0, status.Started.UnixNano(), epoch
 }
