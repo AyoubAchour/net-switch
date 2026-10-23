@@ -199,6 +199,7 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 		}
 	}()
 	routes.timings.record("state.directory", stateElapsed)
+	routes.retirementError = options.RetirementError
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	owners := NewOwners()

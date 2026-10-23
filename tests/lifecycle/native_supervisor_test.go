@@ -49,6 +49,37 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 		return c, held
 	}
 	if faults {
+		t.Run("retirement-failure-exits-and-cleans-capture", func(t *testing.T) {
+			for _, trigger := range []string{"control-stop", "service-stop"} {
+				t.Run(trigger, func(t *testing.T) {
+					c, _ := start(t) // independently verifies real capture and owned journal objects
+					path := filepath.Join(data, "fault-native-retirement")
+					if err := os.WriteFile(path, []byte("armed"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { os.Remove(path) })
+					c.stopLease()
+					recovery := newNativeRecoveryTimer()
+					stop, cancel := context.WithTimeout(ctx, 15*time.Second)
+					defer cancel()
+					if trigger == "control-stop" {
+						if err := c.call(stop, "stop", nil, nil); err == nil {
+							t.Fatal("retirement failure acknowledged as clean stop")
+						}
+					} else if err := service.Stop(stop, service.Engine); err != nil {
+						t.Log("manager stop returned child failure", err)
+					}
+					wait(t, "failed child exits without another Control request", max(time.Millisecond, 15*time.Second-recovery.elapsed()), func() bool { s, e := service.Query(service.Engine); return e == nil && s.Stopped })
+					waitNativeCleanup(t, fixture, data, c.instance)
+					nativeFreshFlow(t, fixture, ctx, "retirement-failure", recovery, 15*time.Second)
+					out, err := host.ReadOutcome(data, c.instance)
+					if err != nil || out.Child == nil || out.Child.Code != 1 || out.Child.Forced || !out.Child.Completed || out.State != "complete" {
+						t.Fatalf("failed retirement outcome: child=%+v state=%s error=%v", out.Child, out.State, err)
+					}
+					t.Logf("NATIVE_RETIREMENT_FAILURE trigger=%s child=%+v capture_removed=true elapsed=%s", trigger, out.Child, recovery.elapsed())
+				})
+			}
+		})
 		t.Run("idle-error-survives-live-lease-backoff", func(t *testing.T) {
 			c, _ := start(t)
 			nativeMust(t, c, "testFault", map[string]any{"fault": map[string]any{"kind": "idle-error"}}, nil)

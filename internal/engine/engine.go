@@ -408,6 +408,13 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 		lastError = Clip(e.lastError.Error(), 4096)
 	}
 	e.live.Store(&liveState{status: status, lastError: lastError})
+	// A failed stop can still own capture. It is not an idle configuration
+	// error that may wait for Control's backoff while its lease is renewed.
+	// Service runtimes route this nonblocking signal to process exit; their
+	// supervisor/manager recovers the retained journal after ownership ends.
+	if err != nil && e.OnFatal != nil {
+		e.OnFatal(err)
+	}
 	return err
 }
 

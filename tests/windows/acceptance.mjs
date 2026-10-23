@@ -1009,7 +1009,13 @@ try {
   if (restoreDNS) try { await network('dns-restore', dnsAdapter); } catch (error) { console.error(error); process.exitCode = 1; }
   if (worker?.exitCode === null && worker.connected) worker.disconnect();
   if (quicServer?.exitCode === null) quicServer.kill();
-  if (server?.child.exitCode === null) try { await server.quit(); } catch (error) { console.error(error); process.exitCode = 1; }
+  if (server?.child.exitCode === null) {
+    const began = performance.now(), eventStart = serverOutput.events.length;
+    let completed = false;
+    try { await server.quit(); completed = true; } catch (error) { console.error(error); process.exitCode = 1; }
+    finally { console.log(`WINDOWS FINAL QUIT ${JSON.stringify({ elapsedMs: performance.now() - began, completed,
+      native: serverOutput.events.slice(eventStart).filter(event => event.operation === 'stop') })}`); }
+  }
   // Check before TestISP's Wintun shutdown can erase an orphan. Only the same
   // non-present IDs observed while our engine was running may use this baseline
   // exemption. The normal 0.3.x stop also terminates its child on Windows.

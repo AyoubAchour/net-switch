@@ -250,6 +250,52 @@ cohorts still live, before fixture close. It requires acknowledgement inside
 20 seconds, the existing strict stopped snapshot and fresh direct traffic.
 All capacity/recovery assertions still run first; none are waived by this stop.
 
+### Retirement failure and stop-cost audit
+
+A failed stop is fatal, distinct from a cleanly idle configuration error.
+`engine.go:122` routes start rollback through stopLocked; `engine.go:416` now
+signals OnFatal when session join or journal cleanup fails. The notification
+is the existing nonblocking service failure channel, not a new shutdown worker.
+
+- **Control routing-off:** the protocol Stop returns failure, and the fatal
+  signal wakes Windows `shutdown_windows.go:50` or Linux `service_linux.go:172`.
+  The service exits with failure without depending on another Control request
+  or on lease expiry. Previously a returned Stop error alone could leave it idle.
+- **Service stop:** the service shutdown tail already calls runtime.Stop
+  (Windows `shutdown_windows.go:97`, Linux `service_linux.go:182`). A retirement
+  error remains a failed exit; it cannot become a clean routing-off outcome.
+- **Start rollback:** stopLocked attempts cleanup and emits the same fatal
+  signal if retirement/cleanup fails. A configuration error whose rollback
+  succeeds remains idle and lease-renewable as specified.
+
+Windows `routes_windows.go:395` still refuses journal mutations while session
+retirement is uncertain. After the failed child exits and registrar ownership
+ends, `native_supervisor.go:403` performs bounded journal recovery under the
+released lifetime lock. Linux `routes_linux.go:939` attempts its journal cleanup
+even when TUN close reported an error; the shared fatal signal also covers a
+failed Linux cleanup. The injected installed proof exercises Control-driven
+and manager-driven stop on both OSes, requires failure exit 1 without a forced
+kill, real capture removal and fresh traffic inside 15 seconds. It starts with
+verified live journal objects; Windows persistent WFP objects prove that
+recovery, not adapter auto-removal alone, performed cleanup.
+
+The existing close-start test is retained and rewritten to prohibit journal
+mutation before session join, while preserving both close and cleanup errors.
+A separate rollback regression requires the fatal signal. Product builds have
+no retirement fault injector.
+
+Timing baseline on main 504f9731: x64 job 120389519569 had 20 routingOffMs
+samples, mean 101.74 ms, min 72.57 ms, max 131.60 ms. ARM64 job 120389519645
+had mean 132.38 ms, min 92.48 ms, max 221.72 ms. Linux acceptance job
+120389486146 completed all five start/traffic/stop cycles in 1.3 s; this is an
+aggregate, not an isolated stop measurement. Linux lifecycle job 120382329800
+reported clean-service-stop in 0.10 s. Historical final-quit duration and Linux
+per-stop timings were not emitted. The harness now records those explicitly.
+No post-reorder comparison is claimed: the old overlap unit test blocked
+Windows acceptance on aadc43c1 and Linux acceptance was still running at audit.
+New hosted timings and the unchanged 15 s stop/28 s hang gates must establish
+the serialization cost; pure tests cannot supply those numbers.
+
 The Linux acceptance `routes.default-route-removed` failure in job
 120435827572 uses the namespace launcher's standalone `run` command, not the
 service host or child command. Standalone has no HealthKey, so no private probe

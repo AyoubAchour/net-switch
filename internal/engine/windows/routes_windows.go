@@ -49,26 +49,27 @@ func (r *Routes) StopPhase(name string) func() {
 }
 
 type Routes struct {
-	healthIndex   atomic.Uint32
-	Instance      string
-	mu            sync.Mutex
-	session       *journal.Session
-	objects       *objects
-	tun           *wintun.Session
-	lines         []platform.Line
-	configured    map[string]bool
-	bindings      atomic.Pointer[bindingTable]
-	statsBindings atomic.Pointer[bindingTable]
-	statsTun      atomic.Pointer[wintun.Session]
-	active        atomic.Bool
-	capture       []journal.Fingerprint
-	permissions   []journal.Creation
-	cancel        context.CancelFunc
-	done          chan struct{}
-	Table         *flows.Table
-	Fatal         func(error)
-	timings       *phaseTimings
-	trace         *packetTrace
+	retirementError func() error
+	healthIndex     atomic.Uint32
+	Instance        string
+	mu              sync.Mutex
+	session         *journal.Session
+	objects         *objects
+	tun             *wintun.Session
+	lines           []platform.Line
+	configured      map[string]bool
+	bindings        atomic.Pointer[bindingTable]
+	statsBindings   atomic.Pointer[bindingTable]
+	statsTun        atomic.Pointer[wintun.Session]
+	active          atomic.Bool
+	capture         []journal.Fingerprint
+	permissions     []journal.Creation
+	cancel          context.CancelFunc
+	done            chan struct{}
+	Table           *flows.Table
+	Fatal           func(error)
+	timings         *phaseTimings
+	trace           *packetTrace
 }
 
 func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Routes, error) {
@@ -401,6 +402,9 @@ func (r *Routes) Cleanup(ctx context.Context) (err error) {
 		// This also covers direct Routes.Close and recovery/rollback callers.
 		finish := r.timings.begin("tun.session.join.wait")
 		joinErr := tun.Close()
+		if joinErr == nil && r.retirementError != nil {
+			joinErr = r.retirementError()
+		}
 		finish()
 		if joinErr != nil {
 			return fmt.Errorf("native session retirement failed before journal cleanup: %w", joinErr)

@@ -1248,6 +1248,8 @@ func TestRealServices(t *testing.T) {
 		wait(t, "sign-in restores routing", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	})
 	t.Run("clean-service-stop", func(t *testing.T) {
+		began := time.Now()
+		defer func() { t.Logf("LIFECYCLE_CLEAN_STOP elapsed=%s", time.Since(began)) }()
 		if err := service.Stop(ctx, service.Control); err != nil {
 			t.Fatal(err)
 		}

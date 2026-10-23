@@ -121,6 +121,10 @@ func attachNative(t *testing.T, ctx context.Context, data string) (*nativeClient
 
 func nativeMust(t *testing.T, c *nativeClient, method string, fields map[string]any, out any) {
 	t.Helper()
+	if method == "stop" {
+		began := time.Now()
+		defer func() { t.Logf("NATIVE_STOP_CALL elapsed=%s child_pid=%d", time.Since(began), c.pid) }()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if method == "stop" && c.stopLease != nil {

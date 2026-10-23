@@ -269,7 +269,10 @@ func (e *Env) StartEngine(cfg engine.Config) {
 
 // StopEngine stops the engine, recording a failed stop as a check.
 func (e *Env) StopEngine() bool {
-	return e.T.Check(e.Eng.Stop(e.Ctx()) == nil, "the engine stops cleanly")
+	started := time.Now()
+	err := e.Eng.Stop(e.Ctx())
+	e.T.Logf("ENGINE_STOP elapsed=%s error=%v", time.Since(started), err)
+	return e.T.Check(err == nil, "the engine stops cleanly")
 }
 
 // Apply changes the policy, or stops the case.

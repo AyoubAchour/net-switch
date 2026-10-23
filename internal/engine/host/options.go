@@ -39,6 +39,9 @@ type Options struct {
 	// WrapTun is nil in product builds; hosted tests stall the actual packet
 	// reader without suspending the separate control/lease goroutines.
 	WrapTun func(platform.TunDevice) platform.TunDevice
+	// RetirementError injects a cached session-close failure in hosted proofs.
+	// It is nil in product builds and is never installed by manager recovery.
+	RetirementError func() error
 	// ProbeTLS is set only by hosted fault builds with a private fixture CA.
 	ProbeTLS   *tls.Config
 	ProbeError func() error // hosted dial-stage exhaustion injection; nil in product

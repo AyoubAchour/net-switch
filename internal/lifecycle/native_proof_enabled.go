@@ -36,6 +36,16 @@ type stalledReader struct {
 	resets    atomic.Uint32
 }
 
+func (r *stalledReader) Close() error {
+	err := r.TunDevice.Close()
+	if runtime.GOOS == "linux" {
+		if _, fault := os.Stat(filepath.Join(r.data, "fault-native-retirement")); fault == nil {
+			err = errors.Join(err, errors.New("hosted session retirement failure"))
+		}
+	}
+	return err
+}
+
 // Preserve the native device's fast paths, cancellation and counters while
 // interposing only the read pump. In particular, Linux stats must not vanish.
 func (r *stalledReader) Stats() any {
@@ -130,6 +140,12 @@ func (r *stalledReader) ReadPacket(ctx context.Context, b []byte) (int, error) {
 }
 
 func configureNativeProof(data string, options *host.Options) error {
+	options.RetirementError = func() error {
+		if _, err := os.Stat(filepath.Join(data, "fault-native-retirement")); err == nil {
+			return errors.New("hosted session retirement failure")
+		}
+		return nil
+	}
 	var probeExhausted atomic.Bool
 	options.ProbeError = func() error {
 		if !probeExhausted.Swap(false) {
