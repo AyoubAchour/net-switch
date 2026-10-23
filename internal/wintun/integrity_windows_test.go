@@ -99,7 +99,8 @@ type integrityConnection struct {
 	records          uint64
 	emit             func(string, integrityFailure)
 	reference        []byte         // Independent immutable oracle; never given to the sender.
-	client           netip.AddrPort // Parsed once; packet lookup must not format tuples.
+	client           integrityTuple // IPv4 plus port, compared as one machine word.
+	uniqueTuple      bool           // False forever once another incarnation exists.
 }
 
 type integrityDiagnostic struct {
@@ -209,10 +210,19 @@ func (c *integrityConnection) check(stage string, data []byte, offset int64, rec
 }
 
 type integrityPacket struct {
-	client netip.AddrPort
+	client integrityTuple
 	out    bool
 	data   []byte
 	record integrityRecord
+}
+
+// Only IPv4 TCP packets reach this observer. Keep the complete address and
+// port, not just the port; text conversion belongs on the evidence path.
+type integrityTuple uint64
+
+func (v integrityTuple) String() string {
+	addr := uint32(v >> 16)
+	return netip.AddrPortFrom(netip.AddrFrom4([4]byte{byte(addr >> 24), byte(addr >> 16), byte(addr >> 8), byte(addr)}), uint16(v)).String()
 }
 
 func integrityChecksums(r integrityRecord, p []byte) integrityRecord {
@@ -247,16 +257,16 @@ func parseIntegrityPacket(p []byte) (integrityPacket, error) {
 	if tcplen < 20 || tcplen > len(tcp) {
 		return result, fmt.Errorf("invalid TCP header length %d", tcplen)
 	}
-	src, dst := netip.AddrFrom4([4]byte(p[12:16])), netip.AddrFrom4([4]byte(p[16:20]))
+	src, dst := binary.BigEndian.Uint32(p[12:16]), binary.BigEndian.Uint32(p[16:20])
 	sp, dp := binary.BigEndian.Uint16(tcp), binary.BigEndian.Uint16(tcp[2:])
-	client, server := netip.AddrFrom4([4]byte{198, 19, 240, 1}), netip.AddrFrom4([4]byte{198, 19, 240, 2})
+	const client, server = 0xc613f001, 0xc613f002 // 198.19.240.1 and .2
 	switch {
 	case src == client && dst == server && dp == 9002:
-		result.client = netip.AddrPortFrom(src, sp)
+		result.client = integrityTuple(uint64(src)<<16 | uint64(sp))
 	case src == server && dst == client && sp == 9002:
-		result.client, result.out = netip.AddrPortFrom(dst, dp), true
+		result.client, result.out = integrityTuple(uint64(dst)<<16|uint64(dp)), true
 	default:
-		return result, fmt.Errorf("unexpected TCP tuple %s:%d -> %s:%d", src, sp, dst, dp)
+		return result, fmt.Errorf("unexpected TCP tuple %s -> %s", integrityTuple(uint64(src)<<16|uint64(sp)), integrityTuple(uint64(dst)<<16|uint64(dp)))
 	}
 	result.data = tcp[tcplen:]
 	result.record = integrityRecord{Seq: binary.BigEndian.Uint32(tcp[4:]), Ack: binary.BigEndian.Uint32(tcp[8:]),
@@ -276,7 +286,7 @@ func integrityOffset(seq, isn uint32, syn bool) int64 {
 
 func (d *integrityDiagnostic) newConnection(local string) *integrityConnection {
 	client, err := netip.ParseAddrPort(local)
-	if err != nil {
+	if err != nil || !client.Addr().Is4() {
 		d.issue("identity", "invalid host tuple: "+local)
 		return nil
 	}
@@ -296,16 +306,23 @@ func (d *integrityDiagnostic) newConnection(local string) *integrityConnection {
 			return nil
 		}
 	}
-	c := &integrityConnection{Tuple: local, client: client, Server: "198.19.240.2:9002",
+	ip := client.Addr().As4()
+	c := &integrityConnection{Tuple: local, client: integrityTuple(uint64(binary.BigEndian.Uint32(ip[:]))<<16 | uint64(client.Port())), Server: "198.19.240.2:9002",
 		Failures: make(map[string]integrityFailure), Coverage: make(map[string]integrityCoverage)}
 	if d.emit != nil {
 		c.emit = func(stage string, f integrityFailure) { d.emit(c, stage, f) }
+	}
+	c.uniqueTuple = true
+	for _, previous := range d.connections {
+		if previous.client == c.client {
+			previous.uniqueTuple, c.uniqueTuple = false, false
+		}
 	}
 	d.connections = append(d.connections, c)
 	return c
 }
 
-func recoverIntegritySequence(c *integrityConnection, p integrityPacket) bool {
+func recoverIntegritySequence(c *integrityConnection, p *integrityPacket) bool {
 	// No guessed zero offset: recover only from a unique 32-byte match in the
 	// independently generated oracle registered by the host before its Write.
 	// This cold path handles a missed SYN or attaching after a handshake.
@@ -327,7 +344,7 @@ func recoverIntegritySequence(c *integrityConnection, p integrityPacket) bool {
 	return false
 }
 
-func (d *integrityDiagnostic) connection(p integrityPacket, stage string) *integrityConnection {
+func (d *integrityDiagnostic) connection(p *integrityPacket, stage string) *integrityConnection {
 	syn := p.record.Flags&2 != 0
 	if syn && !p.out {
 		for _, c := range d.connections {
@@ -393,6 +410,12 @@ func (d *integrityDiagnostic) connection(p integrityPacket, stage string) *integ
 		if offset < -1 || offset > integrityTransferSize+1 {
 			continue
 		}
+		if c.uniqueTuple {
+			// Every candidate still passes identity/sequence validation above.
+			// A reused tuple must take the full ambiguity scan below instead.
+			found = c
+			break
+		}
 		if found != nil {
 			if found.ClientKnown && c.ClientKnown && found.ClientISN == c.ClientISN && found.ServerKnown && c.ServerKnown && found.ServerISN == c.ServerISN {
 				if c.ID != 0 {
@@ -441,10 +464,10 @@ func (d *integrityDiagnostic) packetLocked(stage string, data []byte) (*integrit
 		d.issue(stage, err.Error())
 		return nil, integrityRecord{}
 	}
-	if !p.client.IsValid() {
+	if p.client == 0 {
 		return nil, integrityRecord{}
 	}
-	c := d.connection(p, stage)
+	c := d.connection(&p, stage)
 	if c == nil {
 		return nil, integrityRecord{}
 	}

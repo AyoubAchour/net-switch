@@ -655,6 +655,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./bin/wintun.test.exe '-test.v' '-test.run=^Test(Integrity|Performance)'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Profile the pure ingress observer on each proof architecture
+        if: matrix.scenario == 'proof'
+        run: |
+          ./bin/wintun.test.exe '-test.run=^$' '-test.bench=^BenchmarkIntegrityIngressStreams$' '-test.benchmem' '-test.benchtime=2s' '-test.count=3' '-test.cpuprofile=bin/integrity-ingress.pprof'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go tool pprof -top -nodecount=15 ./bin/wintun.test.exe bin/integrity-ingress.pprof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build and identify the uninstrumented release registrar
         run: |
           go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o dist/registrar-release/netswitch-engine.exe ./cmd/netswitch-engine

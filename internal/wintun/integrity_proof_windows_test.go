@@ -27,6 +27,10 @@ func integrityProofRatios(clean, observed []performanceSample) ([]float64, error
 	return pairedRatios(a, b)
 }
 
+func integrityProofQualified(ratios []float64) bool {
+	return len(ratios) != 0 && median(ratios) >= 0.80
+}
+
 // A qualification test, not corruption exposure. Compare the original clean
 // workload to the actual instrumented workload, with no discarded samples or
 // retries. Each boundary and implementation must retain >=80% of throughput.
@@ -100,12 +104,13 @@ func TestWintunIntegrityProof(t *testing.T) {
 					return
 				}
 				ratio := median(ratios)
+				passed := integrityProofQualified(ratios)
 				verdict := "qualified"
-				if ratio < 0.80 {
+				if !passed {
 					verdict = "diagnostic_overhead_exceeded"
 				}
 				report(t, map[string]any{"test": "integrity_overhead", "verdict": verdict, "boundary": boundary, "mode": mode, "median_diagnostic_over_clean": ratio, "pair_ratios": ratios, "clean": clean, "diagnostic": observed, "minimum_ratio": 0.80, "arch": os.Getenv("RUNNER_ARCH")})
-				if ratio < 0.80 {
+				if !passed {
 					failed = append(failed, fmt.Sprintf("%s/%s: ratio %.6f < 0.80", boundary, mode, ratio))
 					t.Errorf("diagnostic overhead too high: %s/%s throughput ratio %.3f < 0.80", boundary, mode, ratio)
 				} else {
@@ -117,6 +122,22 @@ func TestWintunIntegrityProof(t *testing.T) {
 	report(t, map[string]any{"test": "integrity_proof_complete", "qualified_configurations": qualified, "expected_configurations": 12, "failed_configurations": failed})
 	if qualified != 12 {
 		t.Errorf("only %d of 12 diagnostic configurations qualified; failed gates: %v", qualified, failed)
+	}
+}
+
+func TestIntegrityOverheadBoundUnchanged(t *testing.T) {
+	// Actual failed ARM64 ingress/ours samples from job 120245044279.
+	if integrityProofQualified([]float64{0.7877527415460567, 1.0051356856412232, 0.7857552788965874}) {
+		t.Fatal("historical failing configuration became green")
+	}
+	// One faster observation must not hide a consistently >20% slower path.
+	for _, ratios := range [][]float64{{0.79, 0.79, 0.79}, {0.79, 1.2, 0.79}, nil} {
+		if integrityProofQualified(ratios) {
+			t.Fatal("overhead bound accepted", ratios)
+		}
+	}
+	if !integrityProofQualified([]float64{0.8, 0.8, 0.8}) {
+		t.Fatal("exact 20% boundary changed")
 	}
 }
 

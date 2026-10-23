@@ -200,6 +200,30 @@ func TestIntegrityMissingAndReusedIdentity(t *testing.T) {
 	}
 }
 
+func TestIntegrityUniqueTupleBecomesAmbiguous(t *testing.T) {
+	d := newIntegrityDiagnostic()
+	first := integrityTestHandshake(d, 51000, 100, 200, 257)
+	if !first.uniqueTuple {
+		t.Fatal("new tuple unexpectedly ambiguous")
+	}
+	d.packet("dll_receive", integrityTestPacket(false, 51000, 101, 201, 24, integrityTestBody(257, 0, 64)))
+	// A distinct SYN whose sequence window overlaps must invalidate the early
+	// exit even after the original stream has already used it successfully.
+	second := integrityTestHandshake(d, 51000, 110, 210, 513)
+	if first.uniqueTuple || second.uniqueTuple {
+		t.Fatal("reused tuple retained the fast path")
+	}
+	d.packet("dll_receive", integrityTestPacket(false, 51000, 121, 221, 24, integrityTestBody(513, 10, 64)))
+	if !errors.Is(d.err(), errDiagnosticIncomplete) || !strings.Contains(d.issues["dll_receive"], "ambiguous") {
+		t.Fatal("overlapping incarnations were falsely attributed to one stream", d.err())
+	}
+	// The key includes the address, not just the client port.
+	other := d.newConnection("198.19.241.1:51000")
+	if other.client == first.client || other.client.String() != other.Tuple {
+		t.Fatal("tuple key lost address or text identity")
+	}
+}
+
 func TestIntegrityLatePreviousFixtureAndMidflight(t *testing.T) {
 	d := newIntegrityDiagnostic()
 	// Round-2 evidence: 62320 belonged to the preceding DLL fixture, not
@@ -566,5 +590,29 @@ func TestIntegrityPacketHotPathAllocations(t *testing.T) {
 		if i != 3 && len(c.Failures) != 0 {
 			t.Fatal("cross-stream attribution")
 		}
+	}
+}
+
+// Two completed warm-ups plus eight interleaved measured streams, as in CI.
+// This exercises the per-packet observer only: no sockets, driver or engine.
+func BenchmarkIntegrityIngressStreams(b *testing.B) {
+	d := newIntegrityDiagnostic()
+	d.boundary = "ingress"
+	var packets [8][]byte
+	for i := range 10 {
+		id, port := uint64(257+i), uint16(51000+i)
+		c := integrityTestHandshake(d, port, 100, 200, id)
+		c.reference = integrityTestBody(id, 0, 8192)
+		if i >= 2 {
+			packets[i-2] = integrityTestPacket(false, port, 101, 201, 24, c.reference)
+		}
+	}
+	b.SetBytes(8192)
+	b.ResetTimer()
+	for i := range b.N {
+		d.packet("stack_ingress", packets[i%len(packets)])
+	}
+	if err := d.err(); err != nil {
+		b.Fatal(err)
 	}
 }
