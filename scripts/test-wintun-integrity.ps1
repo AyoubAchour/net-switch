@@ -9,10 +9,10 @@ $ErrorActionPreference = 'Stop'
 $Arch = $Arch.ToLowerInvariant()
 $phases = @(Get-Content (Join-Path $PSScriptRoot 'wintun-integrity-sequence.json') -Raw | ConvertFrom-Json)
 if ($Scenario -eq 'proof') {
-  $phases = @($phases | Where-Object name -eq 'proof')
+  $phases = @($phases | Where-Object { $_.name -in @('capture-proof', 'proof') })
   $Repeats = 1 # The proof itself contains fixed matched samples; never retry it.
 } else {
-  $phases = @($phases | Where-Object name -ne 'proof')
+  $phases = @($phases | Where-Object { $_.name -notin @('capture-proof', 'proof') })
 }
 if ($Scenario -eq 'isolated') {
   $phases = @($phases | Where-Object name -eq 'performance-dll')
@@ -34,7 +34,7 @@ if ($boundary -notin @('receive', 'ingress', 'echo', 'output', 'send', 'host', '
 }
 # Read-only plan/parity tests: no executable or adapter is used.
 if ($PlanOnly) {
-  [pscustomobject]@{ scenario = $Scenario; arch = $Arch; focus = $focus; boundary = $boundary; repeats = $Repeats; phases = $phases } | ConvertTo-Json -Depth 8
+  [pscustomobject]@{ scenario = $Scenario; arch = $Arch; focus = $focus; boundary = $boundary; repeats = $Repeats; phases = $phases; calibrationAfterExposure = ($Scenario -ne 'proof') } | ConvertTo-Json -Depth 8
   return
 }
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or
@@ -50,7 +50,9 @@ if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Run this hosted diagnostic w
 $clock = [Diagnostics.Stopwatch]::StartNew()
 $completed = 0
 $lastSeconds = 0
-$budgetSeconds = 45 * 60
+$calibrationSeconds = if ($Scenario -eq 'proof') { 0 } elseif ($boundary -eq 'all') { 1200 } else { 180 }
+$budgetSeconds = 45 * 60 - $calibrationSeconds
+$runExit = 0
 $keys = @('NETSWITCH_WINTUN_CI', 'NETSWITCH_WINTUN_INTEGRITY', 'NETSWITCH_WINTUN_INTEGRITY_TRACE',
   'NETSWITCH_WINTUN_INTEGRITY_BOUNDARY',
   'NETSWITCH_WINTUN_INTEGRITY_FOCUS', 'NETSWITCH_WINTUN_INTEGRITY_REPEAT',
@@ -123,19 +125,39 @@ try {
     }
     if ($failed -ne 0) {
       Write-Output "INTEGRITY_RUN_FAILED scenario=$Scenario repeat=$repeat completed=$completed requested=$Repeats exit=$failed verdict=test_failed; consult structured diagnostic verdicts; no retry or replacement"
-      exit $failed
+      $runExit = $failed
+      break # Stop exposure without retrying; still measure this job's overhead.
     }
     $completed++
     $lastSeconds = $clock.Elapsed.TotalSeconds - $cycleStart
     Write-Output "INTEGRITY_RUN_COMPLETE scenario=$Scenario repeat=$repeat completed=$completed elapsed_seconds=$([int]$clock.Elapsed.TotalSeconds)"
   }
   if ($Scenario -eq 'proof') {
-    Write-Output "INTEGRITY_PROOF_COMPLETE shard=$env:INTEGRITY_SHARD verdict=qualified configurations=12 pairs_per_configuration=3 minimum_throughput_ratio=0.80"
-    return
+    Write-Output "INTEGRITY_JOB_COMPLETE scenario=proof shard=$env:INTEGRITY_SHARD exit=$runExit; job-wide verdict follows in INTEGRITY_SUMMARY"
+    exit $runExit
   }
   $inprocessPairs = if ($Scenario -eq 'full') { $completed * 12 } else { 0 }
   $measuredStreams = $completed * $(if ($Scenario -eq 'full') { 432 } else { 192 })
-  Write-Output "INTEGRITY_EXPOSURE scenario=$Scenario boundary=$boundary shard=$env:INTEGRITY_SHARD completed=$completed requested=$Repeats dll_tcp8_pairs=$($completed * 12) inprocess_tcp8_pairs=$inprocessPairs measured_tcp_streams=$measuredStreams budget_limited=$($completed -lt $Repeats) diagnostic=true"
+  Write-Output "INTEGRITY_OBSERVED_EXPOSURE scenario=$Scenario boundary=$boundary shard=$env:INTEGRITY_SHARD completed=$completed requested=$Repeats dll_tcp8_pairs=$($completed * 12) inprocess_tcp8_pairs=$inprocessPairs measured_tcp_streams=$measuredStreams budget_limited=$($completed -lt $Repeats) eligibility=pending_calibration"
+  # Calibrate AFTER the original sequence, with the selected boundary and all
+  # implementations used in this job. This cannot reset its pre-exposure state.
+  $env:NETSWITCH_WINTUN_CI = '1'
+  $env:NETSWITCH_WINTUN_INTEGRITY = '1'
+  $env:NETSWITCH_WINTUN_INTEGRITY_PHASE = 'calibration'
+  Write-Output "INTEGRITY_CALIBRATION_START scenario=$Scenario boundary=$boundary seconds=$calibrationSeconds"
+  $calibration = Start-Process -FilePath './bin/wintun.test.exe' -ArgumentList @('-test.run=^TestWintunIntegrityProof$', '-test.v', "-test.timeout=$($calibrationSeconds)s") -WorkingDirectory $PWD.Path -NoNewWindow -PassThru
+  $null = $calibration.Handle
+  if (-not $calibration.WaitForExit(($calibrationSeconds + 15) * 1000)) {
+    $calibration.Kill($true)
+    $null = $calibration.WaitForExit(5000)
+    Write-Output 'INTEGRITY_PHASE_TIMEOUT phase=calibration verdict=diagnostic_incomplete'
+    exit 1
+  }
+  $calibration.WaitForExit()
+  if ($null -eq $calibration.ExitCode) { throw 'Missing calibration exit code' }
+  if ($calibration.ExitCode -ne 0) { $runExit = $calibration.ExitCode }
+  Write-Output "INTEGRITY_JOB_COMPLETE scenario=$Scenario shard=$env:INTEGRITY_SHARD exit=$runExit; job-wide verdict follows in INTEGRITY_SUMMARY"
+  exit $runExit
 } finally {
   foreach ($key in $keys) { [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process') }
 }

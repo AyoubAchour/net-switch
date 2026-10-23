@@ -8,7 +8,7 @@ import { evaluate, readWorkflow } from './workflows.mjs';
 const workflowText = readFileSync(new URL('../workflows/ci.yml', import.meta.url), 'utf8');
 const normal = readWorkflow(workflowText).jobs.get('wintun');
 const manifest = JSON.parse(readFileSync(new URL('../../scripts/wintun-integrity-sequence.json', import.meta.url), 'utf8'));
-const phases = manifest.filter(phase => phase.name !== 'proof');
+const phases = manifest.filter(phase => !['capture-proof','proof'].includes(phase.name));
 const runner = fileURLToPath(new URL('../../scripts/test-wintun-integrity.ps1', import.meta.url));
 
 test('nightly uses the qualified sequence with one shared cap and no ordinary CI jobs', () => {
@@ -121,10 +121,11 @@ for (const arch of ['x64', 'arm64']) {
         env:{...process.env, GITHUB_ACTIONS:'false', NETSWITCH_WINTUN_CI:'0', NETSWITCH_WINTUN_INTEGRITY:'0'},
       });
       const plan = JSON.parse(output);
+      assert.equal(plan.calibrationAfterExposure, scenario !== 'proof');
       assert.equal(plan.arch, arch);
       assert.equal(plan.scenario, scenario);
       if (scenario === 'proof') {
-        assert.deepEqual(plan.phases.map(phase => phase.name), ['proof']);
+        assert.deepEqual(plan.phases.map(phase => phase.name), ['capture-proof','proof']);
         assert.equal(plan.repeats, 1);
       } else if (scenario === 'isolated') {
         assert.equal(plan.focus, 'tcp_8_MBps');

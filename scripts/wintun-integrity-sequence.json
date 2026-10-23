@@ -1,6 +1,10 @@
 [
   {
-    "name": "proof", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 1200, "diagnostic": true,
+    "name": "capture-proof", "program": "./bin/wintun-capture.test.exe", "kind": "test", "timeoutSeconds": 480,
+    "args": ["-test.run=^TestWintunCaptureProof$"]
+  },
+  {
+    "name": "proof", "program": "./bin/wintun.test.exe", "kind": "test", "timeoutSeconds": 1200, "diagnostic": true, "runAfterFailure": true,
     "args": ["-test.run=^TestWintunIntegrityProof$"]
   },
   {

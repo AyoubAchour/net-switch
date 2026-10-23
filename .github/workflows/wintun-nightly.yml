@@ -92,12 +92,10 @@ jobs:
           artifact: wintun
       - name: Fetch the pinned signed DLL unchanged
         run: ./scripts/prepare-wintun-tests.ps1
-      - name: Measure inline capture against SHA-only in the ordinary binary
+      - name: Build the ordinary binary for the paired capture proof
         if: matrix.scenario == 'proof'
         run: |
           go test -c -o ./bin/wintun-capture.test.exe ./internal/wintun
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./bin/wintun-capture.test.exe '-test.v' '-test.run=^TestWintunCaptureProof$' '-test.timeout=8m'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Repeat complete matched cases without retrying or replacing failures
         run: node scripts/wintun-integrity-summary.mjs

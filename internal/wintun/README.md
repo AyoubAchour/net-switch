@@ -288,8 +288,9 @@ check if that slice itself changes. The opt-in diagnostic uses separate oracles.
 The small proof first runs `TestWintunCaptureProof` in an **ordinary untagged
 binary**: eight fixed alternating-order SHA-only/capture pairs per implementation,
 same shared payload and two warm-ups. It logs every matched rate and ratio;
-the per-mode median must retain 95% of SHA-only throughput. This is an overhead
-guard, not a claim that the overhead has already been measured negligible.
+the per-mode median must retain 95% of SHA-only throughput. Timing-only failures
+of this separate guard are reported as `capture_invalid` within a nonfatal
+`diagnostic_invalid` job, with zero clean exposure credit.
 The only capture bypass is a fixture field set by this hosted proof's baseline;
 normal CI has no environment switch that can silently disable the comparison.
 
@@ -301,15 +302,20 @@ queue contention can extend this. The nightly workflow also allows manual
 dispatch and serializes its own invocations. Do not launch an additional manual
 hunt alongside it if the combined work would occupy the remaining CI slots.
 
-The job summary distinguishes positive TCP byte/hash evidence, incomplete
-diagnostics, timeouts, failed diagnostic overhead gates and unrelated test failures.
-An overhead failure names its boundary, implementation and paired ratio in the
-final summary; successful host records at the end are not the failure location.
-Known recovery/throughput
-failure signatures are named separately. All failed exit codes remain failed;
-no general test failure is silently waived or labelled TCP corruption. Detailed
-boundary records stay in the Actions log. This workflow reports observations;
-it never closes the release blocker.
+The owner chose a job-wide qualification rule: the median of **all paired
+diagnostic/clean ratios in that job**, with the 0.80 bound unchanged. Individual
+boundaries are still reported, but no longer gate the job separately. The final
+summary includes pair count, minimum, 25th percentile, median, 75th percentile,
+maximum and count below 0.80; quartiles use linear interpolation.
+
+A complete job below the bound is `diagnostic_invalid`, exits successfully and
+gets **zero clean exposure credit**. Corruption evidence and genuinely incomplete
+diagnostics (including missing calibration, missing pairs or timeouts) fail.
+Other test failures are reported as nonfatal `test_failed`, also with zero clean
+credit. Original errors and child exit codes remain visible. No failing sample
+is discarded or used as a zero-valued rate. A passing Actions check alone does
+not mean valid exposure: use `INTEGRITY_SUMMARY.clean_exposure_connections`.
+This investigation never closes the release blocker or changes ordinary CI gates.
 
 First dispatch `ci.yml` with `wintun_integrity=true`,
 `wintun_integrity_arch=both`, `wintun_integrity_shards=2`, and
@@ -324,8 +330,7 @@ normal performance runs keep the original payload, warm-ups and gate.
 The proof measures each of six boundary choices on both implementations using
 three fixed matched clean/instrumented pairs, alternating which runs first.
 Clean means the original workload in the same binary with observers disabled.
-Every configuration must retain at least 80% of clean throughput (median of
-the three ratios). Failed/incomplete samples stay in place and prevent a ratio;
+All 36 ratios enter the job median. Failed/incomplete samples stay in place and prevent qualification;
 there are no retries. Wall time and heap allocation/reservation are also logged.
 Precomputing independent payload oracles happens before the transfer timer,
 and adds up to 512 MiB for eight streams in addition to sender buffers. Thus a
@@ -370,8 +375,19 @@ bound builds/tools. A case that overruns fails explicitly as incomplete. The
 full performance timeout is 20 minutes for diagnostic overhead; the original
 per-transfer deadlines, sizes and warm-up counts stay unchanged. Profile
 phases use their original 24 transfers with payload diagnostics off.
-`INTEGRITY_EXPOSURE` reports completed DLL and in-process TCP-eight pair counts
-separately, plus measured TCP streams (excluding warm-ups and CPU profiles).
+`INTEGRITY_OBSERVED_EXPOSURE` reports provisional completed-cycle counts.
+Every exposure job then calibrates its selected boundary after the original
+sequence, using three clean/diagnostic pairs per implementation: six pairs in
+isolated jobs, nine in full jobs (including inprocess). These are the paired
+diagnostic/clean ratios for that job; ours/DLL performance comparisons are not
+overhead ratios. Calibration reserves three minutes of the 45-minute budget
+(20 minutes for the explicitly expensive `all` boundary), so it does not add
+traffic or resets before the state-dependent sequence. A failed cycle still
+stops exposure; calibration is not a retry of its failed samples.
+The final summary verifies completed TCP pairs and host connection records,
+keeps calibration transfers separate, and credits observed exposure only when
+the entire job is valid and clean. Distorted runs and other-test-failed runs
+cannot inflate clean exposure; their observations and failure evidence remain.
 An unsuccessful cycle stops repetition; no sample or pair is retried, dropped
 or replaced. Instrumented rates never enter the clean performance gate.
 
