@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -243,10 +244,12 @@ func disableRecovery(t *testing.T) func() {
 	if b, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
 		t.Fatal(err, string(b))
 	}
-	return func() {
+	restore := sync.OnceFunc(func() {
 		_ = os.Remove(path)
 		if b, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
 			t.Error(err, string(b))
 		}
-	}
+	})
+	t.Cleanup(restore)
+	return restore
 }

@@ -1,6 +1,7 @@
 package lifecycle_test
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -61,26 +62,34 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 			var workers sync.WaitGroup
 			var bytes atomic.Uint64
 			errors := make(chan error, 8)
-			until := time.Now().Add(60 * time.Second)
+			loadStarted := time.Now()
+			until := loadStarted.Add(60 * time.Second)
 			for _, peer := range peers {
 				workers.Go(func() {
-					payload := make([]byte, 32<<10)
-					reply := make([]byte, len(payload))
+					marker := strings.Repeat("x", 32<<10)
+					payload := "ping " + marker + "\n"
+					reader := bufio.NewReaderSize(peer, 40<<10)
 					for time.Now().Before(until) {
 						peer.SetDeadline(time.Now().Add(5 * time.Second))
-						if _, err := peer.Write(payload); err != nil {
+						if _, err := io.WriteString(peer, payload); err != nil {
 							errors <- err
 							return
 						}
-						if _, err := io.ReadFull(peer, reply); err != nil {
+						reply, err := reader.ReadSlice('\n')
+						if err == nil {
+							err = nativeLoadReply(marker, string(reply), runtime.GOOS == "linux")
+						}
+						if err != nil {
 							errors <- err
 							return
 						}
-						bytes.Add(uint64(len(reply)))
+						bytes.Add(uint64(len(marker)))
 					}
 				})
 			}
 			workers.Wait()
+			loadElapsed := time.Since(loadStarted)
+			t.Logf("NATIVE_LOAD_FINISHED elapsed=%s echoed_payload_bytes=%d requested_stop=true", loadElapsed, bytes.Load())
 			close(errors)
 			for err := range errors {
 				t.Error("load flow", err)
@@ -90,8 +99,8 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 				t.Fatal(err)
 			}
 			out, err := host.ReadOutcome(data, c.instance)
-			if err != nil || out.Child == nil || out.Child.Forced || !out.Child.Completed || out.Child.HostHealthPasses == 0 || bytes.Load() == 0 {
-				t.Fatal("load watchdog evidence", out, err)
+			if err != nil || out.Child == nil || out.Child.Forced || !out.Child.Completed || out.Child.HostHealthPasses == 0 || bytes.Load() == 0 || loadElapsed < 60*time.Second {
+				t.Fatalf("load incomplete: elapsed=%s bytes=%d child=%+v cleanup=%s error=%v", loadElapsed, bytes.Load(), out.Child, out.State, err)
 			}
 			t.Logf("NATIVE_HEALTH_LOAD seconds=60 streams=8 echoed_bytes=%d passes=%d failures=%d retries=0", bytes.Load(), out.Child.HostHealthPasses, out.Child.HostHealthFailures)
 		})
@@ -388,6 +397,41 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 				}
 			}
 		})
+	}
+}
+
+func nativeLoadReply(marker, reply string, annotated bool) error {
+	if annotated {
+		if strings.HasPrefix(reply, "pong "+marker+" ") && strings.HasSuffix(reply, "\n") {
+			return nil
+		}
+	} else if reply == "ping "+marker+"\n" {
+		return nil
+	}
+	return fmt.Errorf("load fixture reply mismatch: annotated=%t reply_bytes=%d", annotated, len(reply))
+}
+
+func TestNativeLoadFixtureProtocols(t *testing.T) {
+	marker := strings.Repeat("x", 32<<10)
+	for _, tc := range []struct {
+		reply     string
+		annotated bool
+		valid     bool
+	}{
+		{"ping " + marker + "\n", false, true},
+		{"pong " + marker + " 203.0.113.1:5000\n", true, true},
+		{"pong short 203.0.113.1:5000\n", true, false},
+		{"ping " + marker, false, false},
+		{strings.Repeat("\x00", 32<<10), true, false},
+	} {
+		reader := bufio.NewReaderSize(strings.NewReader(tc.reply), 40<<10)
+		reply, err := reader.ReadSlice('\n')
+		if err == nil {
+			err = nativeLoadReply(marker, string(reply), tc.annotated)
+		}
+		if (err == nil) != tc.valid {
+			t.Fatal("fixture protocol validation", tc.annotated, tc.valid, err)
+		}
 	}
 }
 

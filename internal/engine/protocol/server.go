@@ -129,7 +129,7 @@ func (s *Server) handle(ctx context.Context, r Request, c *connection) Reply {
 }
 func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, error) {
 	switch r.Method {
-	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "adapterForgetLane", "testProxy":
+	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "adapterForgetLane", "testProxy", "testFault":
 		// A new controller cannot overtake an accepted mutation. Renewals
 		// remain independent of adapter file/HTTP work and disk flushes.
 		s.mutation.Lock()
@@ -254,7 +254,13 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		if s.TestFault == nil {
 			return nil, errors.New("test faults unavailable in production")
 		}
-		return s.TestFault(ctx, r.Fault)
+		fault := s.TestFault
+		// A restart fault can wait for a registrar ACK consumed by the same
+		// private pump that calls Supervision. Never hold its protocol lock
+		// across external work. The mutation lock still fences the operation.
+		s.mu.Unlock()
+		defer s.mu.Lock()
+		return fault(ctx, r.Fault)
 	case "renew":
 		s.expires = s.now().Add(Lease)
 		return true, nil

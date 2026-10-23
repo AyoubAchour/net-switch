@@ -122,6 +122,58 @@ stop, and routing restart inside the same child. An eight-stream, 60-second
 echo load reports completed bytes, successful probes and failed probes. No
 probe retries are introduced without those measurements.
 
+### Findings from the 26cec04f hosted run
+
+- Windows x64 and ARM64 both hit a registrar adoption lock cycle during the
+  same-child restart fault. `testFault` held the protocol mutex while restart
+  waited for an ACK; the private pump was waiting for that mutex in Supervision
+  ahead of the ACK. A pure regression failed with the old locking and passes
+  when the callback releases the protocol mutex while retaining mutation
+  serialization. The registrar's three-second deadline is unchanged.
+- Windows load completed 60 successful probes with zero failures on both
+  architectures (7,474,348,032 bytes on x64). Linux's five-second failure was a
+  fixture mismatch: binary data never completed its newline-based ping request.
+  All eight reads timed out, then the test explicitly stopped a healthy child.
+  The load now uses bounded ping/pong frames and requires 60 seconds of work.
+- The zero-pass exit-3 outcomes on x64 were brief start/stop cases: child 6980
+  lived from 14:01:05.059 to 14:01:05.450 UTC; child 4424 from 14:01:05.707 to
+  14:01:06.106. The immediate check sees idle, and neither lives to the next
+  one-second check. They briefly enter running, but no running-state forwarding
+  probe completes; zero is expected, not a missing successful count.
+- No pre-termination RST was reproduced in these jobs. The x64 read-pump flow
+  proved OS exhaustion at 18.954 s. ARM64 observed WSAECONNABORTED at
+  14:07:26.373 UTC after the host's 14:07:26.328 termination decision. The original
+  889d90d6 reset remains unexplained; its strict check and direction evidence stay.
+  ARM64's startup-hang case completed at 36.16 s, leaving 5.84 s against its
+  unchanged 42 s test limit (35 s startup detection plus polling and cleanup).
+
+The default lifecycle suite still selects `EngineService` without `m4_native`;
+native unit watchdog settings are conditional on `Config.Native`. The host
+starts its child idle, sends no routing start, and never manufactures intent
+or sign-in. Only relayed authenticated Control requests start forwarding.
+
+The Linux x64 lifecycle failure in job 120453669169 came from the old adapter's
+port allocation: the failed API bind and the published proxy both used 38287.
+Two independent allocate-and-close calls allowed immediate reuse. Both ports
+are now held together during allocation, with a pure reuse regression and
+explicit actual-port diagnostics. The frozen oracle's injected ports and all
+frozen Node files remain unchanged.
+
+The downstream sign-in message did not prove routing started: it tested
+`status != off`, which also includes the logged error state. It edited the
+boot journal with Control PID 7426 still alive; Start was a no-op, and the
+next actual Control start was 14:00:19, after that assertion. Fault cases now
+obtain fresh sessions and explicit healthy preconditions, retaining journals
+and the crash-storm's accumulated state. Recovery overrides and unused fault
+arms clean up even on failure. The reboot proof first stops both services,
+preserves wanted=true, writes the previous-boot marker, and requires a new
+Control PID, routing off and Engine stopped before sign-in. Windows x64,
+Windows ARM64 and Linux ARM64 lifecycle jobs on 26cec04f passed; the new
+independent reboot proof still requires hosted validation on this revision.
+It observes off across five seconds of recovery ticks, not just one snapshot.
+The separate 20.069 s forced-stop message is the acknowledged-stop barrier
+case succeeding inside its existing 18–32 s assertion, not an unexpected kill.
+
 The Linux acceptance `routes.default-route-removed` failure in job
 120435827572 uses the namespace launcher's standalone `run` command, not the
 service host or child command. Standalone has no HealthKey, so no private probe

@@ -43,6 +43,7 @@ type Options struct {
 	Now                       func() time.Time
 	Sleep                     func(context.Context, time.Duration) error
 	FreePort                  func() (int, error)
+	ports                     func(bool) (int, int, error)
 	ID                        func() string
 	ListFiles                 func(string) ([]string, error)
 	Verify                    func() error
@@ -139,7 +140,19 @@ func New(o Options) *Adapter {
 		o.ID = randomID
 	}
 	if o.FreePort == nil {
-		o.FreePort = freePort
+		o.ports = func(proxy bool) (int, int, error) {
+			return reservePorts(proxy, func() (net.Listener, error) { return net.Listen("tcp4", "127.0.0.1:0") })
+		}
+	} else {
+		// Preserve the deterministic port hook used by the frozen oracle.
+		o.ports = func(proxy bool) (int, int, error) {
+			api, err := o.FreePort()
+			if err != nil || !proxy {
+				return api, 0, err
+			}
+			port, err := o.FreePort()
+			return api, port, err
+		}
 	}
 	if o.StartProcess == nil {
 		o.StartProcess = startProcess
@@ -213,13 +226,30 @@ func randomID() string {
 	}
 	return hex.EncodeToString(b[:])
 }
-func freePort() (int, error) {
-	l, err := net.Listen("tcp4", "127.0.0.1:0")
+
+// Hold the first reservation while obtaining the second. Releasing each
+// before allocating the next lets the OS return the same ephemeral port.
+// The legacy child cannot inherit listeners, so release both before launch.
+func reservePorts(proxy bool, listen func() (net.Listener, error)) (api, port int, err error) {
+	first, err := listen()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	p := l.Addr().(*net.TCPAddr).Port
-	return p, l.Close()
+	defer func() { err = errors.Join(err, first.Close()) }()
+	api = first.Addr().(*net.TCPAddr).Port
+	if !proxy {
+		return api, 0, nil
+	}
+	second, err := listen()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer func() { err = errors.Join(err, second.Close()) }()
+	port = second.Addr().(*net.TCPAddr).Port
+	if api == port {
+		return 0, 0, errors.New("adapter port reservations overlap")
+	}
+	return api, port, nil
 }
 func sleep(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
@@ -764,17 +794,13 @@ func (a *Adapter) start(ctx context.Context, p engine.Policy) error {
 	if err := verify(); err != nil {
 		return err
 	}
-	apiPort, err := a.o.FreePort()
+	apiPort, proxyPort, err := a.o.ports(a.o.Mode == "proxy")
 	if err != nil {
 		return err
 	}
 	secret := a.o.ID()
-	proxyPort := 0
-	if a.o.Mode == "proxy" {
-		proxyPort, err = a.o.FreePort()
-		if err != nil {
-			return err
-		}
+	if a.o.FreePort == nil { // actual OS reservations, not oracle-supplied ports
+		a.o.Log(fmt.Sprintf("adapter listener ports: api=%d proxy=%d", apiPort, proxyPort))
 	}
 	a.apply.Lock()
 	defer a.apply.Unlock()

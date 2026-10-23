@@ -107,8 +107,9 @@ func NativeChildCommand(args []string) error {
 	var requested, disconnected atomic.Bool
 	registrarAck := make(chan uint32, 1)
 	if err := configureChildRegistrar(func(wait context.Context, msg supervisor.Message) error {
+		started := nativeAwake()
 		if err := channel.Send(wait, msg); err != nil {
-			return err
+			return fmt.Errorf("registrar PID %d capability send: %w", msg.PID, err)
 		}
 		select {
 		case pid := <-registrarAck:
@@ -119,7 +120,7 @@ func NativeChildCommand(args []string) error {
 		case <-channel.Done():
 			return io.ErrClosedPipe
 		case <-wait.Done():
-			return wait.Err()
+			return fmt.Errorf("registrar PID %d capability sent; ACK not consumed after %s: %w", msg.PID, nativeAwake().Sub(started), wait.Err())
 		}
 	}); err != nil {
 		return err

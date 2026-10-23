@@ -1050,8 +1050,44 @@ func TestRealServices(t *testing.T) {
 		c.must(t, "routing", map[string]any{"on": true}, nil)
 		wait(t, "owner starts routing again", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	})
+	// These are independent fault cases, not prerequisites for each other.
+	// Keep accumulated journals; only the explicit owner Retry resets its
+	// budget. A failure must not lend a stale session or live service to the
+	// next case, especially the reboot/sign-in safety proof.
+	readyFaultCase := func(t *testing.T) {
+		t.Helper()
+		t.Cleanup(func() {
+			if !t.Failed() {
+				return
+			}
+			restore := disableRecovery(t)
+			defer restore()
+			for _, name := range []string{service.Control, service.Engine} {
+				s, err := service.Query(name)
+				t.Logf("FAILED_CASE_SERVICE name=%s status=%+v error=%v", name, s, err)
+				if err == nil && s.Stopped {
+					continue
+				}
+				stop, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				if err := service.ForceStop(stop, name); err != nil {
+					t.Error("isolate failed case", name, err)
+				}
+				cancel()
+			}
+		})
+		if err := service.Start(ctx, service.Control); err != nil {
+			t.Fatal(err)
+		}
+		c = openClient(t, owner, false)
+		c.must(t, "session", nil, &session)
+		c.must(t, "routing", map[string]any{"on": true}, nil)
+		wait(t, "independent fault-case routing", 35*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+		stream := proxyStream(t, session.URL, session.Token, echo)
+		defer stream.Close()
+		checkEcho(t, stream)
+	}
 	t.Run("five-failures-stay-stopped-across-control-restart", func(t *testing.T) {
-		c.must(t, "routing", map[string]any{"on": true}, nil) // explicit Retry resets the budget
+		readyFaultCase(t)
 		for i := 0; i < 5; i++ {
 			engine, err := service.Query(service.Engine)
 			if err != nil || !engine.Running {
@@ -1060,7 +1096,13 @@ func TestRealServices(t *testing.T) {
 			before := getStatus(t, c).Instance
 			kill(t, engine.PID)
 			if i < 4 {
-				wait(t, "bounded engine retry", 45*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before })
+				var last status
+				t.Cleanup(func() {
+					if t.Failed() {
+						t.Logf("ENGINE_RETRY injected_crash=%d previous_instance=%s last_status=%+v", i+1, before, last)
+					}
+				})
+				wait(t, "bounded engine retry", 45*time.Second, func() bool { last = getStatus(t, c); return last.Routing == "on" && last.Instance != before })
 			}
 		}
 		wait(t, "durable crash-loop latch", 15*time.Second, func() bool {
@@ -1096,6 +1138,7 @@ func TestRealServices(t *testing.T) {
 		wait(t, "owner Retry releases latch", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	})
 	t.Run("blocked-apply-cannot-hold-the-lease", func(t *testing.T) {
+		readyFaultCase(t)
 		stream := proxyStream(t, session.URL, session.Token, echo)
 		defer stream.Close()
 		checkEcho(t, stream)
@@ -1129,6 +1172,7 @@ func TestRealServices(t *testing.T) {
 		})
 	})
 	t.Run("lease-lapse-fails-open", func(t *testing.T) {
+		readyFaultCase(t)
 		stream := proxyStream(t, session.URL, session.Token, echo)
 		defer stream.Close()
 		checkEcho(t, stream)
@@ -1154,23 +1198,52 @@ func TestRealServices(t *testing.T) {
 		directEcho(t, echo)
 	})
 	t.Run("reboot-like-restart-waits-for-sign-in", func(t *testing.T) {
+		readyFaultCase(t)
+		old, err := service.Query(service.Control)
+		if err != nil || !old.Running {
+			t.Fatal("reboot precondition: Control", old, err)
+		}
+		restore := disableRecovery(t)
+		kill(t, old.PID) // preserve durable routing intent, unlike a clean stop
+		wait(t, "old Control is gone before boot edit", 10*time.Second, func() bool { s, e := service.Query(service.Control); return e == nil && s.Stopped })
+		if err := service.Stop(ctx, service.Engine); err != nil {
+			t.Fatal(err)
+		}
+		wait(t, "old engine is gone before boot edit", 10*time.Second, func() bool { s, e := service.Query(service.Engine); return e == nil && s.Stopped })
 		// Model a new boot while keeping both durable journals, rather than
 		// confusing an ordinary same-boot Control recovery with a reboot.
 		var journal map[string]any
 		if err := lifecycle.Read(filepath.Join(data, "control-journal.json"), &journal); err != nil {
 			t.Fatal(err)
 		}
+		if journal["wanted"] != true {
+			t.Fatal("reboot proof needs saved routing-on intent", journal["wanted"])
+		}
 		journal["bootId"] = "previous-boot"
 		if err := lifecycle.Save(filepath.Join(data, "control-journal.json"), journal); err != nil {
 			t.Fatal(err)
 		}
+		restore()
 		if err := service.Start(ctx, service.Control); err != nil {
 			t.Fatal(err)
 		}
 		c = openClient(t, owner, false)
-		if getStatus(t, c).Routing != "off" {
-			t.Fatal("routing started without sign-in")
+		fresh := getStatus(t, c)
+		engine, err := service.Query(service.Engine)
+		if fresh.ControlPID == old.PID || fresh.Routing != "off" || err != nil || !engine.Stopped {
+			t.Fatal("new-boot sign-in gate: expected new Control off and engine stopped", fresh, engine, err)
 		}
+		// Cross several automatic-recovery ticks before authorizing sign-in.
+		// A single immediate snapshot could race an unintended delayed start.
+		for until := time.Now().Add(5 * time.Second); time.Now().Before(until); {
+			current := getStatus(t, c)
+			engine, err = service.Query(service.Engine)
+			if current.ControlPID != fresh.ControlPID || current.Routing != "off" || err != nil || !engine.Stopped {
+				t.Fatal("routing changed before explicit sign-in", current, engine, err)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		t.Logf("REBOOT_SIGNIN_GATE old_control=%d new_control=%d wanted_before_boot=true routing=%s engine_stopped=%t observed_off_for=5s", old.PID, fresh.ControlPID, fresh.Routing, engine.Stopped)
 		c.must(t, "signin", nil, nil)
 		wait(t, "sign-in restores routing", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	})

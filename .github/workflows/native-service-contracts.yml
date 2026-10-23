@@ -59,7 +59,7 @@ jobs:
           go test -v -count=1 -tags lifecycle_test ./internal/engine/testproxy
           go test -tags lifecycle_test -run '^$' -fuzz '^FuzzProxyHandshake$' -fuzztime=5s ./internal/engine/testproxy
           go test -v -count=1 -tags lifecycle_test -run '^TestNative(ReadFault|ManagerExit|Health)' ./internal/lifecycle
-          go test -v -count=1 -run '^TestNative(Stall|TCPInfo|Actor|HeldFlow)' ./tests/lifecycle
+          go test -v -count=1 -run '^TestNative(Stall|TCPInfo|Actor|HeldFlow|LoadFixture)' ./tests/lifecycle
       - name: Windows process diagnostic build contracts
         if: runner.os == 'Windows'
         shell: pwsh

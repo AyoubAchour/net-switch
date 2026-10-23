@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -382,7 +383,7 @@ func disableRecovery(t *testing.T) func() {
 		t.Fatal(err)
 	}
 	s.Close()
-	return func() {
+	restore := sync.OnceFunc(func() {
 		m, err := mgr.Connect()
 		if err != nil {
 			t.Error(err)
@@ -398,7 +399,9 @@ func disableRecovery(t *testing.T) func() {
 		if err := s.SetRecoveryActions(actions, 600); err != nil {
 			t.Error(err)
 		}
-	}
+	})
+	t.Cleanup(restore)
+	return restore
 }
 
 // SCM launches this one test executable as SYSTEM, so its children use real
