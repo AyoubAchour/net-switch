@@ -16,7 +16,9 @@ const refusalEvidenceLimit = 256
 
 // RefusalStatsBudget reserves room in the shared stats reply for the full
 // ring at maximum address and counter widths; tested beside the recorder.
-const RefusalStatsBudget = 96 << 10
+// The actual worst-case encoding is 80,213 bytes. 84 KiB leaves headroom
+// without crowding out the other fixed sections in the 256 KiB shared budget.
+const RefusalStatsBudget = 84 << 10
 
 type refusalEvidence struct {
 	Sequence      uint64         `json:"sequence"`
