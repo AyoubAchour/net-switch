@@ -61,16 +61,40 @@ func routedApps(t *testing.T, data string) map[string]usage.RoutedEntry {
 	return out
 }
 
+// quiesceRouted waits until the routed record has not changed for two
+// accounting rounds, so earlier traffic (still being absorbed every five
+// seconds) cannot land inside a later measurement's baseline.
+func quiesceRouted(t *testing.T, data string) map[string]usage.RoutedEntry {
+	t.Helper()
+	last := routedApps(t, data)
+	stableSince := time.Now()
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(time.Second)
+		now := routedApps(t, data)
+		if fmt.Sprint(now) != fmt.Sprint(last) {
+			last, stableSince = now, time.Now()
+			continue
+		}
+		if time.Since(stableSince) >= 12*time.Second {
+			return last
+		}
+	}
+	t.Fatalf("routed usage never settled: %+v", last)
+	return nil
+}
+
 // findOwnIdentity echoes n bytes and returns the one app identity whose totals
 // grew by exactly n up and n down. Two candidates would mean the probe is
 // ambiguous, which fails rather than guessing.
 func findOwnIdentity(t *testing.T, ctx context.Context, fixture tunFixture, data string, n uint64) (string, usage.RoutedEntry) {
 	t.Helper()
-	before := routedApps(t, data)
+	before := quiesceRouted(t, data)
 	echoExact(t, ctx, fixture, int(n))
 	var key string
 	var entry usage.RoutedEntry
-	wait(t, "own app identity appears in routed usage", 25*time.Second, func() bool {
+	deadline := time.Now().Add(25 * time.Second)
+	for time.Now().Before(deadline) {
 		matches := 0
 		for id, e := range routedApps(t, data) {
 			b := before[id]
@@ -79,9 +103,13 @@ func findOwnIdentity(t *testing.T, ctx context.Context, fixture tunFixture, data
 				key, entry = id, e
 			}
 		}
-		return matches == 1
-	})
-	return key, entry
+		if matches == 1 {
+			return key, entry
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Fatalf("own app identity never appeared in routed usage: before=%+v now=%+v", before, routedApps(t, data))
+	return "", usage.RoutedEntry{}
 }
 
 // echoExact sends exactly n bytes through the TUN and reads them back, so the
@@ -214,7 +242,14 @@ func TestNativeControlCutover(t *testing.T) {
 		t.Logf("NATIVE_CONTROL_USAGE_IDENTITY app=%q up=%d down=%d", key, start.Up, start.Down)
 		own := func() usage.RoutedEntry { return routedApps(t, data)[key] }
 		settle := func(label string, wantUp, wantDown uint64) {
-			wait(t, label, 25*time.Second, func() bool { e := own(); return e.Up == wantUp && e.Down == wantDown })
+			deadline := time.Now().Add(25 * time.Second)
+			for time.Now().Before(deadline) {
+				if e := own(); e.Up == wantUp && e.Down == wantDown {
+					return
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			t.Fatalf("timeout: %s: want up=%d down=%d, routed=%+v", label, wantUp, wantDown, routedApps(t, data))
 		}
 		base := start
 		// Crash between the durable usage commit and the acknowledgement.
