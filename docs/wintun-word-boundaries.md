@@ -69,8 +69,10 @@ slow samples are never replaced. This baseline includes #93's word verifier,
 not the older SHA-only payload. There is no diagnostic callback cost in the
 untagged baseline.
 
-The separately selected `boundaries-hunt` input has five shards per architecture
-and a single cap of ten concurrent jobs. It runs two full performance suites
+The separately selected `boundaries-hunt` input defaults to one replica per
+architecture. Expansion additionally requires `wintun_boundary_shards=2` or
+`5`, with a single cap of ten concurrent jobs. The pilot always stays at one
+replica per architecture regardless of that input. It runs two full performance suites
 against each reference (DLL and in-process). Do not dispatch it until the pilot
 numbers have been reviewed and the hunt explicitly approved. This PR's initial
 dispatch is the two-job pilot only.
