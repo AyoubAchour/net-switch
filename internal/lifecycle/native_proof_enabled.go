@@ -116,6 +116,14 @@ func (r *stalledReader) ReadPacket(ctx context.Context, b []byte) (int, error) {
 	if err != nil {
 		return n, err
 	}
+	// The hosted Control cutover proof makes the real read pump report the
+	// platform's adapter-loss error (Windows: the Wintun removal error, so the
+	// genuine exit-3 path runs; Linux: an ordinary pump failure, exit 1).
+	removed := filepath.Join(r.data, "fault-native-adapter-removed")
+	if os.Rename(removed, removed+".consumed") == nil {
+		log.Printf("NATIVE_READ_FAULT pid=%d kind=adapter-removed at=%s", os.Getpid(), time.Now().UTC().Format(time.RFC3339Nano))
+		return 0, nativeProofReadFault()
+	}
 	arm := filepath.Join(r.data, "fault-native-forwarding")
 	if os.Rename(arm, arm+".consumed") != nil {
 		return n, nil

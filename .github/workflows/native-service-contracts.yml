@@ -29,7 +29,7 @@ jobs:
   services:
     name: Native services / ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -41,7 +41,7 @@ jobs:
       GOFLAGS: -mod=vendor -p=2
       NETSWITCH_LIFECYCLE_CI: '1'
       NETSWITCH_NATIVE_CI: '1'
-      NETSWITCH_LIFECYCLE_FILTER: '^TestNativeEngineService$'
+      NETSWITCH_LIFECYCLE_FILTER: '^TestNative(ControlCutover|EngineService)$'
       NATIVE_FAULTS_ONLY: ${{ inputs.faults_only && '1' || '0' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -150,7 +150,7 @@ jobs:
             done
             go test -c -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" ./tests/lifecycle
             sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"
-            (cd tests/lifecycle && sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR,NETSWITCH_NATIVE_CI,NETSWITCH_NATIVE_FAULTS "$(command -v node)" "$GITHUB_WORKSPACE/scripts/run-native-proof.mjs" "native-$variant" "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v '-test.run=^TestNativeEngineService$' -test.timeout=12m)
+            (cd tests/lifecycle && sudo --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT,NETSWITCH_LIFECYCLE_CI,NETSWITCH_LIFECYCLE_DIR,NETSWITCH_NATIVE_CI,NETSWITCH_NATIVE_FAULTS "$(command -v node)" "$GITHUB_WORKSPACE/scripts/run-native-proof.mjs" "native-$variant" "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" -test.v '-test.run=^TestNative(ControlCutover|EngineService)$' -test.timeout=20m)
           done
       - name: Linux service evidence
         if: always() && runner.os == 'Linux'

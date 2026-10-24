@@ -125,8 +125,9 @@ alone cannot establish absence. The measured PnP-plus-IP criterion above is
 applied consistently to both paths; query errors never count as absence.
 
 The `m4_native` service now hosts one verified native child. This implements
-option (e), recorded in spec §3.4. Control cutover and restart/backoff/latch
-policy remain in the later cutover PR. The host never respawns a child.
+option (e), recorded in spec §3.4. Control's client, restart/backoff/latch
+policy and exit classification are in [the production cutover](m4-production-cutover.md).
+The host never respawns a child.
 
 Explicit protocol Stop now owns its cleanup failure report. A failed stop
 first writes the error reply through the unbuffered transport, then reports
@@ -505,8 +506,9 @@ preconditions. It adds real host/child PID checks, real-host death with an
 independently pinned child, Control-absent read-pump and whole-child stalls,
 startup death, slow public/log readers, and clean child-3 propagation with failed
 host cleanup. Crash/lease/hang bounds remain 12/42/28 seconds. The explicit
-test-controller restart must restore fresh routing within 70 seconds; production
-Control restart policy itself still belongs to cutover.
+test-controller restart must restore fresh routing within 70 seconds; the
+installed Control's own restart policy is proved in
+[the production cutover](m4-production-cutover.md).
 
 On Windows, suspending only the host leaves the runnable child's lease to
 restore direct internet within 42 seconds. Suspending both while Control is

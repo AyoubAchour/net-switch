@@ -32,6 +32,9 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 		return err
 	}
 	remote := NewRemote(ctx, log)
+	// Native exits are classified through the service manager's status and the
+	// shared outcome reader; the stand-in's exit reason file stays for its dialect.
+	remote.outcome = nativeOutcomeReader(c.Data)
 	remote.exitReason = func(instance string) (string, error) {
 		var state engineState
 		err := readEngineState(c.Data, &state, log)
