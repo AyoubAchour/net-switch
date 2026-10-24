@@ -23,10 +23,11 @@ func sendImmutablePayload(w io.Writer, content []byte) (int64, error) {
 // EOF is part of the contract. The sender half-closes after its last byte;
 // tcpEcho closes after echoing all input. A short bounded completion deadline
 // starts at the expected length, with an additional byte cap on hostile output.
-func receivePayloadWords(c net.Conn, v *wordVerifier, size int64) (int64, string, error) {
+func receivePayloadWords(c net.Conn, v *wordVerifier, size int64, onDifference ...func(*wordDifference)) (int64, string, error) {
 	b := make([]byte, 32<<10)
 	var received int64
 	completion := false
+	observedMismatch := false
 	for {
 		p := b
 		if remaining := size - received; remaining > 0 && remaining < int64(len(p)) {
@@ -35,6 +36,12 @@ func receivePayloadWords(c net.Conn, v *wordVerifier, size int64) (int64, string
 		n, err := c.Read(p)
 		if n > 0 {
 			v.consume(b[:n])
+			if !observedMismatch && v.first != nil {
+				observedMismatch = true
+				if len(onDifference) != 0 && onDifference[0] != nil {
+					onDifference[0](v.first)
+				}
+			}
 			received += int64(n)
 			if !completion && received >= size {
 				completion = true
@@ -90,6 +97,9 @@ func tcpWordTransfer(t *testing.T, f *fixture, streams int, phase ...string) (fl
 				return
 			}
 			defer c.Close()
+			if f.wordBoundaries != nil {
+				f.wordBoundaries.bind(c.LocalAddr().String(), transfer, stream)
+			}
 			if err := c.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
 				failures <- err
 				return
@@ -108,16 +118,25 @@ func tcpWordTransfer(t *testing.T, f *fixture, streams int, phase ...string) (fl
 				written <- result{n, err}
 			}()
 			v := &wordVerifier{transfer: transfer, stream: stream}
-			received, verdict, err := receivePayloadWords(c, v, wordPayloadSize)
-			if err != nil {
-				s, _ := f.io.(*Session)
-				record := "tcp_transfer_completion"
-				if v.first != nil {
-					record = "tcp_payload_difference"
+			var onDifference func(*wordDifference)
+			if f.wordBoundaries != nil {
+				onDifference = func(difference *wordDifference) {
+					f.wordBoundaries.hostFailure(c.LocalAddr().String(), difference, "payload_mismatch_detected")
 				}
-				report(t, map[string]any{"test": record, "verdict": integrityVerdict(err), "failure_kind": verdict, "mode": f.mode, "pair": performancePair(t.Name()), "test_path": t.Name(), "phase": label, "transfer_id": transfer, "stream_id": stream, "local": c.LocalAddr().String(), "length": received, "expected_length": wordPayloadSize, "difference": v.first, "error": err.Error(), "payload_format": "word-v1"})
-				report(t, map[string]any{"test": "tcp_failure_before_teardown", "mode": f.mode, "stage": verdict, "local": c.LocalAddr().String(), "received_bytes": received, "expected_bytes": wordPayloadSize, "state": observeSession(s), "fault": fmt.Sprint(f.fault()), "error": err.Error()})
-				dump.Do(func() { b := make([]byte, 1<<20); t.Logf("TCP failure goroutines:\n%s", b[:runtime.Stack(b, true)]) })
+			}
+			received, verdict, err := receivePayloadWords(c, v, wordPayloadSize, onDifference)
+			if err != nil {
+				emit := f.wordBoundaries == nil || f.wordBoundaries.hostFailure(c.LocalAddr().String(), v.first, verdict)
+				if emit {
+					s, _ := f.io.(*Session)
+					record := "tcp_transfer_completion"
+					if v.first != nil {
+						record = "tcp_payload_difference"
+					}
+					report(t, map[string]any{"test": record, "verdict": integrityVerdict(err), "failure_kind": verdict, "mode": f.mode, "pair": performancePair(t.Name()), "test_path": t.Name(), "phase": label, "transfer_id": transfer, "stream_id": stream, "local": c.LocalAddr().String(), "length": received, "expected_length": wordPayloadSize, "difference": v.first, "error": err.Error(), "payload_format": "word-v1"})
+					report(t, map[string]any{"test": "tcp_failure_before_teardown", "mode": f.mode, "stage": verdict, "local": c.LocalAddr().String(), "received_bytes": received, "expected_bytes": wordPayloadSize, "state": observeSession(s), "fault": fmt.Sprint(f.fault()), "error": err.Error()})
+					dump.Do(func() { b := make([]byte, 1<<20); t.Logf("TCP failure goroutines:\n%s", b[:runtime.Stack(b, true)]) })
+				}
 				c.Close() // Release a blocked sender only after preserving live evidence.
 			}
 			sent := <-written
@@ -134,6 +153,9 @@ func tcpWordTransfer(t *testing.T, f *fixture, streams int, phase ...string) (fl
 	var failure error
 	for err := range failures {
 		failure = errors.Join(failure, err)
+	}
+	if f.wordBoundaries != nil {
+		failure = errors.Join(failure, f.wordBoundaries.complete(transfer, streams))
 	}
 	if failure != nil {
 		return 0, failure

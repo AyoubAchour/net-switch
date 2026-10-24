@@ -136,6 +136,28 @@ test('hunt combines both scenarios and architectures under the single cap, inter
   assert.match(matrix, /always\(\) && matrix\.scenario == 'full'/);
 });
 
+test('proof is single-shard and word-boundary expansion needs its own explicit count', () => {
+  const integrity = workflowText.split('  wintun-integrity:\n')[1].split('\n  wintun:')[0];
+  const shard = /shard: \$\{\{ fromJSON\((.*)\) \}\}/.exec(integrity)?.[1];
+  assert.ok(shard);
+  for (const count of ['1','2','5','10','20']) {
+    assert.deepEqual(JSON.parse(evaluate(shard,{inputs:{wintun_integrity_scenario:'proof',wintun_integrity_shards:count}})),[1]);
+  }
+  for (const count of [undefined,'','invalid']) {
+    assert.deepEqual(JSON.parse(evaluate(shard,{inputs:{wintun_integrity_scenario:'hunt',wintun_integrity_shards:count}})),[1]);
+  }
+  const boundary = workflowText.split('  wintun-boundaries:\n')[1].split('\n  wintun-payload-pilot:')[0];
+  const replica = /replica: \$\{\{ fromJSON\((.*)\) \}\}/.exec(boundary)?.[1];
+  assert.ok(replica);
+  assert.match(workflowText,/wintun_boundary_shards:[\s\S]*?options: \['1', '2', '5'\]\s+default: '1'/);
+  for (const scenario of ['boundaries','boundaries-hunt']) {
+    assert.deepEqual(JSON.parse(evaluate(replica,{inputs:{wintun_integrity_scenario:scenario}})),[1]);
+  }
+  assert.deepEqual(JSON.parse(evaluate(replica,{inputs:{wintun_integrity_scenario:'boundaries',wintun_boundary_shards:'5'}})),[1]);
+  assert.deepEqual(JSON.parse(evaluate(replica,{inputs:{wintun_integrity_scenario:'boundaries-hunt',wintun_boundary_shards:'5'}})),[1,2,3,4,5]);
+  assert.match(boundary,/max-parallel: 10/);
+});
+
 test('rotation selects only qualified single boundaries and leaves explicit selections unchanged', () => {
   for (const [shard, expected, requested = 'rotate'] of [[1,'receive'],[6,'host'],[7,'receive'],[20,'ingress'],[20,'output','output']]) {
     const plan = JSON.parse(execFileSync(pwsh, ['-NoProfile','-File',runner,'-PlanOnly','-Scenario','isolated'], {

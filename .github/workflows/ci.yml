@@ -35,13 +35,18 @@ on:
       wintun_integrity_scenario:
         description: Qualify overhead first, or explicitly run corruption exposure
         type: choice
-        options: [proof, isolated, full, hunt, payload]
+        options: [proof, isolated, full, hunt, payload, boundaries, boundaries-hunt]
         default: proof
       wintun_integrity_shards:
-        description: Independent hosted runners per selected architecture
+        description: Independent hosted runners per architecture for exposure (proof always uses one)
         type: choice
         options: ['1', '2', '5', '10', '20']
         default: '2'
+      wintun_boundary_shards:
+        description: Explicit replicas per architecture for boundaries-hunt only (pilot always uses one)
+        type: choice
+        options: ['1', '2', '5']
+        default: '1'
       wintun_integrity_boundary:
         description: Selected boundary for exposure (proof measures every single-boundary option)
         type: choice
@@ -605,6 +610,75 @@ jobs:
     env: *go1-env
     steps: *go1-steps
 
+  wintun-boundaries:
+    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && (inputs.wintun_integrity_scenario == 'boundaries' || inputs.wintun_integrity_scenario == 'boundaries-hunt')
+    name: Word boundaries / ${{ matrix.runner }} / ${{ matrix.replica }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+        replica: ${{ fromJSON(inputs.wintun_integrity_scenario == 'boundaries-hunt' && inputs.wintun_boundary_shards == '5' && '[1,2,3,4,5]' || inputs.wintun_integrity_scenario == 'boundaries-hunt' && inputs.wintun_boundary_shards == '2' && '[1,2]' || '[1]') }}
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+      NETSWITCH_WINTUN_INTEGRITY: '0'
+      NETSWITCH_BOUNDARY_BASELINE: bin/wintun-baseline.test.exe
+      NETSWITCH_BOUNDARY_DIAGNOSTIC: bin/wintun-boundaries.test.exe
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check dispatch caps and release guards
+        run: node --test .github/ci/wintun-boundaries.test.mjs .github/ci/wintun-release.test.mjs .github/ci/gates.test.mjs
+      - name: Build release registrar and both test variants
+        run: |
+          go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o dist/registrar-release/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -trimpath -buildvcs=false -o dist/registrar-release/netswitch-engine-audit.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o ./bin/wintun-baseline.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -tags=wintun_boundaries -c -o ./bin/wintun-boundaries.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/check-wintun-release.mjs dist/registrar-release/netswitch-engine.exe dist/registrar-release/netswitch-engine-audit.exe bin/wintun-boundaries.test.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $engine = (Resolve-Path dist/registrar-release/netswitch-engine.exe).Path
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant()
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE=$engine" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - name: Prepare signed Wintun DLL
+        run: ./scripts/prepare-wintun-tests.ps1
+      - name: Boundary mapping and injected evidence regressions
+        run: ./bin/wintun-boundaries.test.exe '-test.v' '-test.run=^TestWordBoundary|^TestPayloadWords' '-test.timeout=2m'
+      - name: Untagged versus tagged overhead pilot
+        if: inputs.wintun_integrity_scenario == 'boundaries'
+        run: ./bin/wintun-baseline.test.exe '-test.v' '-test.run=^TestWintunBoundaryProof$' '-test.timeout=20m'
+      - name: Explicitly selected boundary hunt
+        if: inputs.wintun_integrity_scenario == 'boundaries-hunt'
+        env:
+          NETSWITCH_WINTUN_BOUNDARIES: '1'
+        run: |
+          foreach ($reference in @('dll', 'inprocess')) {
+            $env:NETSWITCH_WINTUN_REFERENCE = $reference
+            ./bin/wintun-boundaries.test.exe '-test.v' '-test.run=^TestWintunPerformance$' '-test.count=2' '-test.timeout=12m'
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
   wintun-payload-pilot:
     if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && inputs.wintun_integrity_scenario == 'payload'
     name: Payload overhead / ${{ matrix.name }}
@@ -673,7 +747,7 @@ jobs:
           retention-days: 7
 
   wintun-integrity:
-    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && inputs.wintun_integrity_scenario != 'payload'
+    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && inputs.wintun_integrity_scenario != 'payload' && inputs.wintun_integrity_scenario != 'boundaries' && inputs.wintun_integrity_scenario != 'boundaries-hunt'
     name: TCP integrity / ${{ matrix.runner }} / ${{ matrix.scenario }} / ${{ matrix.shard }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -683,7 +757,7 @@ jobs:
       matrix:
         # Interleave scenario/architecture per shard so every kind starts in
         # the first wave. A hunt is ONE matrix, not two independent caps.
-        shard: ${{ fromJSON(inputs.wintun_integrity_shards == '1' && '[1]' || inputs.wintun_integrity_shards == '2' && '[1,2]' || inputs.wintun_integrity_shards == '5' && '[1,2,3,4,5]' || inputs.wintun_integrity_shards == '10' && '[1,2,3,4,5,6,7,8,9,10]' || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]') }}
+        shard: ${{ fromJSON(inputs.wintun_integrity_scenario == 'proof' && '[1]' || inputs.wintun_integrity_shards == '1' && '[1]' || inputs.wintun_integrity_shards == '2' && '[1,2]' || inputs.wintun_integrity_shards == '5' && '[1,2,3,4,5]' || inputs.wintun_integrity_shards == '10' && '[1,2,3,4,5,6,7,8,9,10]' || inputs.wintun_integrity_shards == '20' && '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]' || '[1]') }}
         scenario: ${{ fromJSON(inputs.wintun_integrity_scenario == 'hunt' && '["isolated","full"]' || inputs.wintun_integrity_scenario == 'full' && '["full"]' || inputs.wintun_integrity_scenario == 'isolated' && '["isolated"]' || '["proof"]') }}
         runner: ${{ fromJSON(inputs.wintun_integrity_arch == 'x64' && '["windows-latest"]' || inputs.wintun_integrity_arch == 'arm64' && '["windows-11-arm"]' || '["windows-latest","windows-11-arm"]') }}
     env:

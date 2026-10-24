@@ -290,6 +290,10 @@ func (r *rings) closeWith(closeHandle func(windows.Handle) error) error {
 }
 
 func (r *rings) read(buffers [][]byte, sizes []int) (int, error) {
+	var wordBatch uint64
+	if wordBoundaryHooksEnabled {
+		wordBatch = nextWordReadBatch()
+	}
 	tail := r.send.load(4)
 	if tail == ^uint32(0) {
 		return 0, ErrDisconnected
@@ -313,6 +317,9 @@ func (r *rings) read(buffers [][]byte, sizes []int) (int, error) {
 			copy(buffers[i], packet)
 			// Validate a private copy before releasing any driver memory.
 			p := buffers[i][:len(packet)]
+			if wordBoundaryHooksEnabled {
+				observeWordRingRead(p, head, wordBatch, i)
+			}
 			if integrityHooksEnabled {
 				observeRingReceive(packet, p)
 			}
@@ -416,6 +423,10 @@ func validIP(p []byte) bool {
 
 func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
 	var inspection integrityRingBatch
+	var wordInspection wordBoundaryBatch
+	if wordBoundaryHooksEnabled {
+		wordInspection = newWordBoundaryBatch()
+	}
 	head := r.receive.load(0)
 	if head == ^uint32(0) {
 		return 0, len(packets), ErrDisconnected
@@ -438,6 +449,9 @@ func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
 		data := r.receive.data()
 		binary.LittleEndian.PutUint32(data[tail:tail+4], uint32(len(p)))
 		copy(data[tail+4:], p)
+		if wordBoundaryHooksEnabled {
+			wordInspection.add(data[tail+4:tail+4+uint32(len(p))], tail, written)
+		}
 		if integrityHooksEnabled {
 			inspection.add(data[tail+4:tail+4+uint32(len(p))], p)
 		}
@@ -445,6 +459,9 @@ func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
 		written++
 	}
 	if written != 0 {
+		if wordBoundaryHooksEnabled {
+			wordInspection.publish()
+		}
 		if integrityHooksEnabled {
 			inspection.publish()
 		}
