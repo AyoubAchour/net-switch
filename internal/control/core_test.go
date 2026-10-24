@@ -830,6 +830,7 @@ func (s *seededTracker) Ingest([]apps.Connection, int64)              {}
 func (s *seededTracker) Snapshot(apps.Pins) []apps.Row                { return s.rows }
 func (s *seededTracker) LineRate(string) apps.Rate                    { return apps.Rate{} }
 func (s *seededTracker) ConnectionIDsOffLine(string, string) []string { return nil }
+func (s *seededTracker) IdentityOf(string) string                     { return "" }
 
 func TestStateMatchesEveryFrozenTrayScenario(t *testing.T) {
 	input, err := os.ReadFile("../../tests/oracle/fixtures/tray-inputs.json")

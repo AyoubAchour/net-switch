@@ -72,6 +72,8 @@ type AppTracker interface {
 	Snapshot(apps.Pins) []apps.Row
 	LineRate(string) apps.Rate
 	ConnectionIDsOffLine(string, string) []string
+	// IdentityOf is the engine's sandbox identity for a tracked app, else "".
+	IdentityOf(string) string
 }
 type lane struct {
 	alias         string

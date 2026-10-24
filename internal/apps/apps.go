@@ -28,6 +28,40 @@ type Connection struct {
 	Upload   float64  `json:"upload"`
 	Chains   []string `json:"chains"`
 	Start    string   `json:"start"`
+	// AppID is the engine's own identity for the owning app. On Windows it is
+	// the normalised path; on Linux a sandboxed app is "flatpak:", "snap:" or
+	// "appimage:" plus its id. The temporary adapter leaves it empty.
+	AppID string `json:"appId,omitempty"`
+}
+
+// SandboxIdentity reports an engine identity no path rule can derive. A pin
+// for such an app stores this exact value (design decision recorded in the
+// spec): two sandboxes can share an executable path.
+func SandboxIdentity(v string) bool {
+	return strings.HasPrefix(v, "flatpak:") || strings.HasPrefix(v, "snap:") || strings.HasPrefix(v, "appimage:")
+}
+
+// SandboxLocation reports a Linux executable path inside a sandbox: the engine
+// identifies such processes by sandbox identity, so a path pin there can only
+// have been stored before the identity was known and must be reselected.
+func SandboxLocation(path string) bool {
+	for _, prefix := range []string{"/snap/", "/var/lib/flatpak/", "/app/", "/tmp/.mount_"} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return strings.Contains(path, "/.local/share/flatpak/")
+}
+
+// PinNeedsReselection flags a path pin that cannot match the app the person
+// meant: the path sits in a sandbox location, or the tracked app at that path
+// is reported under a sandbox identity. Such a pin is kept, shown, and never
+// routed by guess.
+func PinNeedsReselection(pin Pin, trackedIdentity string) bool {
+	if SandboxIdentity(pin.Path) {
+		return false
+	}
+	return SandboxLocation(pin.Path) || SandboxIdentity(trackedIdentity)
 }
 
 func ConnectionLine(c *Connection) *string {
@@ -168,8 +202,11 @@ func smoothRates(before, now map[string]Rate, beforeOrder, nowOrder []string, se
 }
 
 type Row struct {
-	Key         string             `json:"key"`
-	Path        string             `json:"path"`
+	Key  string `json:"key"`
+	Path string `json:"path"`
+	// Identity is the engine's sandbox identity for this app, empty for apps
+	// the engine identifies by path.
+	Identity    string             `json:"identity,omitempty"`
 	Line        *string            `json:"line"`
 	Rate        Rate               `json:"rate"`
 	LineDown    map[string]float64 `json:"lineDown"`
@@ -179,6 +216,7 @@ type Row struct {
 }
 type app struct {
 	Path        string
+	Identity    string // sandbox identity reported by the engine, else empty
 	Lines       map[string]Rate
 	LineOrder   []string
 	SortScore   float64
@@ -250,6 +288,9 @@ func (t *Tracker) Ingest(connections []Connection, now int64) {
 			perApp[key] = entry
 			order = append(order, key)
 		}
+		if SandboxIdentity(c.AppID) {
+			entry.Identity = c.AppID
+		}
 		add(entry.Lines, line, down, up, &entry.LineOrder)
 		entry.Connections[line]++
 		if _, ok := entry.IDs[line]; !ok {
@@ -287,6 +328,9 @@ func (t *Tracker) Ingest(connections []Connection, now int64) {
 			a.IDOrder = entry.IDOrder
 			a.LastSeen = now
 			a.Path = entry.Path
+			if entry.Identity != "" {
+				a.Identity = entry.Identity
+			}
 		} else {
 			a.Connections = map[string]int{}
 			a.IDs = map[string][]string{}
@@ -310,8 +354,17 @@ func (t *Tracker) Ingest(connections []Connection, now int64) {
 	t.previous = nextBytes
 	t.LastPollAt = &now
 }
+
+// IdentityOf is the engine's sandbox identity for a tracked app, or empty.
+func (t *Tracker) IdentityOf(key string) string {
+	if a := t.items[key]; a != nil {
+		return a.Identity
+	}
+	return ""
+}
+
 func row(key string, a *app, pin *Pin) Row {
-	r := Row{Key: key, Path: a.Path, Rate: total(a.Lines, a.LineOrder), LineDown: map[string]float64{}, SortScore: a.SortScore, Connections: map[string]int{}}
+	r := Row{Key: key, Path: a.Path, Identity: a.Identity, Rate: total(a.Lines, a.LineOrder), LineDown: map[string]float64{}, SortScore: a.SortScore, Connections: map[string]int{}}
 	if pin != nil {
 		id := pin.LineID
 		r.Line = &id
@@ -327,15 +380,24 @@ func row(key string, a *app, pin *Pin) Row {
 func (t *Tracker) Snapshot(pins Pins) []Row {
 	order, normalized := pins.normalized()
 	result := []Row{}
+	shown := map[string]bool{}
 	for _, key := range t.order {
+		a := t.items[key]
 		var pin *Pin
 		if p, ok := normalized[key]; ok {
 			pin = &p
+		} else if a.Identity != "" {
+			// A sandbox pin is stored under the engine's identity, not the
+			// shared path; it belongs to the tracked app with that identity.
+			if p, ok := normalized[AppKey(a.Identity)]; ok {
+				pin = &p
+				shown[AppKey(a.Identity)] = true
+			}
 		}
-		result = append(result, row(key, t.items[key], pin))
+		result = append(result, row(key, a, pin))
 	}
 	for _, key := range order {
-		if t.items[key] == nil {
+		if t.items[key] == nil && !shown[key] {
 			p := normalized[key]
 			result = append(result, row(key, &app{Path: p.Path}, &p))
 		}

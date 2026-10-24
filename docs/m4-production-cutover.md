@@ -19,12 +19,18 @@ The native revision is compiled from Control's policy: a line binds by its
 alias (the same identity the sing-box adapter used), shares become integer
 weights, lanes and the blocked set are copied, and shares of blocked lines are
 dropped as spec §4.6 already forbids them. A pin binds exactly the identity the
-user selected (design decision recorded in the spec): a path pin becomes the
-platform's own normalisation (Windows folds case, Linux keeps it), which on
-Windows is the engine's identity, so existing pins stay valid; a Linux sandbox
-pin stores the engine's `flatpak:`, `snap:` or `appimage:` identity itself,
-which flow records now expose as `AppID`. Nothing is inferred from a shared
-path, and the compiled hash depends on the durable revision alone. The
+user selected (design decision recorded in the spec). The engine's identity
+travels end to end: flow records carry `AppID`, Control's app tracking keeps a
+sandboxed app's identity beside its display path, and the pin API stores that
+identity (`flatpak:`, `snap:` or `appimage:`) instead of the shared path. A
+path pin becomes the platform's own normalisation (Windows folds case, Linux
+keeps it), which on Windows is the engine's identity, so 0.3.x pins and the
+API behave exactly as today. On Linux a path pin inside a sandbox location, or
+for an app the engine reports under a sandbox identity, is kept and shown as
+needing reselection (`pinNeedsReselection` on its state row) and compiles to
+nothing: it is never routed by guess, and never auto-converted, because two
+sandboxes can share a path. Nothing is inferred, and the compiled hash depends
+on the durable revision alone. The
 engine's hash of that config is what the engine checks; the acknowledgement
 Control records carries Control's own revision hash plus the engine's apply
 point. An engine already loaded receives `apply`; `start` is only for a fresh

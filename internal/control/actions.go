@@ -47,9 +47,17 @@ func (c *Core) Action(ctx context.Context, method, path string, b map[string]any
 			for _, l := range c.itemsLocked() {
 				exists = exists || l.ID == id
 			}
+			// A pin stores the identity the person selected. For an app the
+			// engine reports under a sandbox identity, that is the identity,
+			// never the path other sandboxes may share; a path pin for it is
+			// replaced here. On Windows the identity is the path as today.
+			identity := path
+			if tracked := c.tracker.IdentityOf(apps.AppKey(path)); tracked != "" {
+				identity = tracked
+			}
 			pins := apps.Pins{}
 			for _, p := range c.pinsLocked() {
-				if apps.AppKey(p.Path) != apps.AppKey(path) {
+				if apps.AppKey(p.Path) != apps.AppKey(path) && apps.AppKey(p.Path) != apps.AppKey(identity) {
 					pins = append(pins, p)
 				}
 			}
@@ -58,7 +66,7 @@ func (c *Core) Action(ctx context.Context, method, path string, b map[string]any
 				return bad("That line isn’t there any more.")
 			}
 			if b["line"] != nil {
-				pins = append(pins, apps.Pin{Path: path, LineID: id})
+				pins = append(pins, apps.Pin{Path: identity, LineID: id})
 			}
 			if err := c.save(map[string]any{"appLines": pins}); err != nil {
 				return err

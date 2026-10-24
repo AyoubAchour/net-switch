@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/apppath"
+	"github.com/AyoubAchour/net-switch/internal/apps"
 	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
@@ -70,27 +71,21 @@ func engineAppIdentityWith(path string, rules apppath.Rules) string {
 	return apppath.Normalize(path, rules)
 }
 
-// sandboxIdentity reports whether a pin value is already an engine identity
-// that no path rule can derive: the Linux owner lookup names Flatpak, Snap and
-// AppImage apps this way, and a pin stores exactly the identity the user chose.
-func sandboxIdentity(value string) bool {
-	for _, prefix := range []string{"flatpak:", "snap:", "appimage:"} {
-		if strings.HasPrefix(value, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 // pinIdentity is the engine identity a pin binds (design decision recorded in
 // the spec): the exact identity the user selected, never inferred from a path
 // other apps may share. A Windows path pin is the normalised path, which is
-// also the Windows engine's identity, so existing pins stay valid.
-func pinIdentity(value string) string {
-	if sandboxIdentity(value) {
-		return value
+// also the Windows engine's identity, so existing pins stay valid. On Linux a
+// path pin inside a sandbox location cannot name the app the person meant (the
+// engine reports it by sandbox identity), so it compiles to nothing and is
+// shown as needing reselection rather than routed by guess.
+func pinIdentity(value string, rules apppath.Rules) (string, bool) {
+	if apps.SandboxIdentity(value) {
+		return value, true
 	}
-	return engineAppIdentity(value)
+	if rules.Separator == "/" && apps.PinNeedsReselection(apps.Pin{Path: value}, "") {
+		return "", false
+	}
+	return engineAppIdentityWith(value, rules), true
 }
 
 // nativeRevision compiles Control's policy into the engine's config. The line
@@ -99,6 +94,9 @@ func pinIdentity(value string) string {
 // compiles to the same hash after any restart, and an alias change still goes
 // through Control's existing restart rule.
 func nativeRevision(r ce.Revision) (policy.Revision, error) {
+	return nativeRevisionWith(r, appIdentityRules)
+}
+func nativeRevisionWith(r ce.Revision, rules apppath.Rules) (policy.Revision, error) {
 	p := r.Policy
 	config := policy.Config{Combine: p.Combine, IPv6: p.IPv6, AppLines: map[string]string{}, Shares: map[string]uint64{}, Lanes: map[string]string{}, Blocked: []string{}}
 	known := map[string]bool{}
@@ -110,8 +108,11 @@ func nativeRevision(r ce.Revision) (policy.Revision, error) {
 		config.Lines = append(config.Lines, platform.Line{ID: line.ID, Interface: line.Alias})
 	}
 	for _, pin := range p.AppLines {
-		if known[pin.LineID] && pin.Path != "" {
-			config.AppLines[pinIdentity(pin.Path)] = pin.LineID
+		if !known[pin.LineID] || pin.Path == "" {
+			continue
+		}
+		if id, ok := pinIdentity(pin.Path, rules); ok {
+			config.AppLines[id] = pin.LineID
 		}
 	}
 	blocked := map[string]bool{}
@@ -245,8 +246,9 @@ func (r *Remote) nativeConnections(ctx context.Context) ([]ce.Connection, error)
 // destination address only once the upstream connection is established, so a
 // flow still connecting is never evidence that its line works (spec §4.5).
 func nativeConnection(f flows.Record) ce.Connection {
-	c := ce.Connection{AppID: f.Owner.AppID}
+	c := ce.Connection{}
 	c.ID = strconv.FormatUint(f.ID, 10)
+	c.AppID = f.Owner.AppID
 	c.Metadata.ProcessPath = f.Owner.Path
 	c.Download, c.Upload = float64(f.Down), float64(f.Up)
 	c.Start = f.Start.UTC().Format(time.RFC3339Nano)
