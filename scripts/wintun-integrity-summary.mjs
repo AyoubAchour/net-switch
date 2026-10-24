@@ -32,21 +32,49 @@ function paired(clean, observed, count) {
 // job-wide verdict can credit connections; overhead-invalid jobs remain visible.
 export class IntegritySummary {
   constructor({scenario='proof'}={}) { this.scenario=scenario; }
-  corruption=0; incomplete=0; timeouts=0; connections=0; calibrationConnections=0; complete=false;
+  incomplete=0; timeouts=0; connections=0; calibrationConnections=0; complete=false;
   failures=[]; notes=new Set(); configurations=new Map(); capture=new Map(); proof=null;
   expectedPhases=new Map(); boundary=null; connectionIDs=new Set();
-  phase=null; currentTest=null; byMode=new Map();
+  phase=null; repeat=null; currentTest=null; currentTestPath=null; byMode=new Map();
+  payloadIncidents=new Map(); ringIncidents=new Map();
+  get hasIntegrityFailure() { return this.payloadIncidents.size>0 || this.ringIncidents.size>0; }
+  attribution(record={}) {
+    const testPath=record.test_path ?? this.currentTestPath ?? null;
+    const mode=record.mode ?? (testPath ? /\/(ours|dll|inprocess)(?:\/|$)/.exec(testPath)?.[1] : undefined);
+    return {mode,testPath,phase:record.phase ?? this.phase ?? null,repeat:record.repeat ?? this.repeat ?? null};
+  }
+  payload(record,detail) {
+    const a=this.attribution(record);
+    const key=['payload_mismatch',a.mode??'',a.testPath??'',a.phase??'',a.repeat??'',detail??''].join('|');
+    this.payloadIncidents.set(key,{kind:'payload_mismatch',mode:a.mode??null,test_path:a.testPath,phase:a.phase,detail:detail??null});
+  }
+  ring(record,counter,detail) {
+    const a=this.attribution(record);
+    // A recovery warning and every later counter snapshot from the same
+    // session share the test path, phase, repeat and counter value.
+    const key=['ring_rejection',a.mode??'',a.testPath??'',a.phase??'',a.repeat??'',counter??''].join('|');
+    this.ringIncidents.set(key,{kind:'ring_rejection',mode:a.mode??null,test_path:a.testPath,phase:a.phase,counter:counter??null,detail:detail??null});
+  }
+  failureKindsFor(mode) {
+    const kinds=new Set();
+    for (const incident of [...this.payloadIncidents.values(),...this.ringIncidents.values()]) if (incident.mode===mode) kinds.add(incident.kind);
+    return [...kinds];
+  }
   line(line) {
-    if (payloadFailure.test(line)) this.corruption++;
+    if (payloadFailure.test(line)) this.payload({phase:this.phase,repeat:this.repeat,test_path:this.currentTestPath}, line.trim());
     const phase=/INTEGRITY_PHASE_START .*?phase=([\w-]+)/.exec(line);
     if (phase) this.phase=phase[1];
+    const phaseRepeat=/INTEGRITY_PHASE_START .*?\brepeat=(\d+)/.exec(line);
+    if (phaseRepeat) this.repeat=phaseRepeat[1];
     if (/INTEGRITY_CALIBRATION_START/.test(line)) this.phase='calibration';
     const running=/=== RUN\s+(\S+)/.exec(line);
-    if (running) this.currentTest=running[1].split('/')[0];
+    if (running) { this.currentTestPath=running[1]; this.currentTest=running[1].split('/')[0]; }
     // Recovery/lifetime tests intentionally damage rings. Only natural traffic
     // paths use the raw ring error as evidence; actual payload failures above
     // remain fatal in EVERY test, including tests which inject delays/faults.
-    if ((naturalPhases.has(this.phase) || this.currentTest==='TestWintunParallelUDP') && /Wintun ring corruption(?: recovered|:)|packet failed validation|invalid entry/.test(line)) this.corruption++;
+    if ((naturalPhases.has(this.phase) || this.currentTest==='TestWintunParallelUDP') && /Wintun ring corruption(?: recovered|:)|packet failed validation|invalid entry/.test(line)) {
+      this.ring({phase:this.phase,repeat:this.repeat,test_path:this.currentTestPath}, /corruptions=(\d+)/.exec(line)?.[1] ?? 1, line.trim());
+    }
     if (/INTEGRITY_JOB_COMPLETE/.test(line)) this.complete=true;
     if (/INTEGRITY_PHASE_TIMEOUT/.test(line)) { this.timeouts++; this.notes.add(line.trim()); }
     if (/INTEGRITY_RUN_FAILED.*diagnostic_incomplete/.test(line)) this.incomplete++;
@@ -56,6 +84,7 @@ export class IntegritySummary {
     if (start) {
       if (start[1] !== this.scenario || (this.boundary && this.boundary !== start[2])) this.incomplete++;
       this.boundary=start[2];
+      this.repeat=start[3];
       if (this.scenario !== 'proof') for (const phase of this.scenario==='full' ? ['performance-dll','performance-inprocess'] : ['performance-dll']) {
         const key=`${start[3]}/${phase}`;
         if (this.expectedPhases.has(key)) this.incomplete++;
@@ -66,10 +95,12 @@ export class IntegritySummary {
     if (pos<0) return;
     let r;
     try { r=JSON.parse(line.slice(pos+14)); } catch { this.incomplete++; return; }
-    if (r.verdict==='integrity_failure' || r.test==='tcp_integrity_first_failure' || r.test==='tcp_payload_difference') this.corruption++;
     if (r.verdict==='diagnostic_incomplete') this.incomplete++;
-    if (r.test==='parallel_udp' && r.invalid_delivered>0) this.corruption++;
-    if ((naturalPhases.has(this.phase) && r.test==='integrity_session' || r.test==='parallel_udp') && r.stats?.Corruptions>0) this.corruption++;
+    const ringCounters=(r.stats?.Corruptions??0)>0 || (r.stats?.Recoveries??0)>0;
+    const naturalRing=((naturalPhases.has(this.phase) && r.test==='integrity_session') || r.test==='parallel_udp') && ringCounters;
+    if (naturalRing) this.ring(r, r.stats.Corruptions ?? r.stats.Recoveries, `${r.test} corruptions=${r.stats.Corruptions??0} recoveries=${r.stats.Recoveries??0}`);
+    if (!naturalRing && (r.verdict==='integrity_failure' || r.test==='tcp_integrity_first_failure' || r.test==='tcp_payload_difference')) this.payload(r, r.test ?? r.verdict ?? 'integrity_failure');
+    if (r.test==='parallel_udp' && r.invalid_delivered>0) this.payload(r, `invalid_delivered=${r.invalid_delivered}`);
     try {
       if (r.test==='integrity_overhead') {
         const key=`${r.boundary}/${r.mode}`;
@@ -95,13 +126,13 @@ export class IntegritySummary {
         this.connections++;
         const c=r.connection;
         if (!c || !/^[a-f0-9]{64}$/.test(c.host_expected_sha256) || !/^[a-f0-9]{64}$/.test(c.host_actual_sha256)) throw Error('missing host hash');
-        if (c.host_expected_sha256!==c.host_actual_sha256) this.corruption++;
+        const mode=/\/(ours|dll|inprocess)\//.exec(c.transfer)?.[1];
+        if (!mode) throw Error('missing connection mode');
+        if (c.host_expected_sha256!==c.host_actual_sha256) this.payload({mode,test_path:c.transfer,phase:r.phase,repeat:r.repeat}, 'host hash mismatch');
         if (c.coverage?.host_receive?.bytes!==67108864 || r.verdict!=='ok') throw Error('incomplete host coverage');
         const key=`${r.phase}/${r.repeat}/${c.transfer}/${c.payload_id}`;
         if (this.connectionIDs.has(key)) throw Error('duplicate connection record');
         this.connectionIDs.add(key);
-        const mode=/\/(ours|dll|inprocess)\//.exec(c.transfer)?.[1];
-        if (!mode) throw Error('missing connection mode');
         const counts=this.byMode.get(mode)??{connections:0,calibration:0};
         counts.connections++;
         if (/TestWintunIntegrityProof\//.test(c.transfer)) { this.calibrationConnections++; counts.calibration++; }
@@ -145,16 +176,20 @@ export class IntegritySummary {
       const counts=this.byMode.get(mode)??{connections:0,calibration:0};
       const overhead=spread ? ratioSpread(chosen.flatMap(b=>this.configurations.get(`${b}/${mode}`))) : null;
       const observed=this.scenario==='proof'?counts.calibration:counts.connections-counts.calibration;
-      const verdict=this.corruption?'integrity_failure':!overhead?'diagnostic_incomplete':overhead.median<.80 || (this.capture.get(mode)?.median??1)<.95?'diagnostic_invalid':otherFailure?'test_failed':'no_corruption_observed';
-      return [mode,{verdict,overhead,observed_exposure_connections:observed,calibration_connections:counts.calibration,clean_exposure_connections:verdict==='no_corruption_observed'?observed:0}];
+      const failureKinds=this.failureKindsFor(mode);
+      const verdict=failureKinds.length?'integrity_failure':!overhead?'diagnostic_incomplete':overhead.median<.80 || (this.capture.get(mode)?.median??1)<.95?'diagnostic_invalid':otherFailure?'test_failed':'no_corruption_observed';
+      const clean=verdict==='no_corruption_observed' && !this.hasIntegrityFailure ? observed : 0;
+      return [mode,{verdict,failure_kinds:failureKinds,overhead,observed_exposure_connections:observed,calibration_connections:counts.calibration,clean_exposure_connections:clean}];
     }));
     const invalidModes=modes.filter(m=>modeResults[m].verdict==='diagnostic_invalid');
-    const verdict=this.corruption ? 'integrity_failure' : this.incomplete || this.timeouts || missing ? 'diagnostic_incomplete' : invalidModes.length ? 'diagnostic_invalid' : otherFailure ? 'test_failed' : 'no_corruption_observed';
+    const evidenceKinds=[...(this.payloadIncidents.size?['payload_mismatch']:[]),...(this.ringIncidents.size?['ring_rejection']:[])];
+    const verdict=this.hasIntegrityFailure ? 'integrity_failure' : this.incomplete || this.timeouts || missing ? 'diagnostic_incomplete' : invalidModes.length ? 'diagnostic_invalid' : otherFailure ? 'test_failed' : 'no_corruption_observed';
     return {verdict, exit:['integrity_failure','diagnostic_incomplete'].includes(verdict)?1:0, original_exit:code,
       overhead:spread, qualification_scope:'per_mode', mode_results:modeResults, invalid_modes:invalidModes, minimum_ratio:.80, capture_overhead:Object.fromEntries(this.capture), capture_invalid:captureInvalid,
       diagnostic_connections:this.connections, calibration_connections:this.calibrationConnections, observed_exposure_connections:observedExposure,
       clean_exposure_connections:Object.values(modeResults).reduce((n,r)=>n+r.clean_exposure_connections,0),
-      integrity_evidence_records:this.corruption, incomplete_records:this.incomplete, timeout_records:this.timeouts, incomplete_structure:Boolean(missing),
+      integrity_evidence_kinds:evidenceKinds, payload_mismatch_incidents:this.payloadIncidents.size, ring_rejection_incidents:this.ringIncidents.size,
+      integrity_evidence_records:this.payloadIncidents.size+this.ringIncidents.size, incomplete_records:this.incomplete, timeout_records:this.timeouts, incomplete_structure:Boolean(missing),
       notes:[...this.notes], failed_tests_and_phases:this.failures};
   }
 }
@@ -170,7 +205,7 @@ if (process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
   const writeSummary=body=>{if(process.env.GITHUB_STEP_SUMMARY)writeFileSync(process.env.GITHUB_STEP_SUMMARY,body);};
   // A hard runner stop leaves an explicit incomplete placeholder, not clean
   // credit. The final verdict replaces it only after all output is consumed.
-  writeSummary('### Integrity: diagnostic_incomplete\n\nExecution has not finished. Eligible clean transfers: **0**. A missing final INTEGRITY_SUMMARY is incomplete, including a job timeout.\n');
+  writeSummary('### Wintun integrity: diagnostic_incomplete\n\nExecution has not finished. Eligible clean transfers: **0**. A missing final INTEGRITY_SUMMARY is incomplete, including a job timeout.\n');
   console.log('INTEGRITY_PENDING_SUMMARY verdict=diagnostic_incomplete clean_exposure_connections=0');
   let child, timer, fallback, finished=false, expiring=false;
   const finish=code=>{
@@ -178,11 +213,12 @@ if (process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
     finished=true; clearTimeout(timer); clearTimeout(fallback);
     const result=summary.result(code??1);
     console.log(`INTEGRITY_SUMMARY ${JSON.stringify(result)}`);
+    const kinds=result.integrity_evidence_kinds.length ? ` (${result.integrity_evidence_kinds.join(', ')})` : '';
     writeSummary(
-      `### Payload integrity: ${result.verdict}\n\nEligible clean transfers: **${result.clean_exposure_connections}**; observed: ${result.observed_exposure_connections}; calibration connections: ${result.calibration_connections}.\n\n`+
+      `### Wintun integrity: ${result.verdict}${kinds}\n\nEligible clean transfers: **${result.clean_exposure_connections}**; observed: ${result.observed_exposure_connections}; calibration connections: ${result.calibration_connections}. Payload-mismatch incidents: ${result.payload_mismatch_incidents}; ring-rejection incidents: ${result.ring_rejection_incidents}.\n\n`+
       `Per-mode results (each median must be >=0.80): ${JSON.stringify(result.mode_results)}\n\n`+
       [...result.notes,...result.failed_tests_and_phases].map(line=>`- ${line.replaceAll('<','&lt;')}\n`).join('')+
-      '\nCorruption in any protocol or incomplete diagnostics fail this investigation. An overhead-invalid mode receives zero clean credit; valid modes still count. Full evidence remains in the log; no sample was retried or replaced. The release blocker remains open.\n');
+      '\nDelivered payload mismatches and ring validation rejections in any protocol, or incomplete diagnostics, fail this investigation. An overhead-invalid mode receives zero clean credit; no mode receives clean credit when the job fails. Full evidence remains in the log; no sample was retried or replaced. The release blocker remains open.\n');
     process.exitCode=result.exit;
   };
   const expire=()=>{

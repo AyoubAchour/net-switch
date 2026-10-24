@@ -108,3 +108,47 @@ test('runner deadline includes setup and leaves summary headroom',()=>{
  assert.equal(diagnosticBudget('bad',0),0);
  assert.equal(diagnosticBudget(String(75*60*1000),0),48*60*1000);
 });
+
+const ringWarning='2026/10/24 02:44:55 WARN Wintun ring corruption recovered adapter=NsRingCI error="Wintun ring corruption: Send packet failed validation (head=3509468 tail=3510700 size=1228 capacity=8388608)" corruptions=1';
+function ringIncident(s,{mode='ours',testPath='TestWintunPerformance/pair2/udp_8_MBps/ours',repeat='1',instances=2}={}) {
+ s.line(`INTEGRITY_PHASE_START scenario=full repeat=${repeat} phase=performance-inprocess diagnostic=1`);
+ s.line(`=== RUN   ${testPath}`);
+ s.line(ringWarning);
+ for(const event of instances===2?['pumps_joined','closed']:['pumps_joined'])emit(s,{mode,phase:'performance-inprocess',repeat,scenario:'full',event,stats:{Corruptions:1,Recoveries:1},test:'integrity_session',test_path:testPath});
+}
+test('a ring rejection in one UDP mode is named and attributed without blaming the other modes',()=>{
+ const s=fixture({scenario:'full'});ringIncident(s);
+ const r=s.result(0);
+ assert.equal(r.verdict,'integrity_failure');assert.equal(r.exit,1);
+ assert.deepEqual(r.integrity_evidence_kinds,['ring_rejection']);
+ assert.equal(r.payload_mismatch_incidents,0);assert.equal(r.ring_rejection_incidents,1);
+ assert.deepEqual(r.mode_results.ours.failure_kinds,['ring_rejection']);
+ assert.equal(r.mode_results.ours.verdict,'integrity_failure');
+ assert.deepEqual(r.mode_results.dll.failure_kinds,[]);
+ assert.deepEqual(r.mode_results.inprocess.failure_kinds,[]);
+ assert.equal(r.mode_results.dll.verdict,'no_corruption_observed');
+ assert.equal(r.clean_exposure_connections,0);assert.ok(r.observed_exposure_connections>0);
+});
+test('a delivered payload mismatch is named separately and stays fatal',()=>{
+ const s=fixture({scenario:'full'});
+ emit(s,{test:'tcp_payload_difference',verdict:'integrity_failure',mode:'dll',phase:'performance-dll',repeat:'1',test_path:'TestWintunPerformance/pair0/tcp_8_MBps/dll'});
+ const r=s.result(0);
+ assert.equal(r.verdict,'integrity_failure');assert.equal(r.exit,1);
+ assert.deepEqual(r.integrity_evidence_kinds,['payload_mismatch']);
+ assert.equal(r.payload_mismatch_incidents,1);assert.equal(r.ring_rejection_incidents,0);
+ assert.deepEqual(r.mode_results.dll.failure_kinds,['payload_mismatch']);
+ assert.equal(r.clean_exposure_connections,0);
+});
+test('a warning and repeated counter snapshots for one incident count once',()=>{
+ const s=fixture({scenario:'full'});ringIncident(s);
+ const r=s.result(0);
+ assert.equal(r.ring_rejection_incidents,1);
+ assert.equal(r.integrity_evidence_records,1);
+});
+test('a clean run names no evidence kind and keeps its clean exposure',()=>{
+ const r=fixture({scenario:'full'}).result(0);
+ assert.equal(r.verdict,'no_corruption_observed');assert.equal(r.exit,0);
+ assert.deepEqual(r.integrity_evidence_kinds,[]);
+ assert.equal(r.payload_mismatch_incidents,0);assert.equal(r.ring_rejection_incidents,0);
+ assert.ok(r.clean_exposure_connections>0);
+});
