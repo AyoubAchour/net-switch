@@ -143,6 +143,8 @@ type fixture struct {
 	mode string
 	// Only the hosted capture overhead proof sets this, for its SHA-only baseline.
 	skipPayloadCapture bool
+	captureVariant     string
+	capturePair        int
 	integrity          *integrityDiagnostic
 	a                  *Adapter
 	io                 batchIO
