@@ -8,8 +8,12 @@ and the lifecycle-suite port are PR 2b.
 
 ## Dialect
 
-Control's engine client (`internal/lifecycle/remote.go`) chooses its wire
-dialect from the hello capabilities. `singbox-adapter-v1` selects the temporary
+Control's engine client (`internal/lifecycle/remote.go`) dials the engine's
+pipe the way the installation says: the native install (recorded with the
+service) gets the native dialer, which sends no M2 impersonation primer byte,
+because the native host's pipe carries plain newline JSON and rejects that
+byte on the first exchange. It then chooses its wire dialect from the hello
+capabilities. `singbox-adapter-v1` selects the temporary
 adapter payload, unchanged. Anything else must advertise `revisions`, `lease`,
 `status`, `paged-totals`, `totals-ack`, `terminal-stop` and `probe-options`,
 or attach is refused with the missing capability named. The adapter dialect is

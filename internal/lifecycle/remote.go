@@ -44,12 +44,16 @@ type Remote struct {
 	forgotten            map[string]uint64
 	forgetSequence       uint64
 	dial                 func(context.Context, localipc.Endpoint) (*localipc.Conn, error)
-	startService         func(context.Context, string) error
-	queryService         func(string) (service.Status, error)
-	waitStopped          func(context.Context, string) error
-	forceStop            func(context.Context, string) error
-	wakeGrace            time.Time
-	exitReason           func(string) (string, error)
+	// dialAdapter writes the M2 primer; dialNative does not. nativeInstalled
+	// reads the installation to choose between them (see dialInstalled).
+	dialAdapter, dialNative func(context.Context, localipc.Endpoint) (*localipc.Conn, error)
+	nativeInstalled         func() (bool, error)
+	startService            func(context.Context, string) error
+	queryService            func(string) (service.Status, error)
+	waitStopped             func(context.Context, string) error
+	forceStop               func(context.Context, string) error
+	wakeGrace               time.Time
+	exitReason              func(string) (string, error)
 	// native is set by a hello that advertised the native engine's contract.
 	// Until then, and after a hello that advertised the temporary sing-box
 	// dialect, requests use the adapter payload.
@@ -59,7 +63,26 @@ type Remote struct {
 }
 
 func NewRemote(ctx context.Context, log func(string)) *Remote {
-	return &Remote{ctx: ctx, log: log, endpoint: localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine}, snapshot: ce.Snapshot{Status: "off"}, forgotten: map[string]uint64{}, dial: localipc.Dial, startService: service.Start, queryService: service.Query, waitStopped: service.WaitStopped}
+	r := &Remote{ctx: ctx, log: log, endpoint: localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine}, snapshot: ce.Snapshot{Status: "off"}, forgotten: map[string]uint64{}, startService: service.Start, queryService: service.Query, waitStopped: service.WaitStopped}
+	r.dialAdapter, r.dialNative, r.nativeInstalled = localipc.Dial, localipc.DialNativeEngine, service.NativeEngineInstalled
+	r.dial = r.dialInstalled
+	return r
+}
+
+// dialInstalled picks the engine's transport dialect from the installation.
+// The M2 stand-in's pipe expects a one-byte impersonation primer before the
+// JSON; the native host's pipe carries plain newline JSON and rejects that
+// byte, so the wrong choice fails the very first exchange. On Linux both
+// dialers are the same socket connection.
+func (r *Remote) dialInstalled(ctx context.Context, e localipc.Endpoint) (*localipc.Conn, error) {
+	native, err := r.nativeInstalled()
+	if err != nil {
+		return nil, fmt.Errorf("cannot tell which engine is installed: %w", err)
+	}
+	if native {
+		return r.dialNative(ctx, e)
+	}
+	return r.dialAdapter(ctx, e)
 }
 func (r *Remote) Snapshot() ce.Snapshot {
 	r.mu.Lock()
