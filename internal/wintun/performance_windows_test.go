@@ -227,6 +227,8 @@ func tcpLegacyTransfer(t *testing.T, f *fixture, streams int, phase ...string) (
 			t.Logf("TCP failure goroutines:\n%s", buf[:runtime.Stack(buf, true)])
 		})
 	}
+	finishResources := startCaptureResources(t, f)
+	defer finishResources()
 	start := ticks()
 	for i := 0; i < streams; i++ {
 		wg.Add(1)

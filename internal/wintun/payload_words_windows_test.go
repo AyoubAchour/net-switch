@@ -5,14 +5,14 @@ package wintun
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 	"math/bits"
+	"sync"
 )
 
 const wordPayloadSize = 64 << 20
 
 // The wire format is a bijection over (32-bit transfer, 8-bit stream,
-// 24-bit word index). Never silently wrap an identity. No payload is cached.
+// 24-bit word index). Never silently wrap an identity.
 // Multiplication spreads adjacent indices across the word; its odd multiplier
 // has the inverse below in arithmetic modulo 2^64. This is not authentication.
 func payloadWord(transfer uint64, stream int, offset int64) uint64 {
@@ -32,35 +32,59 @@ func decodePayloadWord(w uint64) decodedPayloadWord {
 }
 
 func fillPayloadWords(p []byte, transfer uint64, stream int, offset int64) {
-	for len(p) > 0 {
-		if offset&7 == 0 && len(p) >= 8 {
-			binary.LittleEndian.PutUint64(p, payloadWord(transfer, stream, offset))
-			p, offset = p[8:], offset+8
-			continue
-		}
+	if offset&7 != 0 && len(p) > 0 {
 		var b [8]byte
 		binary.LittleEndian.PutUint64(b[:], payloadWord(transfer, stream, offset))
 		n := copy(p, b[offset&7:])
 		p, offset = p[n:], offset+int64(n)
 	}
+	base := transfer<<32 | uint64(stream)<<24 | uint64(offset/8)
+	for len(p) >= 8 {
+		binary.LittleEndian.PutUint64(p, bits.RotateLeft64(base*0xbf58476d1ce4e5b9, 23))
+		base++
+		p = p[8:]
+	}
+	if len(p) > 0 {
+		var b [8]byte
+		binary.LittleEndian.PutUint64(b[:], bits.RotateLeft64(base*0xbf58476d1ce4e5b9, 23))
+		copy(p, b[:])
+	}
 }
 
-func sendPayloadWords(w io.Writer, transfer uint64, stream int, size int64) (int64, error) {
-	b := make([]byte, 256<<10)
-	var offset int64
-	for offset < size {
-		p := b[:min(int64(len(b)), size-offset)]
-		fillPayloadWords(p, transfer, stream, offset)
-		n, err := w.Write(p)
-		offset += int64(n)
-		if err != nil {
-			return offset, err
-		}
-		if n != len(p) {
-			return offset, io.ErrShortWrite
+// Change only the transfer field in the reversible encoding. Addition is
+// modulo 2^64; stream and word-index bits are preserved without allocation.
+func restampPayloadWords(p []byte, oldTransfer, transfer uint64) {
+	delta := ((transfer - oldTransfer) << 32) * 0xbf58476d1ce4e5b9
+	for len(p) >= 8 {
+		word := bits.RotateLeft64(binary.LittleEndian.Uint64(p), -23)
+		binary.LittleEndian.PutUint64(p, bits.RotateLeft64(word+delta, 23))
+		p = p[8:]
+	}
+}
+
+type payloadBank struct {
+	mu       sync.Mutex
+	data     [8][]byte
+	transfer [8]uint64
+}
+
+// One bank per process, leased until every sender has completed. Preparation
+// is outside timing; no later transfer can restamp a socket's borrowed bytes.
+var performancePayloads payloadBank
+
+func (b *payloadBank) prepare(transfer uint64, streams, size int) ([][]byte, func()) {
+	b.mu.Lock()
+	for stream := range b.data {
+		if b.data[stream] == nil {
+			b.data[stream] = make([]byte, size)
+			fillPayloadWords(b.data[stream], 0, stream, 0)
 		}
 	}
-	return offset, nil
+	for stream := range streams {
+		restampPayloadWords(b.data[stream], b.transfer[stream], transfer)
+		b.transfer[stream] = transfer
+	}
+	return b.data[:streams], b.mu.Unlock
 }
 
 type wordDifference struct {
@@ -97,6 +121,36 @@ type wordVerifier struct {
 }
 
 func (v *wordVerifier) consume(p []byte) {
+	if v.first != nil {
+		v.consumeEvidence(p)
+		return
+	}
+	if v.used != 0 {
+		n := min(len(p), 8-v.used)
+		v.consumeEvidence(p[:n])
+		p = p[n:]
+		if v.used != 0 || v.first != nil {
+			v.consumeEvidence(p)
+			return
+		}
+	}
+	base := v.transfer<<32 | uint64(v.stream)<<24 | uint64(v.offset/8)
+	end := len(p) &^ 7
+	for i := 0; i < end; i += 8 {
+		if binary.LittleEndian.Uint64(p[i:]) != bits.RotateLeft64(base*0xbf58476d1ce4e5b9, 23) {
+			v.offset += int64(i)
+			v.consumeEvidence(p[i:])
+			return
+		}
+		base++
+	}
+	v.offset += int64(end)
+	v.used = copy(v.pending[:], p[end:])
+}
+
+// Original loop retained for split words/failure evidence and profiling the
+// pre-optimization comparison cost. Clean aligned chunks never enter it.
+func (v *wordVerifier) consumeEvidence(p []byte) {
 	for len(p) > 0 {
 		// Clean words are compared directly in the socket buffer.
 		if v.used == 0 && len(p) >= 8 && (v.first == nil || v.first.Realigned) && binary.LittleEndian.Uint64(p) == payloadWord(v.transfer, v.stream, v.offset) {

@@ -656,8 +656,21 @@ jobs:
         run: ./scripts/prepare-wintun-tests.ps1
       - name: Verify decoding and stream completion regressions
         run: ./bin/wintun.test.exe '-test.v' '-test.run=^TestPayloadWords' '-test.timeout=2m'
-      - name: Eight alternating baseline and streaming pairs per mode
+      - name: Profile original and optimized payload loops
+        run: |
+          ./bin/wintun.test.exe '-test.run=^$' '-test.bench=^BenchmarkPayloadCost$' '-test.benchmem' '-test.benchtime=2s' '-test.cpuprofile=bin/payload-loops.pprof'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go tool pprof -top -nodecount=20 ./bin/wintun.test.exe bin/payload-loops.pprof
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Eight alternating single-write baseline and capture pairs per mode
         run: ./bin/wintun.test.exe '-test.v' '-test.run=^TestWintunCaptureProof$' '-test.timeout=12m'
+      - name: Keep payload CPU profile
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: payload-loops-${{ matrix.name }}
+          path: bin/payload-loops.pprof
+          retention-days: 7
 
   wintun-integrity:
     if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && inputs.wintun_integrity_scenario != 'payload'

@@ -4,6 +4,7 @@ package wintun
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -25,14 +26,11 @@ func TestPayloadWordsIdentityAndChunking(t *testing.T) {
 	if validPayloadIdentity(1<<32, 8) == nil || validPayloadIdentity(1, 9) == nil {
 		t.Fatal("identity wrapped")
 	}
-	var sent bytes.Buffer
-	n, err := sendPayloadWords(&sent, 96, 5, 300003)
-	if n != 300003 || err != nil {
-		t.Fatal(n, err)
-	}
+	sent := make([]byte, 300003)
+	fillPayloadWords(sent, 96, 5, 0)
 	for _, chunk := range []int{1, 3, 7, 8, 9, 32767, 32768} {
 		v := wordVerifier{transfer: 96, stream: 5}
-		p := sent.Bytes()
+		p := sent
 		for len(p) > 0 {
 			n := min(chunk, len(p))
 			v.consume(p[:n])
@@ -42,6 +40,52 @@ func TestPayloadWordsIdentityAndChunking(t *testing.T) {
 		if v.first != nil {
 			t.Fatalf("chunk %d: %+v", chunk, v.first)
 		}
+	}
+}
+
+func TestPayloadWordsBankRestampsWithoutReallocation(t *testing.T) {
+	var bank payloadBank
+	data, release := bank.prepare(0xffffffff, 8, 1024)
+	var addresses [8]*byte
+	for stream, p := range data {
+		addresses[stream] = &p[0]
+		for off := 0; off < len(p); off += 8 {
+			got := decodePayloadWord(binary.LittleEndian.Uint64(p[off:]))
+			if got != (decodedPayloadWord{0xffffffff, stream, int64(off)}) {
+				t.Fatal(got)
+			}
+		}
+	}
+	release()
+	data, release = bank.prepare(3, 8, 1024)
+	defer release()
+	for stream, p := range data {
+		if &p[0] != addresses[stream] {
+			t.Fatal("payload reallocated")
+		}
+		for off := 0; off < len(p); off += 8 {
+			got := decodePayloadWord(binary.LittleEndian.Uint64(p[off:]))
+			if got != (decodedPayloadWord{3, stream, int64(off)}) {
+				t.Fatal(got)
+			}
+		}
+	}
+}
+
+type payloadWriteShape struct{ sizes []int }
+
+func (w *payloadWriteShape) Write(p []byte) (int, error) {
+	w.sizes = append(w.sizes, len(p))
+	return len(p), nil
+}
+
+func TestPayloadWordsSingleWrite(t *testing.T) {
+	p := make([]byte, 300003)
+	fillPayloadWords(p, 1, 0, 0)
+	w := &payloadWriteShape{}
+	n, err := sendImmutablePayload(w, p)
+	if err != nil || n != int64(len(p)) || len(w.sizes) != 1 || w.sizes[0] != len(p) {
+		t.Fatal(n, err, w.sizes)
 	}
 }
 

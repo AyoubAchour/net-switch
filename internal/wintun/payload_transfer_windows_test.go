@@ -3,6 +3,7 @@
 package wintun
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,10 @@ import (
 
 const payloadEOFWait = 250 * time.Millisecond
 
+func sendImmutablePayload(w io.Writer, content []byte) (int64, error) {
+	return io.Copy(w, bytes.NewReader(content))
+}
+
 // EOF is part of the contract. The sender half-closes after its last byte;
 // tcpEcho closes after echoing all input. A short bounded completion deadline
 // starts at the expected length, with an additional byte cap on hostile output.
@@ -23,7 +28,11 @@ func receivePayloadWords(c net.Conn, v *wordVerifier, size int64) (int64, string
 	var received int64
 	completion := false
 	for {
-		n, err := c.Read(b)
+		p := b
+		if remaining := size - received; remaining > 0 && remaining < int64(len(p)) {
+			p = p[:remaining]
+		}
+		n, err := c.Read(p)
 		if n > 0 {
 			v.consume(b[:n])
 			received += int64(n)
@@ -65,6 +74,10 @@ func tcpWordTransfer(t *testing.T, f *fixture, streams int, phase ...string) (fl
 	var wg sync.WaitGroup
 	var dump sync.Once
 	failures := make(chan error, streams)
+	contents, release := performancePayloads.prepare(transfer, streams, wordPayloadSize)
+	defer release()
+	finishResources := startCaptureResources(t, f)
+	defer finishResources()
 	start := ticks()
 	for stream := range streams {
 		wg.Add(1)
@@ -87,7 +100,8 @@ func tcpWordTransfer(t *testing.T, f *fixture, streams int, phase ...string) (fl
 			}
 			written := make(chan result, 1)
 			go func() {
-				n, err := sendPayloadWords(c, transfer, stream, wordPayloadSize)
+				// bytes.Reader.WriteTo issues one 64 MiB Write, as the oracle does.
+				n, err := sendImmutablePayload(c, contents[stream])
 				if err == nil {
 					err = c.(*net.TCPConn).CloseWrite()
 				}

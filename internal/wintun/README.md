@@ -478,8 +478,13 @@ was copied into this diagnostic.
 - [Process handle snapshot ABI reference](https://github.com/winsiderss/phnt/blob/master/ntpsapi.h)
 # Normal-run payload evidence (word-v1)
 
-Normal TCP performance/profile transfers generate 64 MiB per stream using a
-256 KiB sender buffer and a 32 KiB receiver buffer. Every little-endian word is
+Normal TCP performance/profile transfers keep eight 64 MiB immutable stream
+buffers for the process lifetime (512 MiB total), with a 32 KiB receiver buffer.
+Each sender makes one 64 MiB Write, exactly like the unchanged baseline.
+The bank is allocated and generated once, then only transfer IDs are restamped
+with an allocation-free word loop before each transfer. The bank remains leased
+until all senders finish; preparation precedes throughput and resource timing.
+Every little-endian word is
 an invertible encoding of a process-local 32-bit transfer ID, zero-based 8-bit
 stream ID and 24-bit word index. A multiply and rotate spread changes across
 bytes. The transfer counter is checked before use; it cannot silently wrap.
@@ -487,8 +492,8 @@ This replaces the repeating shared payload, not product traffic. The existing
 tagged boundary diagnostic retains its previous payload until the separate
 boundary-comparison change.
 
-The verifier computes expected words directly, without reference payloads or
-SHA-256 passes. Failure records retain decoded expected/actual words and raw
+The verifier computes expected words directly, using an incrementing word base
+and no per-chunk allocation or SHA-256 pass. Failure records retain decoded expected/actual words and raw
 hex. An arbitrary damaged word still decodes to an integer: only three
 consecutive words with a consistent transfer, stream and increasing offset
 are labelled `confirmed_source`. Searching all byte alignments in the initial
@@ -505,15 +510,19 @@ The sender half-closes after sending. The echo peer then closes after echoing
 all input, and the verifier requires EOF. A 250 ms deadline starts when the
 expected length is reached; reads continue for extra data, capped at an extra
 1 MiB. Reports distinguish under-delivery, over-delivery (observed length,
-possibly a lower bound) and failure to obtain EOF. Generation now uses bounded
-256 KiB writes instead of one 64 MiB write, so workload timing is not identical.
+possibly a lower bound) and failure to obtain EOF. Read requests match the old
+32 KiB CopyN buffer, including its final short request. Only the required EOF
+check adds reads after the expected length.
 
 The manual CI `wintun_integrity=true`, `wintun_integrity_scenario=payload`
 pilot starts exactly two x64 jobs and one ARM64 job. Each measures eight
 alternating pairs in ours and DLL modes, comparing the old SHA-only workload
-with the complete new generator/verifier/EOF workload. No failed pair is
+with the new verifier/EOF workload. No failed pair is
 replaced. The throughput gate is 0.95. `capture_resources` also reports process
-CPU time, cumulative allocation delta and before/after private/Go heap bytes;
-these are not per-sample peak memory or total system/driver CPU measurements.
-Resource timing includes baseline precomputation; the baseline throughput
-timer retains its old exclusion. No overhead result is assumed in advance.
+CPU time, cumulative allocation delta and before/after private/Go heap bytes.
+Each ratio record includes process-lifetime peak working set (not a per-sample
+peak), current working set and private bytes. CPU is process CPU, not total
+system/driver CPU. Both timing windows exclude preparation. A separate process
+profiles original/optimized fill and compare loops plus transfer restamping;
+its instrumentation does not affect the throughput gate. No overhead result
+is assumed in advance.
