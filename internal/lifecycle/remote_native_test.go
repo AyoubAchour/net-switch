@@ -193,7 +193,9 @@ func TestNativeRevisionIsAPureFunctionOfControlsPolicy(t *testing.T) {
 	if len(c.Lines) != 3 || c.Lines[0].ID != "a1" || c.Lines[0].Interface != "Ethernet" || len(c.Lines[0].Addresses) != 0 || c.Lines[1].Interface != "Wi-Fi" {
 		t.Fatalf("lines bind by alias: %+v", c.Lines)
 	}
-	if c.AppLines[apps.AppKey(`C:\Games\game.exe`)] != "b2" || len(c.AppLines) != 1 {
+	// The key is this OS's engine identity (Windows folds case, Linux keeps
+	// it), so the expectation comes from the same normaliser the client uses.
+	if c.AppLines[engineAppIdentity(`C:\Games\game.exe`)] != "b2" || len(c.AppLines) != 1 {
 		t.Fatalf("pins must use the engine's app key and drop unknown lines: %+v", c.AppLines)
 	}
 	if c.Shares["a1"] != 12_000_000 || c.Shares["b2"] != 8_000_000 || c.Lanes["c3"] != "a1" || len(c.Blocked) != 1 || c.Blocked[0] != "c3" || c.Combine != true {
