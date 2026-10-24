@@ -142,6 +142,9 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 		return err
 	}
 	nonce := hex.EncodeToString(token[:])
+	if err := refuseStandInStore(c.Data); err != nil {
+		return err
+	}
 	listener, err := listenNativePublic()
 	if err != nil {
 		return err

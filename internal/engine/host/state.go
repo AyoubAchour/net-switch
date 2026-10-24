@@ -48,10 +48,11 @@ func Open(path, instance string, save func(Record) error) (*Durable, error) {
 		if err := json.Unmarshal(b, &old); err != nil {
 			return nil, fmt.Errorf("invalid native service state: %w", err)
 		}
-		// A stand-in state must be retired by the migration path, never read
-		// as a fresh native instance or silently reset to epoch zero.
+		// Stand-in state is never read as a fresh native instance or silently
+		// reset to epoch zero. The pre-release stand-in folder is retired by
+		// hand; there is no migration because it never shipped.
 		if old.Schema != 1 {
-			return nil, errors.New("native service state schema is not supported")
+			return nil, errors.New("engine-state.json is not native service state: this data folder belonged to a pre-release stand-in build; run that build's uninstall or remove the folder")
 		}
 	}
 	next := old

@@ -104,6 +104,10 @@ func prepareTUN(t *testing.T, _, data string) tunFixture {
 		conn.SetDeadline(time.Time{})
 		return conn, nil
 	}
+	// The installed services run inside this namespace, so the suite's own
+	// HTTP requests and every actor process must join it too.
+	apiDialer, actorNamespace = dial, topo.DUT
+	t.Cleanup(func() { apiDialer, actorNamespace = nil, "" })
 	return tunFixture{
 		line: "eth-a", target: "198.51.100.10:7002", dial: dial,
 		churnLine: "eth-b", seen: topo.Lines[0].Public4.String(), churnSeen: topo.Lines[1].Public4.String(),

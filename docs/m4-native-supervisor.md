@@ -285,8 +285,9 @@ probe retries are introduced without those measurements.
   ARM64's startup-hang case completed at 36.16 s, leaving 5.84 s against its
   unchanged 42 s test limit (35 s startup detection plus polling and cleanup).
 
-The default lifecycle suite still selects `EngineService` without `m4_native`;
-native unit watchdog settings are conditional on `Config.Native`. The host
+At this PR the default lifecycle suite still selected the stand-in `EngineService`;
+since [the production cutover](m4-production-cutover.md) it runs the native
+engine. Native unit watchdog settings are conditional on `Config.Native`. The host
 starts its child idle, sends no routing start, and never manufactures intent
 or sign-in. Only relayed authenticated Control requests start forwarding.
 

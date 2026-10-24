@@ -11,6 +11,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/AyoubAchour/net-switch/internal/faultpoint"
 	"github.com/AyoubAchour/net-switch/internal/service"
 	"github.com/AyoubAchour/net-switch/internal/settings"
 )
@@ -37,7 +38,21 @@ func runNativeChild(ctx context.Context, ready func(), c Config, log func(string
 				return nil, err
 			}
 			path := filepath.Join(c.Data, "engine-state.json")
-			state, err := host.Open(path, id, func(record host.Record) error { return saveNative(path, record) })
+			var committed uint64
+			state, err := host.Open(path, id, func(record host.Record) error {
+				if err := saveNative(path, record); err != nil {
+					return err
+				}
+				// The hosted suite's crash barrier: a revision is durable in the
+				// engine, and its acknowledgement never reaches Control.
+				if record.N > committed {
+					committed = record.N
+					if record.N > 1 {
+						faultpoint.Hit(c.Data, "engine-after-apply-commit")
+					}
+				}
+				return nil
+			})
 			if err != nil {
 				return nil, err
 			}
@@ -45,6 +60,14 @@ func runNativeChild(ctx context.Context, ready func(), c Config, log func(string
 		},
 		Ready: func(s *protocol.Server) {
 			server = s
+			// A lapsed lease with a command stuck inside the engine cannot stop
+			// gracefully: the stop would wait on that command's lock. Ending the
+			// process fails open instead; the host recovers the journal under
+			// the lifetime lock this exit releases (spec §2, "if it lapses").
+			s.OnLeaseStall = func(err error) {
+				log("native child: " + err.Error())
+				os.Exit(1)
+			}
 			workers.Go(func() {
 				events := service.Events(ctx)
 				for {
@@ -73,6 +96,9 @@ func runNativeChild(ctx context.Context, ready func(), c Config, log func(string
 	if err == nil {
 		err = nativeProofExit(c.Data)
 	}
+	// The hosted suite's barrier for a stop the engine acknowledged and cleaned
+	// up after, while its process still refuses to exit.
+	faultpoint.Hit(c.Data, "engine-after-stop-cleanup")
 	if instance != "" {
 		out := host.Outcome{Instance: instance, State: "pending", Reason: "stop", InvocationID: invocation, BootID: boot}
 		if server != nil && server.LeaseExpired() {
