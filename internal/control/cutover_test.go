@@ -384,6 +384,33 @@ func TestUsageWritersAreSerialized(t *testing.T) {
 	}
 }
 
+// While the crash budget cannot be written, the supervisor holds the restart
+// back; the first durable write releases it.
+func TestUnwritableBudgetBlocksTheRestart(t *testing.T) {
+	c, e, _, files := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	c.wanted = true
+	e.mu.Lock()
+	e.s = engine.Snapshot{Status: "error", Instance: "lost", FailureID: "lost", Reason: engine.ReasonAdapterLost}
+	e.mu.Unlock()
+	files.failPrefix = c.op.Journal.File
+	err := c.Supervise(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "crash budget") {
+		t.Fatal("restart was not held back by the unwritable budget", err)
+	}
+	if slices.Contains(e.calls, "start") {
+		t.Fatal("engine restarted while its loss was not durable", e.calls)
+	}
+	files.failPrefix = ""
+	if err := c.Supervise(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var losses []int64
+	if err := json.Unmarshal(c.op.Journal.RawValues()["adapterLosses"], &losses); err != nil || len(losses) != 1 || !slices.Contains(e.calls, "start") {
+		t.Fatal("durable budget did not release the restart", err, losses, e.calls)
+	}
+}
+
 // A failure or adapter loss seen by the supervisor is journaled before the
 // restart it allows, so a crash during that start cannot forget it.
 func TestStartupFailureIsPersistedBeforeTheRestart(t *testing.T) {

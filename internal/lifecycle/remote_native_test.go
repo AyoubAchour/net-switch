@@ -163,26 +163,51 @@ func TestNativeRevisionUsesTheEnginesAppIdentity(t *testing.T) {
 	if got := engineAppIdentityWith(`C:\Games\Game.exe`, apppath.Windows); got != apps.AppKey(`C:\Games\Game.exe`) {
 		t.Fatalf("Windows identity differs from the owner lookup's key: %q", got)
 	}
-	r := NewRemote(context.Background(), func(string) {})
-	r.noteIdentitiesLocked(flows.Record{Owner: platform.Owner{Path: "/app/bin/game", AppID: "flatpak:org.example.Game"}})
-	r.noteIdentitiesLocked(flows.Record{Owner: platform.Owner{Path: "/app/bin/game", AppID: "flatpak:org.example.Other"}})
-	r.noteIdentitiesLocked(flows.Record{Owner: platform.Owner{Path: `C:\plain\app.exe`, AppID: engineAppIdentity(`C:\plain\app.exe`)}})
-	if len(r.identities) != 1 || len(r.identities["/app/bin/game"]) != 2 {
-		t.Fatalf("sandbox identities not remembered exactly: %+v", r.identities)
-	}
+	// A pin stores the exact identity the user selected. Two Flatpaks share
+	// /app/bin/game: pinning one must never pin the other or the plain path.
 	rev := testRevision(3)
-	rev.Policy.AppLines = apps.Pins{{Path: "/app/bin/game", LineID: "b2"}}
-	native, err := nativeRevision(rev, r.identities)
+	rev.Policy.AppLines = apps.Pins{{Path: "flatpak:org.example.Game", LineID: "b2"}, {Path: "snap:other", LineID: "a1"}, {Path: "/opt/Plain/App", LineID: "a1"}}
+	native, err := nativeRevision(rev)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if native.Config.AppLines["flatpak:org.example.Game"] != "b2" || native.Config.AppLines["flatpak:org.example.Other"] != "b2" || native.Config.AppLines[engineAppIdentity("/app/bin/game")] != "b2" {
-		t.Fatalf("pin did not reach the engine's identities: %+v", native.Config.AppLines)
+	want := map[string]string{"flatpak:org.example.Game": "b2", "snap:other": "a1", engineAppIdentity("/opt/Plain/App"): "a1"}
+	if len(native.Config.AppLines) != len(want) {
+		t.Fatalf("pins inferred or lost: %+v", native.Config.AppLines)
+	}
+	for id, line := range want {
+		if native.Config.AppLines[id] != line {
+			t.Fatalf("pin %q bound to %q, want %q (%+v)", id, native.Config.AppLines[id], line, native.Config.AppLines)
+		}
+	}
+	if _, inferred := native.Config.AppLines["flatpak:org.example.Other"]; inferred {
+		t.Fatal("an unrelated app sharing the path was pinned")
+	}
+	// The compiled hash depends on the durable revision alone, so a Control
+	// restart (a fresh client, no flow history) produces the same revision.
+	again, err := nativeRevision(rev)
+	if err != nil || again.Hash != native.Hash {
+		t.Fatal("sandbox pins changed the hash across a restart", err, again.Hash, native.Hash)
+	}
+	f := newNativeFixture(t, nativeProber{})
+	ctx := context.Background()
+	f.remote.Restore(&rev)
+	if err := f.remote.Start(ctx, rev.Policy); err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewRemote(ctx, func(string) {})
+	restarted.dial, restarted.queryService, restarted.outcome = f.remote.dial, f.remote.queryService, f.remote.outcome
+	restarted.Restore(&rev)
+	if err := restarted.Attach(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if s := restarted.Snapshot(); s.AppliedHash != rev.Hash || len(s.Policy.AppLines) != 3 {
+		t.Fatalf("reattach after restart did not recognise its own revision with sandbox pins: %+v", s)
 	}
 }
 
 func TestNativeRevisionIsAPureFunctionOfControlsPolicy(t *testing.T) {
-	native, err := nativeRevision(testRevision(7), nil)
+	native, err := nativeRevision(testRevision(7))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +229,7 @@ func TestNativeRevisionIsAPureFunctionOfControlsPolicy(t *testing.T) {
 	if _, err := policy.Compile(native); err != nil {
 		t.Fatal("the engine would refuse the compiled config:", err)
 	}
-	again, _ := nativeRevision(testRevision(7), nil)
+	again, _ := nativeRevision(testRevision(7))
 	if again.Hash != native.Hash {
 		t.Fatal("translation is not deterministic")
 	}
@@ -499,6 +524,14 @@ func TestRetainedNativeExitIsClassifiedAtStartup(t *testing.T) {
 	if err := off.remote.classifyRetainedExit(ctx, data); err != nil || off.remote.Snapshot().Status != "off" {
 		t.Fatal("lease expiry counted", off.remote.Snapshot(), err)
 	}
+	// A deliberate stop that completed before Control crashed is off, not a
+	// spent failure: resume follows the journaled routing intent instead.
+	stopped := newNativeFixture(t, nativeProber{})
+	stopped.status = service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true}
+	stopped.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "stop"}
+	if err := stopped.remote.classifyRetainedExit(ctx, data); err != nil || stopped.remote.Snapshot().Status != "off" || stopped.remote.Snapshot().FailureID != "" {
+		t.Fatal("clean retained stop counted", stopped.remote.Snapshot(), err)
+	}
 	running := newNativeFixture(t, nativeProber{})
 	running.status = service.Status{Running: true, PID: 7}
 	if err := running.remote.classifyRetainedExit(ctx, data); err != nil || running.remote.Snapshot().Status != "off" || running.remote.instance != "" {
@@ -554,6 +587,17 @@ func TestNativeExitClassification(t *testing.T) {
 	f.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "lease-expired"}
 	if class, _ := f.remote.classifyExit(instance, service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true}); class.reason != "lease-expired" {
 		t.Fatal("lease expiry is routing off, not a failure", class)
+	}
+	// A deliberate, verified clean stop (exit 0, cleanup complete, reason
+	// "stop") is routing off, never a failure.
+	f.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "stop"}
+	if class, _ := f.remote.classifyExit(instance, service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true}); class.reason != exitStopped {
+		t.Fatal("verified clean stop counted as a failure", class)
+	}
+	// Exit 0 whose cleanup failed, or that carries an error, is not clean.
+	f.outcome = host.Outcome{Instance: instance, State: "failed", Reason: "stop", Error: "cleanup failed"}
+	if class, _ := f.remote.classifyExit(instance, service.Status{Stopped: true, Cleanup: "failed", ExitKnown: true}); class.reason != "" {
+		t.Fatal("stop with failed cleanup was treated as clean", class)
 	}
 }
 

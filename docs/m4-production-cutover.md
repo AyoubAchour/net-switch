@@ -18,11 +18,13 @@ deleted with sing-box in PR 4.
 The native revision is compiled from Control's policy: a line binds by its
 alias (the same identity the sing-box adapter used), shares become integer
 weights, lanes and the blocked set are copied, and shares of blocked lines are
-dropped as spec §4.6 already forbids them. A pin binds the identity the engine
-itself gives the app: the platform's own path normalisation (Windows folds
-case, Linux keeps it), plus every sandbox identity (Flatpak, Snap, AppImage)
-the engine has reported for that path in its flow records, since no path rule
-can derive those. The
+dropped as spec §4.6 already forbids them. A pin binds exactly the identity the
+user selected (design decision recorded in the spec): a path pin becomes the
+platform's own normalisation (Windows folds case, Linux keeps it), which on
+Windows is the engine's identity, so existing pins stay valid; a Linux sandbox
+pin stores the engine's `flatpak:`, `snap:` or `appimage:` identity itself,
+which flow records now expose as `AppID`. Nothing is inferred from a shared
+path, and the compiled hash depends on the durable revision alone. The
 engine's hash of that config is what the engine checks; the acknowledgement
 Control records carries Control's own revision hash plus the engine's apply
 point. An engine already loaded receives `apply`; `start` is only for a fresh
@@ -42,8 +44,11 @@ destinations); a connecting flow lists its line but is never evidence.
 A stopped engine is classified through the service manager's status, which
 already folds the shared outcome reader: `Cleanup`, `ExitKnown`, `ExitCode`
 and the instance's outcome file. Only exit 3 with completed cleanup and the
-engine's own "adapter lost" reason is adapter loss; a lease expiry is routing
-off; everything else is a failure. While the manager reports cleanup pending,
+engine's own "adapter lost" reason is adapter loss; a lease expiry or a
+verified clean stop (exit 0, cleanup complete, reason "stop") is routing off;
+everything else is a failure. The supervisor journals a counted failure or
+loss before the restart it allows, and holds the restart back while that
+write fails. While the manager reports cleanup pending,
 Control polls for up to 10 s before classifying; past that it counts the exit
 as a failure and says so in the log. Nothing is guessed clean. The same
 classification runs at Control startup for a native engine that stopped while

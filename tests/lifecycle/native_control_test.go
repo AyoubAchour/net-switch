@@ -289,7 +289,7 @@ func TestNativeControlCutover(t *testing.T) {
 				latched := waitRouting(t, c, "five failures latch routing off", 45*time.Second, func(s status) bool {
 					return s.Routing == "error" && s.Error != nil && strings.Contains(*s.Error, "five failures")
 				})
-				time.Sleep(6 * time.Second) // longer than the 1/2/5 s backoff steps
+				time.Sleep(35 * time.Second) // past the 30 s backoff step a fifth failure would get
 				if s := getStatus(t, c); s.Routing != "error" || s.Instance != latched.Instance {
 					t.Fatalf("latched routing restarted on its own: %+v", s)
 				}

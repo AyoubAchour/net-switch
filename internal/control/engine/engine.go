@@ -103,6 +103,10 @@ type ProbeResult struct {
 }
 type Connection struct {
 	apps.Connection
+	// AppID is the engine's own identity for the owning app: the normalised
+	// path, or a sandbox identity (flatpak:, snap:, appimage:) on Linux. A pin
+	// for a sandboxed app stores this exact value.
+	AppID string
 	// Host is the destination name when the engine knows one, otherwise the
 	// destination address of a flow whose upstream connection is established.
 	// It is empty for flows still connecting, so they never count as evidence.

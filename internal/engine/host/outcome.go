@@ -24,6 +24,11 @@ type Outcome struct {
 	InvocationID string       `json:"invocationId,omitempty"`
 	BootID       string       `json:"bootId,omitempty"`
 	Systemd      *SystemdExit `json:"systemd,omitempty"`
+	// RecoveryPID is the process that ran the last journal recovery for this
+	// instance: the host after its child exits, or the manager's recovery
+	// command (SCM) / ExecStopPost (systemd). Tests use it to tell which
+	// writer published the final result.
+	RecoveryPID uint32 `json:"recoveryPid,omitempty"`
 }
 
 type ChildOutcome struct {

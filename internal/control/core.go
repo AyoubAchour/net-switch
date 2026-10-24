@@ -1086,13 +1086,16 @@ func (c *Core) Supervise(ctx context.Context) error {
 	c.mu.Unlock()
 	if ready {
 		// A failure or adapter loss observed this tick is durable before the
-		// restart it allows, so a crash during the start cannot forget it.
-		c.persistFailureBudget()
+		// restart it allows. While the budget cannot be written, no restart
+		// happens: a crash during it would otherwise forget the failure.
+		if err := c.persistFailureBudget(); err != nil {
+			return fmt.Errorf("engine restart held back until the crash budget is durable: %w", err)
+		}
 		return c.Start(ctx)
 	}
 	return nil
 }
-func (c *Core) persistFailureBudget() {
+func (c *Core) persistFailureBudget() error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
 	c.mu.Lock()
@@ -1100,14 +1103,16 @@ func (c *Core) persistFailureBudget() {
 	c.failureDirty = false
 	c.mu.Unlock()
 	if !dirty {
-		return
+		return nil
 	}
 	if err := c.persistJournal(); err != nil {
 		c.mu.Lock()
 		c.failureDirty = true
 		c.mu.Unlock()
 		c.log("cannot persist engine crash budget: %v", err)
+		return err
 	}
+	return nil
 }
 func (c *Core) bindingChangedLocked(s engine.Snapshot) bool {
 	if s.StartedWith == nil {

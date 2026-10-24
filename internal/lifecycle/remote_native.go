@@ -70,38 +70,35 @@ func engineAppIdentityWith(path string, rules apppath.Rules) string {
 	return apppath.Normalize(path, rules)
 }
 
-// sandboxIdentityBound caps the paths whose sandbox identities are remembered.
-const sandboxIdentityBound = 4096
-
-// noteIdentitiesLocked remembers identities the engine reports for a path that
-// differ from the plain normalisation: Flatpak, Snap and AppImage apps, whose
-// identity comes from process metadata Control cannot derive from the path.
-func (r *Remote) noteIdentitiesLocked(f flows.Record) {
-	id, path := f.Owner.AppID, f.Owner.Path
-	if id == "" || path == "" || id == engineAppIdentity(path) {
-		return
-	}
-	if r.identities == nil {
-		r.identities = map[string]map[string]bool{}
-	}
-	set := r.identities[path]
-	if set == nil {
-		if len(r.identities) >= sandboxIdentityBound {
-			return
+// sandboxIdentity reports whether a pin value is already an engine identity
+// that no path rule can derive: the Linux owner lookup names Flatpak, Snap and
+// AppImage apps this way, and a pin stores exactly the identity the user chose.
+func sandboxIdentity(value string) bool {
+	for _, prefix := range []string{"flatpak:", "snap:", "appimage:"} {
+		if strings.HasPrefix(value, prefix) {
+			return true
 		}
-		set = map[string]bool{}
-		r.identities[path] = set
 	}
-	set[id] = true
+	return false
+}
+
+// pinIdentity is the engine identity a pin binds (design decision recorded in
+// the spec): the exact identity the user selected, never inferred from a path
+// other apps may share. A Windows path pin is the normalised path, which is
+// also the Windows engine's identity, so existing pins stay valid.
+func pinIdentity(value string) string {
+	if sandboxIdentity(value) {
+		return value
+	}
+	return engineAppIdentity(value)
 }
 
 // nativeRevision compiles Control's policy into the engine's config. The line
 // binds by alias, the same identity the sing-box adapter used, so the config
-// is a pure function of Control's revision (plus the sandbox identities the
-// engine itself reported) and an alias change still goes through Control's
-// existing restart rule. A pin binds the engine's identity for its path: the
-// platform normalisation, plus every sandbox identity seen for that path.
-func nativeRevision(r ce.Revision, identities map[string]map[string]bool) (policy.Revision, error) {
+// is a pure function of Control's durable revision alone: the same revision
+// compiles to the same hash after any restart, and an alias change still goes
+// through Control's existing restart rule.
+func nativeRevision(r ce.Revision) (policy.Revision, error) {
 	p := r.Policy
 	config := policy.Config{Combine: p.Combine, IPv6: p.IPv6, AppLines: map[string]string{}, Shares: map[string]uint64{}, Lanes: map[string]string{}, Blocked: []string{}}
 	known := map[string]bool{}
@@ -113,12 +110,8 @@ func nativeRevision(r ce.Revision, identities map[string]map[string]bool) (polic
 		config.Lines = append(config.Lines, platform.Line{ID: line.ID, Interface: line.Alias})
 	}
 	for _, pin := range p.AppLines {
-		if !known[pin.LineID] || pin.Path == "" {
-			continue
-		}
-		config.AppLines[engineAppIdentity(pin.Path)] = pin.LineID
-		for id := range identities[pin.Path] {
-			config.AppLines[id] = pin.LineID
+		if known[pin.LineID] && pin.Path != "" {
+			config.AppLines[pinIdentity(pin.Path)] = pin.LineID
 		}
 	}
 	blocked := map[string]bool{}
@@ -162,7 +155,7 @@ func (r *Remote) nativeSnapshotLocked(status protocol.Status) ce.Snapshot {
 	if status.Applied != nil {
 		s.AppliedRevision, s.AppliedHash, s.AppliedPoint = status.Applied.N, status.Applied.Hash, status.Applied.Point
 		if desired := r.desired; desired != nil && desired.Number == status.Applied.N {
-			if native, err := nativeRevision(*desired, r.identities); err == nil && native.Hash == status.Applied.Hash {
+			if native, err := nativeRevision(*desired); err == nil && native.Hash == status.Applied.Hash {
 				s.AppliedHash = desired.Hash
 				s.Policy = desired.Policy
 				if s.Status == "on" {
@@ -196,10 +189,7 @@ func (r *Remote) nativeRefresh(ctx context.Context) error {
 // nativeLoad sends start or apply. An engine that is already on receives apply,
 // which the table answers idempotently; start is only for a fresh instance.
 func (r *Remote) nativeLoad(ctx context.Context, revision ce.Revision, running bool) (ce.Acknowledgement, error) {
-	r.mu.Lock()
-	identities := r.identities
-	r.mu.Unlock()
-	native, err := nativeRevision(revision, identities)
+	native, err := nativeRevision(revision)
 	if err != nil {
 		return ce.Acknowledgement{}, err
 	}
@@ -233,12 +223,9 @@ func (r *Remote) nativeConnections(ctx context.Context) ([]ce.Connection, error)
 		if err := r.call(ctx, "flows", fields, "", &page); err != nil {
 			return nil, err
 		}
-		r.mu.Lock()
 		for _, f := range page.Flows {
-			r.noteIdentitiesLocked(f)
 			out = append(out, nativeConnection(f))
 		}
-		r.mu.Unlock()
 		if len(out) > flows.Defaults().SnapshotEntries {
 			return nil, errors.New("engine flow snapshot exceeds its entry limit")
 		}
@@ -258,7 +245,7 @@ func (r *Remote) nativeConnections(ctx context.Context) ([]ce.Connection, error)
 // destination address only once the upstream connection is established, so a
 // flow still connecting is never evidence that its line works (spec §4.5).
 func nativeConnection(f flows.Record) ce.Connection {
-	c := ce.Connection{}
+	c := ce.Connection{AppID: f.Owner.AppID}
 	c.ID = strconv.FormatUint(f.ID, 10)
 	c.Metadata.ProcessPath = f.Owner.Path
 	c.Download, c.Upload = float64(f.Down), float64(f.Up)
@@ -375,14 +362,19 @@ func (r *Remote) AckTotals(ctx context.Context, opID, receipt string) error {
 	return r.call(ctx, "ackTotals", map[string]any{"receipt": receipt}, opID, &ack)
 }
 
+// exitStopped is a verified clean stop: exit 0, cleanup complete, and the
+// engine's own "stop" reason. It is routing off, never a failure.
+const exitStopped = "stopped"
+
 type exitClass struct {
-	reason  string // "", "lease-expired" or ce.ReasonAdapterLost
+	reason  string // "", "lease-expired", exitStopped or ce.ReasonAdapterLost
 	pending bool
 }
 
 // classifyExit reads a stopped engine's outcome through the service manager
 // and the shared outcome reader. Only a known exit 3 with completed cleanup is
-// adapter loss; a lease expiry is routing off; anything else is a failure.
+// adapter loss; a lease expiry or a verified clean stop is routing off;
+// anything else is a failure.
 func (r *Remote) classifyExit(instance string, status service.Status) (exitClass, error) {
 	r.mu.Lock()
 	native := r.native
@@ -413,6 +405,9 @@ func (r *Remote) classifyExit(instance string, status service.Status) (exitClass
 	}
 	if status.Cleanup == "complete" && status.ExitKnown && status.ExitCode == 3 && out.Reason == "adapter lost" {
 		return exitClass{reason: ce.ReasonAdapterLost}, nil
+	}
+	if status.Cleanup == "complete" && status.ExitKnown && status.ExitCode == 0 && out.Reason == "stop" && out.Error == "" {
+		return exitClass{reason: exitStopped}, nil
 	}
 	return exitClass{}, nil
 }
@@ -478,7 +473,9 @@ func (r *Remote) classifyRetainedExit(ctx context.Context, data string) error {
 		defer r.mu.Unlock()
 		r.instance = record.Instance
 		switch class.reason {
-		case "lease-expired":
+		case "lease-expired", exitStopped:
+			// Off, not a failure: a deliberate stop before Control crashed, or
+			// an expired lease. Resume follows the journaled routing intent.
 			r.snapshot = ce.Snapshot{Status: "off"}
 		case ce.ReasonAdapterLost:
 			r.failWithReasonLocked(fmt.Errorf("adapter lost while Control was unavailable (%s)", describeExit(status)), ce.ReasonAdapterLost)
@@ -491,23 +488,21 @@ func (r *Remote) classifyRetainedExit(ctx context.Context, data string) error {
 	}
 }
 
-// terminalAcknowledger answers the engine's service-initiated stop record on
+// acknowledgeTerminal answers the engine's service-initiated stop record on
 // the connection that received it, so adapter-loss cleanup does not wait out
 // the delivery timeout. It never changes routing intent.
-func (r *Remote) terminalAcknowledger(rpc *RPC) func([]byte) {
-	return func(b []byte) {
-		var message protocol.Terminal
-		if json.Unmarshal(b, &message) != nil || message.Type != "stopped" || message.OpID == "" {
-			return
-		}
-		go func() {
-			ctx, cancel := context.WithTimeout(r.ctx, protocol.TerminalDeliveryTimeout)
-			defer cancel()
-			if err := rpc.Call(ctx, map[string]any{"method": "terminalAck", "engineInstanceId": message.Instance, "epoch": message.Epoch, "opId": message.OpID}, nil); err != nil {
-				r.log("engine terminal receipt not delivered: " + err.Error())
-			} else {
-				r.log(fmt.Sprintf("engine stopped itself (%s); receipt sent", message.Reason))
-			}
-		}()
+func (r *Remote) acknowledgeTerminal(rpc *RPC, b []byte) {
+	var message protocol.Terminal
+	if json.Unmarshal(b, &message) != nil || message.Type != "stopped" || message.OpID == "" {
+		return
 	}
+	go func() {
+		ctx, cancel := context.WithTimeout(r.ctx, protocol.TerminalDeliveryTimeout)
+		defer cancel()
+		if err := rpc.Call(ctx, map[string]any{"method": "terminalAck", "engineInstanceId": message.Instance, "epoch": message.Epoch, "opId": message.OpID}, nil); err != nil {
+			r.log("engine terminal receipt not delivered: " + err.Error())
+		} else {
+			r.log(fmt.Sprintf("engine stopped itself (%s); receipt sent", message.Reason))
+		}
+	}()
 }

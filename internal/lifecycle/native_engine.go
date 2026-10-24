@@ -129,6 +129,7 @@ func recoveryOutcome(data string) (func(error) error, error) {
 		captureSystemdExit(&out, os.Getenv)
 	}
 	out.State, out.Error = "pending", ""
+	out.RecoveryPID = uint32(os.Getpid())
 	if err := writeOutcome(data, out); err != nil {
 		return nil, err
 	}

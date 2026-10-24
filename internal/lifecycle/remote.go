@@ -56,8 +56,6 @@ type Remote struct {
 	native bool
 	// outcome reads a stopped native instance's cleanup result (host.ReadOutcome).
 	outcome func(string) (host.Outcome, error)
-	// identities are sandbox app identities the engine reported per path.
-	identities map[string]map[string]bool
 }
 
 func NewRemote(ctx context.Context, log func(string)) *Remote {
@@ -191,7 +189,8 @@ func (r *Remote) recoverConnection(cause error, id uint64) {
 			current := r.recovery == id && r.rpc == nil && r.instance == instance && r.attempt == attempt
 			if current && !stopping && !grace {
 				switch class.reason {
-				case "lease-expired":
+				case "lease-expired", exitStopped:
+					// Routing is off; the supervisor restarts it if still wanted.
 					r.snapshot = ce.Snapshot{Status: "off"}
 				case ce.ReasonAdapterLost:
 					r.failWithReasonLocked(fmt.Errorf("adapter lost; the engine cleaned up and exited (%s)", describeExit(status)), ce.ReasonAdapterLost)
@@ -253,14 +252,13 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 	if err != nil {
 		return err
 	}
-	rpc := NewRPC(c)
+	rpc := NewRPCWithEvents(c, r.acknowledgeTerminal)
 	ok := false
 	defer func() {
 		if !ok {
 			rpc.Close()
 		}
 	}()
-	rpc.OnEvent = r.terminalAcknowledger(rpc)
 	var hello struct {
 		Version      string          `json:"version"`
 		Instance     string          `json:"engineInstanceId"`
