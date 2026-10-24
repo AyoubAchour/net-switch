@@ -16,7 +16,10 @@ concurrency:
 
 jobs:
   wintun-integrity:
-    if: github.repository == 'AyoubAchour/net-switch'
+    # Run only in this repository, not in forks. Match the numeric repository
+    # id, which survives renames: a name match silently skipped every nightly
+    # hunt after the owner account was renamed.
+    if: github.repository_id == '1418987447'
     name: TCP integrity / ${{ matrix.runner }} / ${{ matrix.scenario }} / ${{ matrix.shard }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
