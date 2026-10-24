@@ -12,6 +12,8 @@ import (
 	"time"
 
 	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
+	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/lifecycle"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
@@ -59,7 +61,7 @@ func actionAsync(url, token, route, body string) <-chan error {
 		}
 		r.Header.Set("X-Token", token)
 		r.Header.Set("Content-Type", "application/json")
-		response, err := (&http.Client{Timeout: 35 * time.Second}).Do(r)
+		response, err := apiClient(35 * time.Second).Do(r)
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == 200 {
@@ -72,31 +74,39 @@ func actionAsync(url, token, route, body string) <-chan error {
 	}()
 	return done
 }
+
+// checkAppliedJournal proves Control's durable desired revision is the one the
+// engine has committed: the native record keeps the engine's own hash of the
+// compiled config, so the comparison is on the revision number and on the
+// hash Control would send for that same desired policy.
 func checkAppliedJournal(t *testing.T, data, label string) {
 	t.Helper()
 	var desired struct {
 		Desired ce.Revision `json:"desired"`
 	}
 	var state struct {
-		Instance string             `json:"engineInstanceId"`
-		Applied  ce.Acknowledgement `json:"appliedRevision"`
+		Instance string `json:"engineInstanceId"`
+		N        uint64 `json:"n"`
+		Hash     string `json:"hash"`
 	}
 	wait(t, "desired revision acknowledged", 25*time.Second, func() bool {
-		return lifecycle.Read(filepath.Join(data, "control-journal.json"), &desired) == nil &&
-			lifecycle.Read(filepath.Join(data, "engine-state.json"), &state) == nil &&
-			desired.Desired.Number == state.Applied.Number && desired.Desired.Hash == state.Applied.Hash &&
+		if lifecycle.Read(filepath.Join(data, "control-journal.json"), &desired) != nil || lifecycle.Read(filepath.Join(data, "engine-state.json"), &state) != nil {
+			return false
+		}
+		native, err := lifecycle.NativeRevision(desired.Desired)
+		return err == nil && desired.Desired.Number == state.N && native.Hash == state.Hash &&
 			len(desired.Desired.Policy.Lines) == 1 && desired.Desired.Policy.Lines[0].Label == label
 	})
 }
-func durableCrash(t *testing.T, data, point, url, token, echo string, owner actor) *client {
+func durableCrash(t *testing.T, ctx context.Context, data, point, url, token string, fixture tunFixture, owner actor) *client {
 	t.Helper()
 	before, err := service.Query(service.Control)
 	if err != nil {
 		t.Fatal(err)
 	}
-	stream := proxyStream(t, url, token, echo)
+	stream := routedStream(t, ctx, fixture)
 	defer stream.Close()
-	checkEcho(t, stream)
+	fixture.exchange(t, stream)
 	var previousEngine struct {
 		Instance string `json:"engineInstanceId"`
 	}
@@ -123,14 +133,14 @@ func durableCrash(t *testing.T, data, point, url, token, echo string, owner acto
 		t.Fatal("interrupted HTTP request did not finish")
 	}
 	if strings.HasPrefix(point, "control-") {
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		wait(t, "Control recovery after journal interruption", 25*time.Second, func() bool {
 			s, err := service.Query(service.Control)
 			return err == nil && s.Running && s.PID != before.PID
 		})
 	} else {
 		expectClosed(t, stream)
-		directEcho(t, echo)
+		directTraffic(t, ctx, fixture)
 	}
 	c := openClient(t, owner, false)
 	wait(t, "routing recovers after durable interruption", 35*time.Second, func() bool {
@@ -139,15 +149,20 @@ func durableCrash(t *testing.T, data, point, url, token, echo string, owner acto
 	})
 	checkAppliedJournal(t, data, label)
 	if strings.HasPrefix(point, "control-") {
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 	}
 	return c
 }
-func replayClosure(t *testing.T, data, url, token, echo string, owner actor) *client {
+
+// replayClosure plants a closure intent whose cutoff is a revision Control has
+// not acknowledged yet, applies that revision as the controller itself, then
+// lets two successive Controls replay the same operation id: the old flow
+// closes once, the newer flow (admitted after the apply point) survives both.
+func replayClosure(t *testing.T, ctx context.Context, data string, fixture tunFixture, owner actor) *client {
 	t.Helper()
-	old := proxyStream(t, url, token, echo)
+	old := routedStream(t, ctx, fixture)
 	defer old.Close()
-	checkEcho(t, old)
+	fixture.exchange(t, old)
 	restore := disableRecovery(t)
 	control, err := service.Query(service.Control)
 	if err != nil {
@@ -155,20 +170,23 @@ func replayClosure(t *testing.T, data, url, token, echo string, owner actor) *cl
 	}
 	kill(t, control.PID)
 	wait(t, "Control stopped before replay fixture", 10*time.Second, func() bool { s, err := service.Query(service.Control); return err == nil && !s.Running })
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	connection, err := localipc.Dial(ctx, localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine})
+	connection, err := localipc.DialNativeEngine(ctx, localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine})
 	if err != nil {
 		t.Fatal(err)
 	}
 	rpc := lifecycle.NewRPC(connection)
 	defer rpc.Close()
 	var hello struct {
-		Instance string      `json:"engineInstanceId"`
-		Snapshot ce.Snapshot `json:"adapterSnapshot"`
+		Instance string          `json:"engineInstanceId"`
+		Status   protocol.Status `json:"status"`
 	}
 	if err := rpc.Call(ctx, map[string]any{"method": "hello"}, &hello); err != nil {
 		t.Fatal(err)
+	}
+	if hello.Status.Applied == nil {
+		t.Fatal("engine has no loaded revision to build on", hello.Status)
 	}
 	var lease struct {
 		Epoch uint64 `json:"epoch"`
@@ -184,7 +202,7 @@ func replayClosure(t *testing.T, data, url, token, echo string, owner actor) *cl
 	if err := json.Unmarshal(record["desired"], &revision); err != nil {
 		t.Fatal(err)
 	}
-	revision.Number = max(revision.Number, hello.Snapshot.AppliedRevision) + 1
+	revision.Number = max(revision.Number, hello.Status.Applied.N) + 1
 	record["desired"], _ = json.Marshal(revision)
 	record["revision"], _ = json.Marshal(revision.Number)
 	record["engineInstanceId"], _ = json.Marshal(hello.Instance)
@@ -195,16 +213,20 @@ func replayClosure(t *testing.T, data, url, token, echo string, owner actor) *cl
 	if err := lifecycle.Save(filepath.Join(data, "control-journal.json"), record); err != nil {
 		t.Fatal(err)
 	}
-	var ack ce.Acknowledgement
-	if err := rpc.Call(ctx, map[string]any{"method": "apply", "engineInstanceId": hello.Instance, "epoch": lease.Epoch, "adapter": map[string]any{"revision": revision}}, &ack); err != nil {
+	native, err := lifecycle.NativeRevision(revision)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if ack.AppliedAt.IsZero() {
-		t.Fatal("engine did not return a fixed apply point")
+	var applied policy.Applied
+	if err := rpc.Call(ctx, map[string]any{"method": "apply", "engineInstanceId": hello.Instance, "epoch": lease.Epoch, "revision": native}, &applied); err != nil {
+		t.Fatal(err)
 	}
-	newer := proxyStreamPort(t, *hello.Snapshot.ProxyPort, echo)
+	if applied.N != native.N || applied.Point == 0 {
+		t.Fatal("engine did not return a fixed apply point", applied)
+	}
+	newer := routedStream(t, ctx, fixture)
 	defer newer.Close()
-	checkEcho(t, newer)
+	fixture.exchange(t, newer)
 	rpc.Close()
 	// Lose the close acknowledgement after its effect, then let another Control
 	// replay the very same opId and revision cutoff.
@@ -214,7 +236,7 @@ func replayClosure(t *testing.T, data, url, token, echo string, owner actor) *cl
 	go func() { started <- service.Start(ctx, service.Control) }()
 	pid := barrier(t, data, "control-after-close-ack")
 	expectClosed(t, old)
-	checkEcho(t, newer)
+	fixture.exchange(t, newer)
 	kill(t, pid)
 	select {
 	case <-started:
@@ -229,6 +251,6 @@ func replayClosure(t *testing.T, data, url, token, echo string, owner actor) *cl
 		}
 		return lifecycle.Read(filepath.Join(data, "control-journal.json"), &journal) == nil && len(journal.Closures) == 0
 	})
-	checkEcho(t, newer)
+	fixture.exchange(t, newer)
 	return c
 }

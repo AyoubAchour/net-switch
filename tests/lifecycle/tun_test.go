@@ -5,10 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -29,9 +27,8 @@ type tunFixture struct {
 	probe                      func(*testing.T, string) nativeProbeFixture
 }
 
-func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
+func tunServices(t *testing.T, config lifecycle.Config, owner actor, fixture tunFixture) {
 	t.Helper()
-	fixture := prepareTUN(t, config.Directory, config.Data)
 	config.Mode = "tun"
 	if err := lifecycle.Save(filepath.Join(config.Data, "service-config.json"), config); err != nil {
 		t.Fatal(err)
@@ -59,13 +56,15 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 			defer c.input.Close()
 			c.must(t, "signin", nil, nil)
 			wait(t, "TUN routing on", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+			var session struct{ Token, URL string }
+			c.must(t, "session", nil, &session)
 			conn, err := fixture.dial(ctx, "tcp4", fixture.target)
 			if err != nil {
 				t.Fatal("captured traffic failed", err)
 			}
 			defer conn.Close()
 			fixture.exchange(t, conn)
-			assertTUNCaptured(t, config.Data, getStatus(t, c).Instance, fixture)
+			assertTUNCaptured(t, session.URL, session.Token, fixture)
 			fixture.installed(t)
 			engine, err := service.Query(service.Engine)
 			if err != nil {
@@ -117,6 +116,8 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 		defer func() { c.input.Close() }()
 		c.must(t, "routing", map[string]any{"on": true}, nil)
 		wait(t, "TUN before hang", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+		var session struct{ Token, URL string }
+		c.must(t, "session", nil, &session)
 		for hang := 1; hang <= 5; hang++ {
 			before := getStatus(t, c)
 			live, err := fixture.dial(ctx, "tcp4", fixture.target)
@@ -124,22 +125,18 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 				t.Fatal(err)
 			}
 			fixture.exchange(t, live)
-			assertTUNCaptured(t, config.Data, before.Instance, fixture)
+			assertTUNCaptured(t, session.URL, session.Token, fixture)
 			fixture.installed(t)
-			pidBytes, err := os.ReadFile(filepath.Join(config.Data, "adapter-"+before.Instance, "engine.pid"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			pid, err := strconv.ParseUint(strings.TrimSpace(string(pidBytes)), 10, 32)
-			if err != nil || pid == 0 {
-				t.Fatal("adapter pid precondition", err)
-			}
+			// The forwarding process is the host's verified child; suspending
+			// it stalls forwarding while the host's own health checks keep
+			// running, with or without Control (spec §3.4).
+			pid := nativeChildPID(t, config.Data, before.Instance)
 			restore := func() {}
 			if hang == 1 {
 				restore = disableRecovery(t)
 			}
 			faultAt := time.Now()
-			suspendAdapter(t, uint32(pid))
+			suspendAdapter(t, pid)
 			if hang == 1 {
 				kill(t, before.ControlPID)
 			} // health must work without Control
@@ -205,51 +202,40 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor) {
 	})
 }
 
-func assertTUNCaptured(t *testing.T, data, instance string, fixture tunFixture) {
+// assertTUNCaptured proves the stream went through the native engine: Control's
+// own state lists this process's executable with a connection on the fixture
+// line, which only the engine's paged flow listing can have told it.
+func assertTUNCaptured(t *testing.T, url, token string, fixture tunFixture) {
 	t.Helper()
-	var config struct {
-		Experimental struct {
-			API struct {
-				Address string `json:"external_controller"`
-				Secret  string `json:"secret"`
-			} `json:"clash_api"`
-		} `json:"experimental"`
-	}
-	if err := lifecycle.Read(filepath.Join(data, "adapter-"+instance, "engine-config.json"), &config); err != nil {
-		t.Fatal(err)
-	}
-	host, port, _ := net.SplitHostPort(fixture.target)
-	client := &http.Client{Transport: &http.Transport{DialContext: fixture.dial}, Timeout: 5 * time.Second}
-	defer client.CloseIdleConnections()
-	wait(t, "stream observed inside the TUN adapter", 10*time.Second, func() bool {
-		req, _ := http.NewRequest("GET", "http://"+config.Experimental.API.Address+"/connections", nil)
-		req.Header.Set("Authorization", "Bearer "+config.Experimental.API.Secret)
-		resp, err := client.Do(req)
-		if err != nil {
-			t.Fatal(err)
+	exe := hostedTestExecutable()
+	var observed []string
+	wait(t, "stream observed inside the native engine", 15*time.Second, func() bool {
+		status, b := api(t, url, token, "GET", "/api/state", "")
+		if status != 200 {
+			return false
 		}
-		defer resp.Body.Close()
-		var result struct {
-			Connections []struct {
-				Metadata map[string]any `json:"metadata"`
-			} `json:"connections"`
+		var state struct {
+			Apps []struct {
+				Path        string         `json:"path"`
+				Connections map[string]int `json:"connections"`
+			} `json:"apps"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			t.Fatal(err)
+		if json.Unmarshal(b, &state) != nil {
+			return false
 		}
-		for _, flow := range result.Connections {
-			m := flow.Metadata
-			if fmt.Sprint(m["destinationIP"]) == host && fmt.Sprint(m["destinationPort"]) == port {
-				b, _ := json.Marshal(m)
-				if !strings.Contains(strings.ToLower(string(b)), "tun") {
-					t.Fatal("target was not a TUN inbound", string(b))
-				}
-				t.Log("adapter observed TUN destination", fixture.target)
+		observed = observed[:0]
+		for _, app := range state.Apps {
+			observed = append(observed, fmt.Sprintf("%s:%v", app.Path, app.Connections))
+			if strings.EqualFold(app.Path, exe) && app.Connections["a1"] > 0 {
+				t.Logf("engine observed %s on line a1 toward %s", exe, fixture.target)
 				return true
 			}
 		}
 		return false
 	})
+	if t.Failed() {
+		t.Logf("apps observed: %q", observed)
+	}
 }
 
 func hostedTestExecutable() string { exe, _ := os.Executable(); return exe }

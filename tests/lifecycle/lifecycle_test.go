@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,7 +24,6 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/lines"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
-	linuxbox "github.com/AyoubAchour/net-switch/tests/linux/engine/singbox"
 )
 
 func hosted() bool {
@@ -289,7 +287,7 @@ func api(t *testing.T, url, token, method, route, body string) (int, []byte) {
 	}
 	r.Header.Set("X-Token", token)
 	r.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 20 * time.Second}).Do(r)
+	response, err := apiClient(20 * time.Second).Do(r)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,43 +300,6 @@ func api(t *testing.T, url, token, method, route, body string) (int, []byte) {
 		t.Fatal(err)
 	}
 	return response.StatusCode, b
-}
-func fixture(t *testing.T, dir string) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		path := filepath.Join(dir, "adapter", "sing-box.exe")
-		if _, err := os.Stat(path); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-	version, err := linuxbox.PinnedVersion("../../packaging/versions.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pin, err := linuxbox.LookupPin("../../tests/linux/sing-box-linux.json", version, runtime.GOARCH)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	b, err := linuxbox.Download(ctx, pin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = linuxbox.Extract(b, filepath.Join(dir, "adapter")); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(dir, "adapter", "sing-box")
-	content, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hash := sha256.Sum256(content)
-	if err = os.WriteFile(filepath.Join(dir, "adapter", "SHA256SUMS.txt"), []byte(hex.EncodeToString(hash[:])+"  sing-box\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	return path
 }
 func TestRealServices(t *testing.T) {
 	if !hosted() {
@@ -413,22 +374,24 @@ func TestRealServices(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	adapter := fixture(t, dir)
-	t.Run("held-hostile-store-cannot-block-install", func(t *testing.T) { blockedStoreInstallation(t, dir, adapter, other) })
+	t.Run("held-hostile-store-cannot-block-install", func(t *testing.T) { blockedStoreInstallation(t, dir, "", other) })
 	t.Run("installation-rejects-writable-images-and-parents", func(t *testing.T) { installationTrust(t, dir) })
-	config := lifecycle.Config{Directory: dir, Data: data, Adapter: adapter, Mode: "proxy"}
+	// The product build runs the native engine over a real TUN: TestISP on
+	// Windows, the namespace fixture on Linux. Every traffic check below goes
+	// through that capture, and fail-open checks use the same target directly.
+	config := lifecycle.Config{Directory: dir, Data: data, Mode: "tun"}
 	if err := lifecycle.Save(filepath.Join(data, "service-config.json"), config); err != nil {
 		t.Fatal(err)
 	}
-	nic, address := primaryInterface(t)
-	if err := lifecycle.Save(filepath.Join(data, "settings.json"), map[string]any{"lines": []lines.Line{{ID: "a1", Alias: nic, Label: "Test line", Weight: 1}}, "ipv6": "off", "checkForUpdates": false}); err != nil {
+	fixture := prepareTUN(t, dir, data)
+	nic, _ := primaryInterface(t)
+	if err := lifecycle.Save(filepath.Join(data, "settings.json"), map[string]any{"lines": []lines.Line{{ID: "a1", Alias: fixture.line, Label: "Test line", Weight: 1}}, "ipv6": "off", "checkForUpdates": false}); err != nil {
 		t.Fatal(err)
 	}
-	echo := echoServer(t, address)
-	if err := service.Install(service.Config{Directory: dir, Data: data}); err != nil {
+	if err := service.Install(service.Config{Directory: dir, Data: data, Native: true}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 38*time.Minute)
 	defer cancel()
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 45*time.Second)
@@ -697,26 +660,15 @@ func TestRealServices(t *testing.T) {
 			}
 		}
 	})
-	t.Run("adapter-carries-traffic", func(t *testing.T) {
-		stream := proxyStream(t, session.URL, session.Token, echo)
+	t.Run("engine-carries-traffic", func(t *testing.T) {
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
+		assertTUNCaptured(t, session.URL, session.Token, fixture)
 	})
 	t.Run("owner-sees-another-users-app", func(t *testing.T) {
-		status, b := api(t, session.URL, session.Token, "GET", "/api/state", "")
-		if status != 200 {
-			t.Fatal(status)
-		}
-		var state struct {
-			Routing struct {
-				Port int `json:"proxyPort"`
-			} `json:"routing"`
-		}
-		if err := json.Unmarshal(b, &state); err != nil || state.Routing.Port == 0 {
-			t.Fatal("proxy not ready", err)
-		}
 		path := filepath.Join(dir, binary("lifecycle-other-app"))
-		process := other.command(path, fmt.Sprintf("127.0.0.1:%d", state.Routing.Port), echo)
+		process := other.command(path, fixture.target)
 		input, err := process.StdinPipe()
 		if err != nil {
 			t.Fatal(err)
@@ -775,9 +727,9 @@ func TestRealServices(t *testing.T) {
 		}
 		assertServiceIsolation(t, control.PID, engine.PID)
 		refs := runningWorkers(t, control.PID, dir)
-		stream := proxyStream(t, session.URL, session.Token, echo)
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		for _, ref := range refs {
 			if err := ref.suspend(); err != nil {
 				t.Fatal(err)
@@ -792,7 +744,7 @@ func TestRealServices(t *testing.T) {
 				}
 			}
 		}
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 	})
 	t.Run("desktop-death-keeps-routing", func(t *testing.T) {
 		before := getStatus(t, c)
@@ -820,9 +772,9 @@ func TestRealServices(t *testing.T) {
 	})
 	t.Run("control-crash-reattaches", func(t *testing.T) {
 		before := getStatus(t, c)
-		stream := proxyStream(t, session.URL, session.Token, echo)
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		old, err := service.Query(service.Control)
 		if err != nil {
 			t.Fatal(err)
@@ -834,7 +786,7 @@ func TestRealServices(t *testing.T) {
 		}
 		kill(t, old.PID)
 		workersGone(t, workers, 10*time.Second)
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		wait(t, "SCM/systemd Control recovery", 25*time.Second, func() bool {
 			s, err := service.Query(service.Control)
 			return err == nil && s.Running && s.PID != old.PID
@@ -847,24 +799,24 @@ func TestRealServices(t *testing.T) {
 		if err != nil || s.Instance != before.Instance || engineAfter.PID != engine.PID {
 			t.Fatal("Control restart replaced engine", s, err)
 		}
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 	})
 	t.Run("stale-controller-fenced", func(t *testing.T) { engineProbe(t, dir, data, "fence") })
 	wait(t, "Control reattaches after fencing", 15*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	for _, point := range []string{"control-after-desired-commit", "control-after-apply-ack", "engine-after-apply-commit"} {
 		t.Run(point, func(t *testing.T) {
-			c = durableCrash(t, data, point, session.URL, session.Token, echo, owner)
+			c = durableCrash(t, ctx, data, point, session.URL, session.Token, fixture, owner)
 			c.must(t, "session", nil, &session)
 		})
 	}
 	t.Run("closure-replay-keeps-newer-flows", func(t *testing.T) {
-		c = replayClosure(t, data, session.URL, session.Token, echo, owner)
+		c = replayClosure(t, ctx, data, fixture, owner)
 		c.must(t, "session", nil, &session)
 	})
 	t.Run("engine-crash-recovers", func(t *testing.T) {
-		stream := proxyStream(t, session.URL, session.Token, echo)
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		engine, err := service.Query(service.Engine)
 		if err != nil {
 			t.Fatal(err)
@@ -872,42 +824,31 @@ func TestRealServices(t *testing.T) {
 		before := getStatus(t, c)
 		kill(t, engine.PID)
 		expectClosed(t, stream)
-		directEcho(t, echo)
+		directTraffic(t, ctx, fixture)
 		wait(t, "new engine instance", 40*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
 	})
-	t.Run("adapter-child-crash-gets-a-new-service-instance", func(t *testing.T) {
+	t.Run("engine-child-crash-gets-a-new-service-instance", func(t *testing.T) {
+		// The Engine service is the supervisor host; the forwarding engine is
+		// its verified child (spec §3.4). The child's death ends the host's
+		// lifetime, and Control starts a fresh service instance.
 		engine, err := service.Query(service.Engine)
 		if err != nil {
 			t.Fatal(err)
 		}
-		connection, err := localipc.Dial(ctx, localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine})
-		if err != nil {
-			t.Fatal(err)
-		}
-		rpc := lifecycle.NewRPC(connection)
-		var hello struct {
-			Snapshot struct {
-				PID uint32 `json:"PID"`
-			} `json:"adapterSnapshot"`
-		}
-		if err := rpc.Call(ctx, map[string]any{"method": "hello"}, &hello); err != nil {
-			rpc.Close()
-			t.Fatal(err)
-		}
-		rpc.Close()
-		if hello.Snapshot.PID == 0 || hello.Snapshot.PID == engine.PID {
-			t.Fatal("adapter child identity is not distinct")
-		}
 		before := getStatus(t, c).Instance
-		stream := proxyStream(t, session.URL, session.Token, echo)
+		child := nativeChildPID(t, data, before)
+		if child == engine.PID {
+			t.Fatal("engine child identity is not distinct from the host")
+		}
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
-		kill(t, hello.Snapshot.PID)
+		fixture.exchange(t, stream)
+		kill(t, child)
 		expectClosed(t, stream)
-		wait(t, "adapter crash changes the engine lifetime", 40*time.Second, func() bool { return getStatus(t, c).Routing == "on" && getStatus(t, c).Instance != before })
+		wait(t, "child crash changes the engine lifetime", 40*time.Second, func() bool { return getStatus(t, c).Routing == "on" && getStatus(t, c).Instance != before })
 		after, err := service.Query(service.Engine)
 		if err != nil || after.PID == engine.PID {
-			t.Fatal("adapter restarted inside the old service lifetime", err)
+			t.Fatal("engine restarted inside the old service lifetime", err)
 		}
 	})
 	t.Run("explicit-stop-acknowledged", func(t *testing.T) {
@@ -921,7 +862,11 @@ func TestRealServices(t *testing.T) {
 	})
 	t.Run("binding-change-waits-for-old-service-exit", func(t *testing.T) {
 		before := getStatus(t, c)
-		body, _ := json.Marshal(map[string]string{"alias": nic})
+		second := fixture.churnLine // Linux's second physical path; Windows adds the runner's uplink
+		if second == "" {
+			second = nic
+		}
+		body, _ := json.Marshal(map[string]string{"alias": second})
 		code, b := api(t, session.URL, session.Token, "POST", "/api/lines/add", string(body))
 		if code != 200 {
 			t.Fatal("add fixture binding", code, string(b))
@@ -940,29 +885,31 @@ func TestRealServices(t *testing.T) {
 			t.Fatal("remove fixture binding", code, string(b))
 		}
 		wait(t, "new service after binding removal", 40*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
-		stream := proxyStream(t, session.URL, session.Token, echo)
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
+		// The new instance retires every earlier instance's outcome record,
+		// so only the live instance's result remains in the store.
 		entries, err := os.ReadDir(data)
 		if err != nil {
 			t.Fatal(err)
 		}
 		count := 0
 		for _, entry := range entries {
-			if strings.HasPrefix(entry.Name(), "adapter-") {
+			if strings.HasPrefix(entry.Name(), "engine-outcome-") {
 				count++
 			}
 		}
 		if count != 1 {
-			t.Fatal("retired adapter directories still present", count)
+			t.Fatal("retired engine instances still present", count)
 		}
 	})
 	t.Run("enrollment-preserves-routing-and-same-owner-is-noop", func(t *testing.T) {
 		resetControlRecoveryWindow(t)
 		before := getStatus(t, c)
-		stream := proxyStream(t, session.URL, session.Token, echo)
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		ctl := filepath.Join(dir, binary("netswitchctl"))
 		if b, err := exec.Command(ctl, "enroll", "--data", data, "--owner", owner.id()).CombinedOutput(); err != nil {
 			t.Fatal(err, string(b))
@@ -973,7 +920,7 @@ func TestRealServices(t *testing.T) {
 		if b, err := exec.Command(ctl, "enroll", "--data", data, "--owner", other.id()).CombinedOutput(); err != nil {
 			t.Fatal(err, string(b))
 		}
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		replacement := openClient(t, other, false)
 		after := getStatus(t, replacement)
 		if after.Instance != before.Instance || after.ControlPID == before.ControlPID || after.Routing != "on" {
@@ -985,7 +932,7 @@ func TestRealServices(t *testing.T) {
 		}
 		c = openClient(t, owner, false)
 		c.must(t, "session", nil, &session)
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 	})
 	t.Run("legacy-global-mutex-cannot-block-start", func(t *testing.T) {
 		if runtime.GOOS != "windows" {
@@ -1017,9 +964,9 @@ func TestRealServices(t *testing.T) {
 		}
 	})
 	t.Run("committed-stop-survives-control-crash", func(t *testing.T) {
-		stream := proxyStream(t, session.URL, session.Token, echo)
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		arm(t, data, "control-after-stop-intent")
 		pending := actionAsync(session.URL, session.Token, "api/routing", `{"on":false}`)
 		pid := barrier(t, data, "control-after-stop-intent")
@@ -1029,7 +976,7 @@ func TestRealServices(t *testing.T) {
 		if err := lifecycle.Read(filepath.Join(data, "control-journal.json"), &journal); err != nil || journal.Wanted {
 			t.Fatal("stop intent was not durable", err)
 		}
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		kill(t, pid)
 		select {
 		case err := <-pending:
@@ -1082,9 +1029,9 @@ func TestRealServices(t *testing.T) {
 		c.must(t, "session", nil, &session)
 		c.must(t, "routing", map[string]any{"on": true}, nil)
 		wait(t, "independent fault-case routing", 35*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
-		stream := proxyStream(t, session.URL, session.Token, echo)
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 	}
 	t.Run("five-failures-stay-stopped-across-control-restart", func(t *testing.T) {
 		readyFaultCase(t)
@@ -1138,10 +1085,14 @@ func TestRealServices(t *testing.T) {
 		wait(t, "owner Retry releases latch", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	})
 	t.Run("blocked-apply-cannot-hold-the-lease", func(t *testing.T) {
+		// The native child stalls inside a durable revision write while
+		// Control dies. Spec §2: a lapsed lease stops forwarding whatever a
+		// command is doing, so the engine reports the stall as a failure
+		// instead of waiting on the stuck command, and its host cleans up.
 		readyFaultCase(t)
-		stream := proxyStream(t, session.URL, session.Token, echo)
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		arm(t, data, "engine-after-apply-commit")
 		pending := mutateAsync(session.URL, session.Token, "Lease expiry")
 		enginePID := barrier(t, data, "engine-after-apply-commit")
@@ -1151,7 +1102,7 @@ func TestRealServices(t *testing.T) {
 			t.Fatal(err)
 		}
 		kill(t, control.PID)
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		select {
 		case <-pending:
 		case <-time.After(40 * time.Second):
@@ -1159,7 +1110,7 @@ func TestRealServices(t *testing.T) {
 		}
 		wait(t, "lease stops a blocked engine command", 50*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
 		expectClosed(t, stream)
-		directEcho(t, echo)
+		directTraffic(t, ctx, fixture)
 		restore()
 		if err := service.Start(ctx, service.Control); err != nil {
 			t.Fatal(err)
@@ -1173,9 +1124,9 @@ func TestRealServices(t *testing.T) {
 	})
 	t.Run("lease-lapse-fails-open", func(t *testing.T) {
 		readyFaultCase(t)
-		stream := proxyStream(t, session.URL, session.Token, echo)
+		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		restore := disableRecovery(t)
 		defer restore()
 		control, err := service.Query(service.Control)
@@ -1192,10 +1143,10 @@ func TestRealServices(t *testing.T) {
 		if err != nil || still.PID != engine.PID || !still.Running {
 			t.Fatal("engine died immediately with Control", err)
 		}
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		wait(t, "30-second lease cleanup", 40*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
 		expectClosed(t, stream)
-		directEcho(t, echo)
+		directTraffic(t, ctx, fixture)
 	})
 	t.Run("reboot-like-restart-waits-for-sign-in", func(t *testing.T) {
 		readyFaultCase(t)
@@ -1263,13 +1214,17 @@ func TestRealServices(t *testing.T) {
 		defer c.input.Close()
 		c.must(t, "routing", map[string]any{"on": true}, nil)
 		wait(t, "routing before bounded stop", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
+		// The child acknowledges the stop and cleans up, then refuses to exit.
+		// Its host's bounded stop and Control's own forced stop both end the
+		// service inside the same window; neither may wait on the stuck child.
+		instance := getStatus(t, c).Instance
 		arm(t, data, "engine-after-stop-cleanup")
 		started := time.Now()
 		finished := make(chan error, 1)
 		go func() { _, err := c.call(t, "routing", map[string]any{"on": false}); finished <- err }()
 		pid := barrier(t, data, "engine-after-stop-cleanup")
-		if state, err := service.Query(service.Engine); err != nil || !state.Running || state.PID != pid {
-			t.Fatal("acknowledged but still-running service precondition", state, err)
+		if state, err := service.Query(service.Engine); err != nil || !state.Running || nativeChildPID(t, data, instance) != pid {
+			t.Fatal("acknowledged but still-running service precondition", state, pid, err)
 		}
 		select {
 		case err := <-finished:
@@ -1286,17 +1241,17 @@ func TestRealServices(t *testing.T) {
 		if state, err := service.Query(service.Engine); err != nil || !state.Stopped {
 			t.Fatal("forced stop left the engine alive", state, err)
 		}
-		directEcho(t, echo)
+		directTraffic(t, ctx, fixture)
 		if err := service.Stop(ctx, service.Control); err != nil {
 			t.Fatal(err)
 		}
 		t.Logf("FORCED_STOP acknowledged engine held at barrier, service terminated after %s", elapsed)
 	})
-	t.Run("control-crash-storm-keeps-socket-and-recovers", func(t *testing.T) { controlCrashStorm(t, ctx, owner, echo) })
-	t.Run("enrollment-restarts-do-not-backoff", func(t *testing.T) { enrollmentRestarts(t, ctx, owner, echo) })
-	t.Run("control-restart-delay-decays-after-healthy-run", func(t *testing.T) { controlRestartDelayDecays(t, ctx, owner, echo) })
+	t.Run("control-crash-storm-keeps-socket-and-recovers", func(t *testing.T) { controlCrashStorm(t, ctx, owner, fixture) })
+	t.Run("enrollment-restarts-do-not-backoff", func(t *testing.T) { enrollmentRestarts(t, ctx, owner, fixture) })
+	t.Run("control-restart-delay-decays-after-healthy-run", func(t *testing.T) { controlRestartDelayDecays(t, ctx, owner, fixture) })
 	t.Run("CLI-activates-stopped-Control", func(t *testing.T) { cliActivation(t, owner) })
-	t.Run("real-tun-fail-open", func(t *testing.T) { tunServices(t, config, owner) })
+	t.Run("real-tun-fail-open", func(t *testing.T) { tunServices(t, config, owner, fixture) })
 }
 func binary(name string) string {
 	if runtime.GOOS == "windows" {
@@ -1327,7 +1282,7 @@ func killUnreset(t *testing.T, pid uint32) {
 }
 func probe(ctx context.Context, issued *uint64) error {
 	endpoint := localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine}
-	c, err := localipc.Dial(ctx, endpoint)
+	c, err := localipc.DialNativeEngine(ctx, endpoint)
 	if err != nil {
 		return err
 	}

@@ -38,7 +38,7 @@ func heldStoreClient(path string) error {
 	return err
 }
 
-func blockedStoreInstallation(t *testing.T, dir, adapter string, other actor) {
+func blockedStoreInstallation(t *testing.T, dir, _ string, other actor) {
 	t.Helper()
 	logical := filepath.Join(os.Getenv("ProgramData"), fmt.Sprintf("NetSwitch-held-store-%d", os.Getpid()))
 	exe, _ := os.Executable()
@@ -60,7 +60,7 @@ func blockedStoreInstallation(t *testing.T, dir, adapter string, other actor) {
 		t.Fatal("hostile handle precondition", line, err)
 	}
 	ctl := filepath.Join(dir, "netswitchctl.exe")
-	if b, err := exec.Command(ctl, "install", "--directory", dir, "--adapter", adapter, "--data", logical, "--mode", "proxy").CombinedOutput(); err != nil {
+	if b, err := exec.Command(ctl, "install", "--directory", dir, "--data", logical, "--mode", "tun").CombinedOutput(); err != nil {
 		t.Fatal("held occupant blocked install", err, string(b))
 	}
 	physical, err := lifecycle.ResolveStore(logical)

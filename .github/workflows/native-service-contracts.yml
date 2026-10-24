@@ -92,10 +92,12 @@ jobs:
           foreach ($variant in @('product', 'faults')) {
             if ($env:NATIVE_FAULTS_ONLY -eq '1' -and $variant -eq 'product') { continue }
             $env:NETSWITCH_NATIVE_FAULTS = if ($variant -eq 'faults') { '1' } else { '0' }
-            $tags = if ($variant -eq 'faults') { 'm4_native,lifecycle_test' } else { 'm4_native' }
+            # PowerShell drops an empty native argument, which would let -tags
+            # swallow -ldflags; pass the flag pair only for the fault build.
+            $tagArgs = if ($variant -eq 'faults') { @('-tags', 'lifecycle_test') } else { @() }
             $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles "NetSwitch-Native-CI-$variant"
             foreach ($name in @('netswitch', 'netswitch-engine', 'netswitch-desktop', 'netswitchctl')) {
-              go build -tags $tags -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-$variant" -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"
+              go build @tagArgs -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-$variant" -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
             go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') ./tests/lifecycle
@@ -141,8 +143,8 @@ jobs:
           for variant in product faults; do
             if [ "$NATIVE_FAULTS_ONLY" = 1 ] && [ "$variant" = product ]; then continue; fi
             export NETSWITCH_NATIVE_FAULTS=0
-            tags=m4_native
-            if [ "$variant" = faults ]; then export NETSWITCH_NATIVE_FAULTS=1; tags=m4_native,lifecycle_test; fi
+            tags=""
+            if [ "$variant" = faults ]; then export NETSWITCH_NATIVE_FAULTS=1; tags=lifecycle_test; fi
             export NETSWITCH_LIFECYCLE_DIR="/usr/lib/netswitch-native-ci-$variant"
             sudo install -d -o "$(id -u)" -g "$(id -g)" "$NETSWITCH_LIFECYCLE_DIR"
             for name in netswitch netswitch-engine netswitch-desktop netswitchctl; do

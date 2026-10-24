@@ -1,12 +1,62 @@
-# M4 PR 2a: Control's native engine client
+# M4 PR 2: the production cutover
 
-2026-10-24. This is the first of the two production-cutover PRs in the M4 plan.
-It teaches Control the native engine's contract (spec §5.10) and the restart,
-probe and accounting rules the earlier native PRs left "for the cutover". The
-ordinary build still runs the M2 stand-in; the tag drop, the stand-in refusal
-and the lifecycle-suite port are PR 2b.
+2026-10-24. Two PRs. PR 2a teaches Control the native engine's contract (spec
+§5.10) and the restart, probe and accounting rules the earlier native PRs left
+"for the cutover". PR 2b makes every product build run the native engine and
+ports the lifecycle suite to it. The sing-box downloads, the adapter dialect in
+Control's client and the legacy CI are PR 4.
 
-## Dialect
+## PR 2b: the native engine in product builds
+
+- **No tag, no selector.** `internal/lifecycle/engine_selection.go` is one
+  untagged file: the Engine service program is the supervisor host, and
+  `netswitchctl install` refuses `--adapter` and any mode but `tun`. The
+  native-service-contracts workflow builds without `m4_native`. The stand-in's
+  code stays compiled only until PR 4 deletes it; no product path reaches it.
+- **Stand-in folders are refused, not migrated.** A data folder with an
+  `engine-state.json` lacking the native schema, or `adapter-service-scope` /
+  `adapter-linux-rule` journal records, is refused by the installer and by the
+  host with "this data folder belonged to a pre-release stand-in build (sing-box
+  adapter); run that build's uninstall or remove the folder, then install
+  again". Linux 1.0 never shipped and 0.3.x is Windows-only, so no field data
+  exists.
+- **A lapsed lease never waits on a stuck command.** The protocol's expiry
+  used to take the mutation lock; a start or apply stuck in a durable write
+  held it, so capture stayed installed with Control gone. The expiry now waits
+  at most five seconds for that lock, then reports the stall (`ErrLeaseStalled`)
+  on its own hook; the host's child ends its process there, and the host
+  recovers the journal under the released lifetime lock (spec §2, "if it
+  lapses"). A graceful stop would have waited on the same lock.
+- **The lifecycle suite runs the native engine.** `TestRealServices` installs
+  the native services in TUN mode over the real fixture (TestISP on Windows,
+  the namespace topology on Linux); every traffic check goes through that
+  capture and every fail-open check uses the same target directly. On Linux the
+  services run inside the fixture's namespace, so the suite's HTTP requests go
+  through the fixture's relay and every actor process starts inside the
+  namespace (`ip netns exec`, then `setpriv` to drop to the actor), which keeps
+  loopback HTTP, routed traffic and app identity in the network the engine
+  captures. Each case keeps its property:
+  - sing-box child kill → kill the host's verified child (`engine-child-crash-gets-a-new-service-instance`);
+  - the engine's hung-adapter hangs → suspend the child; the host's own checks end it within 28 s, Control counts, five latch;
+  - `engine-after-apply-commit` → the child's durable revision write (the
+    barrier fires after the record is saved, before the acknowledgement), used
+    by both the durable-crash case and the blocked-apply lease case;
+  - `engine-after-stop-cleanup` → the child after cleanup, before exit;
+    Control's forced stop ends the service inside the 18–32 s window;
+  - closure replay applies the compiled native revision as a controller and
+    drives the cutoff from the engine's apply point;
+  - the stand-in's retired `adapter-*` directories → the retired
+    `engine-outcome-*` records;
+  - "stream observed inside the TUN" → Control's own state lists this process
+    on the fixture line, which only the engine's flow listing can have told it;
+  - the fixture's target is a line server on Linux and a byte echo on Windows;
+    the other-user app and the traffic checks speak that line contract.
+  No case is dropped or loosened; Windows-only and Linux-only cases keep their
+  existing skips.
+
+## PR 2a: Control's native engine client
+
+### Dialect
 
 Control's engine client (`internal/lifecycle/remote.go`) dials the engine's
 pipe the way the installation says: the native install (recorded with the
@@ -49,7 +99,7 @@ reads. A flow's `Host` is its destination address only once the upstream
 connection is established (spec §4.5, "2 different hosts" means established
 destinations); a connecting flow lists its line but is never evidence.
 
-## Exit classification and restart budget
+### Exit classification and restart budget
 
 A stopped engine is classified through the service manager's status, which
 already folds the shared outcome reader: `Cleanup`, `ExitKnown`, `ExitCode`
@@ -84,7 +134,7 @@ and `ExecStopPost` with `Restart=no` on Linux. A pure Linux test reads the unit
 text and the installed proof reads the real recovery actions, so no manager
 ever respawns the host: Control owns every restart.
 
-## Probes
+### Probes
 
 Every probe result carries its `kind` and the engine instance that answered.
 Control accepts a result only when the kind matches what it asked for (a quick
@@ -93,7 +143,7 @@ still the current one; anything else becomes `engineUnavailable`, which changes
 no line's state. The in-process sing-box adapter and the adapter dialect stamp
 the same two fields, so the rule applies to every engine.
 
-## Exact accounting
+### Exact accounting
 
 Every five seconds while routing is on, Control reads all pages of `totals`
 under one receipt within the engine's ten-second snapshot lifetime, absorbs
@@ -116,7 +166,7 @@ Caps keep counting the whole adapter, as 0.3.x does (spec §4.6, "today's rules"
 The exact routed totals are stored for the desktop work in milestone 5 and have
 no UI consumer yet; `/api/state` is unchanged.
 
-## Proofs
+### Proofs
 
 Pure tests (fail on main's code where noted):
 - `internal/lifecycle`: attaching to a real native `protocol.Server` over an

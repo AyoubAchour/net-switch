@@ -96,6 +96,10 @@ func pinIdentity(value string, rules apppath.Rules) (string, bool) {
 func nativeRevision(r ce.Revision) (policy.Revision, error) {
 	return nativeRevisionWith(r, appIdentityRules)
 }
+
+// NativeRevision is the compilation Control sends the engine, exported for
+// hosted fixtures that act as a controller over Control's durable journal.
+func NativeRevision(r ce.Revision) (policy.Revision, error) { return nativeRevision(r) }
 func nativeRevisionWith(r ce.Revision, rules apppath.Rules) (policy.Revision, error) {
 	p := r.Policy
 	config := policy.Config{Combine: p.Combine, IPv6: p.IPv6, AppLines: map[string]string{}, Shares: map[string]uint64{}, Lanes: map[string]string{}, Blocked: []string{}}

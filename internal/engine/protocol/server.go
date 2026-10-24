@@ -62,6 +62,10 @@ type Server struct {
 	// TestFault is nil in production. Acceptance binaries install it explicitly.
 	TestFault        func(context.Context, json.RawMessage) (any, error)
 	OnCleanupFailure func(error)
+	// OnLeaseStall runs when an expired lease cannot even begin cleanup
+	// because a command still holds the engine. The host's child ends its
+	// process here; a graceful stop would wait on the very lock that is stuck.
+	OnLeaseStall func(error)
 }
 
 func New(runtime Runtime, table *flows.Table, prober platform.Prober) *Server {
@@ -455,7 +459,13 @@ func (s *Server) CheckLease(ctx context.Context) error {
 	}
 	s.stopping = true
 	s.mu.Unlock()
-	s.mutation.Lock()
+	// A command that never returns (a start or apply stuck in a durable
+	// write) must not keep capture installed past the lease: fail open by
+	// reporting the stall, so the hosting service exits and its recovery
+	// removes the journaled objects (spec §2, "if it lapses").
+	if !lockWithin(&s.mutation, leaseStallBound) {
+		return ErrLeaseStalled
+	}
 	defer s.mutation.Unlock()
 	s.mu.Lock()
 	if s.stopped {
@@ -472,6 +482,44 @@ func (s *Server) CheckLease(ctx context.Context) error {
 	}
 	return err
 }
+
+// leaseStallBound is how long an expired lease waits for a stuck command to
+// release the engine before the expiry is reported as a failure instead. It is
+// a variable only so the pure test can shorten the wait.
+var leaseStallBound = 5 * time.Second
+
+// ErrLeaseStalled is the lease expiry that could not begin cleanup because a
+// command still holds the engine. The host treats it like any cleanup failure.
+var ErrLeaseStalled = errors.New("control lease expired while a command still holds the engine; exiting to fail open")
+
+// lockWithin acquires mu unless the bound passes first. The waiting goroutine
+// releases the lock again if it wins after the caller gave up.
+func lockWithin(mu *sync.Mutex, bound time.Duration) bool {
+	acquired := make(chan struct{})
+	gaveUp := make(chan struct{})
+	go func() {
+		mu.Lock()
+		select {
+		case <-gaveUp:
+			mu.Unlock()
+		default:
+			close(acquired)
+		}
+	}()
+	select {
+	case <-acquired:
+		return true
+	case <-time.After(bound):
+		close(gaveUp)
+		select {
+		case <-acquired:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
 func (s *Server) RunLease(ctx context.Context) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
@@ -484,7 +532,9 @@ func (s *Server) RunLease(ctx context.Context) {
 		case <-tick.C:
 			if err := s.CheckLease(ctx); err != nil {
 				s.Emit(Event{Type: "fatal", Message: err.Error()})
-				if s.OnCleanupFailure != nil {
+				if errors.Is(err, ErrLeaseStalled) && s.OnLeaseStall != nil {
+					s.OnLeaseStall(err)
+				} else if s.OnCleanupFailure != nil {
 					s.OnCleanupFailure(err)
 				}
 			}

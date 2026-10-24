@@ -1,8 +1,7 @@
 package lifecycle_test
 
 import (
-	"bufio"
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -53,44 +52,43 @@ func echoServer(t *testing.T, address string) string {
 	}()
 	return listener.Addr().String()
 }
-func proxyStream(t *testing.T, url, token, target string) net.Conn {
-	t.Helper()
-	status, b := api(t, url, token, "GET", "/api/state", "")
-	if status != 200 {
-		t.Fatal("state before traffic:", status)
+
+// apiDialer carries the suite's own HTTP requests to Control. On Linux, Control
+// runs inside the TUN fixture's network namespace, so the fixture's relay
+// dials for us; on Windows it stays nil and the loopback address is direct.
+var apiDialer func(context.Context, string, string) (net.Conn, error)
+
+func apiClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{DisableKeepAlives: true}
+	if apiDialer != nil {
+		transport.DialContext = apiDialer
 	}
-	var state struct {
-		Routing struct {
-			Port *int `json:"proxyPort"`
-		} `json:"routing"`
-	}
-	if err := json.Unmarshal(b, &state); err != nil || state.Routing.Port == nil {
-		t.Fatal("running proxy has no port", err)
-	}
-	return proxyStreamPort(t, *state.Routing.Port, target)
+	return &http.Client{Timeout: timeout, Transport: transport}
 }
-func proxyStreamPort(t *testing.T, port int, target string) net.Conn {
+
+// routedStream opens a connection to the fixture's target through the native
+// engine: on Windows through the TestISP adapter, on Linux through the
+// namespace relay. fixture.exchange proves bytes flow both ways.
+func routedStream(t *testing.T, ctx context.Context, fixture tunFixture) net.Conn {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp4", fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
+	conn, err := fixture.dial(ctx, "tcp4", fixture.target)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("routed stream", err)
 	}
-	conn.SetDeadline(time.Now().Add(10 * time.Second))
-	_, err = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
-	if err != nil {
-		conn.Close()
-		t.Fatal(err)
-	}
-	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: "CONNECT"})
-	if err != nil {
-		conn.Close()
-		t.Fatal(err)
-	}
-	if response.StatusCode != 200 {
-		conn.Close()
-		t.Fatal("adapter CONNECT:", response.Status)
-	}
+	conn.SetDeadline(time.Now().Add(20 * time.Second))
 	return conn
+}
+
+// directTraffic is the fail-open check: the same target must work with no
+// engine running, over the fixture's own route.
+func directTraffic(t *testing.T, ctx context.Context, fixture tunFixture) {
+	t.Helper()
+	conn, err := fixture.dial(ctx, "tcp4", fixture.target)
+	if err != nil {
+		t.Fatal("direct connection unavailable after engine failure", err)
+	}
+	defer conn.Close()
+	fixture.exchange(t, conn)
 }
 func checkEcho(t *testing.T, conn net.Conn) {
 	t.Helper()
@@ -103,15 +101,6 @@ func checkEcho(t *testing.T, conn net.Conn) {
 	if _, err := io.ReadFull(conn, reply); err != nil || string(reply) != string(message) {
 		t.Fatal("stream was interrupted", err)
 	}
-}
-func directEcho(t *testing.T, address string) {
-	t.Helper()
-	conn, err := net.DialTimeout("tcp4", address, 5*time.Second)
-	if err != nil {
-		t.Fatal("direct connection unavailable after engine failure", err)
-	}
-	defer conn.Close()
-	checkEcho(t, conn)
 }
 func expectClosed(t *testing.T, conn net.Conn) {
 	t.Helper()

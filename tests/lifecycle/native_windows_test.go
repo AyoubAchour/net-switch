@@ -425,7 +425,7 @@ func hostedMain(m *testing.M) (bool, int) {
 		}
 		os.Stdout, os.Stderr = log, log
 		code := 1
-		os.Args = []string{os.Args[0], "-test.v", "-test.timeout=22m"}
+		os.Args = []string{os.Args[0], "-test.v", "-test.timeout=40m"}
 		if filter := os.Getenv("NETSWITCH_LIFECYCLE_FILTER"); filter != "" {
 			os.Args = append(os.Args, "-test.run="+filter)
 		}
@@ -489,7 +489,7 @@ func hostedMain(m *testing.M) (bool, int) {
 			fmt.Println(err)
 			return true, 1
 		}
-		deadline := time.Now().Add(16 * time.Minute)
+		deadline := time.Now().Add(42 * time.Minute)
 		for time.Now().Before(deadline) {
 			state, err := s.Query()
 			if err != nil {

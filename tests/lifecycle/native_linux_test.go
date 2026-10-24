@@ -31,9 +31,23 @@ type linuxActor struct {
 func (a *linuxActor) cleanup(fn func()) { a.t.Cleanup(fn) }
 
 func (a *linuxActor) id() string { return a.uid }
+
+// actorNamespace, when set, is the network namespace the installed services
+// run in (the TUN fixture's DUT). Every actor process then starts inside it as
+// well, so loopback HTTP, routed traffic and app identity all belong to the
+// same network the engine captures. Entering a namespace needs root, so the
+// identity drop happens inside it with setpriv.
+var actorNamespace string
+
 func (a *linuxActor) command(exe string, args ...string) *exec.Cmd {
-	cmd := exec.Command(exe, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: a.number, Gid: a.group, NoSetGroups: false}}
+	var cmd *exec.Cmd
+	if actorNamespace != "" {
+		full := append([]string{"netns", "exec", actorNamespace, "setpriv", "--reuid=" + strconv.FormatUint(uint64(a.number), 10), "--regid=" + strconv.FormatUint(uint64(a.group), 10), "--init-groups", exe}, args...)
+		cmd = exec.Command("ip", full...)
+	} else {
+		cmd = exec.Command(exe, args...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: a.number, Gid: a.group, NoSetGroups: false}}
+	}
 	cmd.Env = append(os.Environ(), "HOME="+a.home, "USER="+a.name)
 	return cmd
 }

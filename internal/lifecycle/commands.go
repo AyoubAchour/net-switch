@@ -158,6 +158,9 @@ func Ctl(args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := refuseStandInStore(*data); err != nil {
+			return err
+		}
 		c := Config{Directory: *dir, Data: *data, Adapter: *adapter, Mode: *mode}
 		if err := Save(filepath.Join(*data, "service-config.json"), c); err != nil {
 			return err

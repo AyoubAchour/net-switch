@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func enrollmentRestarts(t *testing.T, ctx context.Context, owner actor, echo string) {
+func enrollmentRestarts(t *testing.T, ctx context.Context, owner actor, fixture tunFixture) {
 	resetControlRecoveryWindow(t)
 	if err := service.Start(ctx, service.Control); err != nil {
 		t.Fatal(err)
@@ -22,9 +22,7 @@ func enrollmentRestarts(t *testing.T, ctx context.Context, owner actor, echo str
 	defer c.input.Close()
 	c.must(t, "signin", nil, nil)
 	wait(t, "routing before enrollment restarts", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
-	var session struct{ Token, URL string }
-	c.must(t, "session", nil, &session)
-	stream := proxyStream(t, session.URL, session.Token, echo)
+	stream := routedStream(t, ctx, fixture)
 	defer stream.Close()
 	for range 6 {
 		before, err := service.Query(service.Control)
@@ -38,7 +36,7 @@ func enrollmentRestarts(t *testing.T, ctx context.Context, owner actor, echo str
 			s, e := service.Query(service.Control)
 			return e == nil && s.Running && s.PID != before.PID
 		})
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 		b, err := exec.Command("systemctl", "show", "--property=NRestarts", "--value", "netswitch.service").Output()
 		n, parseErr := strconv.Atoi(strings.TrimSpace(string(b)))
 		if err != nil || parseErr != nil || n > 1 {
@@ -66,7 +64,7 @@ func controlRestarts(t *testing.T) int {
 // RestartMaxDelaySec (60 s, past the 30 s lease); after Control has run
 // healthy for its window it must clear the counter itself, and the next
 // crash must restart in about a second.
-func controlRestartDelayDecays(t *testing.T, ctx context.Context, owner actor, echo string) {
+func controlRestartDelayDecays(t *testing.T, ctx context.Context, owner actor, fixture tunFixture) {
 	window := filepath.Join(testData(), "fault-restart-decay-seconds")
 	if err := os.WriteFile(window, []byte("20"), 0600); err != nil {
 		t.Fatal(err)
@@ -79,9 +77,7 @@ func controlRestartDelayDecays(t *testing.T, ctx context.Context, owner actor, e
 	defer c.input.Close()
 	c.must(t, "signin", nil, nil)
 	wait(t, "routing before accumulating crashes", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
-	var session struct{ Token, URL string }
-	c.must(t, "session", nil, &session)
-	stream := proxyStream(t, session.URL, session.Token, echo)
+	stream := routedStream(t, ctx, fixture)
 	defer stream.Close()
 	for i := 0; i < 4; i++ {
 		s, err := service.Query(service.Control)
@@ -93,7 +89,7 @@ func controlRestartDelayDecays(t *testing.T, ctx context.Context, owner actor, e
 			next, e := service.Query(service.Control)
 			return e == nil && next.Running && next.PID != s.PID
 		})
-		checkEcho(t, stream)
+		fixture.exchange(t, stream)
 	}
 	accumulated := controlRestarts(t)
 	if accumulated < 4 {
@@ -120,7 +116,7 @@ func controlRestartDelayDecays(t *testing.T, ctx context.Context, owner actor, e
 	if restarted > 5*time.Second {
 		t.Fatal("restart after decay still used the long delay", restarted)
 	}
-	checkEcho(t, stream)
+	fixture.exchange(t, stream)
 	t.Logf("RESTART_DECAY accumulated=%d cleared_after=%s restart_after_decay=%s", accumulated, cleared.Round(time.Millisecond), restarted.Round(time.Millisecond))
 }
 
@@ -131,7 +127,7 @@ func resetControlRecoveryWindow(t *testing.T) {
 	}
 	t.Log("isolated fault case: reset Control restart delay; start limiting is disabled")
 }
-func controlCrashStorm(t *testing.T, ctx context.Context, owner actor, echo string) {
+func controlCrashStorm(t *testing.T, ctx context.Context, owner actor, fixture tunFixture) {
 	t.Helper()
 	resetControlRecoveryWindow(t)
 	defer resetControlRecoveryWindow(t)
@@ -141,9 +137,7 @@ func controlCrashStorm(t *testing.T, ctx context.Context, owner actor, echo stri
 	c := openClient(t, owner, false)
 	c.must(t, "signin", nil, nil)
 	wait(t, "routing before crash storm", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
-	var session struct{ Token, URL string }
-	c.must(t, "session", nil, &session)
-	stream := proxyStream(t, session.URL, session.Token, echo)
+	stream := routedStream(t, ctx, fixture)
 	defer stream.Close()
 	for i := 0; i < 5; i++ {
 		s, err := service.Query(service.Control)
@@ -156,14 +150,14 @@ func controlCrashStorm(t *testing.T, ctx context.Context, owner actor, echo stri
 				next, e := service.Query(service.Control)
 				return e == nil && next.Running && next.PID != s.PID
 			})
-			checkEcho(t, stream)
+			fixture.exchange(t, stream)
 		}
 	}
 	wait(t, "lease fails open during the long restart delay", 40*time.Second, func() bool {
 		s, e := service.Query(service.Engine)
 		return e == nil && s.Stopped
 	})
-	directEcho(t, echo)
+	directTraffic(t, ctx, fixture)
 	if info, err := os.Stat(localipc.DefaultPath("status")); err != nil || info.Mode()&os.ModeSocket == 0 {
 		t.Fatal("activation socket disappeared", err)
 	}
