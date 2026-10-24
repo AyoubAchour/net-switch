@@ -38,15 +38,15 @@ func fillPayloadWords(p []byte, transfer uint64, stream int, offset int64) {
 		n := copy(p, b[offset&7:])
 		p, offset = p[n:], offset+int64(n)
 	}
-	base := transfer<<32 | uint64(stream)<<24 | uint64(offset/8)
+	base := (transfer<<32 | uint64(stream)<<24 | uint64(offset/8)) * 0xbf58476d1ce4e5b9
 	for len(p) >= 8 {
-		binary.LittleEndian.PutUint64(p, bits.RotateLeft64(base*0xbf58476d1ce4e5b9, 23))
-		base++
+		binary.LittleEndian.PutUint64(p, bits.RotateLeft64(base, 23))
+		base += 0xbf58476d1ce4e5b9
 		p = p[8:]
 	}
 	if len(p) > 0 {
 		var b [8]byte
-		binary.LittleEndian.PutUint64(b[:], bits.RotateLeft64(base*0xbf58476d1ce4e5b9, 23))
+		binary.LittleEndian.PutUint64(b[:], bits.RotateLeft64(base, 23))
 		copy(p, b[:])
 	}
 }
@@ -134,15 +134,17 @@ func (v *wordVerifier) consume(p []byte) {
 			return
 		}
 	}
-	base := v.transfer<<32 | uint64(v.stream)<<24 | uint64(v.offset/8)
+	// Multiplication distributes over addition modulo 2^64. Advance the
+	// encoded base directly, avoiding a multiplication for every payload word.
+	base := (v.transfer<<32 | uint64(v.stream)<<24 | uint64(v.offset/8)) * 0xbf58476d1ce4e5b9
 	end := len(p) &^ 7
 	for i := 0; i < end; i += 8 {
-		if binary.LittleEndian.Uint64(p[i:]) != bits.RotateLeft64(base*0xbf58476d1ce4e5b9, 23) {
+		if binary.LittleEndian.Uint64(p[i:]) != bits.RotateLeft64(base, 23) {
 			v.offset += int64(i)
 			v.consumeEvidence(p[i:])
 			return
 		}
-		base++
+		base += 0xbf58476d1ce4e5b9
 	}
 	v.offset += int64(end)
 	v.used = copy(v.pending[:], p[end:])
