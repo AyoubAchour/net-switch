@@ -10,7 +10,7 @@ const actorComment = "Net Switch lifecycle CI disposable account"
 func requireActorName(t *testing.T, name string) {
 	t.Helper()
 	switch name {
-	case "NSLifecycleOwner", "NSLifecycleOther", "NSNativeOther":
+	case "NSLifecycleOwner", "NSLifecycleOther", "NSNativeOther", "NSNativeControlOwner":
 	default:
 		t.Fatalf("unexpected disposable account name %q", name)
 	}

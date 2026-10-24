@@ -108,6 +108,7 @@ func (c *Core) Poll(ctx context.Context) error {
 		c.log("could not finish closure intents: %v", err)
 	}
 	c.scheduleProbes(ctx, connections)
+	c.scheduleTotals(ctx, gen)
 	return nil
 }
 
@@ -232,6 +233,25 @@ func (c *Core) closeExhausted(ctx context.Context, connections []engine.Connecti
 
 var defaultTargets = []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}
 
+// acceptProbe applies the two checks every probe result must pass before it
+// may change a line's state. A quick result can never stand in for the full
+// HTTPS check that brings a line back (spec §4.5), and a result from an engine
+// instance that is no longer current says nothing about the current one. A
+// rejected result becomes engineUnavailable, which changes nothing.
+func acceptProbe(r engine.ProbeResult, quick bool, asked, current string) engine.ProbeResult {
+	want := "full"
+	if quick {
+		want = "quick"
+	}
+	if r.Outcome == engine.Unavailable {
+		return r
+	}
+	if r.Kind != want || r.Instance != asked || asked != current {
+		return engine.ProbeResult{Outcome: engine.Unavailable, Kind: r.Kind, Instance: r.Instance}
+	}
+	return r
+}
+
 func customTargets(v any, explicit bool) bool {
 	list := array(v)
 	return explicit || (len(list) > 0 && !(len(list) == 2 && list[0] == defaultTargets[0] && list[1] == defaultTargets[1]))
@@ -320,10 +340,12 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 		custom := customTargets(c.values["probeTargets"], c.values["probeTargetsCustom"] == true)
 		operator := l.operator % len(targets)
 		l.operator = (operator + 1) % len(targets)
+		instance := s.Instance
 		jobs = append(jobs, probeJob{id, func() {
 			result := engine.ProbeResult{Outcome: engine.Unavailable}
 			probe := func(target string, quick bool) engine.ProbeResult {
-				return c.op.Engine.Probe(ctx, engine.ProbeRequest{OperationID: c.op.ID(), Line: id, Index: index, Target: target, Quick: quick, Custom: custom})
+				answer := c.op.Engine.Probe(ctx, engine.ProbeRequest{OperationID: c.op.ID(), Line: id, Index: index, Target: target, Quick: quick, Custom: custom})
+				return acceptProbe(answer, quick, instance, c.op.Engine.Snapshot().Instance)
 			}
 			if realPassed {
 				result.Outcome = engine.OK

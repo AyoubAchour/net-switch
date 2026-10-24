@@ -32,6 +32,9 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 		return err
 	}
 	remote := NewRemote(ctx, log)
+	// Native exits are classified through the service manager's status and the
+	// shared outcome reader; the stand-in's exit reason file stays for its dialect.
+	remote.outcome = nativeOutcomeReader(c.Data)
 	remote.exitReason = func(instance string) (string, error) {
 		var state engineState
 		err := readEngineState(c.Data, &state, log)
@@ -66,6 +69,14 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	wasRunning := err == nil && remote.Snapshot().Status == "on"
 	if err != nil {
 		log("no existing engine attachment: " + err.Error())
+		// A native engine that failed or lost its adapter while Control was
+		// down is classified from its retained outcome, so it still counts.
+		retainCtx, stopRetain := context.WithTimeout(ctx, adapterLostPendingBound+5*time.Second)
+		retainErr := remote.classifyRetainedExit(retainCtx, c.Data)
+		stopRetain()
+		if retainErr != nil {
+			log("retained engine outcome not classified: " + retainErr.Error())
+		}
 		var previous engineState
 		if readErr := readEngineState(c.Data, &previous, log); readErr != nil {
 			return readErr

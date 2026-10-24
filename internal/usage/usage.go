@@ -73,6 +73,10 @@ type Counter struct {
 type Saved struct {
 	Lines map[string]Entry   `json:"lines"`
 	Peaks map[string]float64 `json:"peaks"`
+	// Routed holds the engine's exact per-app and per-line bytes (spec §5.10).
+	// It is absent while the temporary adapter is the engine, so that record
+	// keeps its 0.3.x shape. Caps keep counting the whole adapter.
+	Routed *Routed `json:"routed,omitempty"`
 }
 type Usage struct {
 	Saved
@@ -89,7 +93,7 @@ func New(location *time.Location) *Usage {
 			panic(err)
 		}
 	}
-	return &Usage{Saved: Saved{map[string]Entry{}, map[string]float64{}}, Counters: map[string]Counter{}, PeakAt: map[string]int64{}, Location: location}
+	return &Usage{Saved: Saved{Lines: map[string]Entry{}, Peaks: map[string]float64{}}, Counters: map[string]Counter{}, PeakAt: map[string]int64{}, Location: location}
 }
 func finite(n float64) bool { return !math.IsNaN(n) && !math.IsInf(n, 0) }
 func (u *Usage) Load(saved map[string]any) {

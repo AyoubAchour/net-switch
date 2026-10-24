@@ -15,6 +15,7 @@ import (
 	"time"
 	"unsafe"
 
+	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
 	"github.com/AyoubAchour/net-switch/internal/lifecycle"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -49,11 +50,35 @@ func prepareTUN(t *testing.T, dir, data string) tunFixture {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait(); t.Log(logs.String()) })
 	var state struct {
 		Index   int    `json:"index"`
 		Control string `json:"control"`
+		GUID    string `json:"guid"`
 	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Log(logs.String())
+		// Wintun removes the adapter asynchronously after the process dies.
+		// The next TestISP refuses a present adapter under the engine's
+		// absence rule, so wait here until that rule says it is gone.
+		if state.GUID == "" {
+			return
+		}
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			present, reason, err := winengine.LeftoverAdapterPresent(state.GUID, "TestISP")
+			if err == nil && !present {
+				t.Logf("TestISP adapter gone: %s", reason)
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Errorf("TestISP adapter still present 30 s after its process exited: %s (error=%v)", reason, err)
+				return
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	})
 	wait(t, "TestISP ready", 30*time.Second, func() bool { return lifecycle.Read(statePath, &state) == nil && state.Index > 0 })
 	script, _ := filepath.Abs("../windows/testisp/network.ps1")
 	powershell(t, fmt.Sprintf("& '%s' -Action configure", strings.ReplaceAll(script, "'", "''")), "TESTISP_INDEX="+strconv.Itoa(state.Index))

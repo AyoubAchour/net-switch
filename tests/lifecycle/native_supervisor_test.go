@@ -53,6 +53,11 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 			for _, trigger := range []string{"control-stop", "service-stop"} {
 				t.Run(trigger, func(t *testing.T) {
 					c, _ := start(t) // independently verifies real capture and owned journal objects
+					hostService, err := service.Query(service.Engine)
+					if err != nil || hostService.PID == 0 {
+						t.Fatal("host PID", hostService, err)
+					}
+					hostPID := hostService.PID
 					path := filepath.Join(data, "fault-native-retirement")
 					if err := os.WriteFile(path, []byte("armed"), 0600); err != nil {
 						t.Fatal(err)
@@ -72,10 +77,21 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 					wait(t, "failed child exits without another Control request", max(time.Millisecond, 15*time.Second-recovery.elapsed()), func() bool { s, e := service.Query(service.Engine); return e == nil && s.Stopped })
 					waitNativeCleanup(t, fixture, data, c.instance)
 					nativeFreshFlow(t, fixture, ctx, "retirement-failure", recovery, 15*time.Second)
-					out, err := host.ReadOutcome(data, c.instance)
+					// The host's exit 1 is a service failure, so the manager's
+					// recovery (SCM command / ExecStopPost) republishes this
+					// instance's outcome as pending and then complete after the
+					// host already wrote complete (see "Reading atomically
+					// published outcomes"). Wait for the recovery writer itself:
+					// its process is not the host, and its result is final.
+					var out host.Outcome
+					wait(t, "manager recovery finished for this instance", 15*time.Second, func() bool {
+						out, err = host.ReadOutcome(data, c.instance)
+						return err == nil && out.RecoveryPID != 0 && out.RecoveryPID != hostPID && (out.State == "complete" || out.State == "failed")
+					})
 					if err != nil || out.Child == nil || out.Child.Code != 1 || out.Child.Forced || !out.Child.Completed || out.State != "complete" {
 						t.Fatalf("failed retirement outcome: child=%+v state=%s error=%v", out.Child, out.State, err)
 					}
+					t.Logf("NATIVE_RETIREMENT_WRITER host_pid=%d recovery_pid=%d", hostPID, out.RecoveryPID)
 					t.Logf("NATIVE_RETIREMENT_FAILURE trigger=%s child=%+v capture_removed=true elapsed=%s", trigger, out.Child, recovery.elapsed())
 				})
 			}

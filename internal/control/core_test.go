@@ -146,6 +146,9 @@ type fakeEngine struct {
 	beforeClose     func(engine.CloseRequest) error
 	killFailure     string
 	directoryLists  [][]string
+	// ackPoint, when set, makes the fake answer like the native engine: every
+	// acknowledgement carries a growing apply point.
+	ackPoint uint64
 }
 type recordedReply struct {
 	Route  string
@@ -235,7 +238,13 @@ func (f *fakeEngine) Apply(ctx context.Context, r engine.Revision) (engine.Ackno
 	f.s.Policy = r.Policy
 	f.s.AppliedRevision = r.Number
 	f.s.AppliedHash = r.Hash
-	return engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: f.s.Instance, AppliedAt: f.s.StartedAt}, nil
+	ack := engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: f.s.Instance, AppliedAt: f.s.StartedAt}
+	if f.ackPoint != 0 {
+		f.ackPoint++
+		f.s.AppliedPoint, f.s.AppliedAt = f.ackPoint, time.Time{}
+		ack.Point, ack.AppliedAt = f.ackPoint, time.Time{}
+	}
+	return ack, nil
 }
 func (f *fakeEngine) CloseFlows(ctx context.Context, r engine.CloseRequest) (engine.CloseResult, error) {
 	if f.beforeClose != nil {
@@ -269,10 +278,22 @@ func (f *fakeEngine) Probe(ctx context.Context, r engine.ProbeRequest) engine.Pr
 	if f.real != nil {
 		return f.real.Probe(ctx, r)
 	}
+	result := engine.ProbeResult{Outcome: engine.OK, Delay: ptr(float64(18))}
 	if f.probe != nil {
-		return f.probe(r)
+		result = f.probe(r)
 	}
-	return engine.ProbeResult{Outcome: engine.OK, Delay: ptr(float64(18))}
+	// Like the adapter dialect of the real client, stamp the kind asked for and
+	// the current instance unless the test set them itself.
+	if result.Kind == "" {
+		result.Kind = "full"
+		if r.Quick {
+			result.Kind = "quick"
+		}
+	}
+	if result.Instance == "" {
+		result.Instance = f.Snapshot().Instance
+	}
+	return result
 }
 
 type fakePlatform struct {
@@ -330,6 +351,13 @@ func testCore(t *testing.T, initial map[string]any) (*Core, *fakeEngine, *fakeCl
 	}
 	files.data[filepath.Join("/test", "settings.json")] = b
 	clock := &fakeClock{at: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)}
+	return testCoreWithFiles(t, files, clock)
+}
+
+// testCoreWithFiles builds a Core over existing files, like a service restart
+// over the same data folder.
+func testCoreWithFiles(t *testing.T, files *memoryFiles, clock *fakeClock) (*Core, *fakeEngine, *fakeClock, *memoryFiles) {
+	t.Helper()
 	var serial atomic.Uint64
 	id := func() string { return fmt.Sprintf("%012x", serial.Add(1)) }
 	io := settings.Options{Files: files, Now: clock.Now, ID: id, Sleep: func(time.Duration) {}}
@@ -802,6 +830,7 @@ func (s *seededTracker) Ingest([]apps.Connection, int64)              {}
 func (s *seededTracker) Snapshot(apps.Pins) []apps.Row                { return s.rows }
 func (s *seededTracker) LineRate(string) apps.Rate                    { return apps.Rate{} }
 func (s *seededTracker) ConnectionIDsOffLine(string, string) []string { return nil }
+func (s *seededTracker) IdentityOf(string) string                     { return "" }
 
 func TestStateMatchesEveryFrozenTrayScenario(t *testing.T) {
 	input, err := os.ReadFile("../../tests/oracle/fixtures/tray-inputs.json")

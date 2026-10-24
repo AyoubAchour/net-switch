@@ -21,6 +21,10 @@ type RPC struct {
 	done    chan struct{}
 	err     error
 	next    atomic.Uint64
+	// onEvent receives a copy of every message without an id (events and the
+	// engine's terminal record). It is installed before the reader starts and
+	// must not block.
+	onEvent func(*RPC, []byte)
 }
 type rpcWrite struct {
 	ctx  context.Context
@@ -36,8 +40,12 @@ type rpcReply struct {
 	Error  string          `json:"error"`
 }
 
-func NewRPC(c io.ReadWriteCloser) *RPC {
-	r := &RPC{conn: c, writes: make(chan rpcWrite, protocol.Outstanding), pending: map[string]chan rpcReply{}, done: make(chan struct{})}
+func NewRPC(c io.ReadWriteCloser) *RPC { return NewRPCWithEvents(c, nil) }
+
+// NewRPCWithEvents installs the event handler before the reader goroutine
+// exists, so no message can arrive while the handler is unset.
+func NewRPCWithEvents(c io.ReadWriteCloser, onEvent func(*RPC, []byte)) *RPC {
+	r := &RPC{conn: c, writes: make(chan rpcWrite, protocol.Outstanding), pending: map[string]chan rpcReply{}, done: make(chan struct{}), onEvent: onEvent}
 	go r.read()
 	go r.write()
 	return r
@@ -75,6 +83,9 @@ func (r *RPC) read() {
 			if reply.Error != "" {
 				r.fail(rpcError(reply.Error))
 				return
+			}
+			if r.onEvent != nil {
+				r.onEvent(r, append([]byte{}, scan.Bytes()...))
 			}
 			continue
 		} // droppable events

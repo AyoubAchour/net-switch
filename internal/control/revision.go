@@ -57,7 +57,7 @@ func (c *Core) commitIntent(next routingIntent) error {
 func (c *Core) publishIntentLocked(next routingIntent) {
 	c.wanted = next.wanted
 	if next.fresh {
-		c.retryAttempts, c.retryAt, c.failureTimes = 0, 0, nil
+		c.retryAttempts, c.retryAt, c.failureTimes, c.adapterLosses = 0, 0, nil, nil
 	}
 }
 
@@ -76,11 +76,12 @@ func (c *Core) writeJournal(pending *routingIntent) error {
 		values[k] = v
 	}
 	failures := append([]int64{}, c.failureTimes...)
+	losses := append([]int64{}, c.adapterLosses...)
 	wanted := c.wanted
 	if pending != nil {
 		wanted = pending.wanted
 		if pending.fresh {
-			failures = []int64{}
+			failures, losses = []int64{}, []int64{}
 		}
 	}
 	failureID := c.lastFailureID
@@ -93,6 +94,7 @@ func (c *Core) writeJournal(pending *routingIntent) error {
 		record["desired"], record["settings"], record["engineInstanceId"], record["failures"] = desired, values, instance, failures
 		record["wanted"], record["bootId"] = wanted, c.op.BootID
 		record["lastFailureId"] = failureID
+		record["adapterLosses"] = losses
 	}
 	_, err := c.op.Journal.Update(record)
 	if err != nil {
@@ -131,7 +133,7 @@ func (c *Core) persistRevision(p engine.Policy, intents []closureIntent) (engine
 	revision := engine.Revision{Number: number, Hash: hash, Policy: p}
 	applied := snapshot.AppliedRevision
 	for i := range intents {
-		if intents[i].Revision == 0 || (intents[i].Request.StartedBefore.IsZero() && intents[i].Revision > applied) {
+		if intents[i].Revision == 0 || (!cutoffKnown(intents[i].Request) && intents[i].Revision > applied) {
 			intents[i].Revision = number
 			intents[i].Request.BeforeRevision = number
 		}
@@ -203,6 +205,22 @@ func (c *Core) saveIntent(intent closureIntent) error {
 	return c.persistJournal()
 }
 
+// cutoffKnown reports whether a line closure has its apply-point cutoff: the
+// native engine's point, or the adapter's acknowledgement time.
+func cutoffKnown(r engine.CloseRequest) bool {
+	return r.StartedBeforePoint != 0 || !r.StartedBefore.IsZero()
+}
+
+// recordCutoff stores an acknowledged apply point in the form the engine
+// dialect understands. A native acknowledgement always carries its point.
+func recordCutoff(r *engine.CloseRequest, ack engine.Acknowledgement) {
+	if ack.Point != 0 {
+		r.StartedBeforePoint = ack.Point
+		return
+	}
+	r.StartedBefore = ack.AppliedAt
+}
+
 func closureNeeded(p engine.Policy, line string) bool {
 	if target := p.Lanes[line]; target != "" && target != line {
 		return true
@@ -227,9 +245,9 @@ func (c *Core) reconcileIntents(intents []closureIntent, p engine.Policy) ([]clo
 			}
 			continue
 		}
-		if intent.Request.StartedBefore.IsZero() && intent.Revision != 0 {
-			if intent.Revision == s.AppliedRevision && !s.AppliedAt.IsZero() {
-				intent.Request.StartedBefore = s.AppliedAt
+		if !cutoffKnown(intent.Request) && intent.Revision != 0 {
+			if intent.Revision == s.AppliedRevision && (s.AppliedPoint != 0 || !s.AppliedAt.IsZero()) {
+				recordCutoff(&intent.Request, engine.Acknowledgement{Point: s.AppliedPoint, AppliedAt: s.AppliedAt})
 				if err := c.saveIntent(intent); err != nil {
 					return nil, err
 				}
@@ -252,8 +270,8 @@ func (c *Core) reconcileIntents(intents []closureIntent, p engine.Policy) ([]clo
 }
 func (c *Core) recordIntentAcks(intents []closureIntent, ack engine.Acknowledgement) error {
 	for i := range intents {
-		if intents[i].Request.StartedBefore.IsZero() && intents[i].Request.BeforeRevision == ack.Number {
-			intents[i].Request.StartedBefore = ack.AppliedAt
+		if !cutoffKnown(intents[i].Request) && intents[i].Request.BeforeRevision == ack.Number {
+			recordCutoff(&intents[i].Request, ack)
 			if err := c.saveIntent(intents[i]); err != nil {
 				return err
 			}
@@ -354,7 +372,7 @@ func (c *Core) finishClosures(ctx context.Context, gen uint64) error {
 			}
 			continue
 		}
-		if request.StartedBefore.IsZero() && (request.BeforeRevision == 0 || request.BeforeRevision > s.AppliedRevision) {
+		if !cutoffKnown(request) && (request.BeforeRevision == 0 || request.BeforeRevision > s.AppliedRevision) {
 			continue
 		}
 		result, err := c.op.Engine.CloseFlows(ctx, request)

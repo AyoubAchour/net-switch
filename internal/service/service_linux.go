@@ -158,25 +158,7 @@ func Install(c Config) error {
 			return errors.New("invalid service path")
 		}
 	}
-	run := func(file string) string { return quoted(filepath.Join(c.Directory, file)) }
-	common := "\nUser=root\nUMask=0077\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=read-only\nPrivateTmp=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nRestrictSUIDSGID=yes\nProtectClock=yes\nProtectHostname=yes\nProtectKernelLogs=yes\nRestrictNamespaces=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\nDevicePolicy=closed\nReadWritePaths=" + quoted(c.Data) + " /run/netswitch\n"
-	// /proc/<pid>/exe and fd links for other UIDs require the ptrace read
-	// permission. Routing is machine-wide, including other users' apps.
-	readCapabilities := "CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_SYS_PTRACE"
-	units := map[string]string{
-		"netswitch.socket":         "[Unit]\nDescription=Net Switch local desktop socket\n[Socket]\nListenStream=/run/netswitch/desktop.sock\nSocketMode=0666\nDirectoryMode=0755\nRemoveOnStop=yes\n[Install]\nWantedBy=sockets.target\n",
-		"netswitch.service":        "[Unit]\nDescription=Net Switch Control\nRequires=netswitch.socket\nAfter=netswitch.socket\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch") + " service --data " + quoted(c.Data) + "\nRestart=on-failure\nRestartSec=1s\nRestartSteps=4\nRestartMaxDelaySec=60s\nKillMode=control-group\nTimeoutStopSec=40s\nCapabilityBoundingSet=" + readCapabilities + "\n" + common,
-		"netswitch-engine.service": "[Unit]\nDescription=Net Switch Engine\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch-engine") + " service --data " + quoted(c.Data) + "\nExecStopPost=" + run("netswitchctl") + " cleanup --engine --data " + quoted(c.Data) + "\nRestart=no\nKillMode=mixed\nTimeoutStopSec=30s\nCapabilityBoundingSet=" + readCapabilities + "\nDeviceAllow=/dev/net/tun rw\n" + common,
-	}
-	if c.Native {
-		units["netswitch-engine.service"] += "WatchdogSec=8s\nWatchdogSignal=SIGKILL\nNotifyAccess=main\n"
-		units["netswitch-engine.service"] += nativeStateMetadata(c.Data)
-		// The journal-owned TUN is created after this mount namespace, with a
-		// fresh name per instance. A missing per-device ReadWritePaths entry
-		// is ignored permanently. Keep the exception at the smallest existing
-		// parent; global/default and loopback IPv6 settings remain read-only.
-		units["netswitch-engine.service"] += "ReadWritePaths=-/proc/sys/net/ipv6/conf\nReadOnlyPaths=-/proc/sys/net/ipv6/conf/all -/proc/sys/net/ipv6/conf/default -/proc/sys/net/ipv6/conf/lo\n"
-	}
+	units := unitFiles(c)
 	if err := os.MkdirAll("/run/netswitch", 0755); err != nil {
 		return err
 	}
@@ -203,6 +185,32 @@ func Install(c Config) error {
 		return err
 	}
 	return systemctl(ctx, "enable", "--now", "netswitch.socket")
+}
+
+// unitFiles is the installed unit text. The engine unit never restarts itself:
+// its only failure action is the cleanup command, and Control owns every
+// restart, backoff and latch decision (spec §3.4).
+func unitFiles(c Config) map[string]string {
+	run := func(file string) string { return quoted(filepath.Join(c.Directory, file)) }
+	common := "\nUser=root\nUMask=0077\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=read-only\nPrivateTmp=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nRestrictSUIDSGID=yes\nProtectClock=yes\nProtectHostname=yes\nProtectKernelLogs=yes\nRestrictNamespaces=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\nDevicePolicy=closed\nReadWritePaths=" + quoted(c.Data) + " /run/netswitch\n"
+	// /proc/<pid>/exe and fd links for other UIDs require the ptrace read
+	// permission. Routing is machine-wide, including other users' apps.
+	readCapabilities := "CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_SYS_PTRACE"
+	units := map[string]string{
+		"netswitch.socket":         "[Unit]\nDescription=Net Switch local desktop socket\n[Socket]\nListenStream=/run/netswitch/desktop.sock\nSocketMode=0666\nDirectoryMode=0755\nRemoveOnStop=yes\n[Install]\nWantedBy=sockets.target\n",
+		"netswitch.service":        "[Unit]\nDescription=Net Switch Control\nRequires=netswitch.socket\nAfter=netswitch.socket\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch") + " service --data " + quoted(c.Data) + "\nRestart=on-failure\nRestartSec=1s\nRestartSteps=4\nRestartMaxDelaySec=60s\nKillMode=control-group\nTimeoutStopSec=40s\nCapabilityBoundingSet=" + readCapabilities + "\n" + common,
+		"netswitch-engine.service": "[Unit]\nDescription=Net Switch Engine\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch-engine") + " service --data " + quoted(c.Data) + "\nExecStopPost=" + run("netswitchctl") + " cleanup --engine --data " + quoted(c.Data) + "\nRestart=no\nKillMode=mixed\nTimeoutStopSec=30s\nCapabilityBoundingSet=" + readCapabilities + "\nDeviceAllow=/dev/net/tun rw\n" + common,
+	}
+	if c.Native {
+		units["netswitch-engine.service"] += "WatchdogSec=8s\nWatchdogSignal=SIGKILL\nNotifyAccess=main\n"
+		units["netswitch-engine.service"] += nativeStateMetadata(c.Data)
+		// The journal-owned TUN is created after this mount namespace, with a
+		// fresh name per instance. A missing per-device ReadWritePaths entry
+		// is ignored permanently. Keep the exception at the smallest existing
+		// parent; global/default and loopback IPv6 settings remain read-only.
+		units["netswitch-engine.service"] += "ReadWritePaths=-/proc/sys/net/ipv6/conf\nReadOnlyPaths=-/proc/sys/net/ipv6/conf/all -/proc/sys/net/ipv6/conf/default -/proc/sys/net/ipv6/conf/lo\n"
+	}
+	return units
 }
 func Uninstall(ctx context.Context) error {
 	for _, name := range []string{Control, Engine} {

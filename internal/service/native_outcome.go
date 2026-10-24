@@ -7,6 +7,14 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 )
 
+// NativeEngineInstalled reports whether the installed engine service is the
+// native one. The installation records this with the service, so Control can
+// choose the engine's transport dialect before it has spoken to it.
+func NativeEngineInstalled() (bool, error) {
+	data, err := nativeStateDirectory()
+	return data != "", err
+}
+
 func nativeOutcome(name string, state Status) Status {
 	if name != Engine || !state.Stopped {
 		return state

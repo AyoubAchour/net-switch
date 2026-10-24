@@ -479,6 +479,12 @@ func (a *Adapter) Probe(ctx context.Context, r engine.ProbeRequest) engine.Probe
 		a.logProbeFailure(r.Line, fmt.Errorf("worker returned invalid outcome %q", result.Outcome))
 		return engine.ProbeResult{Outcome: engine.Unavailable}
 	}
+	// The worker ran exactly the kind requested; Control's acceptance checks
+	// (kind and instance) apply to this adapter like to the native engine.
+	result.Kind, result.Instance = "full", s.Instance
+	if r.Quick {
+		result.Kind = "quick"
+	}
 	return result
 }
 

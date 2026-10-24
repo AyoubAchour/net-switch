@@ -219,6 +219,19 @@ func (c *Core) State() map[string]any {
 		row["sortScore"] = a.SortScore
 		row["connections"] = a.Connections
 		row["outside"] = outsideJSON(a.Outside)
+		// Only Linux sandbox apps have an identity apart from their path; a
+		// path pin that cannot match such an app is kept but flagged, never
+		// routed by guess. Windows rows and 0.3.x shapes are unchanged.
+		if a.Identity != "" {
+			row["identity"] = a.Identity
+		}
+		if a.Line != nil {
+			for _, p := range c.pinsLocked() {
+				if apps.AppKey(p.Path) == a.Key && apps.PinNeedsReselection(p, a.Identity) {
+					row["pinNeedsReselection"] = true
+				}
+			}
+		}
 		appRows = append(appRows, row)
 	}
 	var retryAt, ipv6, offer, autostart any

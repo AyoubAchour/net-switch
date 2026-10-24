@@ -37,8 +37,8 @@ engine-unavailable results. Successful latency is `latencyMs`, a fractional
 millisecond value; failures omit it. No duration in nanoseconds goes over IPC.
 **PR 2 integration:** Control must require the expected kind before accepting a
 result (quick never restores a line requiring full HTTPS), and drop a delayed
-result if its originating engine instance is no longer current. That instance
-check belongs in Control and is not implemented here.
+result if its originating engine instance is no longer current. Both checks are
+in Control since [the production cutover](m4-production-cutover.md).
 
 Harness caller audit: Windows capacity probes its plain TCP echo peer with
 `target, quick:true, custom:true`. Windows driver health and Linux's binding

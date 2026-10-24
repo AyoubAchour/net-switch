@@ -72,6 +72,8 @@ type AppTracker interface {
 	Snapshot(apps.Pins) []apps.Row
 	LineRate(string) apps.Rate
 	ConnectionIDsOffLine(string, string) []string
+	// IdentityOf is the engine's sandbox identity for a tracked app, else "".
+	IdentityOf(string) string
 }
 type lane struct {
 	alias         string
@@ -157,7 +159,23 @@ type Core struct {
 	failureTimes                                 []int64
 	failureDirty                                 bool
 	lastFailureID                                string
+	// adapterLosses are clean adapter-loss exits in the last ten minutes. The
+	// first three restart at once without touching failureTimes (spec §5.1).
+	adapterLosses []int64
+	totalsAt      int64
+	totalsBusy    bool
+	// usageWrite serialises every usage.json writer: the snapshot is taken and
+	// written under it, so an older snapshot can never replace a newer one.
+	usageWrite sync.Mutex
+	// routedGeneration counts routed-usage changes; routedSaved is the last
+	// generation written durably. Unequal means unacknowledged accounting is
+	// not yet on disk, whatever the next engine read says.
+	routedGeneration, routedSaved uint64
 }
+
+// adapterLossesFree is how many clean adapter losses in ten minutes restart
+// without counting toward the five-failure latch.
+const adapterLossesFree = 3
 
 func New(ctx context.Context, o Options) (*Core, error) {
 	if o.Engine == nil || o.Settings == nil || o.Platform == nil {
@@ -235,6 +253,7 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		if b, err := o.IO.Files.ReadFile(filepath.Join(o.UserDir, "usage.json")); err == nil {
 			if v, err := js.Decode(b); err == nil {
 				c.usage.Load(js.Object(v))
+				c.usage.Routed = usage.LoadRouted(b) // exact integers, not float64
 			} else {
 				c.log("could not read the data use record, starting it over: %v", err)
 			}
@@ -281,6 +300,7 @@ func New(ctx context.Context, o Options) (*Core, error) {
 				}
 			}
 			_ = json.Unmarshal(raw["failures"], &c.failureTimes)
+			_ = json.Unmarshal(raw["adapterLosses"], &c.adapterLosses)
 			c.lastFailureID = js.Text(o.Journal.Values()["lastFailureId"])
 			if c.wanted && len(c.failureTimes) >= 5 {
 				o.Engine.Fail(fmt.Errorf("Routing stopped after five failures in ten minutes. Turn routing on to retry."))
@@ -554,11 +574,22 @@ func (c *Core) statusLocked(s engine.Snapshot) {
 	if s.Status != "on" {
 		c.resetLocked()
 	}
-	if s.Status == "error" && c.wanted && !c.quitting && (!c.op.ServiceMode || freshFailure) {
+	if s.Status == "error" && c.wanted && !c.quitting && c.op.ServiceMode && freshFailure && s.Reason == engine.ReasonAdapterLost && c.adapterLossIsFreeLocked() {
+		// A clean adapter loss (exit 3, cleanup complete) restarts at once and
+		// leaves the crash budget alone. The window makes a flapping driver
+		// fall through to the ordinary path below on its fourth loss.
+		c.lastFailureID = s.FailureID
+		c.failureDirty = true
+		c.retryAt = c.now()
+		c.log("adapter lost; restarting routing without counting a failure (%d of %d in ten minutes)", len(c.adapterLosses), adapterLossesFree)
+	} else if s.Status == "error" && c.wanted && !c.quitting && (!c.op.ServiceMode || freshFailure) {
 		d := []int64{5000, 15000, 30000, 60000}
 		if c.op.ServiceMode {
 			c.lastFailureID = s.FailureID
 			d = []int64{1000, 2000, 5000, 30000}
+			if s.Reason == engine.ReasonAdapterLost {
+				c.log("adapter lost again; this loss counts toward the five-failure budget")
+			}
 			recent := c.failureTimes[:0]
 			for _, at := range c.failureTimes {
 				if at > c.now()-10*60000 {
@@ -581,6 +612,20 @@ func (c *Core) statusLocked(s engine.Snapshot) {
 	c.log("%s", msg)
 }
 func settledStatus(status string) bool { return status == "on" || status == "off" || status == "error" }
+
+// adapterLossIsFreeLocked records one clean adapter loss and reports whether it
+// is within the free allowance. Losses older than ten minutes fall out first.
+func (c *Core) adapterLossIsFreeLocked() bool {
+	now := c.now()
+	recent := c.adapterLosses[:0]
+	for _, at := range c.adapterLosses {
+		if at > now-10*60000 {
+			recent = append(recent, at)
+		}
+	}
+	c.adapterLosses = append(recent, now)
+	return len(c.adapterLosses) <= adapterLossesFree
+}
 func (c *Core) noteLocked(kind, id, text string) {
 	e := map[string]any{"id": c.op.ID(), "at": c.now(), "kind": kind, "lineId": id, "text": text}
 	c.events = append(c.events, e)
@@ -1042,11 +1087,17 @@ func (c *Core) Supervise(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 	if ready {
+		// A failure or adapter loss observed this tick is durable before the
+		// restart it allows. While the budget cannot be written, no restart
+		// happens: a crash during it would otherwise forget the failure.
+		if err := c.persistFailureBudget(); err != nil {
+			return fmt.Errorf("engine restart held back until the crash budget is durable: %w", err)
+		}
 		return c.Start(ctx)
 	}
 	return nil
 }
-func (c *Core) persistFailureBudget() {
+func (c *Core) persistFailureBudget() error {
 	c.applyMu.Lock()
 	defer c.applyMu.Unlock()
 	c.mu.Lock()
@@ -1054,14 +1105,16 @@ func (c *Core) persistFailureBudget() {
 	c.failureDirty = false
 	c.mu.Unlock()
 	if !dirty {
-		return
+		return nil
 	}
 	if err := c.persistJournal(); err != nil {
 		c.mu.Lock()
 		c.failureDirty = true
 		c.mu.Unlock()
 		c.log("cannot persist engine crash budget: %v", err)
+		return err
 	}
+	return nil
 }
 func (c *Core) bindingChangedLocked(s engine.Snapshot) bool {
 	if s.StartedWith == nil {
@@ -1079,13 +1132,24 @@ func (c *Core) bindingChangedLocked(s engine.Snapshot) bool {
 	return false
 }
 func (c *Core) SaveUsage() error {
+	c.usageWrite.Lock()
+	defer c.usageWrite.Unlock()
 	c.mu.Lock()
 	b, err := js.Marshal(c.usage.Saved)
+	generation := c.routedGeneration
 	c.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	return settings.AtomicWrite(filepath.Join(c.op.UserDir, "usage.json"), b, c.op.IO)
+	if err := settings.AtomicWrite(filepath.Join(c.op.UserDir, "usage.json"), b, c.op.IO); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if generation > c.routedSaved {
+		c.routedSaved = generation
+	}
+	c.mu.Unlock()
+	return nil
 }
 func (c *Core) Shutdown(ctx context.Context) error {
 	// quitting holds off new starts while the stop intent is written. It is

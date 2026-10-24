@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
 	"github.com/AyoubAchour/net-switch/internal/wintun"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
@@ -116,8 +117,15 @@ func serve(args []string) error {
 	if *index <= 0 || net.ParseIP(*ip).To4() == nil || *state == "" {
 		return errors.New("uplink-index, uplink-ip and state are required")
 	}
-	if _, err := net.InterfaceByName("TestISP"); err == nil {
-		return errors.New("refusing to reuse an existing TestISP adapter")
+	// The engine's absence rule (spec §5.1): a lingering NDIS row from the
+	// previous TestISP, kept alive by TIME_WAIT entries after heavy traffic,
+	// is not a present adapter; a PnP devnode or a live IP interface is.
+	present, reason, err := winengine.LeftoverAdapterPresent(deviceConfig.GUID, deviceConfig.Name)
+	if err != nil {
+		return fmt.Errorf("checking for an existing TestISP adapter: %s: %w", reason, err)
+	}
+	if present {
+		return fmt.Errorf("refusing to reuse an existing TestISP adapter: %s", reason)
 	}
 	token := os.Getenv("TESTISP_TOKEN")
 	if len(token) < 32 {
@@ -214,7 +222,7 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	ready := map[string]any{"pid": os.Getpid(), "index": adapter.Index, "alias": "TestISP", "instanceID": device.adapter.InstanceID(), "session": "internal/wintun", "address": "198.19.0.1", "control": "http://" + listener.Addr().String(), "uplinkIndex": *index, "uplinkIP": *ip, "tcpReuseHook": g.tcpReuseHook}
+	ready := map[string]any{"pid": os.Getpid(), "index": adapter.Index, "alias": "TestISP", "guid": deviceConfig.GUID, "instanceID": device.adapter.InstanceID(), "session": "internal/wintun", "address": "198.19.0.1", "control": "http://" + listener.Addr().String(), "uplinkIndex": *index, "uplinkIP": *ip, "tcpReuseHook": g.tcpReuseHook}
 	if err := writeJSON(*state, ready); err != nil {
 		return err
 	}
