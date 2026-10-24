@@ -53,31 +53,48 @@ func adapterPresent(guid, alias string, luid uint64, rows []adapterRow, pnp func
 // row with our GUID or alias is judged by its own LUID: present only while
 // its PnP devnode exists or an IP interface still exists for that LUID. A
 // lingering NDIS row kept alive by other apps' TIME_WAIT entries is absent.
-// Rows with a different GUID under our alias still count as present.
-func LeftoverAdapterPresent(guid, alias string) (bool, error) {
+// Rows with a different GUID under our alias still count as present. The
+// reason names what was seen, so a refusal is never silent.
+func LeftoverAdapterPresent(guid, alias string) (present bool, reason string, err error) {
 	rows, err := nativeAdapterRows()
 	if err != nil {
-		return true, err
+		return true, "interface table unreadable", err
 	}
 	return leftoverAdapterPresent(guid, alias, rows, func() (bool, error) { return presentWintunDevice(guid) }, nativeIPInterface)
 }
 
-func leftoverAdapterPresent(guid, alias string, rows []adapterRow, pnp func() (bool, error), ip func(uint64, uint16) error) (bool, error) {
-	matched := false
+func leftoverAdapterPresent(guid, alias string, rows []adapterRow, pnp func() (bool, error), ip func(uint64, uint16) error) (bool, string, error) {
+	matched := []adapterRow{}
 	for _, row := range rows {
-		if !strings.EqualFold(row.guid, guid) && row.alias != alias {
-			continue
-		}
-		matched = true
-		present, err := adapterPresent(guid, alias, row.luid, []adapterRow{row}, pnp, ip)
-		if err != nil || present {
-			return true, err
+		if strings.EqualFold(row.guid, guid) || row.alias == alias {
+			if !strings.EqualFold(row.guid, guid) {
+				return true, fmt.Sprintf("foreign adapter %s uses alias %q (luid %d)", row.guid, row.alias, row.luid), errors.New("foreign or replacement adapter identity")
+			}
+			matched = append(matched, row)
 		}
 	}
-	if matched {
-		return false, nil
+	devnode, err := pnp()
+	if err != nil {
+		return true, fmt.Sprintf("PnP query for %s failed", guid), err
 	}
-	return adapterPresent(guid, alias, 0, nil, pnp, ip)
+	if devnode {
+		return true, fmt.Sprintf("PnP devnode SWD\\Wintun\\%s is present", guid), nil
+	}
+	for _, row := range matched {
+		for _, family := range []uint16{windows.AF_INET, windows.AF_INET6} {
+			err := ip(row.luid, family)
+			if err == nil {
+				return true, fmt.Sprintf("IP interface family %d still exists for luid %d (%s)", family, row.luid, row.guid), nil
+			}
+			if !errors.Is(err, windows.ERROR_NOT_FOUND) && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+				return true, fmt.Sprintf("IP interface query failed for luid %d family %d", row.luid, family), err
+			}
+		}
+	}
+	if len(matched) > 0 {
+		return false, fmt.Sprintf("only a lingering interface row (luid %d) with no device or IP interface", matched[0].luid), nil
+	}
+	return false, "no row, device or IP interface", nil
 }
 
 func nativeAdapterPresent(guid, alias string, luid uint64) (bool, error) {
