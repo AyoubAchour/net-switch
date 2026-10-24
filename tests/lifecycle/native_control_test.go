@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/apppath"
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/lifecycle"
 	"github.com/AyoubAchour/net-switch/internal/lines"
@@ -66,15 +67,34 @@ func routedApps(t *testing.T, data string) map[string]usage.RoutedEntry {
 // quiesceRouted waits until the routed record has not changed for two
 // accounting rounds, so earlier traffic (still being absorbed every five
 // seconds) cannot land inside a later measurement's baseline.
-func quiesceRouted(t *testing.T, data string) map[string]usage.RoutedEntry {
+// ownIdentity is the engine's identity for this process: the dialing process
+// on Windows, and the namespace relay on Linux, which is this same executable.
+// The runner's own apps (browsers, agents, Defender) share the TUN, so every
+// exact check reads this entry alone.
+func ownIdentity(t *testing.T) string {
 	t.Helper()
-	last := routedApps(t, data)
+	exe := hostedTestExecutable()
+	if exe == "" {
+		t.Fatal("test executable path unavailable")
+	}
+	if runtime.GOOS == "windows" {
+		return apppath.Key(exe)
+	}
+	return apppath.Normalize(exe, apppath.Linux)
+}
+
+// quiesceRouted waits until this process's own entry has not changed for two
+// accounting rounds, so earlier traffic (still being absorbed every five
+// seconds) cannot land inside a later measurement's baseline.
+func quiesceRouted(t *testing.T, data, key string) usage.RoutedEntry {
+	t.Helper()
+	last := routedApps(t, data)[key]
 	stableSince := time.Now()
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(time.Second)
-		now := routedApps(t, data)
-		if fmt.Sprint(now) != fmt.Sprint(last) {
+		now := routedApps(t, data)[key]
+		if now != last {
 			last, stableSince = now, time.Now()
 			continue
 		}
@@ -82,35 +102,25 @@ func quiesceRouted(t *testing.T, data string) map[string]usage.RoutedEntry {
 			return last
 		}
 	}
-	t.Fatalf("routed usage never settled: %+v", last)
-	return nil
+	t.Fatalf("routed usage for %q never settled: %+v", key, last)
+	return usage.RoutedEntry{}
 }
 
-// findOwnIdentity sends one exact exchange and returns the one app identity
-// whose totals grew by exactly the bytes sent and received. Two candidates
-// would mean the probe is ambiguous, which fails rather than guessing.
+// findOwnIdentity settles this process's entry, sends one exact exchange and
+// requires that entry to grow by exactly the bytes sent and received.
 func findOwnIdentity(t *testing.T, ctx context.Context, fixture tunFixture, data string, n int) (string, usage.RoutedEntry) {
 	t.Helper()
-	before := quiesceRouted(t, data)
+	key := ownIdentity(t)
+	before := quiesceRouted(t, data, key)
 	up, down := echoExact(t, ctx, fixture, n)
-	var key string
-	var entry usage.RoutedEntry
 	deadline := time.Now().Add(25 * time.Second)
 	for time.Now().Before(deadline) {
-		matches := 0
-		for id, e := range routedApps(t, data) {
-			b := before[id]
-			if e.Up == b.Up+up && e.Down == b.Down+down {
-				matches++
-				key, entry = id, e
-			}
-		}
-		if matches == 1 {
-			return key, entry
+		if e := routedApps(t, data)[key]; e.Up == before.Up+up && e.Down == before.Down+down {
+			return key, e
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("own app identity never appeared in routed usage: before=%+v now=%+v", before, routedApps(t, data))
+	t.Fatalf("own entry %q did not grow by exactly up=%d down=%d: before=%+v now=%+v", key, up, down, before, routedApps(t, data)[key])
 	return "", usage.RoutedEntry{}
 }
 
