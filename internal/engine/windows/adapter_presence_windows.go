@@ -48,6 +48,38 @@ func adapterPresent(guid, alias string, luid uint64, rows []adapterRow, pnp func
 	return false, nil
 }
 
+// LeftoverAdapterPresent applies the same absence rule for a harness adapter
+// whose previous owner process is gone and left no LUID history (TestISP). A
+// row with our GUID or alias is judged by its own LUID: present only while
+// its PnP devnode exists or an IP interface still exists for that LUID. A
+// lingering NDIS row kept alive by other apps' TIME_WAIT entries is absent.
+// Rows with a different GUID under our alias still count as present.
+func LeftoverAdapterPresent(guid, alias string) (bool, error) {
+	rows, err := nativeAdapterRows()
+	if err != nil {
+		return true, err
+	}
+	return leftoverAdapterPresent(guid, alias, rows, func() (bool, error) { return presentWintunDevice(guid) }, nativeIPInterface)
+}
+
+func leftoverAdapterPresent(guid, alias string, rows []adapterRow, pnp func() (bool, error), ip func(uint64, uint16) error) (bool, error) {
+	matched := false
+	for _, row := range rows {
+		if !strings.EqualFold(row.guid, guid) && row.alias != alias {
+			continue
+		}
+		matched = true
+		present, err := adapterPresent(guid, alias, row.luid, []adapterRow{row}, pnp, ip)
+		if err != nil || present {
+			return true, err
+		}
+	}
+	if matched {
+		return false, nil
+	}
+	return adapterPresent(guid, alias, 0, nil, pnp, ip)
+}
+
 func nativeAdapterPresent(guid, alias string, luid uint64) (bool, error) {
 	rows, err := nativeAdapterRows()
 	if err != nil {

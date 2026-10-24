@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
 	"github.com/AyoubAchour/net-switch/internal/wintun"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
@@ -116,7 +117,14 @@ func serve(args []string) error {
 	if *index <= 0 || net.ParseIP(*ip).To4() == nil || *state == "" {
 		return errors.New("uplink-index, uplink-ip and state are required")
 	}
-	if _, err := net.InterfaceByName("TestISP"); err == nil {
+	// The engine's absence rule (spec §5.1): a lingering NDIS row from the
+	// previous TestISP, kept alive by TIME_WAIT entries after heavy traffic,
+	// is not a present adapter; a PnP devnode or a live IP interface is.
+	present, err := winengine.LeftoverAdapterPresent(deviceConfig.GUID, deviceConfig.Name)
+	if err != nil {
+		return fmt.Errorf("checking for an existing TestISP adapter: %w", err)
+	}
+	if present {
 		return errors.New("refusing to reuse an existing TestISP adapter")
 	}
 	token := os.Getenv("TESTISP_TOKEN")
