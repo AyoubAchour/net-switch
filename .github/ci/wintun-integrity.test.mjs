@@ -29,7 +29,8 @@ test('manual and nightly investigations share a noncancelling queue; PR runs kee
   ctx.github.event_name='workflow_dispatch';ctx.inputs.wintun_integrity=false;
   assert.equal(evaluate(expr('group'),ctx),'ci-run-123');
   assert.equal(evaluate(expr('queue'),ctx),'single');
-  assert.match(nightly,/if: github.repository == 'AyoubAchour\/net-switch'/);
+  assert.match(nightly,/if: github\.repository_id == '1418987447'/);
+  assert.doesNotMatch(nightly,/github\.repository ==/);
 });
 
 test('investigations leave time to report incomplete and scripts run in normal PR CI',()=>{
