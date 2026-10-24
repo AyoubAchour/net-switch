@@ -65,6 +65,23 @@ func TestWordBoundaryMissingByteCannotEarnCoverage(t *testing.T) {
 	}
 }
 
+func TestWordBoundaryRejectedRingCannotEarnCleanSample(t *testing.T) {
+	d, events := boundaryFixture(t)
+	f := d.flows[51000].Load()
+	for i := range f.state {
+		f.state[i].cover(0, wordPayloadSize)
+	}
+	s := &Session{}
+	s.corruptions.Store(1)
+	d.fixture = &fixture{io: s}
+	if err := d.complete(96, 1); !errors.Is(err, errPayloadIntegrity) || d.incomplete.Load() {
+		t.Fatal("ring rejection hidden", err)
+	}
+	if len(*events) != 2 || (*events)[0]["test"] != "word_boundary_ring_rejection" {
+		t.Fatal(*events)
+	}
+}
+
 func boundaryFixture(t *testing.T) (*boundaryCapture, *[]map[string]any) {
 	t.Helper()
 	events := new([]map[string]any)

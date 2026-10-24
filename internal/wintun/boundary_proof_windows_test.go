@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,6 +42,7 @@ func TestWintunBoundarySample(t *testing.T) {
 	}
 	f.capturePair, _ = strconv.Atoi(os.Getenv("NETSWITCH_BOUNDARY_PAIR"))
 	rate, err := tcpTransfer(t, f, 8, "measured")
+	err = errors.Join(err, f.fault(), wordBoundaryRingFault(f))
 	report(t, map[string]any{"test": "boundary_sample", "mode": mode, "variant": f.captureVariant, "pair": f.capturePair, "MBps": rate, "verdict": integrityVerdict(err)})
 	must(t, err)
 }
@@ -95,12 +97,12 @@ func TestWintunBoundaryProof(t *testing.T) {
 					found, resources, coverage := 0, 0, 0
 					for scanner.Scan() {
 						line := scanner.Text()
+						t.Log(line) // Preserve raw recovery warnings and child failures too.
 						pos := strings.Index(line, "WINTUN_RESULT ")
 						if pos < 0 {
 							continue
 						}
 						line = line[pos:]
-						t.Log(line)
 						var r struct {
 							Test, Mode, Variant, Verdict string
 							Pair                         int

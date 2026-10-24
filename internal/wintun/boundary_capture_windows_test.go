@@ -103,6 +103,8 @@ type boundaryCapture struct {
 	list               []*boundaryFlow
 	budget             *atomic.Uint64
 	emit               func(map[string]any)
+	fixture            *fixture
+	ringOnce           sync.Once
 }
 
 func (d *boundaryCapture) number() uint64 {
@@ -120,7 +122,7 @@ func (d *boundaryCapture) report(value map[string]any) {
 }
 
 func attachWordBoundaries(t *testing.T, f *fixture) (wordBoundaryCapture, func()) {
-	d := &boundaryCapture{t: t, mode: f.mode}
+	d := &boundaryCapture{t: t, mode: f.mode, fixture: f}
 	h := &wordRingObserver{inspect: d.raw}
 	if !wordRingHook.CompareAndSwap(nil, h) {
 		t.Fatal("word ring observer already installed")
@@ -540,6 +542,14 @@ func (d *boundaryCapture) echo(c net.Conn) (int64, error) {
 	return io.Copy(c, &boundaryEchoReader{reader: c, d: d})
 }
 func (d *boundaryCapture) complete(transfer uint64, streams int) error {
+	if err := wordBoundaryRingFault(d.fixture); err != nil {
+		d.failed.Store(true)
+		d.ringOnce.Do(func() {
+			if d.number() <= boundaryFailureLimit {
+				d.report(map[string]any{"test": "word_boundary_ring_rejection", "verdict": "integrity_failure", "mode": d.mode, "reason": err.Error()})
+			}
+		})
+	}
 	d.listMu.Lock()
 	flows := append([]*boundaryFlow(nil), d.list...)
 	d.listMu.Unlock()

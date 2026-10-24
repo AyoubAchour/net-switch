@@ -54,6 +54,9 @@ ingress exposes receive-side corruption that would otherwise be blamed on send.
 
 No packet is changed, dropped or repaired by a hook. In particular, the existing
 validated-prefix return and session-recovery behavior is unchanged.
+Unexpected ring-rejection counters still fail a diagnostic/sample even if
+retransmission repairs the stream. They are reported separately from delivered
+word mismatches, and the pilot retains raw child recovery warnings.
 
 ## Pilot and subsequent hunt
 

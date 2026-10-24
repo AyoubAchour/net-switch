@@ -2,7 +2,21 @@
 
 package wintun
 
-import "net"
+import (
+	"fmt"
+	"net"
+)
+
+func wordBoundaryRingFault(f *fixture) error {
+	if f != nil {
+		if s, ok := f.io.(*Session); ok {
+			if n := s.Stats().Corruptions; n != 0 {
+				return fmt.Errorf("%w: %d unexpected ring validation rejections", errPayloadIntegrity, n)
+			}
+		}
+	}
+	return nil
+}
 
 type wordBoundaryCapture interface {
 	bind(local string, transfer uint64, stream int)
