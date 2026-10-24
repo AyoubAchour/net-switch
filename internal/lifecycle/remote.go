@@ -56,6 +56,8 @@ type Remote struct {
 	native bool
 	// outcome reads a stopped native instance's cleanup result (host.ReadOutcome).
 	outcome func(string) (host.Outcome, error)
+	// identities are sandbox app identities the engine reported per path.
+	identities map[string]map[string]bool
 }
 
 func NewRemote(ctx context.Context, log func(string)) *Remote {
@@ -258,6 +260,7 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 			rpc.Close()
 		}
 	}()
+	rpc.OnEvent = r.terminalAcknowledger(rpc)
 	var hello struct {
 		Version      string          `json:"version"`
 		Instance     string          `json:"engineInstanceId"`
@@ -360,6 +363,14 @@ func (r *Remote) call(ctx context.Context, method string, payload any, opID stri
 	return r.request(ctx, method, payload, opID, "", out)
 }
 func (r *Remote) request(ctx context.Context, method string, payload any, opID, cursor string, out any) error {
+	return r.fencedRequest(ctx, "", method, payload, opID, cursor, out)
+}
+
+// fencedRequest sends on the session captured under the lock. When fence names
+// an engine instance, the request is refused unless that is still the attached
+// instance, and the request itself carries that instance and epoch, so a
+// replacement attached in between is rejected by the engine, never by luck.
+func (r *Remote) fencedRequest(ctx context.Context, fence, method string, payload any, opID, cursor string, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	r.mu.Lock()
@@ -367,6 +378,9 @@ func (r *Remote) request(ctx context.Context, method string, payload any, opID, 
 	r.mu.Unlock()
 	if rpc == nil {
 		return errors.New("engine service is not attached")
+	}
+	if fence != "" && fence != instance {
+		return fmt.Errorf("%s belongs to engine instance %s; the attached instance is %s", method, fence, instance)
 	}
 	request := map[string]any{"method": method, "engineInstanceId": instance, "epoch": epoch}
 	switch fields := payload.(type) {
@@ -615,7 +629,7 @@ func (r *Remote) CloseFlows(ctx context.Context, request ce.CloseRequest) (ce.Cl
 		return r.nativeClose(ctx, request)
 	}
 	var out ce.CloseResult
-	err := r.call(ctx, "closeFlows", adapterPayload{Close: &request}, request.OperationID, &out)
+	err := r.fencedRequest(ctx, request.Instance, "closeFlows", adapterPayload{Close: &request}, request.OperationID, "", &out)
 	return out, err
 }
 func (r *Remote) Probe(ctx context.Context, request ce.ProbeRequest) ce.ProbeResult {

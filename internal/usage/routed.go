@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"encoding/json"
 	"math"
 	"sort"
 )
@@ -145,41 +146,30 @@ func (r *Routed) Compact(presentApps, presentLines map[string]bool) bool {
 	return changed
 }
 
-func (r *Routed) load(v any) {
-	m, ok := v.(map[string]any)
-	if !ok {
-		return
+// LoadRouted decodes the routed section of a usage record with exact integers.
+// The rest of the record goes through the JavaScript-shaped decoder, whose
+// float64 numbers would lose exactness above 2^53. Absent or invalid routed
+// data yields nil: the record then starts over, which the marks make safe.
+func LoadRouted(file []byte) *Routed {
+	var saved struct {
+		Routed *Routed `json:"routed"`
 	}
-	if s, ok := m["engineInstanceId"].(string); ok {
-		r.Instance = s
+	if err := json.Unmarshal(file, &saved); err != nil || saved.Routed == nil {
+		return nil
 	}
-	loadEntries := func(set map[string]*RoutedEntry, v any) {
-		items, ok := v.(map[string]any)
-		if !ok {
-			return
-		}
-		for id, raw := range items {
-			e, ok := raw.(map[string]any)
-			if !ok {
-				continue
+	r := saved.Routed
+	if r.Apps == nil {
+		r.Apps = map[string]*RoutedEntry{}
+	}
+	if r.Lines == nil {
+		r.Lines = map[string]*RoutedEntry{}
+	}
+	for _, set := range []map[string]*RoutedEntry{r.Apps, r.Lines} {
+		for id, e := range set {
+			if e == nil {
+				delete(set, id)
 			}
-			entry := &RoutedEntry{Up: number(e["up"]), Down: number(e["down"]), MarkUp: number(e["markUp"]), MarkDown: number(e["markDown"])}
-			entry.Generation, _ = e["generation"].(string)
-			set[id] = entry
 		}
 	}
-	loadEntries(r.Apps, m["apps"])
-	loadEntries(r.Lines, m["lines"])
-	if other, ok := m["other"].(map[string]any); ok {
-		r.Other = RoutedBytes{Up: number(other["up"]), Down: number(other["down"])}
-	}
-	r.Folded = number(m["folded"])
-}
-
-func number(v any) uint64 {
-	f, ok := v.(float64)
-	if !ok || !finite(f) || f < 0 {
-		return 0
-	}
-	return uint64(f)
+	return r
 }

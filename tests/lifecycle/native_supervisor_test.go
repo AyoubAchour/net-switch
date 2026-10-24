@@ -72,7 +72,18 @@ func nativeSupervisorCases(t *testing.T, ctx context.Context, fixture tunFixture
 					wait(t, "failed child exits without another Control request", max(time.Millisecond, 15*time.Second-recovery.elapsed()), func() bool { s, e := service.Query(service.Engine); return e == nil && s.Stopped })
 					waitNativeCleanup(t, fixture, data, c.instance)
 					nativeFreshFlow(t, fixture, ctx, "retirement-failure", recovery, 15*time.Second)
-					out, err := host.ReadOutcome(data, c.instance)
+					// The host's exit 1 is a service failure, so the manager's
+					// recovery command republishes this instance's outcome as
+					// pending and then complete after the host already wrote
+					// complete (see "Reading atomically published outcomes").
+					// Read the settled result, not a snapshot between those
+					// two writers; it must still be complete with child 1.
+					var out host.Outcome
+					var err error
+					wait(t, "retirement outcome settles after manager recovery", 10*time.Second, func() bool {
+						out, err = host.ReadOutcome(data, c.instance)
+						return err == nil && (out.State == "complete" || out.State == "failed")
+					})
 					if err != nil || out.Child == nil || out.Child.Code != 1 || out.Child.Forced || !out.Child.Completed || out.State != "complete" {
 						t.Fatalf("failed retirement outcome: child=%+v state=%s error=%v", out.Child, out.State, err)
 					}

@@ -15,10 +15,14 @@ adapter payload, unchanged. Anything else must advertise `revisions`, `lease`,
 or attach is refused with the missing capability named. The adapter dialect is
 deleted with sing-box in PR 4.
 
-The native revision is compiled from Control's policy alone: a line binds by
-its alias (the same identity the sing-box adapter used), pins use the engine's
-app key, shares become integer weights, lanes and the blocked set are copied,
-and shares of blocked lines are dropped as spec §4.6 already forbids them. The
+The native revision is compiled from Control's policy: a line binds by its
+alias (the same identity the sing-box adapter used), shares become integer
+weights, lanes and the blocked set are copied, and shares of blocked lines are
+dropped as spec §4.6 already forbids them. A pin binds the identity the engine
+itself gives the app: the platform's own path normalisation (Windows folds
+case, Linux keeps it), plus every sandbox identity (Flatpak, Snap, AppImage)
+the engine has reported for that path in its flow records, since no path rule
+can derive those. The
 engine's hash of that config is what the engine checks; the acknowledgement
 Control records carries Control's own revision hash plus the engine's apply
 point. An engine already loaded receives `apply`; `start` is only for a fresh
@@ -41,7 +45,12 @@ and the instance's outcome file. Only exit 3 with completed cleanup and the
 engine's own "adapter lost" reason is adapter loss; a lease expiry is routing
 off; everything else is a failure. While the manager reports cleanup pending,
 Control polls for up to 10 s before classifying; past that it counts the exit
-as a failure and says so in the log. Nothing is guessed clean.
+as a failure and says so in the log. Nothing is guessed clean. The same
+classification runs at Control startup for a native engine that stopped while
+Control was down, so that failure or loss counts (deduplicated by the journal's
+last failure id) and is journaled before the restart it allows. Control
+acknowledges the engine's service-initiated stop record, so adapter-loss
+cleanup does not wait out the 2 s delivery timeout.
 
 Core keeps a ten-minute window of clean adapter losses beside the crash budget
 (both durable in the control journal, both cleared by a fresh routing intent).
@@ -49,7 +58,11 @@ The first three losses restart at once and leave `failures` alone; the fourth
 and later go through the ordinary 1/2/5/30 s backoff and the five-failure
 latch (spec §5.1 and §2). Closure cutoffs are apply points: the native
 acknowledgement's point is recorded on each intent and sent as `startedBefore`
-with the line closure; Reconnect closes by native flow ids.
+with the line closure; Reconnect closes by native flow ids. Every closure is
+bound to the engine instance Core checked it against: the client captures its
+session under one lock, refuses the request if that instance is no longer
+attached, and sends the intent's instance and epoch so a replacement attached
+in between is fenced by the engine itself (flow ids are reused per instance).
 
 The engine service's only failure action is the recovery command on Windows
 and `ExecStopPost` with `Restart=no` on Linux. A pure Linux test reads the unit
@@ -77,7 +90,12 @@ generation, so a crash between the commit and the ack re-reads counters at or
 above the marks (no double count), and a crash after the ack sees retired
 identities return with a new generation (no loss). A new engine instance drops
 every mark. Identities the engine no longer reports fold into an `other`
-bucket beyond 4,096 kept entries; present identities are never folded.
+bucket beyond 4,096 kept entries; present identities are never folded. The
+record stays dirty until a write succeeds, so an unchanged read after a failed
+commit still writes before it acknowledges. Every `usage.json` writer (the
+minute timer and the accounting consumer) takes the snapshot and writes under
+one lock, so an older snapshot never replaces a newer, acknowledged one. The
+routed section is reloaded with exact integers, not the record's float64 path.
 
 Caps keep counting the whole adapter, as 0.3.x does (spec §4.6, "today's rules").
 The exact routed totals are stored for the desktop work in milestone 5 and have

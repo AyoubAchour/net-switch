@@ -162,6 +162,13 @@ type Core struct {
 	adapterLosses []int64
 	totalsAt      int64
 	totalsBusy    bool
+	// usageWrite serialises every usage.json writer: the snapshot is taken and
+	// written under it, so an older snapshot can never replace a newer one.
+	usageWrite sync.Mutex
+	// routedGeneration counts routed-usage changes; routedSaved is the last
+	// generation written durably. Unequal means unacknowledged accounting is
+	// not yet on disk, whatever the next engine read says.
+	routedGeneration, routedSaved uint64
 }
 
 // adapterLossesFree is how many clean adapter losses in ten minutes restart
@@ -244,6 +251,7 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		if b, err := o.IO.Files.ReadFile(filepath.Join(o.UserDir, "usage.json")); err == nil {
 			if v, err := js.Decode(b); err == nil {
 				c.usage.Load(js.Object(v))
+				c.usage.Routed = usage.LoadRouted(b) // exact integers, not float64
 			} else {
 				c.log("could not read the data use record, starting it over: %v", err)
 			}
@@ -1077,6 +1085,9 @@ func (c *Core) Supervise(ctx context.Context) error {
 	}
 	c.mu.Unlock()
 	if ready {
+		// A failure or adapter loss observed this tick is durable before the
+		// restart it allows, so a crash during the start cannot forget it.
+		c.persistFailureBudget()
 		return c.Start(ctx)
 	}
 	return nil
@@ -1114,13 +1125,24 @@ func (c *Core) bindingChangedLocked(s engine.Snapshot) bool {
 	return false
 }
 func (c *Core) SaveUsage() error {
+	c.usageWrite.Lock()
+	defer c.usageWrite.Unlock()
 	c.mu.Lock()
 	b, err := js.Marshal(c.usage.Saved)
+	generation := c.routedGeneration
 	c.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	return settings.AtomicWrite(filepath.Join(c.op.UserDir, "usage.json"), b, c.op.IO)
+	if err := settings.AtomicWrite(filepath.Join(c.op.UserDir, "usage.json"), b, c.op.IO); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if generation > c.routedSaved {
+		c.routedSaved = generation
+	}
+	c.mu.Unlock()
+	return nil
 }
 func (c *Core) Shutdown(ctx context.Context) error {
 	// quitting holds off new starts while the stop intent is written. It is

@@ -99,8 +99,14 @@ func (c *Core) readTotals(ctx context.Context, accounting engine.Accounting, gen
 		changed = c.usage.Routed.Absorb(instance, routedCounters(page.Apps), routedCounters(page.Lines)) || changed
 	}
 	changed = c.usage.Routed.Compact(apps, lines) || changed
-	c.mu.Unlock()
 	if changed {
+		c.routedGeneration++
+	}
+	// Dirty means an earlier commit failed or this read changed something. An
+	// unchanged read after a failed commit must still write before it acks.
+	dirty := c.routedGeneration != c.routedSaved
+	c.mu.Unlock()
+	if dirty {
 		if err := c.SaveUsage(); err != nil {
 			return fmt.Errorf("routed usage not committed; accounting left unacknowledged: %w", err)
 		}

@@ -2,20 +2,25 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
+	"github.com/AyoubAchour/net-switch/internal/apppath"
 	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
 
@@ -46,11 +51,57 @@ func nativeDialect(capabilities []string) (adapter bool, err error) {
 	return false, nil
 }
 
+// appIdentityRules are the engine's own path normalisation for this OS: the
+// Windows owner lookup keys apps by apppath.Key (Windows rules), the Linux one
+// by apppath.Normalize with Linux rules, which keeps case and separators.
+var appIdentityRules = func() apppath.Rules {
+	if runtime.GOOS == "linux" {
+		return apppath.Linux
+	}
+	return apppath.Windows
+}()
+
+// engineAppIdentity is the identity the engine gives a plain executable.
+func engineAppIdentity(path string) string { return engineAppIdentityWith(path, appIdentityRules) }
+func engineAppIdentityWith(path string, rules apppath.Rules) string {
+	if path == "" {
+		return ""
+	}
+	return apppath.Normalize(path, rules)
+}
+
+// sandboxIdentityBound caps the paths whose sandbox identities are remembered.
+const sandboxIdentityBound = 4096
+
+// noteIdentitiesLocked remembers identities the engine reports for a path that
+// differ from the plain normalisation: Flatpak, Snap and AppImage apps, whose
+// identity comes from process metadata Control cannot derive from the path.
+func (r *Remote) noteIdentitiesLocked(f flows.Record) {
+	id, path := f.Owner.AppID, f.Owner.Path
+	if id == "" || path == "" || id == engineAppIdentity(path) {
+		return
+	}
+	if r.identities == nil {
+		r.identities = map[string]map[string]bool{}
+	}
+	set := r.identities[path]
+	if set == nil {
+		if len(r.identities) >= sandboxIdentityBound {
+			return
+		}
+		set = map[string]bool{}
+		r.identities[path] = set
+	}
+	set[id] = true
+}
+
 // nativeRevision compiles Control's policy into the engine's config. The line
 // binds by alias, the same identity the sing-box adapter used, so the config
-// is a pure function of Control's revision and an alias change still goes
-// through Control's existing restart rule.
-func nativeRevision(r ce.Revision) (policy.Revision, error) {
+// is a pure function of Control's revision (plus the sandbox identities the
+// engine itself reported) and an alias change still goes through Control's
+// existing restart rule. A pin binds the engine's identity for its path: the
+// platform normalisation, plus every sandbox identity seen for that path.
+func nativeRevision(r ce.Revision, identities map[string]map[string]bool) (policy.Revision, error) {
 	p := r.Policy
 	config := policy.Config{Combine: p.Combine, IPv6: p.IPv6, AppLines: map[string]string{}, Shares: map[string]uint64{}, Lanes: map[string]string{}, Blocked: []string{}}
 	known := map[string]bool{}
@@ -62,8 +113,12 @@ func nativeRevision(r ce.Revision) (policy.Revision, error) {
 		config.Lines = append(config.Lines, platform.Line{ID: line.ID, Interface: line.Alias})
 	}
 	for _, pin := range p.AppLines {
-		if known[pin.LineID] && pin.Path != "" {
-			config.AppLines[apps.AppKey(pin.Path)] = pin.LineID
+		if !known[pin.LineID] || pin.Path == "" {
+			continue
+		}
+		config.AppLines[engineAppIdentity(pin.Path)] = pin.LineID
+		for id := range identities[pin.Path] {
+			config.AppLines[id] = pin.LineID
 		}
 	}
 	blocked := map[string]bool{}
@@ -107,7 +162,7 @@ func (r *Remote) nativeSnapshotLocked(status protocol.Status) ce.Snapshot {
 	if status.Applied != nil {
 		s.AppliedRevision, s.AppliedHash, s.AppliedPoint = status.Applied.N, status.Applied.Hash, status.Applied.Point
 		if desired := r.desired; desired != nil && desired.Number == status.Applied.N {
-			if native, err := nativeRevision(*desired); err == nil && native.Hash == status.Applied.Hash {
+			if native, err := nativeRevision(*desired, r.identities); err == nil && native.Hash == status.Applied.Hash {
 				s.AppliedHash = desired.Hash
 				s.Policy = desired.Policy
 				if s.Status == "on" {
@@ -141,7 +196,10 @@ func (r *Remote) nativeRefresh(ctx context.Context) error {
 // nativeLoad sends start or apply. An engine that is already on receives apply,
 // which the table answers idempotently; start is only for a fresh instance.
 func (r *Remote) nativeLoad(ctx context.Context, revision ce.Revision, running bool) (ce.Acknowledgement, error) {
-	native, err := nativeRevision(revision)
+	r.mu.Lock()
+	identities := r.identities
+	r.mu.Unlock()
+	native, err := nativeRevision(revision, identities)
 	if err != nil {
 		return ce.Acknowledgement{}, err
 	}
@@ -175,9 +233,12 @@ func (r *Remote) nativeConnections(ctx context.Context) ([]ce.Connection, error)
 		if err := r.call(ctx, "flows", fields, "", &page); err != nil {
 			return nil, err
 		}
+		r.mu.Lock()
 		for _, f := range page.Flows {
+			r.noteIdentitiesLocked(f)
 			out = append(out, nativeConnection(f))
 		}
+		r.mu.Unlock()
 		if len(out) > flows.Defaults().SnapshotEntries {
 			return nil, errors.New("engine flow snapshot exceeds its entry limit")
 		}
@@ -233,8 +294,13 @@ func (r *Remote) nativeClose(ctx context.Context, request ce.CloseRequest) (ce.C
 		}
 	}
 	fields["selector"] = selector
+	if request.Instance == "" {
+		return ce.CloseResult{}, errors.New("closure names no engine instance")
+	}
+	// Flow ids are per instance and reused by a replacement. The closure is
+	// bound to the instance Core checked, atomically with the session capture.
 	var result flows.CloseResult
-	err := r.call(ctx, "closeFlows", fields, request.OperationID, &result)
+	err := r.fencedRequest(ctx, request.Instance, "closeFlows", fields, request.OperationID, "", &result)
 	return ce.CloseResult{Closed: result.Closed, Failed: result.Failed, Gone: result.Gone}, err
 }
 
@@ -321,6 +387,9 @@ func (r *Remote) classifyExit(instance string, status service.Status) (exitClass
 	r.mu.Lock()
 	native := r.native
 	r.mu.Unlock()
+	// The service manager reports Cleanup only for a native installation, so
+	// a retained native exit is classified natively even before any hello.
+	native = native || status.Cleanup != ""
 	if !native || r.outcome == nil {
 		if r.exitReason == nil {
 			return exitClass{}, nil
@@ -363,4 +432,82 @@ func describeExit(status service.Status) string {
 // sharing-safe reader every native outcome consumer uses.
 func nativeOutcomeReader(data string) func(string) (host.Outcome, error) {
 	return func(instance string) (host.Outcome, error) { return host.ReadOutcome(data, instance) }
+}
+
+// classifyRetainedExit runs at Control startup when no engine is attached. A
+// native engine that failed or lost its adapter while Control was down is
+// classified like a live exit, so it counts toward the budget (deduplicated
+// by Core against the journal's last failure id) before any restart. A lease
+// expiry or an engine never recorded leaves the snapshot off.
+func (r *Remote) classifyRetainedExit(ctx context.Context, data string) error {
+	record, err := host.ReadRecord(filepath.Join(data, "engine-state.json"))
+	if os.IsNotExist(err) || (err == nil && record.Instance == "") {
+		return nil
+	}
+	if err != nil {
+		// Not a native record: the stand-in's exit reason file applies.
+		return nil
+	}
+	pendingSince := time.Time{}
+	for {
+		status, err := r.queryService(service.Engine)
+		if err != nil {
+			return err
+		}
+		if !status.Stopped {
+			return nil
+		}
+		class, err := r.classifyExit(record.Instance, status)
+		if err != nil {
+			return err
+		}
+		if class.pending {
+			if pendingSince.IsZero() {
+				pendingSince = time.Now()
+			}
+			if time.Since(pendingSince) < adapterLostPendingBound {
+				if err := localipc.Pause(ctx, 500*time.Millisecond); err != nil {
+					return err
+				}
+				continue
+			}
+			r.log(fmt.Sprintf("retained engine cleanup still pending after %s (%s); counting the exit as a failure", adapterLostPendingBound, describeExit(status)))
+			class = exitClass{}
+		}
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		r.instance = record.Instance
+		switch class.reason {
+		case "lease-expired":
+			r.snapshot = ce.Snapshot{Status: "off"}
+		case ce.ReasonAdapterLost:
+			r.failWithReasonLocked(fmt.Errorf("adapter lost while Control was unavailable (%s)", describeExit(status)), ce.ReasonAdapterLost)
+			r.snapshot.Instance = record.Instance
+		default:
+			r.failLocked(fmt.Errorf("engine instance failed while Control was unavailable (%s)", describeExit(status)))
+			r.snapshot.Instance = record.Instance
+		}
+		return nil
+	}
+}
+
+// terminalAcknowledger answers the engine's service-initiated stop record on
+// the connection that received it, so adapter-loss cleanup does not wait out
+// the delivery timeout. It never changes routing intent.
+func (r *Remote) terminalAcknowledger(rpc *RPC) func([]byte) {
+	return func(b []byte) {
+		var message protocol.Terminal
+		if json.Unmarshal(b, &message) != nil || message.Type != "stopped" || message.OpID == "" {
+			return
+		}
+		go func() {
+			ctx, cancel := context.WithTimeout(r.ctx, protocol.TerminalDeliveryTimeout)
+			defer cancel()
+			if err := rpc.Call(ctx, map[string]any{"method": "terminalAck", "engineInstanceId": message.Instance, "epoch": message.Epoch, "opId": message.OpID}, nil); err != nil {
+				r.log("engine terminal receipt not delivered: " + err.Error())
+			} else {
+				r.log(fmt.Sprintf("engine stopped itself (%s); receipt sent", message.Reason))
+			}
+		}()
+	}
 }

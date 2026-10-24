@@ -6,14 +6,18 @@ import (
 	"errors"
 	"net/netip"
 	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/usage"
 )
 
@@ -98,9 +102,9 @@ func TestProbeResultsRequireKindAndInstance(t *testing.T) {
 
 func TestQuickPassNeverRestoresADownLine(t *testing.T) {
 	c, e, clock, _ := testCore(t, map[string]any{"lines": testLines()})
-	probes := 0
+	var probes atomic.Int64 // the two full checks of a round run concurrently
 	e.probe = func(r engine.ProbeRequest) engine.ProbeResult {
-		probes++
+		probes.Add(1)
 		// A mis-kinded engine answers every check as a quick pass.
 		return engine.ProbeResult{Outcome: engine.OK, Kind: "quick", Instance: "test-engine"}
 	}
@@ -117,7 +121,7 @@ func TestQuickPassNeverRestoresADownLine(t *testing.T) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if probes == 0 {
+	if probes.Load() == 0 {
 		t.Fatal("no probe ran")
 	}
 	if !c.lanes["a1"].health.Offline {
@@ -228,16 +232,11 @@ func routedUsage(t *testing.T, files *memoryFiles) *usage.Routed {
 	if err != nil {
 		t.Fatal("usage record missing", err)
 	}
-	v, err := js.Decode(b)
-	if err != nil {
-		t.Fatal(err)
-	}
-	u := usage.New(nil)
-	u.Load(js.Object(v))
-	if u.Routed == nil {
+	routed := usage.LoadRouted(b)
+	if routed == nil {
 		t.Fatal("usage record has no routed section", string(b))
 	}
-	return u.Routed
+	return routed
 }
 
 // Spec §5.10: the durable store is committed before the acknowledgement, so
@@ -297,7 +296,7 @@ func TestTotalsConsumerSurvivesCrashesAroundTheAck(t *testing.T) {
 }
 
 func TestTotalsAreNotAcknowledgedWhenTheCommitFails(t *testing.T) {
-	c, e, _, files := testCore(t, map[string]any{"lines": testLines()})
+	c, e, clock, files := testCore(t, map[string]any{"lines": testLines()})
 	c.op.ServiceMode = true
 	table := accountingTable(t)
 	acct := &accountingEngine{fakeEngine: e, table: table}
@@ -310,6 +309,101 @@ func TestTotalsAreNotAcknowledgedWhenTheCommitFails(t *testing.T) {
 	files.failPrefix = filepath.Join("/test", "usage.json")
 	if err := c.readTotals(ctx, acct, c.generation); err == nil || acct.acks != 0 {
 		t.Fatal("accounting acknowledged without a durable commit", err, acct.acks)
+	}
+	// An unchanged second read must not ack either: the bytes are still only
+	// in memory. (On the first version of this consumer it did, and a later
+	// crash lost them.)
+	if err := c.readTotals(ctx, acct, c.generation); err == nil || acct.acks != 0 {
+		t.Fatal("unchanged read acknowledged bytes that were never written", err, acct.acks)
+	}
+	// Once the disk is back, the unchanged read writes first, then acks.
+	files.failPrefix = ""
+	if err := c.readTotals(ctx, acct, c.generation); err != nil || acct.acks != 1 {
+		t.Fatal("recovered commit did not acknowledge", err, acct.acks)
+	}
+	if got := routedUsage(t, files).Apps[apps.AppKey("C:/apps/two.exe")]; got == nil || got.Up != 3 || got.Down != 4 {
+		t.Fatalf("durable record after recovery: %+v", got)
+	}
+	// A restart after the ack still has every byte exactly once.
+	transfer(t, table, "C:/apps/two.exe", 1, 1)
+	restarted, _, _, _ := testCoreWithFiles(t, files, clock)
+	restarted.op.ServiceMode = true
+	restarted.op.Engine = acct
+	if err := restarted.readTotals(ctx, acct, restarted.generation); err != nil {
+		t.Fatal(err)
+	}
+	if got := routedUsage(t, files).Apps[apps.AppKey("C:/apps/two.exe")]; got.Up != 4 || got.Down != 5 {
+		t.Fatalf("bytes lost or double counted across the failed commit and restart: %+v", got)
+	}
+}
+
+// Two usage writers (the minute timer and the accounting consumer) must not
+// let an older snapshot replace a newer, already acknowledged one. The writer
+// holds one lock across snapshot and write; without it the second writer
+// below would write immediately.
+func TestUsageWritersAreSerialized(t *testing.T) {
+	c, _, _, files := testCore(t, map[string]any{"lines": testLines()})
+	usagePath := filepath.Join("/test", "usage.json")
+	c.usage.Routed = usage.NewRouted()
+	c.usage.Routed.Absorb("i1", map[string]usage.RoutedCounter{"app": {Up: 1, Generation: "1"}}, nil)
+	var second sync.WaitGroup
+	secondWrote := make(chan struct{}, 1)
+	first := true
+	files.beforeWrite = func(p string) {
+		if !strings.HasPrefix(p, usagePath) || !first {
+			return
+		}
+		first = false
+		// While the first writer is between snapshot and write, a newer state
+		// arrives and a second writer starts. It must wait.
+		c.mu.Lock()
+		c.usage.Routed.Absorb("i1", map[string]usage.RoutedCounter{"app": {Up: 2, Generation: "1"}}, nil)
+		c.routedGeneration++
+		c.mu.Unlock()
+		second.Add(1)
+		go func() {
+			defer second.Done()
+			if err := c.SaveUsage(); err != nil {
+				t.Error(err)
+			}
+			secondWrote <- struct{}{}
+		}()
+		select {
+		case <-secondWrote:
+			t.Error("second usage writer wrote while the first held an older snapshot")
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	if err := c.SaveUsage(); err != nil {
+		t.Fatal(err)
+	}
+	second.Wait()
+	files.beforeWrite = nil
+	if got := routedUsage(t, files).Apps["app"]; got == nil || got.Up != 2 {
+		t.Fatalf("the newer snapshot did not win: %+v", got)
+	}
+}
+
+// A failure or adapter loss seen by the supervisor is journaled before the
+// restart it allows, so a crash during that start cannot forget it.
+func TestStartupFailureIsPersistedBeforeTheRestart(t *testing.T) {
+	c, e, _, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	c.wanted = true
+	e.mu.Lock()
+	e.s = engine.Snapshot{Status: "error", Instance: "lost-while-down", FailureID: "lost-while-down", Reason: engine.ReasonAdapterLost}
+	e.mu.Unlock()
+	e.beforeStart = func() {
+		var losses []int64
+		if err := json.Unmarshal(c.op.Journal.RawValues()["adapterLosses"], &losses); err != nil || len(losses) != 1 {
+			t.Fatal("restart began before the adapter loss was journaled", err, losses)
+		}
+	}
+	if err := c.Supervise(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(e.calls, "start") {
+		t.Fatal("free adapter loss did not restart at once", e.calls)
 	}
 }
 

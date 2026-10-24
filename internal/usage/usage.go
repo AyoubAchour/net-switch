@@ -117,10 +117,6 @@ func (u *Usage) Load(saved map[string]any) {
 			}
 		}
 	}
-	if routed, ok := saved["routed"].(map[string]any); ok {
-		u.Routed = NewRouted()
-		u.Routed.load(routed)
-	}
 }
 func (u *Usage) KeepOnly(ids []string) {
 	keep := map[string]bool{}

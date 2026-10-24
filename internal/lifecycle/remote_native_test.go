@@ -2,14 +2,18 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/apppath"
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
@@ -149,8 +153,36 @@ func TestRemoteRefusesEnginesMissingRequiredCapabilities(t *testing.T) {
 	}
 }
 
+// Pins must name the identity the engine itself gives the app: the platform's
+// own normalisation (Linux keeps case), plus sandbox identities (Flatpak, Snap,
+// AppImage) the engine reported for that path, which no path rule can derive.
+func TestNativeRevisionUsesTheEnginesAppIdentity(t *testing.T) {
+	if got := engineAppIdentityWith("/opt/Game/Game", apppath.Linux); got != "/opt/Game/Game" {
+		t.Fatalf("Linux identity folded case or separators: %q", got)
+	}
+	if got := engineAppIdentityWith(`C:\Games\Game.exe`, apppath.Windows); got != apps.AppKey(`C:\Games\Game.exe`) {
+		t.Fatalf("Windows identity differs from the owner lookup's key: %q", got)
+	}
+	r := NewRemote(context.Background(), func(string) {})
+	r.noteIdentitiesLocked(flows.Record{Owner: platform.Owner{Path: "/app/bin/game", AppID: "flatpak:org.example.Game"}})
+	r.noteIdentitiesLocked(flows.Record{Owner: platform.Owner{Path: "/app/bin/game", AppID: "flatpak:org.example.Other"}})
+	r.noteIdentitiesLocked(flows.Record{Owner: platform.Owner{Path: `C:\plain\app.exe`, AppID: engineAppIdentity(`C:\plain\app.exe`)}})
+	if len(r.identities) != 1 || len(r.identities["/app/bin/game"]) != 2 {
+		t.Fatalf("sandbox identities not remembered exactly: %+v", r.identities)
+	}
+	rev := testRevision(3)
+	rev.Policy.AppLines = apps.Pins{{Path: "/app/bin/game", LineID: "b2"}}
+	native, err := nativeRevision(rev, r.identities)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if native.Config.AppLines["flatpak:org.example.Game"] != "b2" || native.Config.AppLines["flatpak:org.example.Other"] != "b2" || native.Config.AppLines[engineAppIdentity("/app/bin/game")] != "b2" {
+		t.Fatalf("pin did not reach the engine's identities: %+v", native.Config.AppLines)
+	}
+}
+
 func TestNativeRevisionIsAPureFunctionOfControlsPolicy(t *testing.T) {
-	native, err := nativeRevision(testRevision(7))
+	native, err := nativeRevision(testRevision(7), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +202,7 @@ func TestNativeRevisionIsAPureFunctionOfControlsPolicy(t *testing.T) {
 	if _, err := policy.Compile(native); err != nil {
 		t.Fatal("the engine would refuse the compiled config:", err)
 	}
-	again, _ := nativeRevision(testRevision(7))
+	again, _ := nativeRevision(testRevision(7), nil)
 	if again.Hash != native.Hash {
 		t.Fatal("translation is not deterministic")
 	}
@@ -302,8 +334,11 @@ func TestNativeFlowsKeepTheChainShapeAndEstablishedHostsOnly(t *testing.T) {
 	if _, err := f.remote.CloseFlows(ctx, ce.CloseRequest{OperationID: "nocut", Line: "a1"}); err == nil {
 		t.Fatal("a line closure without its cutoff was sent")
 	}
-	if _, err := f.remote.CloseFlows(ctx, ce.CloseRequest{OperationID: "ids", ConnectionIDs: []string{e.ID}}); err != nil {
+	if _, err := f.remote.CloseFlows(ctx, ce.CloseRequest{OperationID: "ids", Instance: f.server.Instance, ConnectionIDs: []string{e.ID}}); err != nil {
 		t.Fatal("closure by native flow ids", err)
+	}
+	if _, err := f.remote.CloseFlows(ctx, ce.CloseRequest{OperationID: "noinst", ConnectionIDs: []string{e.ID}}); err == nil {
+		t.Fatal("a closure without its engine instance was sent")
 	}
 }
 
@@ -373,6 +408,122 @@ func TestNativeTotalsAndAcknowledgementOverTheWire(t *testing.T) {
 	plain := NewRemote(ctx, func(string) {})
 	if _, err := plain.Totals(ctx, ""); !errors.Is(err, ce.ErrNoAccounting) {
 		t.Fatal("the adapter dialect must report that it has no accounting", err)
+	}
+}
+
+// A closure Core checked against one instance must never reach a replacement:
+// flow ids are per instance and a new engine reuses them.
+func TestClosureIsFencedToItsOriginalInstance(t *testing.T) {
+	f := newNativeFixture(t, nativeProber{})
+	ctx := context.Background()
+	rev := testRevision(1)
+	f.remote.Restore(&rev)
+	if err := f.remote.Start(ctx, rev.Policy); err != nil {
+		t.Fatal(err)
+	}
+	tuple := platform.Tuple{Source: netip.MustParseAddrPort("198.18.0.2:40000"), Destination: netip.MustParseAddrPort("203.0.113.7:443")}
+	ticket, err := f.runtime.table.Begin("tcp", tuple)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ticket.Resolve(platform.Owner{AppID: "game"}); err != nil {
+		t.Fatal(err)
+	}
+	// The intent was recorded against an engine that has since been replaced
+	// by the attached one; its flow id 1 now names an unrelated new flow.
+	old := ce.CloseRequest{OperationID: "stale", Instance: "replaced-" + f.server.Instance, ConnectionIDs: []string{"1"}}
+	if _, err := f.remote.CloseFlows(ctx, old); err == nil {
+		t.Fatal("closure for a replaced instance was sent to the current engine")
+	}
+	page, err := f.runtime.table.Page("")
+	if err != nil || len(page.Flows) != 1 || page.Flows[0].Closing {
+		t.Fatal("the unrelated new flow was touched", page.Flows, err)
+	}
+	// Replacement between Core's check and the send: the request carries the
+	// captured instance, so the engine itself fences it even without Core.
+	f.remote.mu.Lock()
+	f.remote.instance = "replaced-mid-closure"
+	f.remote.mu.Unlock()
+	if _, err := f.remote.CloseFlows(ctx, ce.CloseRequest{OperationID: "mid", Instance: "replaced-mid-closure", ConnectionIDs: []string{"1"}}); err == nil {
+		t.Fatal("engine accepted a closure fenced to another instance")
+	}
+	page, _ = f.runtime.table.Page("")
+	if len(page.Flows) != 1 || page.Flows[0].Closing {
+		t.Fatal("the fenced closure closed a flow", page.Flows)
+	}
+}
+
+// A native engine that failed or lost its adapter while Control was down is
+// classified from its retained outcome at Control startup, before any hello.
+func TestRetainedNativeExitIsClassifiedAtStartup(t *testing.T) {
+	f := newNativeFixture(t, nativeProber{})
+	data := t.TempDir()
+	instance := "0123456789abcdef0123456789abcdef"
+	// A plain write stands in for the service's ACL-protected durable save,
+	// which needs the SYSTEM identity this pure test does not have.
+	if _, err := host.Open(filepath.Join(data, "engine-state.json"), instance, func(r host.Record) error {
+		b, err := json.Marshal(r)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(data, "engine-state.json"), b, 0600)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	f.status = service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 3}
+	f.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "adapter lost"}
+	if err := f.remote.classifyRetainedExit(ctx, data); err != nil {
+		t.Fatal(err)
+	}
+	if s := f.remote.Snapshot(); s.Status != "error" || s.Reason != ce.ReasonAdapterLost || s.FailureID != instance || s.Instance != instance {
+		t.Fatalf("retained adapter loss not classified: %+v", s)
+	}
+	// A plain failure counts; the stand-in's exit-reason file is not involved.
+	plain := newNativeFixture(t, nativeProber{})
+	plain.status = service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 1}
+	plain.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "failure"}
+	if err := plain.remote.classifyRetainedExit(ctx, data); err != nil {
+		t.Fatal(err)
+	}
+	if s := plain.remote.Snapshot(); s.Status != "error" || s.Reason != "" || s.FailureID != instance {
+		t.Fatalf("retained failure not classified: %+v", s)
+	}
+	// A lease expiry while Control was down is routing off, not a failure, and
+	// a running engine is left for the attach path.
+	off := newNativeFixture(t, nativeProber{})
+	off.status = service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true}
+	off.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "lease-expired"}
+	if err := off.remote.classifyRetainedExit(ctx, data); err != nil || off.remote.Snapshot().Status != "off" {
+		t.Fatal("lease expiry counted", off.remote.Snapshot(), err)
+	}
+	running := newNativeFixture(t, nativeProber{})
+	running.status = service.Status{Running: true, PID: 7}
+	if err := running.remote.classifyRetainedExit(ctx, data); err != nil || running.remote.Snapshot().Status != "off" || running.remote.instance != "" {
+		t.Fatal("a running engine was classified", running.remote.Snapshot(), err)
+	}
+	if err := running.remote.classifyRetainedExit(ctx, t.TempDir()); err != nil {
+		t.Fatal("a folder without a native record must be ignored", err)
+	}
+}
+
+// The engine's service-initiated stop record is acknowledged on the connection
+// that received it, so cleanup does not wait out the delivery timeout.
+func TestTerminalRecordIsAcknowledged(t *testing.T) {
+	f := newNativeFixture(t, nativeProber{})
+	ctx := context.Background()
+	rev := testRevision(1)
+	f.remote.Restore(&rev)
+	if err := f.remote.Start(ctx, rev.Policy); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	cleanup, delivery := f.server.StopWithReason(ctx, "adapter lost", nil)
+	if cleanup != nil || delivery != nil {
+		t.Fatal("terminal record not acknowledged", cleanup, delivery)
+	}
+	if elapsed := time.Since(started); elapsed >= protocol.TerminalDeliveryTimeout {
+		t.Fatal("acknowledgement only arrived through the delivery timeout", elapsed)
 	}
 }
 

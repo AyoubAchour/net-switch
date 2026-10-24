@@ -3,13 +3,13 @@ package lifecycle_test
 import (
 	"context"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,16 +51,11 @@ func routedApps(t *testing.T, data string) map[string]usage.RoutedEntry {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var raw map[string]any
-	if err := json.Unmarshal(b, &raw); err != nil {
-		t.Fatal(err)
-	}
-	u := usage.New(nil)
-	u.Load(raw)
-	if u.Routed == nil {
+	routed := usage.LoadRouted(b)
+	if routed == nil {
 		return out
 	}
-	for id, e := range u.Routed.Apps {
+	for id, e := range routed.Apps {
 		out[id] = *e
 	}
 	return out
@@ -287,11 +282,34 @@ func TestNativeControlCutover(t *testing.T) {
 			})
 			_ = os.Remove(filepath.Join(data, "fault-native-adapter-removed.consumed"))
 			recovery := newNativeRecoveryTimer()
+			if runtime.GOOS != "windows" && loss == 4 {
+				// Linux counts every read fault as an ordinary failure, so this
+				// is the fifth in ten minutes with the child crash above: the
+				// latch must hold (spec §2) until the owner turns routing on.
+				latched := waitRouting(t, c, "five failures latch routing off", 45*time.Second, func(s status) bool {
+					return s.Routing == "error" && s.Error != nil && strings.Contains(*s.Error, "five failures")
+				})
+				time.Sleep(6 * time.Second) // longer than the 1/2/5 s backoff steps
+				if s := getStatus(t, c); s.Routing != "error" || s.Instance != latched.Instance {
+					t.Fatalf("latched routing restarted on its own: %+v", s)
+				}
+				j := readControlJournal(t, data)
+				if len(j.Failures) < 5 {
+					t.Fatalf("latched with fewer than five journaled failures: %+v", j)
+				}
+				t.Logf("NATIVE_CONTROL_LATCH failures=%d losses=%d status=%+v", len(j.Failures), len(j.Losses), latched)
+				c.must(t, "routing", map[string]any{"on": true}, nil) // the owner's explicit retry clears the budget
+				recovery = newNativeRecoveryTimer()
+			}
 			after := waitRouting(t, c, fmt.Sprintf("restart after loss %d", loss), 60*time.Second, func(s status) bool { return s.Routing == "on" && s.Instance != "" && s.Instance != before.Instance })
 			j := readControlJournal(t, data)
 			end, err := service.Query(service.Engine)
 			t.Logf("NATIVE_CONTROL_LOSS n=%d old=%s new=%s restarted_after=%s failures=%d losses=%d query=%+v err=%v", loss, before.Instance, after.Instance, recovery.elapsed(), len(j.Failures), len(j.Losses), end, err)
-			if runtime.GOOS == "windows" {
+			if runtime.GOOS != "windows" && loss == 4 {
+				if len(j.Failures) != 0 || len(j.Losses) != 0 {
+					t.Fatalf("the owner's retry did not reset the budget: %+v", j)
+				}
+			} else if runtime.GOOS == "windows" {
 				// Windows: the genuine Wintun removal error exits 3 with cleanup
 				// complete. Three are free; the fourth counts.
 				wantFailures := failuresBefore

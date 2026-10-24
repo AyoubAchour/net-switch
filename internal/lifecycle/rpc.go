@@ -21,6 +21,9 @@ type RPC struct {
 	done    chan struct{}
 	err     error
 	next    atomic.Uint64
+	// OnEvent receives a copy of every message without an id (events and the
+	// engine's terminal record). It must not block: set it before any call.
+	OnEvent func([]byte)
 }
 type rpcWrite struct {
 	ctx  context.Context
@@ -75,6 +78,9 @@ func (r *RPC) read() {
 			if reply.Error != "" {
 				r.fail(rpcError(reply.Error))
 				return
+			}
+			if r.OnEvent != nil {
+				r.OnEvent(append([]byte{}, scan.Bytes()...))
 			}
 			continue
 		} // droppable events

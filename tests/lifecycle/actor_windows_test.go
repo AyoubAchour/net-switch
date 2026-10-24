@@ -38,7 +38,7 @@ func TestNativeActorAccountChecks(t *testing.T) {
 		}
 		return p
 	}
-	for _, name := range []string{"NSNativeOther", "NSLifecycleOwner", "NSLifecycleOther"} {
+	for _, name := range []string{"NSNativeOther", "NSLifecycleOwner", "NSLifecycleOther", "NSNativeControlOwner"} {
 		t.Run(name, func(t *testing.T) {
 			valid := actorUserInfo{Name: ptr(name), Comment: ptr(actorComment), Privilege: 1, Flags: 0x10201}
 			if err := checkWindowsActorInfo(name, &valid); err != nil {

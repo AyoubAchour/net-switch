@@ -61,24 +61,21 @@ func TestRoutedRoundTripsThroughUsageFile(t *testing.T) {
 	u := New(nil)
 	u.Routed = NewRouted()
 	u.Routed.Absorb("i1", map[string]RoutedCounter{"app": {Up: 5, Down: 6, Generation: "g"}}, map[string]RoutedCounter{"line": {Up: 1, Generation: "h"}})
+	// Beyond 2^53 a float64 would round; the routed section must stay exact.
+	u.Routed.Apps["app"].Up = 1<<60 + 3
 	b, err := json.Marshal(u.Saved)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var raw map[string]any
-	if err := json.Unmarshal(b, &raw); err != nil {
-		t.Fatal(err)
+	again := LoadRouted(b)
+	if again == nil || *again.Apps["app"] != *u.Routed.Apps["app"] || *again.Lines["line"] != *u.Routed.Lines["line"] || again.Instance != "i1" {
+		t.Fatalf("routed usage lost or rounded on reload: %+v", again)
 	}
-	again := New(nil)
-	again.Load(raw)
-	if again.Routed == nil || *again.Routed.Apps["app"] != *u.Routed.Apps["app"] || *again.Routed.Lines["line"] != *u.Routed.Lines["line"] || again.Routed.Instance != "i1" {
-		t.Fatalf("routed usage lost on reload: %+v", again.Routed)
+	if LoadRouted([]byte(`{"lines":{},"peaks":{}}`)) != nil || LoadRouted([]byte(`not json`)) != nil {
+		t.Fatal("an adapter-era or invalid record grew a routed section")
 	}
 	plain := New(nil)
 	plain.Load(map[string]any{"lines": map[string]any{}})
-	if plain.Routed != nil {
-		t.Fatal("an adapter-era record grew a routed section")
-	}
 	if b, _ := json.Marshal(plain.Saved); string(b) != `{"lines":{},"peaks":{}}` {
 		t.Fatal("adapter-era usage record changed shape", string(b))
 	}
