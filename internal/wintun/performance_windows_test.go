@@ -63,6 +63,12 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 	listener, err := gonet.ListenTCP(stack, tcpip.FullAddress{NIC: ns.NIC, Addr: address, Port: 9002}, ipv4.ProtocolNumber)
 	must(t, err)
 	detach := func() {}
+	if os.Getenv("NETSWITCH_WINTUN_BOUNDARIES") == "1" {
+		if f.integrity != nil {
+			t.Fatal("old and word boundary diagnostics cannot run together")
+		}
+		f.wordBoundaries, detach = attachWordBoundaries(t, f)
+	}
 	if f.integrity != nil {
 		detach = attachIntegrityRings(t, f.integrity)
 	}
@@ -141,7 +147,9 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 				c.SetDeadline(time.Now().Add(30 * time.Second))
 				var n int64
 				var err error
-				if integrityHooksEnabled && f.integrity != nil && f.integrity.selected("echo_read") {
+				if f.wordBoundaries != nil {
+					n, err = f.wordBoundaries.echo(c)
+				} else if integrityHooksEnabled && f.integrity != nil && f.integrity.selected("echo_read") {
 					n, err = f.integrity.echo(c)
 				} else {
 					n, err = io.Copy(c, c)

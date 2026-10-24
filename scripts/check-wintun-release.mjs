@@ -3,7 +3,7 @@ import {pathToFileURL} from 'node:url';
 
 export function assertNoIntegrityBuild(metadata, symbols) {
   if (!/\bbuild\s+/.test(metadata) || !/\bmain\.main\b/.test(symbols)) throw Error('Missing build metadata or engine symbols');
-  if (/\bwintun_integrity\b/.test(metadata) || /\bintegrityRingHook\b/.test(symbols)) throw Error('Diagnostic tag/hook reached a release engine');
+  if (/\b(?:wintun_integrity|wintun_boundaries)\b/.test(metadata) || /\b(?:integrityRingHook|wordRingHook|wordPacketHook)\b/.test(symbols)) throw Error('Diagnostic tag/hook reached a release engine');
 }
 
 if (process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
@@ -13,6 +13,6 @@ if (process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
   // -s removes nm symbols, but retains build settings. Check the ACTUAL release
   // settings and the same source's unstripped engine, not an empty nm result.
   assertNoIntegrityBuild(go(['version','-m',release]),go(['tool','nm',audit]));
-  if (negative && !/\bintegrityRingHook\b/.test(go(['tool','nm',negative]))) throw Error('Tagged negative control has no hook symbol');
+  if (negative && !/\b(?:integrityRingHook|wordRingHook)\b/.test(go(['tool','nm',negative]))) throw Error('Tagged negative control has no hook symbol');
   console.log('WINTUN_RELEASE_GUARD no diagnostic build tag or hook in release engine');
 }

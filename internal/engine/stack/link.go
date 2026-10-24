@@ -294,6 +294,9 @@ func (l *Link) SendBatch(packets [][]byte, release func()) bool {
 
 func (l *Link) WritePackets(pkts gv.PacketBufferList) (int, tcpip.Error) {
 	for _, p := range pkts.AsSlice() {
+		if boundaryHooksEnabled {
+			observeBoundaryPacket(p)
+		}
 		kind, bulk := classifyOutput(p.Size(), p.NetworkHeader().Slice(), p.TransportHeader().Slice())
 		l.enqueue(p.Size(), kind, bulk, func(dst []byte) {
 			views, skip := p.AsViewList()
