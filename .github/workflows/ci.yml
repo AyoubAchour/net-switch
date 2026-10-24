@@ -35,7 +35,7 @@ on:
       wintun_integrity_scenario:
         description: Qualify overhead first, or explicitly run corruption exposure
         type: choice
-        options: [proof, isolated, full, hunt]
+        options: [proof, isolated, full, hunt, payload]
         default: proof
       wintun_integrity_shards:
         description: Independent hosted runners per selected architecture
@@ -605,8 +605,62 @@ jobs:
     env: *go1-env
     steps: *go1-steps
 
+  wintun-payload-pilot:
+    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && inputs.wintun_integrity_scenario == 'payload'
+    name: Payload overhead / ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - name: x64-1
+            runner: windows-latest
+          - name: x64-2
+            runner: windows-latest
+          - name: arm64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Check dispatch isolation and job gates
+        run: node --test .github/ci/wintun-payload.test.mjs .github/ci/gates.test.mjs
+      - name: Build release registrar and test executable
+        run: |
+          go build -trimpath -buildvcs=false -ldflags '-s -w -buildid=' -o dist/registrar-release/netswitch-engine.exe ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $engine = (Resolve-Path dist/registrar-release/netswitch-engine.exe).Path
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $engine).Hash.ToLowerInvariant()
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE=$engine" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          go test -c -o ./bin/wintun.test.exe ./internal/wintun
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - name: Prepare signed Wintun DLL
+        run: ./scripts/prepare-wintun-tests.ps1
+      - name: Verify decoding and stream completion regressions
+        run: ./bin/wintun.test.exe '-test.v' '-test.run=^TestPayloadWords' '-test.timeout=2m'
+      - name: Eight alternating baseline and streaming pairs per mode
+        run: ./bin/wintun.test.exe '-test.v' '-test.run=^TestWintunCaptureProof$' '-test.timeout=12m'
+
   wintun-integrity:
-    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity
+    if: github.event_name == 'workflow_dispatch' && inputs.wintun_integrity && inputs.wintun_integrity_scenario != 'payload'
     name: TCP integrity / ${{ matrix.runner }} / ${{ matrix.scenario }} / ${{ matrix.shard }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75

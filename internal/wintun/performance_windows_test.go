@@ -171,6 +171,14 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 }
 
 func tcpTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float64, error) {
+	if f.integrity == nil && !f.skipPayloadCapture {
+		return tcpWordTransfer(t, f, streams, phase...)
+	}
+	return tcpLegacyTransfer(t, f, streams, phase...)
+}
+
+// Retained unchanged as the overhead oracle and for the existing tagged hunt.
+func tcpLegacyTransfer(t *testing.T, f *fixture, streams int, phase ...string) (float64, error) {
 	t.Helper()
 	const size = 64 << 20
 	content := make([]byte, size)

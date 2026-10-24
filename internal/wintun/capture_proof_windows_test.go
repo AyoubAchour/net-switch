@@ -7,10 +7,15 @@ import (
 	"fmt"
 	"runtime"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/windows"
 )
 
-// Same executable, payload, hash, warmups and socket read sizes. Only the
-// bytes.Equal reader is disabled in the baseline. No failed pair is replaced.
+// Alternate the previous shared-payload/SHA-only workload with the complete
+// streaming word workload, including generation, verification and EOF. Never
+// replace a failed pair. Resource counters cover the entire transfer call,
+// including baseline precomputation (excluded by its historical MB/s timer).
 func TestWintunCaptureProof(t *testing.T) {
 	requireRunner(t)
 	useProductionRegistrar(t, "capture_proof_registrar")
@@ -51,7 +56,12 @@ func TestWintunCaptureProof(t *testing.T) {
 									t.Fatal(err)
 								}
 							}
+							before := captureResources(t)
+							wall := time.Now()
 							value, err := tcpTransfer(t, f, 8, "measured")
+							seconds := time.Since(wall).Seconds()
+							after := captureResources(t)
+							report(t, map[string]any{"test": "capture_resources", "mode": mode, "pair": pair, "variant": label, "wall_seconds": seconds, "cpu_ms": after.CPUMillis - before.CPUMillis, "allocated_bytes": after.Allocated - before.Allocated, "before": before, "after": after})
 							sample.finish(value, errors.Join(err, f.fault()))
 							must(t, sample.cause)
 						})
@@ -69,4 +79,25 @@ func TestWintunCaptureProof(t *testing.T) {
 			}
 		})
 	}
+}
+
+type captureResourceSnapshot struct {
+	CPUMillis float64 `json:"cpu_ms"`
+	Private   uint64  `json:"private_bytes"`
+	Heap      uint64  `json:"heap_alloc_bytes"`
+	HeapSys   uint64  `json:"heap_reserved_bytes"`
+	Allocated uint64  `json:"total_allocated_bytes"`
+}
+
+func captureResources(t *testing.T) captureResourceSnapshot {
+	t.Helper()
+	var created, exited, kernel, user windows.Filetime
+	must(t, windows.GetProcessTimes(windows.CurrentProcess(), &created, &exited, &kernel, &user))
+	_, private, ok := registrarUsage()
+	if !ok {
+		t.Fatal("process memory measurement failed")
+	}
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return captureResourceSnapshot{float64(filetimeDuration(kernel)+filetimeDuration(user)) / float64(time.Millisecond), private, m.HeapAlloc, m.HeapSys, m.TotalAlloc}
 }
