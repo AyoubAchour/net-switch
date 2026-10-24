@@ -1,8 +1,10 @@
 package lifecycle_test
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -84,13 +86,13 @@ func quiesceRouted(t *testing.T, data string) map[string]usage.RoutedEntry {
 	return nil
 }
 
-// findOwnIdentity echoes n bytes and returns the one app identity whose totals
-// grew by exactly n up and n down. Two candidates would mean the probe is
-// ambiguous, which fails rather than guessing.
-func findOwnIdentity(t *testing.T, ctx context.Context, fixture tunFixture, data string, n uint64) (string, usage.RoutedEntry) {
+// findOwnIdentity sends one exact exchange and returns the one app identity
+// whose totals grew by exactly the bytes sent and received. Two candidates
+// would mean the probe is ambiguous, which fails rather than guessing.
+func findOwnIdentity(t *testing.T, ctx context.Context, fixture tunFixture, data string, n int) (string, usage.RoutedEntry) {
 	t.Helper()
 	before := quiesceRouted(t, data)
-	echoExact(t, ctx, fixture, int(n))
+	up, down := echoExact(t, ctx, fixture, n)
 	var key string
 	var entry usage.RoutedEntry
 	deadline := time.Now().Add(25 * time.Second)
@@ -98,7 +100,7 @@ func findOwnIdentity(t *testing.T, ctx context.Context, fixture tunFixture, data
 		matches := 0
 		for id, e := range routedApps(t, data) {
 			b := before[id]
-			if e.Up == b.Up+n && e.Down == b.Down+n {
+			if e.Up == b.Up+up && e.Down == b.Down+down {
 				matches++
 				key, entry = id, e
 			}
@@ -112,9 +114,13 @@ func findOwnIdentity(t *testing.T, ctx context.Context, fixture tunFixture, data
 	return "", usage.RoutedEntry{}
 }
 
-// echoExact sends exactly n bytes through the TUN and reads them back, so the
-// engine's accounting for this flow is n up and n down.
-func echoExact(t *testing.T, ctx context.Context, fixture tunFixture, n int) {
+// echoExact sends one "ping <marker>" line of about n bytes through the TUN
+// and reads the one reply line, returning the exact bytes sent and received.
+// Both fixtures speak this line contract: the Windows target echoes the line
+// back verbatim; the Linux target (tests/linux/inet, stream) answers
+// "pong <marker> <address>". The engine's accounting for the flow is exactly
+// those two byte counts.
+func echoExact(t *testing.T, ctx context.Context, fixture tunFixture, n int) (up, down uint64) {
 	t.Helper()
 	conn, err := fixture.dial(ctx, "tcp4", fixture.target)
 	if err != nil {
@@ -122,24 +128,42 @@ func echoExact(t *testing.T, ctx context.Context, fixture tunFixture, n int) {
 	}
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(20 * time.Second))
-	payload := make([]byte, n)
-	if _, err := rand.Read(payload); err != nil {
+	raw := make([]byte, n/2)
+	if _, err := rand.Read(raw); err != nil {
 		t.Fatal(err)
 	}
+	marker := hex.EncodeToString(raw)
+	sent := "ping " + marker + "\n"
 	done := make(chan error, 1)
-	go func() { _, err := conn.Write(payload); done <- err }()
-	reply := make([]byte, n)
-	if _, err := io.ReadFull(conn, reply); err != nil {
-		t.Fatal("echo read", err)
+	go func() { _, err := io.WriteString(conn, sent); done <- err }()
+	reply, err := bufio.NewReaderSize(conn, 1<<16).ReadString('\n')
+	if err != nil {
+		t.Fatalf("echo read: %v (got %d bytes: %q)", err, len(reply), truncate(reply))
 	}
 	if err := <-done; err != nil {
 		t.Fatal("echo write", err)
 	}
-	for i := range payload {
-		if payload[i] != reply[i] {
-			t.Fatal("echo corrupted")
+	if !strings.Contains(reply, marker) {
+		offset := 0
+		for offset < len(sent) && offset < len(reply) && sent[offset] == reply[offset] {
+			offset++
 		}
+		t.Fatalf("echo corrupted at offset %d: sent %q, got %q (reply %d bytes: %q)", offset, byteAt(sent, offset), byteAt(reply, offset), len(reply), truncate(reply))
 	}
+	return uint64(len(sent)), uint64(len(reply))
+}
+
+func truncate(s string) string {
+	if len(s) > 96 {
+		return s[:48] + "…" + s[len(s)-48:]
+	}
+	return s
+}
+func byteAt(s string, i int) string {
+	if i >= len(s) {
+		return "<end>"
+	}
+	return fmt.Sprintf("%#x", s[i])
 }
 
 func waitRouting(t *testing.T, c *client, label string, bound time.Duration, accept func(status) bool) status {
@@ -237,7 +261,8 @@ func TestNativeControlCutover(t *testing.T) {
 		assertEngineHasNoManagerRestart(t)
 	})
 	t.Run("exact-usage-survives-control-crashes-around-the-ack", func(t *testing.T) {
-		const n = 65536
+		// One line of about 16 KiB: inside the Linux target's 64 KiB line limit.
+		const n = 16384
 		key, start := findOwnIdentity(t, ctx, fixture, data, n)
 		t.Logf("NATIVE_CONTROL_USAGE_IDENTITY app=%q up=%d down=%d", key, start.Up, start.Down)
 		own := func() usage.RoutedEntry { return routedApps(t, data)[key] }
@@ -251,13 +276,16 @@ func TestNativeControlCutover(t *testing.T) {
 			}
 			t.Fatalf("timeout: %s: want up=%d down=%d, routed=%+v", label, wantUp, wantDown, routedApps(t, data))
 		}
-		base := start
+		// want* are the exact bytes this process has sent and received so far;
+		// every exchange adds what it actually put on the wire.
+		wantUp, wantDown := start.Up, start.Down
 		// Crash between the durable usage commit and the acknowledgement.
 		arm(t, data, "control-after-usage-commit")
-		echoExact(t, ctx, fixture, n)
+		up, down := echoExact(t, ctx, fixture, n)
+		wantUp, wantDown = wantUp+up, wantDown+down
 		pid := barrier(t, data, "control-after-usage-commit")
-		if e := own(); e.Up != base.Up+n || e.Down != base.Down+n {
-			t.Fatalf("usage not committed before the acknowledgement: %+v want up=%d down=%d", e, base.Up+n, base.Down+n)
+		if e := own(); e.Up != wantUp || e.Down != wantDown {
+			t.Fatalf("usage not committed before the acknowledgement: %+v want up=%d down=%d", e, wantUp, wantDown)
 		}
 		kill(t, pid)
 		wait(t, "Control restarts after the commit crash", 30*time.Second, func() bool { s, err := service.Query(service.Control); return err == nil && s.Running && s.PID != pid })
@@ -267,23 +295,25 @@ func TestNativeControlCutover(t *testing.T) {
 			t.Fatal("a Control crash replaced the engine instance", after.Instance, first.Instance)
 		}
 		// The re-read sees the same unretired counters: no double count.
-		settle("totals unchanged after re-read", base.Up+n, base.Down+n)
+		settle("totals unchanged after re-read", wantUp, wantDown)
 		time.Sleep(12 * time.Second) // two accounting rounds without any traffic
-		if e := own(); e.Up != base.Up+n || e.Down != base.Down+n {
-			t.Fatalf("bytes double counted after the commit/ack crash: %+v want up=%d down=%d", e, base.Up+n, base.Down+n)
+		if e := own(); e.Up != wantUp || e.Down != wantDown {
+			t.Fatalf("bytes double counted after the commit/ack crash: %+v want up=%d down=%d", e, wantUp, wantDown)
 		}
 		// Crash right after the acknowledgement, before the next read.
 		arm(t, data, "control-after-totals-ack")
-		echoExact(t, ctx, fixture, n)
+		up, down = echoExact(t, ctx, fixture, n)
+		wantUp, wantDown = wantUp+up, wantDown+down
 		pid = barrier(t, data, "control-after-totals-ack")
 		kill(t, pid)
 		wait(t, "Control restarts after the ack crash", 30*time.Second, func() bool { s, err := service.Query(service.Control); return err == nil && s.Running && s.PID != pid })
 		c = openClient(t, owner, false)
 		waitRouting(t, c, "reattach after the ack crash", 20*time.Second, func(s status) bool { return s.Routing == "on" && s.Instance == first.Instance })
-		echoExact(t, ctx, fixture, n)
-		settle("totals exact after the ack crash", base.Up+3*n, base.Down+3*n)
+		up, down = echoExact(t, ctx, fixture, n)
+		wantUp, wantDown = wantUp+up, wantDown+down
+		settle("totals exact after the ack crash", wantUp, wantDown)
 		e := own()
-		t.Logf("NATIVE_CONTROL_USAGE app=%q base_up=%d base_down=%d up=%d down=%d apps=%d exact=true", key, base.Up, base.Down, e.Up, e.Down, len(routedApps(t, data)))
+		t.Logf("NATIVE_CONTROL_USAGE app=%q base_up=%d base_down=%d up=%d down=%d apps=%d exact=true", key, start.Up, start.Down, e.Up, e.Down, len(routedApps(t, data)))
 	})
 	t.Run("child-crash-counts-one-failure-and-restarts", func(t *testing.T) {
 		before := getStatus(t, c)

@@ -147,8 +147,12 @@ Ubuntu 24.04/26.04 x64/ARM64), every subtest a required PASS line in
   exact to the byte;
 - a killed child counts exactly one failure and routing returns on a new instance;
 - four injected adapter losses through the real read pump: on Windows the
-  genuine Wintun removal error exits 3, three are free and the fourth counts;
-  on Linux each is an ordinary failure;
+  genuine Wintun removal error exits 3, three are free and the fourth counts.
+  The Linux engine has no clean adapter-loss outcome at all (the exit-3 path
+  exists only in `internal/engine/windows`; spec §5.1's rule is written for
+  Wintun removal and the helper's death), so there a failed read pump is an
+  ordinary failure: the proof requires each to count, the fifth to latch, and
+  the owner's explicit retry to clear the budget;
 - Control absent past the lease (recovery disabled), the engine fails open,
   then a Control start restores wanted routing within 70 s.
 
